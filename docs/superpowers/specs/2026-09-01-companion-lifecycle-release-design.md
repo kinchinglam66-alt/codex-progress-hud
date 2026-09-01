@@ -48,6 +48,8 @@ The companion installer is a prerequisite for the release plugin. If it is entir
 
 The plugin does not directly modify Codex cache files. Local development updates use the supported cachebuster and reinstall flow. End-user installation documentation installs the companion first, then the plugin, then performs one Codex restart so the MCP command and skills are loaded deterministically.
 
+The repository also acts as a Git marketplace without moving the companion source tree. It contains `.agents/plugins/marketplace.json` with marketplace name `kinchinglam66-alt` and a minimal runtime plugin under `plugins/codex-progress-hud/`. A synchronization/check script keeps that runtime package aligned with the canonical manifest, skill, launcher, license, and documentation. Public installation uses `codex plugin marketplace add kinchinglam66-alt/codex-progress-hud --ref main` followed by `codex plugin add codex-progress-hud@kinchinglam66-alt`.
+
 ## Runtime components
 
 ### MCP entry mode
