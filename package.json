@@ -12,7 +12,7 @@
     "url": "https://github.com/kinchinglam66-alt/codex-progress-hud/issues"
   },
   "type": "module",
-  "main": "dist/desktop/main.js",
+  "main": "dist/main.js",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22"
@@ -21,7 +21,9 @@
     "test": "vitest --passWithNoTests",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
-    "start": "npm run build && electron .",
+    "start": "npm run start:hud",
+    "start:hud": "npm run build && electron . --hud",
+    "start:mcp": "npm run build && node dist/main.js --mcp-stdio",
     "mcp": "node dist/mcp/main.js",
     "smoke": "npm run build && node scripts/smoke-test.mjs",
     "diagnose:mcp": "vitest --run tests/mcp/stdio-server.test.ts --reporter=verbose",

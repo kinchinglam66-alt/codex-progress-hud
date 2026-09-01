@@ -11,20 +11,29 @@ import { beforeAll, describe, expect, it } from "vitest";
 const execFileAsync = promisify(execFile);
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-type McpConfig = {
-  mcpServers: Record<
-    string,
-    {
-      command: string;
-      args?: string[];
-      cwd?: string;
-    }
-  >;
-};
+class CapturingStdioClientTransport extends StdioClientTransport {
+  readonly stdoutChunks: Buffer[] = [];
+
+  override async start(): Promise<void> {
+    const readBuffer = (this as unknown as {
+      _readBuffer: { append(chunk: Buffer): void };
+    })._readBuffer;
+    const append = readBuffer.append.bind(readBuffer);
+    readBuffer.append = (chunk: Buffer): void => {
+      this.stdoutChunks.push(Buffer.from(chunk));
+      append(chunk);
+    };
+    await super.start();
+  }
+
+  stdout(): string {
+    return Buffer.concat(this.stdoutChunks).toString("utf8");
+  }
+}
 
 beforeAll(async () => {
   try {
-    await access(resolve(pluginRoot, "dist/mcp/main.js"));
+    await access(resolve(pluginRoot, "dist/main.js"));
   } catch {
     await execFileAsync(
       process.execPath,
@@ -39,17 +48,22 @@ describe("plugin MCP stdio server", () => {
     "initializes and exposes every tool when Codex starts it from another task directory",
     async () => {
       const taskDirectory = await mkdtemp(join(tmpdir(), "codex-progress-hud-task-"));
-      const config = JSON.parse(
-        await readFile(resolve(pluginRoot, ".mcp.json"), "utf8")
-      ) as McpConfig;
-      const server = config.mcpServers["codex-progress-hud"];
+      const packageJson = JSON.parse(
+        await readFile(resolve(pluginRoot, "package.json"), "utf8")
+      ) as { main?: string };
+      const server = packageJson.main === undefined
+        ? undefined
+        : {
+            command: process.execPath,
+            args: [resolve(pluginRoot, packageJson.main), "--mcp-stdio"]
+          };
 
       expect(server).toBeDefined();
 
-      const transport = new StdioClientTransport({
+      const transport = new CapturingStdioClientTransport({
         command: server!.command,
         ...(server!.args ? { args: server!.args } : {}),
-        cwd: server!.cwd ? resolve(pluginRoot, server!.cwd) : taskDirectory,
+        cwd: taskDirectory,
         stderr: "pipe"
       });
       let stderr = "";
@@ -79,6 +93,16 @@ describe("plugin MCP stdio server", () => {
             "tracking_stop"
           ].sort()
         );
+        const stdoutLines = transport.stdout().split(/\r?\n/u).filter(Boolean);
+        expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
+        expect(stdoutLines.every((line) => {
+          try {
+            const message = JSON.parse(line) as { jsonrpc?: unknown };
+            return message.jsonrpc === "2.0";
+          } catch {
+            return false;
+          }
+        }), `non-protocol stdout: ${transport.stdout()}`).toBe(true);
       } catch (error) {
         throw new Error(
           `MCP server failed when launched for a different task directory. ${stderr.trim()}`,
