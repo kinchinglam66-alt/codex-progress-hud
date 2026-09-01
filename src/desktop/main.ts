@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow } from "electron";
+import { scheduleAfterReady } from "./lifecycle.js";
 import { createProgressServer } from "../server/http-server.js";
 import { defaultTokenPath } from "../server/paths.js";
 
@@ -51,8 +52,10 @@ async function createWindow(): Promise<BrowserWindow> {
   return window;
 }
 
-await app.whenReady();
-await createWindow();
+scheduleAfterReady(app.whenReady(), createWindow, (error) => {
+  console.error("Codex Progress HUD failed to start", error);
+  app.exit(1);
+});
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void createWindow();
@@ -60,4 +63,3 @@ app.on("activate", () => {
 
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => void progressServer.close());
-
