@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+.worktrees/
 *.log
 .env
 .env.*
@@ -12,4 +13,3 @@ coverage/
 .codex-progress-hud/
 .DS_Store
 Thumbs.db
-
