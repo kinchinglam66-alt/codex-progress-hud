@@ -2,6 +2,15 @@
   "name": "codex-progress-hud",
   "version": "0.1.0",
   "description": "A local, privacy-first progress and ETA overlay for Codex tasks.",
+  "author": "kinchinglam66-alt",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kinchinglam66-alt/codex-progress-hud.git"
+  },
+  "homepage": "https://github.com/kinchinglam66-alt/codex-progress-hud#readme",
+  "bugs": {
+    "url": "https://github.com/kinchinglam66-alt/codex-progress-hud/issues"
+  },
   "type": "module",
   "main": "dist/desktop/main.js",
   "license": "Apache-2.0",
