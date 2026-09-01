@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Progress HUD</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="hud" data-tone="idle">
+      <header>
+        <span class="dot" aria-hidden="true"></span>
+        <span id="status">空闲</span>
+        <h1 id="title">暂无活动任务</h1>
+      </header>
+      <section class="progress-row">
+        <div id="progress" class="progress" data-mode="indeterminate" aria-label="任务进度">
+          <span id="progress-fill"></span>
+        </div>
+        <span id="progress-text" class="progress-text"></span>
+      </section>
+      <p id="eta" class="eta">等待 Codex 上报任务</p>
+      <footer>
+        <span id="step">启动任务后将在这里显示进度</span>
+        <span id="updated"></span>
+      </footer>
+    </main>
+    <script type="module" src="/renderer.js"></script>
+  </body>
+</html>
+

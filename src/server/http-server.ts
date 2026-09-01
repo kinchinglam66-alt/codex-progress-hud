@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ZodError } from "zod";
 import { parseProgressEnvelope } from "../core/schema.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
@@ -10,6 +12,7 @@ export interface ProgressServerOptions {
   host?: string;
   port?: number;
   tokenPath: string;
+  uiDirectory?: string;
 }
 
 export interface ProgressServerAddress {
@@ -27,6 +30,36 @@ function writeJson(response: ServerResponse, status: number, payload: unknown): 
     "x-content-type-options": "nosniff"
   });
   response.end(JSON.stringify(payload));
+}
+
+async function serveUi(
+  response: ServerResponse,
+  uiDirectory: string,
+  pathname: string
+): Promise<boolean> {
+  const assets: Record<string, { file: string; type: string }> = {
+    "/": { file: "index.html", type: "text/html; charset=utf-8" },
+    "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
+    "/renderer.js": { file: "renderer.js", type: "text/javascript; charset=utf-8" }
+  };
+  const asset = assets[pathname];
+  if (asset === undefined) return false;
+  try {
+    const content = await readFile(join(uiDirectory, asset.file));
+    response.writeHead(200, {
+      "content-type": asset.type,
+      "cache-control": "no-store",
+      "content-security-policy":
+        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer"
+    });
+    response.end(content);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
@@ -79,6 +112,13 @@ export function createProgressServer(options: ProgressServerOptions) {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", `http://${host}`);
+      if (
+        request.method === "GET" &&
+        options.uiDirectory !== undefined &&
+        (await serveUi(response, options.uiDirectory, url.pathname))
+      ) {
+        return;
+      }
       if (!url.pathname.startsWith("/api/")) {
         writeJson(response, 404, { error: "not found" });
         return;
@@ -147,4 +187,3 @@ export function createProgressServer(options: ProgressServerOptions) {
     }
   };
 }
-

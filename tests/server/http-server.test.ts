@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,10 +10,19 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
-async function startServer() {
+async function startServer(options: { withUi?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-"));
   const tokenPath = join(directory, "auth.token");
-  const server = createProgressServer({ port: 0, tokenPath });
+  const uiDirectory = options.withUi ? join(directory, "ui") : undefined;
+  if (uiDirectory !== undefined) {
+    await mkdir(uiDirectory);
+    await writeFile(join(uiDirectory, "index.html"), "<h1>HUD</h1>");
+  }
+  const server = createProgressServer({
+    port: 0,
+    tokenPath,
+    ...(uiDirectory === undefined ? {} : { uiDirectory })
+  });
   await server.listen();
   cleanups.push(async () => {
     await server.close();
@@ -131,5 +140,14 @@ describe("local progress HTTP service", () => {
     expect(new TextDecoder().decode(firstChunk?.value)).toContain(
       'data: {"task":null,"eta":null}'
     );
+  });
+
+  it("serves the overlay shell with a restrictive content security policy", async () => {
+    const { baseUrl } = await startServer({ withUi: true });
+    const response = await fetch(baseUrl);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("<h1>HUD</h1>");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'self'");
   });
 });
