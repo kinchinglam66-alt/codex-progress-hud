@@ -9,6 +9,7 @@ A local, privacy-first desktop overlay for Codex task status, structured progres
 - Frameless always-on-top Electron overlay for Windows, with portable core code.
 - Structured `progress_report`, `task_outcome`, and `task_status` MCP tools.
 - User-controlled `tracking_start`, `tracking_pause`, `tracking_resume`, `tracking_stop`, and `tracking_status` MCP tools.
+- Companion lifecycle `hud_open`, `hud_hide`, `hud_close`, `hud_status`, and `hud_diagnose` MCP tools.
 - Deterministic lifecycle states that distinguish waiting, failure, interruption, unverified completion, and verified success.
 - ETA ranges combining observed plan throughput with the executing model's estimate and confidence.
 - Loopback-only authenticated HTTP/SSE transport.
@@ -39,7 +40,7 @@ If the skill is visible but the MCP tools are missing, run the real stdio handsh
 npm run diagnose:mcp
 ```
 
-A healthy result initializes the server from a different temporary task directory and finds all eight tools. This catches broken relative entry paths and startup failures, and includes the child-process error in the failure output. It verifies the installed bundle itself; it does not prove that a running Codex Desktop process has activated that bundle version.
+A healthy result initializes the server from a different temporary task directory and finds all 13 tools. This catches broken relative entry paths and startup failures, and includes the child-process error in the failure output. It verifies the installed bundle itself; it does not prove that a running Codex Desktop process has activated that bundle version.
 
 The overlay and MCP server are separate processes. Missing tools means the MCP server did not load; an available tool that reports `Progress HUD is not reachable` means the plugin loaded but the desktop companion is not running, so start it with `npm start`.
 
@@ -72,6 +73,26 @@ The bundled skill asks Codex to report on task start, plan changes, phase change
 Prompts, hidden reasoning, source code, command output, file contents, and credentials must not be reported.
 
 Tracking can also be controlled from any turn after the plugin has loaded in the task. `tracking_pause` and `tracking_stop` affect only HUD updates and timing; they do not pause or cancel the underlying Codex task. After installing or updating the plugin, fully restart Codex Desktop and then start a new task so its skill and MCP tool definitions are refreshed together.
+
+## Companion lifecycle and troubleshooting
+
+`tracking_stop` stops tracking and preserves the final snapshot; it does not close the companion. `hud_hide` hides the window without stopping the local service. `hud_close` requests authenticated graceful shutdown and records an explicit off preference. While explicit off is set, background reports, outcomes, pause, resume, and stop writes are suppressed. An explicit `hud_open`, or `tracking_start` after the user asks to start or restart tracking, may clear that preference and reopen the companion. `task_status`, `tracking_status`, and `hud_status` only observe state and never reopen it.
+
+Lifecycle failures use stable structured codes:
+
+- `COMPANION_NOT_INSTALLED`: the install manifest or contained executable is unavailable.
+- `MANUALLY_DISABLED`: explicit off suppressed a background write.
+- `PORT_CONFLICT`: the configured loopback port belongs to another service.
+- `VERSION_MISMATCH`: the companion protocol is incompatible.
+- `START_TIMEOUT`: a launched companion did not become healthy within the startup window.
+- `AUTH_ERROR`: the local token is missing, unreadable, or rejected.
+- `SHUTDOWN_TIMEOUT`: graceful shutdown could not be confirmed safely.
+- `COMPANION_CRASHED`: a previously healthy companion disappeared and recovery was unavailable or rate-limited.
+- `INTERNAL_ERROR`: an uncategorized local lifecycle operation failed.
+
+The unauthenticated `/health` route proves only service identity and protocol compatibility. Full health requires the bearer token. A PID in `runtime.json` is stale-prone diagnostic metadata, not proof of a live or owned process. On shutdown timeout, the manager may force-terminate only a process it spawned itself and only while authenticated live health still matches both its PID and instance nonce; it never kills a process merely because it occupies the configured port or appears in stale metadata.
+
+Use `hud_diagnose` for a redacted report. Reports contain only allowlisted versions, lifecycle states, path-existence booleans, loopback host/port, runtime age, and categorized error codes. Operational logs likewise contain category fields and timings only. Neither output may contain bearer tokens, prompts, task payloads, source code, file contents, command output, or exception messages.
 
 ## Development
 
