@@ -1,0 +1,42 @@
+name: Bug report
+description: Report reproducible behavior without including private task data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste prompts, source code, credentials, bearer tokens, or private command output.
+  - type: input
+    id: version
+    attributes:
+      label: HUD version
+    validations:
+      required: true
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex version and surface
+      description: For example, CLI or desktop app and its version.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic task names and redact sensitive paths.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
