@@ -108,4 +108,70 @@ describe("WindowController", () => {
     expect(window.showInactive).toHaveBeenCalledOnce();
     expect(controller.visibility()).toBe("visible");
   });
+
+  it("unregisters authorization interception before destroying the window", async () => {
+    const order: string[] = [];
+    const window = new FakeWindow();
+    window.webContents.session.webRequest.onBeforeSendHeaders.mockImplementation(
+      (...args: unknown[]) => {
+        if (args.length === 1 && args[0] === null) order.push("detach");
+      }
+    );
+    window.destroy.mockImplementation(() => {
+      order.push("destroy");
+    });
+    const controller = new WindowController({
+      createWindow: () => window,
+      quitting: () => true
+    });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+
+    controller.dispose();
+
+    expect(order).toEqual(["detach", "destroy"]);
+  });
+
+  it("cleans up a failed create so a later create can retry", async () => {
+    const failure = new Error("load failed");
+    const firstWindow = new FakeWindow();
+    firstWindow.loadURL.mockRejectedValue(failure);
+    const secondWindow = new FakeWindow();
+    const createWindow = vi.fn()
+      .mockReturnValueOnce(firstWindow)
+      .mockReturnValueOnce(secondWindow);
+    const controller = new WindowController({ createWindow, quitting: () => false });
+
+    await expect(
+      controller.create({ url: "http://127.0.0.1:17837", token: "secret" })
+    ).rejects.toBe(failure);
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+
+    expect(firstWindow.webContents.session.webRequest.onBeforeSendHeaders)
+      .toHaveBeenLastCalledWith(null);
+    expect(firstWindow.destroy).toHaveBeenCalledOnce();
+    expect(secondWindow.loadURL).toHaveBeenCalledOnce();
+    expect(createWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it("cleans up when authorization registration fails so create can retry", async () => {
+    const failure = new Error("registration failed");
+    const firstWindow = new FakeWindow();
+    firstWindow.webContents.session.webRequest.onBeforeSendHeaders.mockImplementationOnce(
+      () => { throw failure; }
+    );
+    const secondWindow = new FakeWindow();
+    const createWindow = vi.fn()
+      .mockReturnValueOnce(firstWindow)
+      .mockReturnValueOnce(secondWindow);
+    const controller = new WindowController({ createWindow, quitting: () => false });
+
+    await expect(
+      controller.create({ url: "http://127.0.0.1:17837", token: "secret" })
+    ).rejects.toBe(failure);
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+
+    expect(firstWindow.destroy).toHaveBeenCalledOnce();
+    expect(secondWindow.loadURL).toHaveBeenCalledOnce();
+    expect(createWindow).toHaveBeenCalledTimes(2);
+  });
 });

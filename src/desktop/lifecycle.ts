@@ -61,10 +61,15 @@ export interface DesktopProgressServer {
   address(): { host: string; port: number; url: string };
 }
 
+export interface DesktopTrayImage {
+  isEmpty(): boolean;
+}
+
 export interface DesktopDependencies {
   app: DesktopAppLike;
   createWindowController(options: { quitting(): boolean }): DesktopWindowController;
-  createTray(): TrayLike;
+  createTrayImage(): DesktopTrayImage;
+  createTray(image: DesktopTrayImage): TrayLike;
   buildMenu(template: TrayMenuItem[]): unknown;
   createTrayController(options: TrayControllerOptions): TrayController;
   createProgressServer(options: ProgressServerOptions): DesktopProgressServer;
@@ -77,7 +82,13 @@ export interface DesktopDependencies {
   uiDirectory: string;
   port: number;
   diagnose(): void | Promise<void>;
+  reportError(error: unknown, context: string): void;
 }
+
+const TRAY_PNG_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+class StartupCancelledError extends Error {}
 
 async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
   const electron = await import("electron");
@@ -91,7 +102,8 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
         new electron.BrowserWindow(options) as unknown as BrowserWindowLike,
       quitting
     }),
-    createTray: () => new electron.Tray(electron.nativeImage.createFromPath(process.execPath)),
+    createTrayImage: () => electron.nativeImage.createFromDataURL(TRAY_PNG_DATA_URL),
+    createTray: (image) => new electron.Tray(image as Electron.NativeImage),
     buildMenu: (template) => electron.Menu.buildFromTemplate(
       template as Electron.MenuItemConstructorOptions[]
     ),
@@ -109,7 +121,8 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     tokenPath,
     uiDirectory: resolve(currentDirectory, "../ui"),
     port: Number.isFinite(configuredPort) ? configuredPort : 17_837,
-    diagnose: () => undefined
+    diagnose: () => undefined,
+    reportError: (error, context) => console.error(`Codex Progress HUD ${context}`, error)
   };
 }
 
@@ -123,83 +136,133 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
   let quitting = false;
   let cleanupComplete = false;
   let cleanupPromise: Promise<void> | undefined;
+  let settleStartup!: () => void;
+  const startupSettled = new Promise<void>((resolve) => {
+    settleStartup = resolve;
+  });
   let trayController: TrayController | undefined;
+  let tray: TrayLike | undefined;
   let progressServer: DesktopProgressServer | undefined;
-  const windowController = resolved.createWindowController({ quitting: () => quitting });
+  let windowController: DesktopWindowController | undefined;
+
+  const reportError = (error: unknown, context: string): void => {
+    try {
+      resolved.reportError(error, context);
+    } catch {
+      // Error reporting must not prevent cleanup or create an unhandled rejection.
+    }
+  };
 
   const cleanup = (): Promise<void> => {
     cleanupPromise ??= (async () => {
-      await progressServer?.close();
-      trayController?.dispose();
-      windowController.dispose();
-      await resolved.stateStore.clearRuntime();
+      const steps: Array<[string, () => void | Promise<void>]> = [
+        ["server close", () => progressServer?.close()],
+        ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
+        ["window dispose", () => windowController?.dispose()],
+        ["runtime clear", () => resolved.stateStore.clearRuntime()]
+      ];
+      for (const [name, step] of steps) {
+        try {
+          await step();
+        } catch (error) {
+          reportError(error, `desktop cleanup: ${name}`);
+        }
+      }
+      cleanupComplete = true;
     })();
     return cleanupPromise;
   };
 
-  resolved.app.on("second-instance", () => windowController.show());
-  resolved.app.on("before-quit", async (event: { preventDefault(): void }) => {
-    quitting = true;
-    if (cleanupComplete) return;
-    event.preventDefault();
-    try {
-      await cleanup();
-    } finally {
-      cleanupComplete = true;
-      resolved.app.quit();
-    }
-  });
-
-  await resolved.app.whenReady();
-  const runtimeIdentity: RuntimeIdentity = {
-    pid: resolved.pid,
-    version: resolved.app.getVersion(),
-    protocolVersion: PROTOCOL_VERSION,
-    instanceNonce: resolved.randomUUID(),
-    startedAt: resolved.now().toISOString()
+  let finishQuitPromise: Promise<void> | undefined;
+  const finishQuitAfterStartup = (): void => {
+    finishQuitPromise ??= startupSettled
+      .then(cleanup)
+      .then(() => resolved.app.quit())
+      .catch((error: unknown) => reportError(error, "desktop quit"));
   };
-  await resolved.stateStore.writeRuntime(runtimeIdentity);
-
-  const health = (): HudHealth => ({
-    service: "codex-progress-hud",
-    ...runtimeIdentity,
-    protocolVersion: PROTOCOL_VERSION,
-    visibility: windowController.visibility()
-  });
-  progressServer = resolved.createProgressServer({
-    port: resolved.port,
-    tokenPath: resolved.tokenPath,
-    uiDirectory: resolved.uiDirectory,
-    health,
-    showWindow: () => windowController.show(),
-    hideWindow: () => windowController.hide(),
-    requestShutdown: () => {
-      quitting = true;
-      resolved.app.quit();
-    }
-  });
+  const assertStarting = (): void => {
+    if (quitting) throw new StartupCancelledError("desktop startup cancelled");
+  };
 
   try {
-    await progressServer.listen();
-    const token = await resolved.readToken(resolved.tokenPath);
-    await windowController.create({ url: progressServer.address().url, token });
-    trayController = resolved.createTrayController({
-      tray: resolved.createTray(),
-      buildMenu: resolved.buildMenu,
-      loginEnabled: resolved.app.getLoginItemSettings().openAtLogin,
-      onShow: () => windowController.show(),
-      onHide: () => windowController.hide(),
-      onToggleLogin: (enabled) => resolved.app.setLoginItemSettings({ openAtLogin: enabled }),
-      onDiagnose: resolved.diagnose,
-      onExit: async () => {
+    assertStarting();
+    windowController = resolved.createWindowController({ quitting: () => quitting });
+    resolved.app.on("second-instance", () => windowController?.show());
+    resolved.app.on("before-quit", (event: { preventDefault(): void }) => {
+      quitting = true;
+      if (cleanupComplete) return;
+      event.preventDefault();
+      finishQuitAfterStartup();
+    });
+
+    await resolved.app.whenReady();
+    assertStarting();
+    const runtimeIdentity: RuntimeIdentity = {
+      pid: resolved.pid,
+      version: resolved.app.getVersion(),
+      protocolVersion: PROTOCOL_VERSION,
+      instanceNonce: resolved.randomUUID(),
+      startedAt: resolved.now().toISOString()
+    };
+    assertStarting();
+    await resolved.stateStore.writeRuntime(runtimeIdentity);
+    assertStarting();
+
+    const health = (): HudHealth => ({
+      service: "codex-progress-hud",
+      ...runtimeIdentity,
+      protocolVersion: PROTOCOL_VERSION,
+      visibility: windowController?.visibility() ?? "hidden"
+    });
+    assertStarting();
+    progressServer = resolved.createProgressServer({
+      port: resolved.port,
+      tokenPath: resolved.tokenPath,
+      uiDirectory: resolved.uiDirectory,
+      health,
+      showWindow: () => windowController?.show(),
+      hideWindow: () => windowController?.hide(),
+      requestShutdown: () => {
         quitting = true;
-        await resolved.stateStore.setDesiredState("off");
         resolved.app.quit();
       }
     });
+
+    await progressServer.listen();
+    assertStarting();
+    const token = await resolved.readToken(resolved.tokenPath);
+    assertStarting();
+    await windowController.create({ url: progressServer.address().url, token });
+    assertStarting();
+    const trayImage = resolved.createTrayImage();
+    if (trayImage.isEmpty()) throw new Error("tray image is empty");
+    assertStarting();
+    tray = resolved.createTray(trayImage);
+    assertStarting();
+    trayController = resolved.createTrayController({
+      tray,
+      buildMenu: resolved.buildMenu,
+      loginEnabled: resolved.app.getLoginItemSettings().openAtLogin,
+      onShow: () => windowController?.show(),
+      onHide: () => windowController?.hide(),
+      onToggleLogin: (enabled) => resolved.app.setLoginItemSettings({ openAtLogin: enabled }),
+      onDiagnose: resolved.diagnose,
+      onExit: async () => {
+        await resolved.stateStore.setDesiredState("off");
+        quitting = true;
+        resolved.app.quit();
+      },
+      onError: (error, action) => reportError(error, `tray action: ${action}`)
+    });
+    tray = undefined;
   } catch (error) {
     quitting = true;
+    if (error instanceof StartupCancelledError) return;
     await cleanup();
+    reportError(error, "desktop startup");
+    resolved.app.quit();
     throw error;
+  } finally {
+    settleStartup();
   }
 }

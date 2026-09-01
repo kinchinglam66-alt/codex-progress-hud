@@ -19,30 +19,41 @@ export interface TrayControllerOptions {
   onToggleLogin(enabled: boolean): void | Promise<void>;
   onDiagnose(): void | Promise<void>;
   onExit(): void | Promise<void>;
+  onError(error: unknown, action: string): void;
 }
 
 export interface TrayController {
   dispose(): void;
 }
 
-function invoke(callback: () => void | Promise<void>): void {
-  void Promise.resolve(callback());
-}
-
 export function createTrayController(options: TrayControllerOptions): TrayController {
+  const invoke = (action: string, callback: () => void | Promise<void>): void => {
+    void Promise.resolve()
+      .then(callback)
+      .catch((error: unknown) => {
+        try {
+          options.onError(error, action);
+        } catch {
+          // Electron menu callbacks must never reject into the event loop.
+        }
+      });
+  };
   const template: TrayMenuItem[] = [
-    { label: "Show HUD", click: () => invoke(options.onShow) },
-    { label: "Hide HUD", click: () => invoke(options.onHide) },
+    { label: "Show HUD", click: () => invoke("Show HUD", options.onShow) },
+    { label: "Hide HUD", click: () => invoke("Hide HUD", options.onHide) },
     { type: "separator" },
     {
       label: "Start with Windows",
       type: "checkbox",
       checked: options.loginEnabled,
-      click: (item) => invoke(() => options.onToggleLogin(item.checked))
+      click: (item) => invoke(
+        "Start with Windows",
+        () => options.onToggleLogin(item.checked)
+      )
     },
-    { label: "Diagnose", click: () => invoke(options.onDiagnose) },
+    { label: "Diagnose", click: () => invoke("Diagnose", options.onDiagnose) },
     { type: "separator" },
-    { label: "Exit", click: () => invoke(options.onExit) }
+    { label: "Exit", click: () => invoke("Exit", options.onExit) }
   ];
   options.tray.setContextMenu(options.buildMenu(template));
   return {

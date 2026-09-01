@@ -32,6 +32,7 @@ export interface BrowserWindowLike {
             callback: (response: { requestHeaders: Record<string, string> }) => void
           ) => void
         ): void;
+        onBeforeSendHeaders(listener: null): void;
       };
     };
   };
@@ -78,6 +79,7 @@ const WINDOW_OPTIONS: BrowserWindowOptionsLike = {
 
 export class WindowController {
   private window: BrowserWindowLike | undefined;
+  private authorizationRequest: BrowserWindowLike["webContents"]["session"]["webRequest"] | undefined;
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -86,28 +88,37 @@ export class WindowController {
 
     const window = this.dependencies.createWindow(WINDOW_OPTIONS);
     this.window = window;
-    window.webContents.session.webRequest.onBeforeSendHeaders(
-      { urls: [`${options.url}/*`] },
-      (details, callback) => {
-        callback({
-          requestHeaders: {
-            ...details.requestHeaders,
-            Authorization: `Bearer ${options.token}`
-          }
-        });
-      }
-    );
-    window.on("close", (event) => {
-      if (this.dependencies.quitting()) return;
-      event.preventDefault();
-      window.hide();
-    });
-    window.on("closed", () => {
-      if (this.window === window) this.window = undefined;
-    });
-    window.setAlwaysOnTop(true, "floating");
-    window.once("ready-to-show", () => this.show());
-    await window.loadURL(options.url);
+    const webRequest = window.webContents.session.webRequest;
+    this.authorizationRequest = webRequest;
+    try {
+      webRequest.onBeforeSendHeaders(
+        { urls: [`${options.url}/*`] },
+        (details, callback) => {
+          callback({
+            requestHeaders: {
+              ...details.requestHeaders,
+              Authorization: `Bearer ${options.token}`
+            }
+          });
+        }
+      );
+      window.on("close", (event) => {
+        if (this.dependencies.quitting()) return;
+        event.preventDefault();
+        window.hide();
+      });
+      window.on("closed", () => {
+        if (this.window !== window) return;
+        this.detachAuthorization();
+        this.window = undefined;
+      });
+      window.setAlwaysOnTop(true, "floating");
+      window.once("ready-to-show", () => this.show());
+      await window.loadURL(options.url);
+    } catch (error) {
+      this.release(window);
+      throw error;
+    }
   }
 
   show(): void {
@@ -128,7 +139,18 @@ export class WindowController {
 
   dispose(): void {
     const window = this.window;
+    if (window !== undefined) this.release(window);
+  }
+
+  private detachAuthorization(): void {
+    this.authorizationRequest?.onBeforeSendHeaders(null);
+    this.authorizationRequest = undefined;
+  }
+
+  private release(window: BrowserWindowLike): void {
+    if (this.window !== window) return;
+    this.detachAuthorization();
     this.window = undefined;
-    if (window !== undefined && !window.isDestroyed()) window.destroy();
+    if (!window.isDestroyed()) window.destroy();
   }
 }

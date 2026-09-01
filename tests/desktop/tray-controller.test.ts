@@ -17,7 +17,8 @@ describe("createTrayController", () => {
       onHide: vi.fn(),
       onToggleLogin: vi.fn(),
       onDiagnose: vi.fn(),
-      onExit: vi.fn()
+      onExit: vi.fn(),
+      onError: vi.fn()
     });
 
     expect(
@@ -30,7 +31,7 @@ describe("createTrayController", () => {
     expect(tray.setContextMenu).toHaveBeenCalledWith({ kind: "menu" });
   });
 
-  it("forwards an explicit login checkbox selection", () => {
+  it("forwards an explicit login checkbox selection", async () => {
     const onToggleLogin = vi.fn();
     let template: TrayMenuItem[] = [];
     createTrayController({
@@ -44,11 +45,59 @@ describe("createTrayController", () => {
       onHide: vi.fn(),
       onToggleLogin,
       onDiagnose: vi.fn(),
-      onExit: vi.fn()
+      onExit: vi.fn(),
+      onError: vi.fn()
     });
 
     template[3]?.click?.({ checked: true });
 
-    expect(onToggleLogin).toHaveBeenCalledWith(true);
+    await vi.waitFor(() => expect(onToggleLogin).toHaveBeenCalledWith(true));
+  });
+
+  it("reports a synchronous tray callback throw without throwing from click", async () => {
+    const failure = new Error("show failed");
+    const onError = vi.fn();
+    let template: TrayMenuItem[] = [];
+    createTrayController({
+      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
+      buildMenu: (received) => {
+        template = received;
+        return {};
+      },
+      loginEnabled: false,
+      onShow: () => { throw failure; },
+      onHide: vi.fn(),
+      onToggleLogin: vi.fn(),
+      onDiagnose: vi.fn(),
+      onExit: vi.fn(),
+      onError
+    });
+
+    expect(() => template[0]?.click?.({ checked: false })).not.toThrow();
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(failure, "Show HUD"));
+  });
+
+  it("reports an asynchronous tray callback rejection", async () => {
+    const failure = new Error("hide failed");
+    const onError = vi.fn();
+    let template: TrayMenuItem[] = [];
+    createTrayController({
+      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
+      buildMenu: (received) => {
+        template = received;
+        return {};
+      },
+      loginEnabled: false,
+      onShow: vi.fn(),
+      onHide: async () => { throw failure; },
+      onToggleLogin: vi.fn(),
+      onDiagnose: vi.fn(),
+      onExit: vi.fn(),
+      onError
+    });
+
+    template[1]?.click?.({ checked: false });
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(failure, "Hide HUD"));
   });
 });

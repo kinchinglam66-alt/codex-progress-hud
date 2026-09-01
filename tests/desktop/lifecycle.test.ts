@@ -8,12 +8,23 @@ import {
 function desktopHarness(lockAcquired = true) {
   const listeners = new Map<string, (...args: unknown[]) => unknown>();
   const order: string[] = [];
+  let isQuitting = () => false;
   const windowController = {
     create: vi.fn(async () => undefined),
     show: vi.fn(),
     hide: vi.fn(),
     visibility: vi.fn(() => "hidden" as const),
     dispose: vi.fn()
+  };
+  const trayController = { dispose: vi.fn() };
+  const progressServer = {
+    listen: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
+    address: vi.fn(() => ({
+      host: "127.0.0.1",
+      port: 17_837,
+      url: "http://127.0.0.1:17837"
+    }))
   };
   let trayCallbacks: Parameters<DesktopDependencies["createTrayController"]>[0] | undefined;
   let serverOptions: Parameters<DesktopDependencies["createProgressServer"]>[0] | undefined;
@@ -27,24 +38,20 @@ function desktopHarness(lockAcquired = true) {
       setLoginItemSettings: vi.fn(),
       getVersion: vi.fn(() => "0.1.0")
     },
-    createWindowController: vi.fn(() => windowController),
+    createWindowController: vi.fn((options) => {
+      isQuitting = options.quitting;
+      return windowController;
+    }),
+    createTrayImage: vi.fn(() => ({ isEmpty: () => false })),
     createTray: vi.fn(() => ({ setContextMenu: vi.fn(), destroy: vi.fn() })),
     buildMenu: vi.fn(() => ({})),
     createTrayController: vi.fn((callbacks) => {
       trayCallbacks = callbacks;
-      return { dispose: vi.fn() };
+      return trayController;
     }),
     createProgressServer: vi.fn((options) => {
       serverOptions = options;
-      return {
-        listen: vi.fn(async () => undefined),
-        close: vi.fn(async () => undefined),
-        address: vi.fn(() => ({
-          host: "127.0.0.1",
-          port: 17_837,
-          url: "http://127.0.0.1:17837"
-        }))
-      };
+      return progressServer;
     }),
     stateStore: {
       readSettings: vi.fn(async () => ({ startWithWindows: false })),
@@ -64,16 +71,30 @@ function desktopHarness(lockAcquired = true) {
     tokenPath: "C:\\hud\\auth.token",
     uiDirectory: "C:\\hud\\ui",
     port: 17_837,
-    diagnose: vi.fn(async () => undefined)
+    diagnose: vi.fn(async () => undefined),
+    reportError: vi.fn()
   };
   return {
     dependencies,
     listeners,
     order,
     windowController,
+    trayController,
+    progressServer,
+    isQuitting: () => isQuitting(),
     get trayCallbacks() { return trayCallbacks; },
     get serverOptions() { return serverOptions; }
   };
+}
+
+type DesktopHarness = ReturnType<typeof desktopHarness>;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((ready) => {
+    resolve = ready;
+  });
+  return { promise, resolve };
 }
 
 describe("desktop lifecycle", () => {
@@ -192,10 +213,117 @@ describe("desktop lifecycle", () => {
     await runDesktop(harness.dependencies);
     const event = { preventDefault: vi.fn() };
 
-    await harness.listeners.get("before-quit")?.(event);
+    harness.listeners.get("before-quit")?.(event);
 
     expect(event.preventDefault).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
+      expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
+    });
+  });
+
+  it.each([
+    ["readiness", (harness: DesktopHarness, failure: Error) => {
+      vi.mocked(harness.dependencies.app.whenReady).mockRejectedValue(failure);
+    }],
+    ["runtime construction", (harness: DesktopHarness, failure: Error) => {
+      vi.mocked(harness.dependencies.app.getVersion).mockImplementation(() => { throw failure; });
+    }],
+    ["runtime write", (harness: DesktopHarness, failure: Error) => {
+      vi.mocked(harness.dependencies.stateStore.writeRuntime).mockRejectedValue(failure);
+    }],
+    ["server construction", (harness: DesktopHarness, failure: Error) => {
+      vi.mocked(harness.dependencies.createProgressServer).mockImplementation(() => {
+        throw failure;
+      });
+    }],
+    ["server listen", (harness: DesktopHarness, failure: Error) => {
+      harness.progressServer.listen.mockRejectedValue(failure);
+    }],
+    ["token read", (harness: DesktopHarness, failure: Error) => {
+      vi.mocked(harness.dependencies.readToken).mockRejectedValue(failure);
+    }],
+    ["window creation", (harness: DesktopHarness, failure: Error) => {
+      harness.windowController.create.mockRejectedValue(failure);
+    }],
+    ["tray creation", (harness: DesktopHarness, failure: Error) => {
+      vi.mocked(harness.dependencies.createTray).mockImplementation(() => { throw failure; });
+    }]
+  ])("fails fast when %s fails after the instance lock", async (_name, arrange) => {
+    const harness = desktopHarness();
+    const failure = new Error(`failed ${_name}`);
+    arrange(harness, failure);
+
+    await expect(runDesktop(harness.dependencies)).rejects.toBe(failure);
+
+    expect(harness.dependencies.app.quit).toHaveBeenCalled();
     expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
-    expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
+    expect(harness.dependencies.reportError).toHaveBeenCalledWith(failure, "desktop startup");
+  });
+
+  it("continues every cleanup obligation and reports each cleanup failure", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+    harness.progressServer.close.mockRejectedValue(new Error("close failed"));
+    harness.trayController.dispose.mockImplementation(() => { throw new Error("tray failed"); });
+    harness.windowController.dispose.mockImplementation(() => { throw new Error("window failed"); });
+    vi.mocked(harness.dependencies.stateStore.clearRuntime).mockRejectedValue(
+      new Error("runtime failed")
+    );
+    const event = { preventDefault: vi.fn() };
+
+    const result = harness.listeners.get("before-quit")?.(event);
+    if (result instanceof Promise) void result.catch(() => undefined);
+
+    expect(result).toBeUndefined();
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalled());
+    expect(harness.progressServer.close).toHaveBeenCalledOnce();
+    expect(harness.trayController.dispose).toHaveBeenCalledOnce();
+    expect(harness.windowController.dispose).toHaveBeenCalledOnce();
+    expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
+    expect(harness.dependencies.reportError).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not strand quitting or quit when Exit cannot persist off", async () => {
+    const harness = desktopHarness();
+    const failure = new Error("settings unavailable");
+    vi.mocked(harness.dependencies.stateStore.setDesiredState).mockRejectedValue(failure);
+    await runDesktop(harness.dependencies);
+
+    await expect(harness.trayCallbacks?.onExit()).rejects.toBe(failure);
+
+    expect(harness.isQuitting()).toBe(false);
+    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+  });
+
+  it("cancels startup when quit begins during an awaited startup step", async () => {
+    const harness = desktopHarness();
+    const token = deferred<string>();
+    vi.mocked(harness.dependencies.readToken).mockReturnValue(token.promise);
+    const starting = runDesktop(harness.dependencies);
+    await vi.waitFor(() => expect(harness.dependencies.readToken).toHaveBeenCalledOnce());
+
+    const event = { preventDefault: vi.fn() };
+    const result = harness.listeners.get("before-quit")?.(event);
+    expect(result).toBeUndefined();
+    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+    token.resolve("secret");
+    await starting;
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalled());
+
+    expect(harness.windowController.create).not.toHaveBeenCalled();
+    expect(harness.dependencies.createTrayImage).not.toHaveBeenCalled();
+    expect(harness.dependencies.createTray).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty tray image through startup fail-fast cleanup", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.createTrayImage).mockReturnValue({ isEmpty: () => true });
+
+    await expect(runDesktop(harness.dependencies)).rejects.toThrow("tray image is empty");
+
+    expect(harness.dependencies.createTray).not.toHaveBeenCalled();
+    expect(harness.dependencies.app.quit).toHaveBeenCalled();
+    expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
   });
 });
