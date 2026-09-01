@@ -8,7 +8,7 @@ import type {
   HudLifecycleSnapshot,
   ObservedHudState
 } from "../lifecycle/types.js";
-import type { ProgressClient } from "./report-client.js";
+import { HudClientError, type ProgressClient } from "./report-client.js";
 
 const id = z.string().trim().min(1).max(128);
 const title = z.string().trim().min(1).max(160);
@@ -80,10 +80,10 @@ function invalidResult(kind: string): ToolResult {
   return { content: [{ type: "text", text: `Invalid ${kind}.` }], isError: true };
 }
 
-function offlineResult(): ToolResult {
+function clientFailureResult(): ToolResult {
   return structuredResult(
-    "Progress HUD is not reachable. Start the local companion and retry.",
-    { ok: false, observedState: "crashed", code: "COMPANION_CRASHED" },
+    "Progress HUD is unreachable or returned an invalid response. Check HUD status or run diagnostics.",
+    { ok: false, code: "INTERNAL_ERROR" },
     true
   );
 }
@@ -173,13 +173,16 @@ export function createToolHandlers({
     if (blocked !== undefined) return blocked;
     try {
       return await operation();
-    } catch {
+    } catch (error) {
+      if (!(error instanceof HudClientError) || error.code !== "OFFLINE") {
+        return clientFailureResult();
+      }
       const recoveryBlocked = await ensure(reason, suppressedText);
       if (recoveryBlocked !== undefined) return recoveryBlocked;
       try {
         return await operation();
       } catch {
-        return offlineResult();
+        return clientFailureResult();
       }
     }
   }
@@ -271,7 +274,7 @@ export function createToolHandlers({
         const snapshot = await client.status();
         return textResult(JSON.stringify(snapshot));
       } catch {
-        return offlineResult();
+        return clientFailureResult();
       }
     },
 

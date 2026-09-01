@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CompanionManager } from "../../src/lifecycle/companion-manager.js";
+import { HudClientError } from "../../src/mcp/report-client.js";
 import { createToolHandlers } from "../../src/mcp/tools.js";
 
 function createManager(overrides: Partial<CompanionManager> = {}): CompanionManager {
@@ -126,13 +127,12 @@ describe("MCP progress tool handlers", () => {
     });
   });
 
-  it("returns a safe diagnostic when the companion is offline", async () => {
-    const handlers = createHandlers({
-      submit: vi.fn(async () => {
-        throw new Error("connect ECONNREFUSED 127.0.0.1 token=secret");
-      }),
-      status: vi.fn()
+  it("returns a sanitized internal error for an unclassified write failure", async () => {
+    const companionManager = createManager();
+    const submit = vi.fn(async () => {
+      throw new Error("malformed response token=secret");
     });
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
     const result = await handlers.progressReport({
       task_id: "task-1",
@@ -141,9 +141,10 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toBe(
-      "Progress HUD is not reachable. Start the local companion and retry."
-    );
+    expect(result.content[0]?.text).not.toContain("token=secret");
+    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(companionManager.ensureForWrite).toHaveBeenCalledOnce();
+    expect(submit).toHaveBeenCalledOnce();
   });
 
   it("starts tracking the supplied task without requiring a progress report", async () => {
@@ -382,11 +383,11 @@ describe("MCP progress tool handlers", () => {
     expect(companionManager.close).not.toHaveBeenCalled();
   });
 
-  it("retries the original report exactly once after a recovered startup", async () => {
+  it("retries an OFFLINE report exactly once after a recovered startup", async () => {
     const companionManager = createManager();
     const submit = vi
       .fn()
-      .mockRejectedValueOnce(new Error("companion disappeared"))
+      .mockRejectedValueOnce(new HudClientError("OFFLINE", "companion disappeared"))
       .mockResolvedValueOnce({ task: { status: "running" }, eta: null });
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
@@ -401,10 +402,14 @@ describe("MCP progress tool handlers", () => {
     expect(submit).toHaveBeenCalledTimes(2);
   });
 
-  it("does not retry the original report more than once", async () => {
+  it.each([
+    ["generic", new Error("unexpected response")],
+    ["authentication", new HudClientError("AUTH_ERROR", "token rejected")],
+    ["application", new TypeError("malformed application payload")]
+  ])("does not retry a %s write failure", async (_kind, failure) => {
     const companionManager = createManager();
     const submit = vi.fn(async () => {
-      throw new Error("companion disappeared");
+      throw failure;
     });
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
@@ -415,6 +420,42 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(companionManager.ensureForWrite).toHaveBeenCalledOnce();
+    expect(submit).toHaveBeenCalledOnce();
+  });
+
+  it("does not invent a crashed state when observational status fails", async () => {
+    const handlers = createHandlers({
+      submit: vi.fn(),
+      status: vi.fn(async () => {
+        throw new HudClientError("OFFLINE", "not reachable");
+      })
+    });
+
+    const result = await handlers.taskStatus();
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(result.structuredContent).not.toHaveProperty("observedState");
+  });
+
+  it("does not invent a crashed state or retry after a second write failure", async () => {
+    const companionManager = createManager();
+    const submit = vi.fn(async () => {
+      throw new HudClientError("OFFLINE", "not reachable");
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    const result = await handlers.progressReport({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(result.structuredContent).not.toHaveProperty("observedState");
     expect(companionManager.ensureForWrite).toHaveBeenCalledTimes(2);
     expect(submit).toHaveBeenCalledTimes(2);
   });
