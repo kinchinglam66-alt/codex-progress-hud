@@ -18,7 +18,26 @@ export function defaultTokenPath(environment: NodeJS.ProcessEnv = process.env): 
   return environment.CODEX_PROGRESS_HUD_TOKEN_PATH ?? join(defaultDataDirectory(environment), "auth.token");
 }
 
+export function defaultSettingsPath(environment: NodeJS.ProcessEnv = process.env): string {
+  return join(defaultDataDirectory(environment), "settings.json");
+}
+
+export function defaultRuntimePath(environment: NodeJS.ProcessEnv = process.env): string {
+  return join(defaultDataDirectory(environment), "runtime.json");
+}
+
+export function defaultInstallManifestPath(environment: NodeJS.ProcessEnv = process.env): string {
+  return join(defaultDataDirectory(environment), "install.json");
+}
+
+export function defaultLogDirectory(environment: NodeJS.ProcessEnv = process.env): string {
+  return join(defaultDataDirectory(environment), "logs");
+}
+
+export function defaultDiagnosticsDirectory(environment: NodeJS.ProcessEnv = process.env): string {
+  return join(defaultDataDirectory(environment), "diagnostics");
+}
+
 export function defaultServiceUrl(environment: NodeJS.ProcessEnv = process.env): string {
   return environment.CODEX_PROGRESS_HUD_URL ?? "http://127.0.0.1:17837";
 }
-
