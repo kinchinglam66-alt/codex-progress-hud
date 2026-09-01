@@ -1,7 +1,9 @@
 import { randomUUID as nodeRandomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createOperationalLogger, type OperationalLogEntry, type OperationalLogger } from "../diagnostics/logger.js";
+import { writeDiagnosticReport } from "../diagnostics/report.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
 import {
   PROTOCOL_VERSION,
@@ -12,6 +14,9 @@ import {
 import { createProgressServer, type ProgressServerOptions } from "../server/http-server.js";
 import {
   defaultInstallManifestPath,
+  defaultDataDirectory,
+  defaultDiagnosticsDirectory,
+  defaultLogDirectory,
   defaultRuntimePath,
   defaultSettingsPath,
   defaultTokenPath
@@ -82,6 +87,7 @@ export interface DesktopDependencies {
   uiDirectory: string;
   port: number;
   diagnose(): void | Promise<void>;
+  operationalLogger?: OperationalLogger;
   reportError(error: unknown, context: string): void;
   cleanupTimeoutMs: number;
   withTimeout<T>(operation: Promise<T>, timeoutMs: number, name: string): Promise<T>;
@@ -117,6 +123,26 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
   const currentDirectory = dirname(fileURLToPath(import.meta.url));
   const tokenPath = defaultTokenPath();
   const configuredPort = Number.parseInt(process.env.CODEX_PROGRESS_HUD_PORT ?? "17837", 10);
+  const dataDirectory = defaultDataDirectory();
+  const installManifestPath = defaultInstallManifestPath();
+  const stateStore = createLifecycleStateStore({
+    settingsPath: defaultSettingsPath(),
+    runtimePath: defaultRuntimePath(),
+    installManifestPath
+  });
+  const pathExists = async (path: string): Promise<boolean> => {
+    try {
+      await access(path);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const operationalLogger = createOperationalLogger({
+    logDirectory: defaultLogDirectory(),
+    maxBytes: 1024 * 1024,
+    maxFiles: 3
+  });
   return {
     app: electron.app,
     createWindowController: ({ quitting }) => new WindowController({
@@ -131,11 +157,7 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     ),
     createTrayController,
     createProgressServer,
-    stateStore: createLifecycleStateStore({
-      settingsPath: defaultSettingsPath(),
-      runtimePath: defaultRuntimePath(),
-      installManifestPath: defaultInstallManifestPath()
-    }),
+    stateStore,
     readToken: async (path) => (await readFile(path, "utf8")).trim(),
     randomUUID: nodeRandomUUID,
     now: () => new Date(),
@@ -143,8 +165,37 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     tokenPath,
     uiDirectory: resolve(currentDirectory, "../ui"),
     port: Number.isFinite(configuredPort) ? configuredPort : 17_837,
-    diagnose: () => undefined,
-    reportError: (error, context) => console.error(`Codex Progress HUD ${context}`, error),
+    diagnose: async () => {
+      const generatedAt = new Date().toISOString();
+      const settings = await stateStore.readSettings();
+      const runtime = await stateStore.readRuntime();
+      const version = electron.app.getVersion();
+      await writeDiagnosticReport({
+        directory: defaultDiagnosticsDirectory(),
+        generatedAt,
+        versions: {
+          plugin: version,
+          mcp: version,
+          companion: version,
+          protocol: PROTOCOL_VERSION
+        },
+        lifecycle: {
+          ...(settings.desiredState === undefined ? {} : { desiredState: settings.desiredState }),
+          observedState: runtime === null ? "stopped" : "running"
+        },
+        paths: {
+          installManifestExists: await pathExists(installManifestPath),
+          dataDirectoryExists: await pathExists(dataDirectory)
+        },
+        endpoint: { host: "127.0.0.1", port: Number.isFinite(configuredPort) ? configuredPort : 17_837 },
+        ...(runtime === null
+          ? {}
+          : { runtimeAgeMs: Math.max(0, Date.parse(generatedAt) - Date.parse(runtime.startedAt)) }),
+        errors: []
+      });
+    },
+    operationalLogger,
+    reportError: () => undefined,
     cleanupTimeoutMs: DEFAULT_CLEANUP_TIMEOUT_MS,
     withTimeout
   };
@@ -163,6 +214,18 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
   let tray: TrayLike | undefined;
   let progressServer: DesktopProgressServer | undefined;
   let windowController: DesktopWindowController | undefined;
+  let startupAt: Date | undefined;
+
+  const record = async (
+    entry: Omit<OperationalLogEntry, "at">,
+    at: Date = startupAt ?? resolved.now()
+  ): Promise<void> => {
+    try {
+      await resolved.operationalLogger?.write({ at: at.toISOString(), ...entry });
+    } catch {
+      // Operational logging is best effort and must not alter desktop lifecycle behavior.
+    }
+  };
 
   const reportError = (error: unknown, context: string): void => {
     try {
@@ -180,7 +243,17 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
     }
   };
 
-  const cleanup = async (): Promise<void> => {
+  const cleanup = async (recordShutdown: boolean): Promise<void> => {
+    const shutdownAt = resolved.now();
+    if (recordShutdown) {
+      await record({
+        level: "info",
+        event: "shutdown_requested",
+        lifecycleState: "stopped",
+        protocolVersion: PROTOCOL_VERSION
+      }, shutdownAt);
+    }
+    let cleanupFailed = false;
     const steps: Array<[string, () => void | Promise<void>]> = [
       ["server close", () => progressServer?.close()],
       ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
@@ -192,22 +265,33 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       try {
         operation = Promise.resolve(step());
       } catch (error) {
+        cleanupFailed = true;
         reportError(error, `desktop cleanup: ${name}`);
         return;
       }
       try {
         await resolved.withTimeout(operation, resolved.cleanupTimeoutMs, name);
       } catch (error) {
+        cleanupFailed = true;
         reportError(error, `desktop cleanup: ${name}`);
       }
     });
     await Promise.all(attempts);
     cleanupComplete = true;
+    if (recordShutdown) {
+      await record({
+        level: cleanupFailed ? "error" : "info",
+        event: cleanupFailed ? "shutdown_timeout" : "shutdown_complete",
+        lifecycleState: "stopped",
+        protocolVersion: PROTOCOL_VERSION,
+        elapsedMs: Math.max(0, resolved.now().getTime() - shutdownAt.getTime())
+      });
+    }
   };
 
   let finishQuitPromise: Promise<void> | undefined;
   const finishQuitAfterStartup = (): void => {
-    finishQuitPromise ??= cleanup()
+    finishQuitPromise ??= cleanup(true)
       .then(quit)
       .catch((error: unknown) => reportError(error, "desktop quit"));
   };
@@ -228,12 +312,19 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
 
     await resolved.app.whenReady();
     assertStarting();
+    startupAt = resolved.now();
+    await record({
+      level: "info",
+      event: "startup_requested",
+      lifecycleState: "starting",
+      protocolVersion: PROTOCOL_VERSION
+    }, startupAt);
     const runtimeIdentity: RuntimeIdentity = {
       pid: resolved.pid,
       version: resolved.app.getVersion(),
       protocolVersion: PROTOCOL_VERSION,
       instanceNonce: resolved.randomUUID(),
-      startedAt: resolved.now().toISOString()
+      startedAt: startupAt.toISOString()
     };
     assertStarting();
     await resolved.stateStore.writeRuntime(runtimeIdentity);
@@ -286,13 +377,27 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       onError: (error, action) => reportError(error, `tray action: ${action}`)
     });
     tray = undefined;
+    await record({
+      level: "info",
+      event: "startup_ready",
+      lifecycleState: windowController.visibility() === "visible" ? "running" : "hidden",
+      protocolVersion: PROTOCOL_VERSION,
+      elapsedMs: 0
+    }, startupAt);
   } catch (error) {
     quitting = true;
     if (!(error instanceof StartupCancelledError)) {
+      await record({
+        level: "error",
+        event: "startup_failed",
+        lifecycleState: "stopped",
+        protocolVersion: PROTOCOL_VERSION,
+        elapsedMs: 0
+      });
       reportError(error, "desktop startup");
     }
     try {
-      await cleanup();
+      await cleanup(false);
     } catch (cleanupError) {
       reportError(cleanupError, "desktop cleanup");
     }

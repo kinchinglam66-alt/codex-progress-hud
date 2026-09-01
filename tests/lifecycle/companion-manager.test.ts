@@ -7,6 +7,7 @@ import { createProcessLauncher } from "../../src/lifecycle/process-launcher.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { HudClientError } from "../../src/mcp/report-client.js";
+import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -81,6 +82,7 @@ async function harness(options: {
     })
   };
   const delays: number[] = [];
+  const logger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
   const manager = createCompanionManager({
     store,
     client,
@@ -91,6 +93,7 @@ async function harness(options: {
     },
     now: () => elapsed,
     recoveryCooldownMs: 60_000,
+    logger,
     diagnostics: {
       directory: join(directory, "diagnostics"),
       pluginVersion: "0.2.0",
@@ -110,6 +113,7 @@ async function harness(options: {
     launcher,
     terminate,
     manager,
+    logger,
     delays,
     setOnline(value: boolean) {
       online = value;
@@ -181,6 +185,30 @@ describe("companion lifecycle manager", () => {
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
   });
 
+  it("records startup using only category fields", async () => {
+    const { manager, logger } = await harness();
+
+    await manager.open();
+
+    expect(logger.write.mock.calls.map(([entry]) => entry)).toEqual([
+      {
+        at: "1970-01-01T00:00:00.000Z",
+        level: "info",
+        event: "startup_requested",
+        lifecycleState: "starting",
+        protocolVersion: 1
+      },
+      {
+        at: "1970-01-01T00:00:00.000Z",
+        level: "info",
+        event: "startup_ready",
+        lifecycleState: "running",
+        protocolVersion: 1,
+        elapsedMs: 0
+      }
+    ]);
+  });
+
   it("uses bounded readiness backoff and makes only one launch attempt", async () => {
     const { manager, launcher, delays } = await harness({ spawnMakesOnline: false });
 
@@ -224,7 +252,7 @@ describe("companion lifecycle manager", () => {
   );
 
   it("recovers a crash once and rate-limits another recovery across calls", async () => {
-    const { manager, launcher, setOnline } = await harness({
+    const { manager, launcher, logger, setOnline } = await harness({
       desiredState: "on",
       runtime: true
     });
@@ -236,6 +264,13 @@ describe("companion lifecycle manager", () => {
       code: "COMPANION_CRASHED"
     });
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
+    expect(logger.write).toHaveBeenCalledWith({
+      at: "1970-01-01T00:00:00.000Z",
+      level: "warn",
+      event: "crash_recovery",
+      lifecycleState: "crashed",
+      protocolVersion: 1
+    });
   });
 
   it("coalesces simultaneous crash recovery for every caller", async () => {
@@ -275,16 +310,20 @@ describe("companion lifecycle manager", () => {
   });
 
   it("closes gracefully after persisting explicit off", async () => {
-    const { manager, store, client, terminate } = await harness({ online: true });
+    const { manager, store, client, logger, terminate } = await harness({ online: true });
 
     expect(await manager.close()).toEqual({ desiredState: "off", observedState: "stopped" });
     expect((await store.readSettings()).desiredState).toBe("off");
     expect(client.shutdown).toHaveBeenCalledOnce();
     expect(terminate).not.toHaveBeenCalled();
+    expect(logger.write.mock.calls.map(([entry]) => entry.event)).toEqual([
+      "shutdown_requested",
+      "shutdown_complete"
+    ]);
   });
 
   it("never force-terminates a PID that this manager did not spawn", async () => {
-    const { manager, terminate } = await harness({
+    const { manager, logger, terminate } = await harness({
       desiredState: "on",
       runtime: true,
       online: true,
@@ -297,6 +336,39 @@ describe("companion lifecycle manager", () => {
       code: "SHUTDOWN_TIMEOUT"
     });
     expect(terminate).not.toHaveBeenCalled();
+    expect(logger.write).toHaveBeenLastCalledWith({
+      at: "1970-01-01T00:00:05.000Z",
+      level: "error",
+      event: "shutdown_timeout",
+      lifecycleState: "stopped",
+      protocolVersion: 1,
+      elapsedMs: 5000
+    });
+  });
+
+  it.each([
+    ["PORT_CONFLICT", "port_conflict", "port_conflict"],
+    ["VERSION_MISMATCH", "protocol_mismatch", "incompatible"]
+  ] as const)("records %s as a category without the client error payload", async (
+    clientCode,
+    event,
+    lifecycleState
+  ) => {
+    const { manager, client, logger } = await harness({ online: true });
+    client.identity.mockRejectedValue(
+      new HudClientError(clientCode, "Bearer secret token=secret private command output")
+    );
+
+    await manager.ensureForWrite("progress_report");
+
+    expect(logger.write).toHaveBeenCalledWith({
+      at: "1970-01-01T00:00:00.000Z",
+      level: "error",
+      event,
+      lifecycleState,
+      protocolVersion: 1
+    });
+    expect(JSON.stringify(logger.write.mock.calls)).not.toContain("Bearer secret");
   });
 
   it("force-terminates only a spawned process whose live identity still matches", async () => {

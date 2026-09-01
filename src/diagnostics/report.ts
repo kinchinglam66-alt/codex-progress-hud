@@ -22,7 +22,6 @@ export interface DiagnosticReportInput {
   endpoint: { host: string; port: number };
   runtimeAgeMs?: number;
   errors: Array<{ code: HudErrorCode | "OFFLINE"; occurredAt?: string }>;
-  [key: string]: unknown;
 }
 
 function line(label: string, value: string | number | boolean | undefined): string {
@@ -39,7 +38,7 @@ export async function writeDiagnosticReport(
     ? "- None"
     : input.errors.map((error) => line("Code", error.code)).join("\n");
   const markdown = [
-    "# Codex Progress HUD Diagnostic Report",
+    "# Codex Progress HUD Diagnostic",
     "",
     line("Generated at", input.generatedAt),
     "",
@@ -63,12 +62,20 @@ export async function writeDiagnosticReport(
     "",
     "## Path checks",
     "",
-    line("Install manifest exists", input.paths.installManifestExists),
-    line("Data directory exists", input.paths.dataDirectoryExists),
+    line("%APPDATA%\\codex-progress-hud\\install.json", input.paths.installManifestExists),
+    line("%APPDATA%\\codex-progress-hud", input.paths.dataDirectoryExists),
     "",
     "## Categorized errors",
     "",
     errors,
+    "",
+    "## Safe verification commands",
+    "",
+    "```powershell",
+    'Test-Path "$env:APPDATA\\codex-progress-hud\\install.json"',
+    'Test-Path "$env:APPDATA\\codex-progress-hud\\runtime.json"',
+    `Invoke-RestMethod -Uri "http://${input.endpoint.host}:${input.endpoint.port}/health"`,
+    "```",
     ""
   ].join("\n");
   await writeFile(path, markdown, { encoding: "utf8", mode: 0o600 });

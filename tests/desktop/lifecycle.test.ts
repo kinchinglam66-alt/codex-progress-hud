@@ -72,6 +72,7 @@ function desktopHarness(lockAcquired = true) {
     uiDirectory: "C:\\hud\\ui",
     port: 17_837,
     diagnose: vi.fn(async () => undefined),
+    operationalLogger: { write: vi.fn(async () => undefined) },
     reportError: vi.fn(),
     cleanupTimeoutMs: 25,
     withTimeout: vi.fn(async (operation) => operation)
@@ -159,6 +160,30 @@ describe("desktop lifecycle", () => {
     });
   });
 
+  it("records desktop startup using category-only entries", async () => {
+    const harness = desktopHarness();
+
+    await runDesktop(harness.dependencies);
+
+    expect(vi.mocked(harness.dependencies.operationalLogger!.write).mock.calls.map(([entry]) => entry)).toEqual([
+      {
+        at: "2026-09-02T00:00:00.000Z",
+        level: "info",
+        event: "startup_requested",
+        lifecycleState: "starting",
+        protocolVersion: 1
+      },
+      {
+        at: "2026-09-02T00:00:00.000Z",
+        level: "info",
+        event: "startup_ready",
+        lifecycleState: "hidden",
+        protocolVersion: 1,
+        elapsedMs: 0
+      }
+    ]);
+  });
+
   it("records the runtime start time only after Electron readiness", async () => {
     const harness = desktopHarness();
     let markReady!: () => void;
@@ -198,6 +223,15 @@ describe("desktop lifecycle", () => {
     expect(harness.order).toEqual(["desired:off", "quit"]);
   });
 
+  it("runs the safe diagnostic action from the tray seam", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+
+    await harness.trayCallbacks?.onDiagnose();
+
+    expect(harness.dependencies.diagnose).toHaveBeenCalledOnce();
+  });
+
   it("updates the per-user login item only after an explicit tray click", async () => {
     const harness = desktopHarness();
     await runDesktop(harness.dependencies);
@@ -222,6 +256,12 @@ describe("desktop lifecycle", () => {
       expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
       expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
     });
+    expect(vi.mocked(harness.dependencies.operationalLogger!.write).mock.calls.map(([entry]) => entry.event)).toEqual([
+      "startup_requested",
+      "startup_ready",
+      "shutdown_requested",
+      "shutdown_complete"
+    ]);
   });
 
   it.each([
@@ -261,6 +301,17 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.app.quit).toHaveBeenCalled();
     expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
     expect(harness.dependencies.reportError).toHaveBeenCalledWith(failure, "desktop startup");
+    expect(JSON.stringify(vi.mocked(harness.dependencies.operationalLogger!.write).mock.calls)).not.toContain(
+      failure.message
+    );
+    expect(harness.dependencies.operationalLogger!.write).toHaveBeenCalledWith({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "error",
+      event: "startup_failed",
+      lifecycleState: "stopped",
+      protocolVersion: 1,
+      elapsedMs: 0
+    });
   });
 
   it("continues every cleanup obligation and reports each cleanup failure", async () => {
