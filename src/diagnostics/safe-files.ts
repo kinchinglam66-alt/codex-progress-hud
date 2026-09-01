@@ -125,7 +125,7 @@ async function openVerified(
     error.code = "EEXIST";
     throw error;
   }
-  const flags = mode === "create" ? "wx" : before === null ? "ax" : "a";
+  const flags = mode === "create" ? "wx" : before === null ? "wx+" : "r+";
   const handle = await open(path, flags, 0o600);
   try {
     await verifyOpenedFile(directory, path, handle, before);
@@ -148,4 +148,22 @@ export async function openVerifiedCreate(
   filename: string
 ): Promise<FileHandle> {
   return openVerified(directory, filename, "create");
+}
+
+export async function openVerifiedExisting(
+  directory: TrustedDirectory,
+  filename: string
+): Promise<FileHandle | null> {
+  const path = outputPath(directory, filename);
+  await assertTrustedDirectory(directory);
+  const before = await regularFileInformation(path);
+  if (before === null) return null;
+  const handle = await open(path, "r+", 0o600);
+  try {
+    await verifyOpenedFile(directory, path, handle, before);
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
 }

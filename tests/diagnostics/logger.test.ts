@@ -1,4 +1,8 @@
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,6 +33,48 @@ async function logDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "hud-log-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   return directory;
+}
+
+function ownerAddress(token: string): string {
+  return `\\\\.\\pipe\\codex-progress-hud-owner-${token}`;
+}
+
+interface HeldOwner {
+  address: string;
+  server: Server;
+}
+
+async function holdLogOwner(): Promise<HeldOwner> {
+  const address = ownerAddress(randomUUID());
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(address, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  cleanups.push(() => closeLogMutex(server));
+  return { address, server };
+}
+
+async function closeLogMutex(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => {
+    try {
+      server.close(() => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function publishLock(directory: string, owner: HeldOwner): Promise<void> {
+  const token = randomUUID();
+  const tempName = `.companion.log.lock.owner-${token}`;
+  const tempPath = join(directory, tempName);
+  await writeFile(tempPath, JSON.stringify({ owner: owner.address, tempName, token }));
+  await link(tempPath, join(directory, ".companion.log.lock"));
+  await rm(tempPath, { force: true });
 }
 
 describe("operational logger", () => {
@@ -151,7 +197,8 @@ describe("operational logger", () => {
     const maxFiles = 3;
     const logger = createOperationalLogger({ logDirectory: directory, maxBytes, maxFiles });
 
-    for (let index = 0; index < 6_000; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
+      await writeFile(join(directory, "companion.log"), "x".repeat(maxBytes - 1));
       await logger.write({
         at: "2026-09-02T00:00:00.000Z",
         level: "info",
@@ -167,6 +214,32 @@ describe("operational logger", () => {
     const sizes = await Promise.all(files.map(async (file) => (await stat(join(directory, file))).size));
     expect(sizes.every((size) => size > 0 && size <= maxBytes)).toBe(true);
   }, 20_000);
+
+  it("preserves newest-to-oldest archive ordering during handle rotation", async () => {
+    const directory = await logDirectory();
+    const maxBytes = 512;
+    const activeBefore = `active-before-${"a".repeat(480)}`;
+    const archiveOneBefore = "archive-one-before\n";
+    const archiveTwoBefore = "archive-two-before\n";
+    await writeFile(join(directory, "companion.log"), activeBefore);
+    await writeFile(join(directory, "companion.log.1"), archiveOneBefore);
+    await writeFile(join(directory, "companion.log.2"), archiveTwoBefore);
+    const logger = createOperationalLogger({ logDirectory: directory, maxBytes, maxFiles: 3 });
+
+    await logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    });
+
+    await expect(readFile(join(directory, "companion.log.2"), "utf8")).resolves.toBe(
+      archiveOneBefore
+    );
+    await expect(readFile(join(directory, "companion.log.1"), "utf8")).resolves.toBe(activeBefore);
+    await expect(readFile(join(directory, "companion.log"), "utf8")).resolves.toContain(
+      "startup_requested"
+    );
+  });
 
   it("serializes rotation across two logger instances sharing one directory", async () => {
     const directory = await logDirectory();
@@ -188,15 +261,40 @@ describe("operational logger", () => {
     const files = (await readdir(directory)).filter((file) => file.startsWith("companion.log"));
     const sizes = await Promise.all(files.map(async (file) => (await stat(join(directory, file))).size));
     expect(sizes.every((size) => size <= maxBytes)).toBe(true);
+    const contents = await Promise.all(files.map((file) => readFile(join(directory, file), "utf8")));
+    expect(contents.join("\n").match(/startup_requested/gu)).toHaveLength(2);
     expect(files).not.toContain("companion.log.lock");
   });
 
-  it("honors the shared directory lock before touching the rotation set", async () => {
+  it("keeps suspended owner initialization invisible until atomic publication", async () => {
+    const directory = await logDirectory();
+    const token = randomUUID();
+    const unpublished = join(directory, `.companion.log.lock.owner-${token}`);
+    await writeFile(unpublished, "");
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    await logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    });
+
+    await expect(readFile(join(directory, "companion.log"), "utf8")).resolves.toContain(
+      "startup_requested"
+    );
+    await expect(readFile(unpublished, "utf8")).resolves.toBe("");
+  });
+
+  it("does not reclaim an atomically published lock from a suspended live owner", async () => {
     const directory = await logDirectory();
     const activePath = join(directory, "companion.log");
-    const lockPath = join(directory, ".companion.log.lock");
     await writeFile(activePath, "existing-category\n");
-    await writeFile(lockPath, JSON.stringify({ pid: process.pid }));
+    const owner = await holdLogOwner();
+    await publishLock(directory, owner);
     const logger = createOperationalLogger({
       logDirectory: directory,
       maxBytes: 256 * 1024,
@@ -211,16 +309,63 @@ describe("operational logger", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await expect(readFile(activePath, "utf8")).resolves.toBe("existing-category\n");
 
-    await rm(lockPath, { force: true });
+    await closeLogMutex(owner.server);
     await writing;
     await expect(readFile(activePath, "utf8")).resolves.toContain("startup_requested");
   });
 
-  it("recovers an orphaned lock whose owner process no longer exists", async () => {
+  it("a late release from an old owner cannot remove its successor lock", async () => {
     const directory = await logDirectory();
+    const activePath = join(directory, "companion.log");
+    await writeFile(activePath, "existing-category\n");
+    const oldOwner = await holdLogOwner();
+    await closeLogMutex(oldOwner.server);
+    const successor = await holdLogOwner();
+    await publishLock(directory, successor);
+    await closeLogMutex(oldOwner.server);
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    const writing = logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(readFile(activePath, "utf8")).resolves.toBe("existing-category\n");
+
+    await closeLogMutex(successor.server);
+    await writing;
+    await expect(readFile(activePath, "utf8")).resolves.toContain("startup_requested");
+  });
+
+  it("recovers automatically when a lock-owning process crashes", async () => {
+    const directory = await logDirectory();
+    const ownerToken = randomUUID();
+    const crashedOwnerAddress = ownerAddress(ownerToken);
+    const script = [
+      'const net = require("node:net");',
+      'const server = net.createServer((socket) => socket.destroy());',
+      'server.listen(process.argv[1], () => process.stdout.write("READY\\n"));'
+    ].join("");
+    const child = spawn(process.execPath, ["-e", script, crashedOwnerAddress], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const childExited = once(child, "exit");
+    cleanups.push(async () => {
+      if (child.exitCode !== null) return;
+      child.kill();
+      await childExited;
+    });
+    await once(child.stdout!, "data");
+    const lockToken = randomUUID();
+    const tempName = `.companion.log.lock.owner-${lockToken}`;
     await writeFile(
       join(directory, ".companion.log.lock"),
-      JSON.stringify({ pid: 2_147_483_647 })
+      JSON.stringify({ owner: crashedOwnerAddress, tempName, token: lockToken })
     );
     const logger = createOperationalLogger({
       logDirectory: directory,
@@ -228,16 +373,20 @@ describe("operational logger", () => {
       maxFiles: 3
     });
 
-    await logger.write({
+    const writing = logger.write({
       at: "2026-09-02T00:00:00.000Z",
       level: "warn",
       event: "crash_recovery"
     });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await readdir(directory)).not.toContain("companion.log");
 
+    child.kill();
+    await childExited;
+    await writing;
     await expect(readFile(join(directory, "companion.log"), "utf8")).resolves.toContain(
       "crash_recovery"
     );
-    expect(await readdir(directory)).not.toContain(".companion.log.lock");
   });
 
   it("preserves an older archive when an intermediate archive is absent", async () => {

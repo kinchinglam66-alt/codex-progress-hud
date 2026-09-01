@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, rename, rm, type FileHandle } from "node:fs/promises";
-import { createServer, type Server } from "node:net";
-import { join, resolve } from "node:path";
+import { link, lstat, open, unlink, type FileHandle } from "node:fs/promises";
+import { connect, createServer, type Server } from "node:net";
+import { resolve } from "node:path";
 import type { ObservedHudState } from "../lifecycle/types.js";
 import {
   assertTrustedDirectory,
   ensureTrustedDirectory,
   openVerifiedAppend,
   openVerifiedCreate,
-  regularFileInformation
+  openVerifiedExisting
 } from "./safe-files.js";
 import type { TrustedDirectory } from "./safe-files.js";
 
@@ -124,79 +124,30 @@ function sanitizeEntry(entry: OperationalLogEntry): OperationalLogEntry {
   };
 }
 
-async function fileSize(directory: TrustedDirectory, path: string): Promise<number> {
-  await assertTrustedDirectory(directory);
-  return Number((await regularFileInformation(path))?.size ?? 0);
-}
-
-async function moveIfPresent(
-  directory: TrustedDirectory,
-  source: string,
-  destination: string
-): Promise<void> {
-  await assertTrustedDirectory(directory);
-  const sourceInformation = await regularFileInformation(source);
-  if (sourceInformation === null) return;
-  await regularFileInformation(destination);
-  await rm(destination, { force: true });
-  await assertTrustedDirectory(directory);
-  await rename(source, destination);
-  await assertTrustedDirectory(directory);
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-async function lockOwnerIsAlive(lockPath: string): Promise<boolean> {
-  const information = await regularFileInformation(lockPath);
-  if (information === null) return false;
-  if (information.size > 256) throw new Error("operational log lock metadata is invalid");
-  let value: unknown;
-  try {
-    value = JSON.parse(await readFile(lockPath, "utf8"));
-  } catch {
-    return Date.now() - information.mtimeMs < 5_000;
-  }
-  if (typeof value !== "object" || value === null) return false;
-  const pid = Reflect.get(value, "pid");
-  return Number.isSafeInteger(pid) && (pid as number) > 0 && processIsAlive(pid as number);
-}
-
-async function reclaimOrphanedLock(lockPath: string): Promise<void> {
-  if (await lockOwnerIsAlive(lockPath)) return;
-  const stalePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
-  try {
-    await rename(lockPath, stalePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  await rm(stalePath, { force: true });
-}
-
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve_) => server.close(() => resolve_()));
 }
 
-async function acquireRecoveryMutex(lockPath: string): Promise<Server | null> {
-  if (process.platform !== "win32") return null;
-  const digest = createHash("sha256").update(lockPath.toLowerCase()).digest("hex").slice(0, 32);
-  const pipePath = `\\\\.\\pipe\\codex-progress-hud-log-recovery-${digest}`;
+function transactionAddress(logDirectory: string): string {
+  const digest = createHash("sha256").update(logDirectory.toLowerCase()).digest("hex").slice(0, 32);
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\codex-progress-hud-log-transaction-${digest}`;
+  }
+  if (process.platform === "linux") return `\0codex-progress-hud-log-transaction-${digest}`;
+  throw new Error("operational log locking requires Windows or Linux kernel sockets");
+}
+
+async function acquireTransaction(logDirectory: string): Promise<Server> {
+  const address = transactionAddress(logDirectory);
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    const server = createServer();
+    const server = createServer((socket) => socket.destroy());
     const acquired = await new Promise<boolean>((resolve_, reject) => {
       const onError = (error: NodeJS.ErrnoException) => {
         if (error.code === "EADDRINUSE") resolve_(false);
         else reject(error);
       };
       server.once("error", onError);
-      server.listen(pipePath, () => {
+      server.listen(address, () => {
         server.off("error", onError);
         resolve_(true);
       });
@@ -204,50 +155,278 @@ async function acquireRecoveryMutex(lockPath: string): Promise<Server | null> {
     if (acquired) return server;
     await new Promise((resolve_) => setTimeout(resolve_, 5));
   }
-  throw new Error("operational log recovery mutex timed out");
+  throw new Error("operational log rotation lock timed out");
 }
 
-interface AcquiredLock {
-  handle: FileHandle;
+interface OwnerIdentity {
+  address: string;
+  server: Server;
+}
+
+async function createOwnerIdentity(): Promise<OwnerIdentity> {
+  const token = randomUUID();
+  const address = process.platform === "win32"
+    ? `\\\\.\\pipe\\codex-progress-hud-owner-${token}`
+    : process.platform === "linux"
+      ? `\0codex-progress-hud-owner-${token}`
+      : (() => { throw new Error("operational log owner identity requires Windows or Linux"); })();
+  const server = createServer((socket) => socket.destroy());
+  await new Promise<void>((resolve_, reject) => {
+    server.once("error", reject);
+    server.listen(address, () => {
+      server.off("error", reject);
+      resolve_();
+    });
+  });
+  server.unref();
+  return { address, server };
+}
+
+let processOwnerIdentityPromise: Promise<OwnerIdentity> | undefined;
+
+function processOwnerIdentity(): Promise<OwnerIdentity> {
+  processOwnerIdentityPromise ??= createOwnerIdentity();
+  return processOwnerIdentityPromise;
+}
+
+function validOwnerAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (process.platform === "win32") {
+    return /^\\\\\.\\pipe\\codex-progress-hud-owner-[0-9a-f-]{36}$/u.test(value);
+  }
+  return /^\0codex-progress-hud-owner-[0-9a-f-]{36}$/u.test(value);
+}
+
+async function ownerIsAlive(address: string): Promise<boolean> {
+  return new Promise((resolve_) => {
+    const socket = connect(address);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve_(true);
+    });
+    socket.once("error", () => resolve_(false));
+  });
+}
+
+interface LockRecord {
+  device: number | bigint;
+  inode: number | bigint;
+  owner: string;
+  tempName: string;
+  token: string;
+}
+
+async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
+  let before;
+  try {
+    before = await lstat(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink < 1 || before.nlink > 2) {
+    throw new Error("operational log lock must be a regular owned file");
+  }
+  if (before.size > 512) throw new Error("operational log lock metadata is invalid");
+  const handle = await open(lockPath, "r");
+  try {
+    const opened = await handle.stat();
+    if (opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error("operational log lock changed while being opened");
+    }
+    const text = await handle.readFile({ encoding: "utf8" });
+    const current = await lstat(lockPath);
+    if (current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new Error("operational log lock path changed while being read");
+    }
+    const value = JSON.parse(text) as unknown;
+    if (typeof value !== "object" || value === null) {
+      throw new Error("operational log lock metadata is invalid");
+    }
+    const owner = Reflect.get(value, "owner");
+    const token = Reflect.get(value, "token");
+    const tempName = Reflect.get(value, "tempName");
+    if (
+      !validOwnerAddress(owner) ||
+      typeof token !== "string" ||
+      !/^[0-9a-f-]{36}$/u.test(token) ||
+      tempName !== `.companion.log.lock.owner-${token}`
+    ) {
+      throw new Error("operational log lock metadata is invalid");
+    }
+    return { device: opened.dev, inode: opened.ino, owner, tempName, token };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function unlinkIfOwned(path: string, record: LockRecord): Promise<boolean> {
+  let information;
+  try {
+    information = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (information.dev !== record.device || information.ino !== record.inode) return false;
+  await unlink(path);
+  return true;
+}
+
+interface AcquiredLock extends LockRecord {
+  lockPath: string;
 }
 
 async function acquireLock(
   directory: TrustedDirectory,
-  lockPath: string
+  logDirectory: string,
+  owner: OwnerIdentity
 ): Promise<AcquiredLock> {
+  const lockPath = resolve(logDirectory, ".companion.log.lock");
   for (let attempt = 0; attempt < 200; attempt += 1) {
+    const token = randomUUID();
+    const tempName = `.companion.log.lock.owner-${token}`;
+    const tempPath = resolve(logDirectory, tempName);
+    const handle = await openVerifiedCreate(directory, tempName);
     try {
-      const token = randomUUID();
-      const handle = await openVerifiedCreate(directory, ".companion.log.lock");
-      try {
-        await handle.writeFile(JSON.stringify({ pid: process.pid, token }), { encoding: "utf8" });
-        return { handle };
-      } catch (error) {
-        await handle.close().catch(() => undefined);
-        await assertTrustedDirectory(directory);
-        await rm(lockPath, { force: true });
-        throw error;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const recoveryMutex = await acquireRecoveryMutex(lockPath);
-      try {
-        await reclaimOrphanedLock(lockPath);
-      } finally {
-        if (recoveryMutex !== null) await closeServer(recoveryMutex);
-      }
-      await new Promise((resolve_) => setTimeout(resolve_, 5));
+      await handle.writeFile(JSON.stringify({ owner: owner.address, tempName, token }), {
+        encoding: "utf8"
+      });
+    } finally {
+      await handle.close();
     }
+    await assertTrustedDirectory(directory);
+    try {
+      await link(tempPath, lockPath);
+      const published = await readLockRecord(lockPath);
+      if (published === null || published.token !== token || published.owner !== owner.address) {
+        throw new Error("operational log lock publication could not be verified");
+      }
+      await unlinkIfOwned(tempPath, published);
+      return { ...published, lockPath };
+    } catch (error) {
+      const tempInformation = await lstat(tempPath);
+      const tempRecord: LockRecord = {
+        device: tempInformation.dev,
+        inode: tempInformation.ino,
+        owner: owner.address,
+        tempName,
+        token
+      };
+      await unlinkIfOwned(tempPath, tempRecord);
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const transaction = await acquireTransaction(logDirectory);
+    try {
+      const existing = await readLockRecord(lockPath);
+      if (existing !== null && !await ownerIsAlive(existing.owner)) {
+        await unlinkIfOwned(lockPath, existing);
+        await unlinkIfOwned(resolve(logDirectory, existing.tempName), existing);
+      }
+    } finally {
+      await closeServer(transaction);
+    }
+    await new Promise((resolve_) => setTimeout(resolve_, 5));
   }
   throw new Error("operational log rotation lock timed out");
+}
+
+async function releaseLock(_logDirectory: string, lock: AcquiredLock): Promise<void> {
+  const current = await readLockRecord(lock.lockPath);
+  if (
+    current === null ||
+    current.token !== lock.token ||
+    current.owner !== lock.owner ||
+    current.device !== lock.device ||
+    current.inode !== lock.inode
+  ) {
+    return;
+  }
+  await unlinkIfOwned(lock.lockPath, lock);
+}
+
+async function readBounded(handle: FileHandle, maxBytes: number): Promise<Buffer> {
+  const information = await handle.stat();
+  if (information.size > maxBytes) {
+    throw new Error("operational log file exceeds maxBytes");
+  }
+  const content = Buffer.alloc(Number(information.size));
+  let offset = 0;
+  while (offset < content.length) {
+    const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
+    if (bytesRead === 0) throw new Error("operational log file changed while being read");
+    offset += bytesRead;
+  }
+  return content;
+}
+
+async function replaceThroughHandle(
+  source: FileHandle,
+  destination: FileHandle,
+  maxBytes: number
+): Promise<void> {
+  const content = await readBounded(source, maxBytes);
+  await destination.truncate(0);
+  await writeAt(destination, content, 0);
+  await destination.truncate(content.length);
+}
+
+async function writeAt(handle: FileHandle, content: Uint8Array, position: number): Promise<void> {
+  let offset = 0;
+  while (offset < content.length) {
+    const { bytesWritten } = await handle.write(
+      content,
+      offset,
+      content.length - offset,
+      position + offset
+    );
+    if (bytesWritten === 0) throw new Error("operational log archive write made no progress");
+    offset += bytesWritten;
+  }
+}
+
+async function rotateThroughHandles(
+  directory: TrustedDirectory,
+  active: FileHandle,
+  maxBytes: number,
+  maxFiles: number
+): Promise<void> {
+  if (maxFiles === 1) {
+    await active.truncate(0);
+    return;
+  }
+  const handles: Array<FileHandle | null> = [active];
+  const existed = [true];
+  try {
+    for (let index = 1; index < maxFiles; index += 1) {
+      const handle = await openVerifiedExisting(directory, `companion.log.${index}`);
+      handles[index] = handle;
+      existed[index] = handle !== null;
+    }
+    for (let index = 1; index < maxFiles; index += 1) {
+      if (handles[index] === null && existed[index - 1]) {
+        handles[index] = await openVerifiedAppend(directory, `companion.log.${index}`);
+      }
+    }
+    for (let index = maxFiles - 1; index >= 1; index -= 1) {
+      if (!existed[index - 1]) continue;
+      const source = handles[index - 1] ?? null;
+      const destination = handles[index] ?? null;
+      if (source === null || destination === null) {
+        throw new Error("operational log rotation handle set is incomplete");
+      }
+      await replaceThroughHandle(source, destination, maxBytes);
+    }
+    await active.truncate(0);
+  } finally {
+    await Promise.all(handles.slice(1).map((handle) => handle?.close().catch(() => undefined)));
+  }
 }
 
 export function createOperationalLogger(options: OperationalLoggerOptions): OperationalLogger {
   positiveInteger(options.maxBytes, "maxBytes");
   positiveInteger(options.maxFiles, "maxFiles");
   const logDirectory = resolve(options.logDirectory);
-  const activePath = join(logDirectory, "companion.log");
-  const lockPath = join(logDirectory, ".companion.log.lock");
   let trustedDirectoryPromise: Promise<TrustedDirectory> | undefined;
   let pending = Promise.resolve();
 
@@ -259,31 +438,30 @@ export function createOperationalLogger(options: OperationalLoggerOptions): Oper
     }
     trustedDirectoryPromise ??= ensureTrustedDirectory(logDirectory);
     const trustedDirectory = await trustedDirectoryPromise;
-    const lock = await acquireLock(trustedDirectory, lockPath);
+    const owner = await processOwnerIdentity();
+    const lock = await acquireLock(trustedDirectory, logDirectory, owner);
     try {
-      if ((await fileSize(trustedDirectory, activePath)) + entryBytes > options.maxBytes) {
-        if (options.maxFiles === 1) {
-          await assertTrustedDirectory(trustedDirectory);
-          await regularFileInformation(activePath);
-          await rm(activePath, { force: true });
-          await assertTrustedDirectory(trustedDirectory);
-        } else {
-          for (let index = options.maxFiles - 1; index >= 1; index -= 1) {
-            const source = index === 1 ? activePath : `${activePath}.${index - 1}`;
-            await moveIfPresent(trustedDirectory, source, `${activePath}.${index}`);
-          }
-        }
-      }
       const handle = await openVerifiedAppend(trustedDirectory, "companion.log");
       try {
-        await handle.appendFile(serialized, { encoding: "utf8" });
+        const activeSize = Number((await handle.stat()).size);
+        if (activeSize + entryBytes > options.maxBytes) {
+          await rotateThroughHandles(
+            trustedDirectory,
+            handle,
+            options.maxBytes,
+            options.maxFiles
+          );
+        }
+        const writePosition = Number((await handle.stat()).size);
+        await writeAt(handle, Buffer.from(serialized, "utf8"), writePosition);
+        if (Number((await handle.stat()).size) > options.maxBytes) {
+          throw new Error("operational log exceeded maxBytes after append");
+        }
       } finally {
         await handle.close();
       }
     } finally {
-      await lock.handle.close().catch(() => undefined);
-      await assertTrustedDirectory(trustedDirectory);
-      await rm(lockPath, { force: true });
+      await releaseLock(logDirectory, lock);
     }
   };
 
