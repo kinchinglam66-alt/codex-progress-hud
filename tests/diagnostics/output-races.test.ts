@@ -1,74 +1,68 @@
 import * as actualFs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  nodeFileSystemOperations,
+  type FileSystemOperations
+} from "../../src/diagnostics/safe-files.js";
+import { createOperationalLoggerWithFileSystem } from "../../src/diagnostics/logger.js";
+import {
+  createDiagnosticReportWriter,
+  type DiagnosticReportInput
+} from "../../src/diagnostics/report.js";
 
-const race = vi.hoisted(() => ({
+const race = {
   beforeOpen: undefined as undefined | ((path: string) => Promise<boolean>),
   beforeMutation: undefined as undefined | ((kind: string, path: string) => Promise<boolean>),
-  realOpen: undefined as undefined | typeof import("node:fs/promises").open,
-  realRename: undefined as undefined | typeof import("node:fs/promises").rename,
-  realRm: undefined as undefined | typeof import("node:fs/promises").rm
-}));
+  openCalls: 0
+};
 
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const original = await importOriginal<typeof import("node:fs/promises")>();
-  race.realOpen = original.open;
-  race.realRename = original.rename;
-  race.realRm = original.rm;
-  return {
-    ...original,
-    open: async (...arguments_: Parameters<typeof original.open>) => {
-      const path = String(arguments_[0]);
-      const beforeOpen = race.beforeOpen;
-      if (beforeOpen !== undefined) {
-        if (await beforeOpen(path)) race.beforeOpen = undefined;
-      }
-      const handle = await original.open(...arguments_);
-      return new Proxy(handle, {
-        get(target, property) {
-          const value = Reflect.get(target, property, target);
-          if ((property === "truncate" || property === "write") && typeof value === "function") {
-            return async (...methodArguments: unknown[]) => {
-              const beforeMutation = race.beforeMutation;
-              if (
-                beforeMutation !== undefined &&
-                await beforeMutation(String(property), path)
-              ) {
-                race.beforeMutation = undefined;
-              }
-              return Reflect.apply(value, target, methodArguments);
-            };
-          }
-          return typeof value === "function" ? value.bind(target) : value;
-        }
-      });
-    },
-    rm: async (...arguments_: Parameters<typeof original.rm>) => {
-      const beforeMutation = race.beforeMutation;
-      if (beforeMutation !== undefined && await beforeMutation("rm", String(arguments_[0]))) {
-        race.beforeMutation = undefined;
-      }
-      return original.rm(...arguments_);
-    },
-    rename: async (...arguments_: Parameters<typeof original.rename>) => {
-      const beforeMutation = race.beforeMutation;
-      if (beforeMutation !== undefined && await beforeMutation("rename", String(arguments_[1]))) {
-        race.beforeMutation = undefined;
-      }
-      return original.rename(...arguments_);
+const injectedFileSystem: FileSystemOperations = {
+  ...nodeFileSystemOperations,
+  open: async (...arguments_: Parameters<typeof nodeFileSystemOperations.open>) => {
+    race.openCalls += 1;
+    const path = String(arguments_[0]);
+    const beforeOpen = race.beforeOpen;
+    if (beforeOpen !== undefined) {
+      if (await beforeOpen(path)) race.beforeOpen = undefined;
     }
-  };
-});
+    const handle = await nodeFileSystemOperations.open(...arguments_);
+    return new Proxy(handle, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if ((property === "truncate" || property === "write") && typeof value === "function") {
+          return async (...methodArguments: unknown[]) => {
+            const beforeMutation = race.beforeMutation;
+            if (
+              beforeMutation !== undefined &&
+              await beforeMutation(String(property), path)
+            ) {
+              race.beforeMutation = undefined;
+            }
+            return Reflect.apply(value, target, methodArguments);
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+  }
+};
 
-import { createOperationalLogger } from "../../src/diagnostics/logger.js";
-import { writeDiagnosticReport, type DiagnosticReportInput } from "../../src/diagnostics/report.js";
+const writeDiagnosticReport = createDiagnosticReportWriter(injectedFileSystem);
+
+function createOperationalLogger(
+  options: Parameters<typeof createOperationalLoggerWithFileSystem>[0]
+) {
+  return createOperationalLoggerWithFileSystem(options, injectedFileSystem);
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   race.beforeOpen = undefined;
   race.beforeMutation = undefined;
+  race.openCalls = 0;
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
@@ -107,6 +101,9 @@ describe("diagnostic output race defenses", () => {
     const outside = join(root, "outside");
     await actualFs.mkdir(directory);
     await actualFs.mkdir(outside);
+    const directoryIdentity = await nodeFileSystemOperations.lstatBigInt(directory);
+    const outsideIdentity = await nodeFileSystemOperations.lstatBigInt(outside);
+    expect(directoryIdentity.ino).not.toBe(outsideIdentity.ino);
     race.beforeOpen = async (path) => {
       if (!path.endsWith(".md")) return false;
       await replaceDirectory(directory, parked, outside);
@@ -116,6 +113,7 @@ describe("diagnostic output race defenses", () => {
     await expect(writeDiagnosticReport(reportInput(directory))).rejects.toThrow(
       /changed|trusted directory/iu
     );
+    expect(race.openCalls).toBeGreaterThan(0);
 
     const outsideFiles = await actualFs.readdir(directory);
     for (const file of outsideFiles) {
@@ -145,6 +143,7 @@ describe("diagnostic output race defenses", () => {
       level: "info",
       event: "startup_requested"
     })).rejects.toThrow("diagnostic output file must have one link");
+    expect(race.openCalls).toBeGreaterThan(0);
     await expect(actualFs.readFile(linked, "utf8")).resolves.toBe("");
   });
 
@@ -162,7 +161,7 @@ describe("diagnostic output race defenses", () => {
     let swapped = false;
     race.beforeMutation = async (kind, path) => {
       if (kind === "rm" && path.endsWith("companion.log.2")) {
-        await race.realRm!(join(outside, "companion.log.2"), { force: true });
+        await actualFs.rm(join(outside, "companion.log.2"), { force: true });
         swapped = true;
         return true;
       }
@@ -198,7 +197,7 @@ describe("diagnostic output race defenses", () => {
     let swapped = false;
     race.beforeMutation = async (kind, path) => {
       if (kind === "rename" && path.endsWith("companion.log.2")) {
-        await race.realRename!(
+        await actualFs.rename(
           join(outside, "companion.log.1"),
           join(outside, "companion.log.2")
         );
@@ -237,7 +236,7 @@ describe("diagnostic output race defenses", () => {
     let swapped = false;
     race.beforeMutation = async (kind, path) => {
       if (kind === "rm" && path.endsWith("companion.log")) {
-        await race.realRm!(join(outside, "companion.log"), { force: true });
+        await actualFs.rm(join(outside, "companion.log"), { force: true });
         swapped = true;
         return true;
       }
@@ -294,7 +293,7 @@ describe("diagnostic output race defenses", () => {
       event: "startup_requested"
     });
     await firstReached;
-    await race.realRename!(lockPath, displacedLockPath);
+    await actualFs.rename(lockPath, displacedLockPath);
     const secondWriting = second.write({
       at: "2026-09-02T00:00:00.000Z",
       level: "warn",
@@ -309,6 +308,6 @@ describe("diagnostic output race defenses", () => {
     resumeSecond();
     await secondWriting;
     await expect(actualFs.lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
-    await race.realRm!(displacedLockPath, { force: true });
+    await actualFs.rm(displacedLockPath, { force: true });
   });
 });

@@ -3,8 +3,10 @@ import type { DesiredHudState, HudErrorCode, ObservedHudState } from "../lifecyc
 import {
   assertTrustedDirectory,
   ensureTrustedDirectory,
+  nodeFileSystemOperations,
   openVerifiedCreate,
-  regularFileInformation
+  regularFileInformation,
+  type FileSystemOperations
 } from "./safe-files.js";
 
 export interface DiagnosticReportInput {
@@ -144,15 +146,16 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
   };
 }
 
-export async function writeDiagnosticReport(
-  input: DiagnosticReportInput
+async function writeDiagnosticReportWithFileSystem(
+  input: DiagnosticReportInput,
+  fileSystem: FileSystemOperations
 ): Promise<{ path: string }> {
   const directory = input.directory;
   if (typeof directory !== "string" || directory.length === 0) {
     throw new TypeError("directory must be a non-empty path");
   }
   const snapshot = snapshotInput(input);
-  const trustedDirectory = await ensureTrustedDirectory(directory);
+  const trustedDirectory = await ensureTrustedDirectory(directory, fileSystem);
   const filename = `codex-progress-hud-${snapshot.generatedAt.replace(/[:.]/g, "-")}.md`;
   const errors = snapshot.errors.length === 0
     ? "- None"
@@ -205,7 +208,11 @@ export async function writeDiagnosticReport(
       suffix === 0 ? filename : filename.replace(/\.md$/u, `-${suffix}.md`)
     );
     try {
-      const handle = await openVerifiedCreate(trustedDirectory, basename(candidate));
+      const handle = await openVerifiedCreate(
+        trustedDirectory,
+        basename(candidate),
+        fileSystem
+      );
       try {
         await handle.writeFile(markdown, { encoding: "utf8" });
       } finally {
@@ -214,10 +221,23 @@ export async function writeDiagnosticReport(
       return { path: candidate };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      await assertTrustedDirectory(trustedDirectory);
-      const existing = await regularFileInformation(candidate);
+      await assertTrustedDirectory(trustedDirectory, fileSystem);
+      const existing = await regularFileInformation(candidate, fileSystem);
       if (existing === null) throw error;
     }
   }
   throw new Error("diagnostic report filename space exhausted");
+}
+
+/** Internal composition seam for deterministic filesystem-boundary tests. */
+export function createDiagnosticReportWriter(
+  fileSystem: FileSystemOperations
+): (input: DiagnosticReportInput) => Promise<{ path: string }> {
+  return (input) => writeDiagnosticReportWithFileSystem(input, fileSystem);
+}
+
+export async function writeDiagnosticReport(
+  input: DiagnosticReportInput
+): Promise<{ path: string }> {
+  return writeDiagnosticReportWithFileSystem(input, nodeFileSystemOperations);
 }

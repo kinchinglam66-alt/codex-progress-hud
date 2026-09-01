@@ -1,16 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, lstat, open, unlink, type FileHandle } from "node:fs/promises";
+import { link, lstat, unlink, type FileHandle } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { resolve } from "node:path";
 import type { ObservedHudState } from "../lifecycle/types.js";
 import {
   assertTrustedDirectory,
   ensureTrustedDirectory,
+  nodeFileSystemOperations,
   openVerifiedAppend,
   openVerifiedCreate,
   openVerifiedExisting
 } from "./safe-files.js";
-import type { TrustedDirectory } from "./safe-files.js";
+import type { FileSystemOperations, TrustedDirectory } from "./safe-files.js";
 
 export type OperationalEventCode =
   | "startup_requested"
@@ -216,7 +217,10 @@ interface LockRecord {
   token: string;
 }
 
-async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
+async function readLockRecord(
+  lockPath: string,
+  fileSystem: FileSystemOperations
+): Promise<LockRecord | null> {
   let before;
   try {
     before = await lstat(lockPath);
@@ -228,7 +232,7 @@ async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
     throw new Error("operational log lock must be a regular owned file");
   }
   if (before.size > 512) throw new Error("operational log lock metadata is invalid");
-  const handle = await open(lockPath, "r");
+  const handle = await fileSystem.open(lockPath, "r");
   try {
     const opened = await handle.stat();
     if (opened.dev !== before.dev || opened.ino !== before.ino) {
@@ -280,14 +284,15 @@ interface AcquiredLock extends LockRecord {
 async function acquireLock(
   directory: TrustedDirectory,
   logDirectory: string,
-  owner: OwnerIdentity
+  owner: OwnerIdentity,
+  fileSystem: FileSystemOperations
 ): Promise<AcquiredLock> {
   const lockPath = resolve(logDirectory, ".companion.log.lock");
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const token = randomUUID();
     const tempName = `.companion.log.lock.owner-${token}`;
     const tempPath = resolve(logDirectory, tempName);
-    const handle = await openVerifiedCreate(directory, tempName);
+    const handle = await openVerifiedCreate(directory, tempName, fileSystem);
     try {
       await handle.writeFile(JSON.stringify({ owner: owner.address, tempName, token }), {
         encoding: "utf8"
@@ -295,10 +300,10 @@ async function acquireLock(
     } finally {
       await handle.close();
     }
-    await assertTrustedDirectory(directory);
+    await assertTrustedDirectory(directory, fileSystem);
     try {
       await link(tempPath, lockPath);
-      const published = await readLockRecord(lockPath);
+      const published = await readLockRecord(lockPath, fileSystem);
       if (published === null || published.token !== token || published.owner !== owner.address) {
         throw new Error("operational log lock publication could not be verified");
       }
@@ -318,7 +323,7 @@ async function acquireLock(
     }
     const transaction = await acquireTransaction(logDirectory);
     try {
-      const existing = await readLockRecord(lockPath);
+      const existing = await readLockRecord(lockPath, fileSystem);
       if (existing !== null && !await ownerIsAlive(existing.owner)) {
         await unlinkIfOwned(lockPath, existing);
         await unlinkIfOwned(resolve(logDirectory, existing.tempName), existing);
@@ -331,8 +336,12 @@ async function acquireLock(
   throw new Error("operational log rotation lock timed out");
 }
 
-async function releaseLock(_logDirectory: string, lock: AcquiredLock): Promise<void> {
-  const current = await readLockRecord(lock.lockPath);
+async function releaseLock(
+  _logDirectory: string,
+  lock: AcquiredLock,
+  fileSystem: FileSystemOperations
+): Promise<void> {
+  const current = await readLockRecord(lock.lockPath, fileSystem);
   if (
     current === null ||
     current.token !== lock.token ||
@@ -389,7 +398,8 @@ async function rotateThroughHandles(
   directory: TrustedDirectory,
   active: FileHandle,
   maxBytes: number,
-  maxFiles: number
+  maxFiles: number,
+  fileSystem: FileSystemOperations
 ): Promise<void> {
   if (maxFiles === 1) {
     await active.truncate(0);
@@ -399,13 +409,21 @@ async function rotateThroughHandles(
   const existed = [true];
   try {
     for (let index = 1; index < maxFiles; index += 1) {
-      const handle = await openVerifiedExisting(directory, `companion.log.${index}`);
+      const handle = await openVerifiedExisting(
+        directory,
+        `companion.log.${index}`,
+        fileSystem
+      );
       handles[index] = handle;
       existed[index] = handle !== null;
     }
     for (let index = 1; index < maxFiles; index += 1) {
       if (handles[index] === null && existed[index - 1]) {
-        handles[index] = await openVerifiedAppend(directory, `companion.log.${index}`);
+        handles[index] = await openVerifiedAppend(
+          directory,
+          `companion.log.${index}`,
+          fileSystem
+        );
       }
     }
     for (let index = maxFiles - 1; index >= 1; index -= 1) {
@@ -423,7 +441,11 @@ async function rotateThroughHandles(
   }
 }
 
-export function createOperationalLogger(options: OperationalLoggerOptions): OperationalLogger {
+/** Internal composition seam for deterministic filesystem-boundary tests. */
+export function createOperationalLoggerWithFileSystem(
+  options: OperationalLoggerOptions,
+  fileSystem: FileSystemOperations
+): OperationalLogger {
   positiveInteger(options.maxBytes, "maxBytes");
   positiveInteger(options.maxFiles, "maxFiles");
   const logDirectory = resolve(options.logDirectory);
@@ -436,12 +458,12 @@ export function createOperationalLogger(options: OperationalLoggerOptions): Oper
     if (entryBytes > options.maxBytes) {
       throw new RangeError("operational log entry exceeds maxBytes");
     }
-    trustedDirectoryPromise ??= ensureTrustedDirectory(logDirectory);
+    trustedDirectoryPromise ??= ensureTrustedDirectory(logDirectory, fileSystem);
     const trustedDirectory = await trustedDirectoryPromise;
     const owner = await processOwnerIdentity();
-    const lock = await acquireLock(trustedDirectory, logDirectory, owner);
+    const lock = await acquireLock(trustedDirectory, logDirectory, owner, fileSystem);
     try {
-      const handle = await openVerifiedAppend(trustedDirectory, "companion.log");
+      const handle = await openVerifiedAppend(trustedDirectory, "companion.log", fileSystem);
       try {
         const activeSize = Number((await handle.stat()).size);
         if (activeSize + entryBytes > options.maxBytes) {
@@ -449,7 +471,8 @@ export function createOperationalLogger(options: OperationalLoggerOptions): Oper
             trustedDirectory,
             handle,
             options.maxBytes,
-            options.maxFiles
+            options.maxFiles,
+            fileSystem
           );
         }
         const writePosition = Number((await handle.stat()).size);
@@ -461,7 +484,7 @@ export function createOperationalLogger(options: OperationalLoggerOptions): Oper
         await handle.close();
       }
     } finally {
-      await releaseLock(logDirectory, lock);
+      await releaseLock(logDirectory, lock, fileSystem);
     }
   };
 
@@ -472,4 +495,8 @@ export function createOperationalLogger(options: OperationalLoggerOptions): Oper
       return operation;
     }
   };
+}
+
+export function createOperationalLogger(options: OperationalLoggerOptions): OperationalLogger {
+  return createOperationalLoggerWithFileSystem(options, nodeFileSystemOperations);
 }
