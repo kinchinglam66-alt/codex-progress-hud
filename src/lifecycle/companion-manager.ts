@@ -88,6 +88,11 @@ interface OwnedHud {
   instanceNonce: string;
 }
 
+type ReadinessResult =
+  | { kind: "ready"; health: HudHealth }
+  | { kind: "offline" }
+  | { kind: "terminal"; code: HudErrorCode };
+
 export function createCompanionManager(
   dependencies: CompanionManagerDependencies
 ): CompanionManager {
@@ -182,12 +187,15 @@ export function createCompanionManager(
     }
   }
 
-  async function readinessProbe(): Promise<HudHealth | undefined> {
+  async function readinessProbe(): Promise<ReadinessResult> {
     try {
       await dependencies.client.identity();
-      return await dependencies.client.health();
-    } catch {
-      return undefined;
+      return { kind: "ready", health: await dependencies.client.health() };
+    } catch (error) {
+      const code = errorCode(error);
+      return code === "OFFLINE"
+        ? { kind: "offline" }
+        : { kind: "terminal", code: lifecycleCode(code) };
     }
   }
 
@@ -227,15 +235,29 @@ export function createCompanionManager(
       return { kind: "error", code: "INTERNAL_ERROR", snapshot };
     }
 
-    let health = await readinessProbe();
+    let readiness = await readinessProbe();
     for (const delay of STARTUP_DELAYS) {
-      if (health !== undefined) break;
+      if (readiness.kind !== "offline") break;
       const elapsed = now() - startStartedAt;
       if (elapsed >= 8_000) break;
       await sleep(Math.min(delay, 8_000 - elapsed));
-      health = await readinessProbe();
+      readiness = await readinessProbe();
     }
-    if (health === undefined) {
+    if (readiness.kind === "terminal") {
+      remember(readiness.code);
+      const observedState =
+        readiness.code === "PORT_CONFLICT"
+          ? "port_conflict"
+          : readiness.code === "VERSION_MISMATCH"
+            ? "incompatible"
+            : "stopped";
+      const snapshot = withDesiredState(settings.desiredState, {
+        observedState,
+        code: readiness.code
+      });
+      return { kind: "error", code: readiness.code, snapshot };
+    }
+    if (readiness.kind === "offline") {
       remember("START_TIMEOUT");
       const snapshot = withDesiredState(settings.desiredState, {
         observedState: "stopped",
@@ -243,6 +265,7 @@ export function createCompanionManager(
       });
       return { kind: "error", code: "START_TIMEOUT", snapshot };
     }
+    const health = readiness.health;
     await dependencies.store.writeRuntime(health);
     ownedHud = { process: spawned, instanceNonce: health.instanceNonce };
     return {
@@ -265,6 +288,7 @@ export function createCompanionManager(
   }
 
   async function ensureRunningOnce(): Promise<RunningResult> {
+    if (startupPromise !== undefined) return startupPromise;
     const snapshot = await observe();
     if (snapshot.observedState === "running" || snapshot.observedState === "hidden") {
       return { kind: "ready", snapshot };
@@ -273,6 +297,7 @@ export function createCompanionManager(
       remember(snapshot.code);
       return { kind: "error", code: snapshot.code, snapshot };
     }
+    if (startupPromise !== undefined) return startupPromise;
     if (snapshot.observedState === "crashed") {
       if (now() - lastRecoveryAt < recoveryCooldownMs) {
         const cooled = { ...snapshot, code: "COMPANION_CRASHED" as const };
@@ -318,7 +343,7 @@ export function createCompanionManager(
         remember(code);
         return { desiredState: "off", observedState: "stopped", code };
       }
-      let latestHealth = health;
+      let latestHealth: HudHealth | undefined;
       for (const delay of SHUTDOWN_DELAYS) {
         await sleep(delay);
         try {
@@ -329,9 +354,14 @@ export function createCompanionManager(
             ownedHud = undefined;
             return { desiredState: "off", observedState: "stopped" };
           }
+          latestHealth = undefined;
         }
       }
-      if (ownedHud !== undefined && identityMatches(latestHealth, ownedHud)) {
+      if (
+        ownedHud !== undefined &&
+        latestHealth !== undefined &&
+        identityMatches(latestHealth, ownedHud)
+      ) {
         await ownedHud.process.terminate();
         await dependencies.store.clearRuntime();
         ownedHud = undefined;

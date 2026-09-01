@@ -193,6 +193,36 @@ describe("companion lifecycle manager", () => {
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["PORT_CONFLICT", "PORT_CONFLICT"],
+    ["VERSION_MISMATCH", "VERSION_MISMATCH"],
+    ["AUTH_ERROR", "AUTH_ERROR"]
+  ] as const)(
+    "preserves terminal %s readiness failures instead of timing out",
+    async (clientCode, expectedCode) => {
+      const { manager, client, launcher, delays } = await harness({ spawnMakesOnline: false });
+      client.identity.mockImplementation(async () => {
+        if (launcher.spawnHud.mock.calls.length === 0) {
+          throw new HudClientError("OFFLINE", "not reachable");
+        }
+        if (clientCode !== "AUTH_ERROR") {
+          throw new HudClientError(clientCode, "terminal identity failure");
+        }
+        return { service: "codex-progress-hud" as const, protocolVersion: 1 as const };
+      });
+      client.health.mockImplementation(async () => {
+        throw new HudClientError("AUTH_ERROR", "terminal authenticated health failure");
+      });
+
+      await expect(manager.ensureForWrite("progress_report")).resolves.toMatchObject({
+        kind: "error",
+        code: expectedCode
+      });
+      expect(delays).toEqual([]);
+      expect(launcher.spawnHud).toHaveBeenCalledOnce();
+    }
+  );
+
   it("recovers a crash once and rate-limits another recovery across calls", async () => {
     const { manager, launcher, setOnline } = await harness({
       desiredState: "on",
@@ -205,6 +235,33 @@ describe("companion lifecycle manager", () => {
       kind: "error",
       code: "COMPANION_CRASHED"
     });
+    expect(launcher.spawnHud).toHaveBeenCalledOnce();
+  });
+
+  it("coalesces simultaneous crash recovery for every caller", async () => {
+    const { manager, launcher, terminate, setOnline } = await harness({
+      desiredState: "on",
+      runtime: true,
+      spawnMakesOnline: false
+    });
+    let releaseSpawn!: () => void;
+    const spawnGate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    launcher.spawnHud.mockImplementation(async () => {
+      await spawnGate;
+      setOnline(true);
+      return { pid: compatibleHealth.pid, terminate };
+    });
+
+    const first = manager.ensureForWrite("progress_report");
+    const second = manager.ensureForWrite("task_outcome");
+    await vi.waitFor(() => expect(launcher.spawnHud).toHaveBeenCalledOnce());
+    releaseSpawn();
+
+    const results = await Promise.all([first, second]);
+    expect(results[0]).toMatchObject({ kind: "ready", snapshot: { observedState: "running" } });
+    expect(results[1]).toEqual(results[0]);
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
   });
 
@@ -248,6 +305,26 @@ describe("companion lifecycle manager", () => {
 
     expect(await manager.close()).toEqual({ desiredState: "off", observedState: "stopped" });
     expect(terminate).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["unauthorized", new HudClientError("AUTH_ERROR", "authentication failed")],
+    ["incompatible", new HudClientError("VERSION_MISMATCH", "protocol changed")],
+    ["malformed", new Error("malformed health response")]
+  ])("does not force-terminate after a fresh %s shutdown probe failure", async (_kind, failure) => {
+    const { manager, client, terminate } = await harness({ shutdownStops: false });
+    await manager.open();
+    client.health.mockImplementation(async () => {
+      if (client.shutdown.mock.calls.length > 0) throw failure;
+      return compatibleHealth;
+    });
+
+    await expect(manager.close()).resolves.toMatchObject({
+      desiredState: "off",
+      observedState: "stopped",
+      code: "SHUTDOWN_TIMEOUT"
+    });
+    expect(terminate).not.toHaveBeenCalled();
   });
 });
 
