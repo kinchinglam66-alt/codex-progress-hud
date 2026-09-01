@@ -3,12 +3,20 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ZodError } from "zod";
 import { parseProgressEnvelope } from "../core/schema.js";
+import { PROTOCOL_VERSION, type HudHealth } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
 import { TaskStore, type HudSnapshot } from "./task-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
-export interface ProgressServerOptions {
+export interface ProgressServerControls {
+  health(): HudHealth;
+  showWindow(): void | Promise<void>;
+  hideWindow(): void | Promise<void>;
+  requestShutdown(): void | Promise<void>;
+}
+
+export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   host?: string;
   port?: number;
   tokenPath: string;
@@ -74,6 +82,18 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+async function readEmptyJson(request: IncomingMessage): Promise<void> {
+  const payload = await readJson(request);
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    Object.keys(payload).length !== 0
+  ) {
+    throw new SyntaxError("control payload must be an empty JSON object");
+  }
+}
+
 function bearerToken(request: IncomingMessage): string {
   const header = request.headers.authorization ?? "";
   return header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -119,6 +139,13 @@ export function createProgressServer(options: ProgressServerOptions) {
       ) {
         return;
       }
+      if (request.method === "GET" && url.pathname === "/health") {
+        writeJson(response, 200, {
+          service: "codex-progress-hud",
+          protocolVersion: PROTOCOL_VERSION
+        });
+        return;
+      }
       if (!url.pathname.startsWith("/api/")) {
         writeJson(response, 404, { error: "not found" });
         return;
@@ -134,6 +161,11 @@ export function createProgressServer(options: ProgressServerOptions) {
         writeJson(response, 200, store.snapshot());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/health") {
+        if (options.health === undefined) throw new Error("health callback is unavailable");
+        writeJson(response, 200, options.health());
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/events") {
         await handleSse(response, expectedToken);
         return;
@@ -145,6 +177,28 @@ export function createProgressServer(options: ProgressServerOptions) {
         }
         const envelope = parseProgressEnvelope(await readJson(request));
         writeJson(response, 202, store.apply(envelope));
+        return;
+      }
+      if (
+        request.method === "POST" &&
+        (url.pathname === "/api/window/show" ||
+          url.pathname === "/api/window/hide" ||
+          url.pathname === "/api/shutdown")
+      ) {
+        if (!(request.headers["content-type"] ?? "").startsWith("application/json")) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        await readEmptyJson(request);
+        const callback =
+          url.pathname === "/api/window/show"
+            ? options.showWindow
+            : url.pathname === "/api/window/hide"
+              ? options.hideWindow
+              : options.requestShutdown;
+        if (callback === undefined) throw new Error("control callback is unavailable");
+        await callback();
+        writeJson(response, 202, { accepted: true });
         return;
       }
       writeJson(response, 404, { error: "not found" });

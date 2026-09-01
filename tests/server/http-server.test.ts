@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { HudHealth } from "../../src/lifecycle/types.js";
 import { createProgressServer } from "../../src/server/http-server.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -18,9 +19,25 @@ async function startServer(options: { withUi?: boolean } = {}) {
     await mkdir(uiDirectory);
     await writeFile(join(uiDirectory, "index.html"), "<h1>HUD</h1>");
   }
+  const health: HudHealth = {
+    service: "codex-progress-hud",
+    pid: 12_345,
+    version: "0.1.0",
+    protocolVersion: 1,
+    instanceNonce: "test-instance",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    visibility: "visible"
+  };
+  const showWindow = vi.fn();
+  const hideWindow = vi.fn();
+  const requestShutdown = vi.fn();
   const server = createProgressServer({
     port: 0,
     tokenPath,
+    health: () => health,
+    showWindow,
+    hideWindow,
+    requestShutdown,
     ...(uiDirectory === undefined ? {} : { uiDirectory })
   });
   await server.listen();
@@ -29,10 +46,134 @@ async function startServer(options: { withUi?: boolean } = {}) {
     await rm(directory, { recursive: true, force: true });
   });
   const token = (await readFile(tokenPath, "utf8")).trim();
-  return { server, token, baseUrl: server.address().url };
+  return {
+    server,
+    token,
+    baseUrl: server.address().url,
+    health,
+    showWindow,
+    hideWindow,
+    requestShutdown
+  };
 }
 
 describe("local progress HTTP service", () => {
+  it("exposes only minimal unauthenticated identity", async () => {
+    const { baseUrl } = await startServer();
+    const response = await fetch(`${baseUrl}/health`);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      service: "codex-progress-hud",
+      protocolVersion: 1
+    });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("rejects unauthenticated access to every new API route", async () => {
+    const { baseUrl } = await startServer();
+
+    const responses = await Promise.all([
+      fetch(`${baseUrl}/api/health`),
+      fetch(`${baseUrl}/api/window/show`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }),
+      fetch(`${baseUrl}/api/window/hide`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }),
+      fetch(`${baseUrl}/api/shutdown`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      })
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([401, 401, 401, 401]);
+  });
+
+  it("returns full health only to an authenticated client", async () => {
+    const { baseUrl, token, health } = await startServer();
+    const response = await fetch(`${baseUrl}/api/health`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(health);
+  });
+
+  it("accepts authenticated idempotent window controls", async () => {
+    const { baseUrl, token, showWindow, hideWindow } = await startServer();
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json"
+    };
+
+    const showResponses = await Promise.all([
+      fetch(`${baseUrl}/api/window/show`, { method: "POST", headers, body: "{}" }),
+      fetch(`${baseUrl}/api/window/show`, { method: "POST", headers, body: "{}" })
+    ]);
+    const hideResponses = await Promise.all([
+      fetch(`${baseUrl}/api/window/hide`, { method: "POST", headers, body: "{}" }),
+      fetch(`${baseUrl}/api/window/hide`, { method: "POST", headers, body: "{}" })
+    ]);
+
+    expect(showResponses.map(({ status }) => status)).toEqual([202, 202]);
+    expect(hideResponses.map(({ status }) => status)).toEqual([202, 202]);
+    expect(await showResponses[0].json()).toEqual({ accepted: true });
+    expect(await hideResponses[0].json()).toEqual({ accepted: true });
+    expect(showWindow).toHaveBeenCalledTimes(2);
+    expect(hideWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires JSON for authenticated controls", async () => {
+    const { baseUrl, token, hideWindow } = await startServer();
+    const response = await fetch(`${baseUrl}/api/window/hide`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: "{}"
+    });
+
+    expect(response.status).toBe(415);
+    expect(hideWindow).not.toHaveBeenCalled();
+  });
+
+  it("applies the 64 KiB body limit to authenticated controls", async () => {
+    const { baseUrl, token, showWindow } = await startServer();
+    const response = await fetch(`${baseUrl}/api/window/show`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ padding: "x".repeat(70_000) })
+    });
+
+    expect(response.status).toBe(413);
+    expect(showWindow).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges authenticated shutdown after callback acceptance", async () => {
+    const { baseUrl, token, requestShutdown } = await startServer();
+    const response = await fetch(`${baseUrl}/api/shutdown`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json"
+      },
+      body: "{}"
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ accepted: true });
+    expect(requestShutdown).toHaveBeenCalledOnce();
+  });
+
   it("binds to loopback and exposes an authenticated empty snapshot", async () => {
     const { server, baseUrl, token } = await startServer();
     const response = await fetch(`${baseUrl}/api/snapshot`, {
