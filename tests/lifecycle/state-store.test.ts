@@ -114,6 +114,37 @@ describe("lifecycle state store", () => {
     expect(await store.readRuntime()).toEqual(identity);
   });
 
+  it("waits for queued same-path writes before reading", async () => {
+    const store = createLifecycleStateStore(testPaths());
+    const firstIdentity = {
+      pid: 4312,
+      version: "0.1.0",
+      protocolVersion: 1,
+      instanceNonce: "first-write",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    };
+    const finalIdentity = {
+      ...firstIdentity,
+      pid: 4313,
+      instanceNonce: "queued-write"
+    };
+
+    const firstWrite = store.writeRuntime(firstIdentity);
+    const queuedWrite = store.writeRuntime(finalIdentity);
+    const [readResult, ...writeResults] = await Promise.allSettled([
+      store.readRuntime(),
+      firstWrite,
+      queuedWrite
+    ]);
+    const writeRejections = writeResults.filter((result) => result.status === "rejected");
+
+    expect(
+      writeRejections,
+      writeRejections.map((result) => String(result.reason)).join("\n")
+    ).toEqual([]);
+    expect(readResult).toEqual({ status: "fulfilled", value: finalIdentity });
+  });
+
   it("reads a valid install manifest", async () => {
     const paths = testPaths();
     const manifest = {

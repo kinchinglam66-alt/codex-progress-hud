@@ -38,6 +38,9 @@ const installManifestSchema = z.object({
 const pendingWrites = new Map<string, Promise<void>>();
 
 async function readJson<T>(path: string, schema: z.ZodType<T>): Promise<T | null> {
+  const pendingWrite = pendingWrites.get(path);
+  if (pendingWrite !== undefined) await pendingWrite;
+
   let content: string;
   try {
     content = await readFile(path, "utf8");
