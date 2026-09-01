@@ -1,7 +1,11 @@
-import { open } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { DesiredHudState, HudErrorCode, ObservedHudState } from "../lifecycle/types.js";
-import { ensureTrustedDirectory, regularFileInformation } from "./safe-files.js";
+import {
+  assertTrustedDirectory,
+  ensureTrustedDirectory,
+  openVerifiedCreate,
+  regularFileInformation
+} from "./safe-files.js";
 
 export interface DiagnosticReportInput {
   directory: string;
@@ -106,20 +110,29 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
     throw new TypeError("runtime age must be a non-negative bounded integer");
   }
   const errorsInput = input.errors;
-  if (!Array.isArray(errorsInput) || errorsInput.length > 10) {
+  if (!Array.isArray(errorsInput)) {
     throw new TypeError("errors must be a bounded array");
   }
-  const errors = errorsInput.map((error, index) => {
+  const errorsLength = errorsInput.length;
+  if (!Number.isSafeInteger(errorsLength) || errorsLength < 0 || errorsLength > 10) {
+    throw new TypeError("errors must be a bounded array");
+  }
+  const errors: DiagnosticReportInput["errors"] = [];
+  for (let index = 0; index < errorsLength; index += 1) {
+    const error = Reflect.get(errorsInput, String(index)) as DiagnosticReportInput["errors"][number];
+    if (typeof error !== "object" || error === null) {
+      throw new TypeError("error entry must be an object");
+    }
     const code = error.code;
     if (!ERROR_CODES.has(code)) throw new TypeError("error code must be allowed");
     const occurredAtValue = error.occurredAt;
-    return {
+    errors.push({
       code,
       ...(occurredAtValue === undefined
         ? {}
         : { occurredAt: canonicalTimestamp(occurredAtValue, `error ${index} time`) })
-    };
-  });
+    });
+  }
   return {
     generatedAt,
     versions: { plugin, mcp, ...(companion === undefined ? {} : { companion }), protocol },
@@ -139,7 +152,7 @@ export async function writeDiagnosticReport(
     throw new TypeError("directory must be a non-empty path");
   }
   const snapshot = snapshotInput(input);
-  const absoluteDirectory = await ensureTrustedDirectory(directory);
+  const trustedDirectory = await ensureTrustedDirectory(directory);
   const filename = `codex-progress-hud-${snapshot.generatedAt.replace(/[:.]/g, "-")}.md`;
   const errors = snapshot.errors.length === 0
     ? "- None"
@@ -188,11 +201,11 @@ export async function writeDiagnosticReport(
   ].join("\n");
   for (let suffix = 0; suffix < 100; suffix += 1) {
     const candidate = join(
-      absoluteDirectory,
+      trustedDirectory.path,
       suffix === 0 ? filename : filename.replace(/\.md$/u, `-${suffix}.md`)
     );
     try {
-      const handle = await open(candidate, "wx", 0o600);
+      const handle = await openVerifiedCreate(trustedDirectory, basename(candidate));
       try {
         await handle.writeFile(markdown, { encoding: "utf8" });
       } finally {
@@ -201,6 +214,7 @@ export async function writeDiagnosticReport(
       return { path: candidate };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      await assertTrustedDirectory(trustedDirectory);
       const existing = await regularFileInformation(candidate);
       if (existing === null) throw error;
     }

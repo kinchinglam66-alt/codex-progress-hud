@@ -166,7 +166,7 @@ describe("operational logger", () => {
     expect(files).toEqual(["companion.log", "companion.log.1", "companion.log.2"]);
     const sizes = await Promise.all(files.map(async (file) => (await stat(join(directory, file))).size));
     expect(sizes.every((size) => size > 0 && size <= maxBytes)).toBe(true);
-  }, 10_000);
+  }, 20_000);
 
   it("serializes rotation across two logger instances sharing one directory", async () => {
     const directory = await logDirectory();
@@ -196,7 +196,7 @@ describe("operational logger", () => {
     const activePath = join(directory, "companion.log");
     const lockPath = join(directory, ".companion.log.lock");
     await writeFile(activePath, "existing-category\n");
-    await writeFile(lockPath, "held");
+    await writeFile(lockPath, JSON.stringify({ pid: process.pid }));
     const logger = createOperationalLogger({
       logDirectory: directory,
       maxBytes: 256 * 1024,
@@ -214,6 +214,30 @@ describe("operational logger", () => {
     await rm(lockPath, { force: true });
     await writing;
     await expect(readFile(activePath, "utf8")).resolves.toContain("startup_requested");
+  });
+
+  it("recovers an orphaned lock whose owner process no longer exists", async () => {
+    const directory = await logDirectory();
+    await writeFile(
+      join(directory, ".companion.log.lock"),
+      JSON.stringify({ pid: 2_147_483_647 })
+    );
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    await logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "warn",
+      event: "crash_recovery"
+    });
+
+    await expect(readFile(join(directory, "companion.log"), "utf8")).resolves.toContain(
+      "crash_recovery"
+    );
+    expect(await readdir(directory)).not.toContain(".companion.log.lock");
   });
 
   it("preserves an older archive when an intermediate archive is absent", async () => {

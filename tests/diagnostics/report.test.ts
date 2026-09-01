@@ -91,6 +91,44 @@ describe("diagnostic report", () => {
     await expect(readdir(directory)).resolves.toEqual([]);
   });
 
+  it("does not invoke Proxy-controlled collection methods while snapshotting errors", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-proxy-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    let mapReads = 0;
+    let lengthReads = 0;
+    let elementReads = 0;
+    const errors = new Proxy([] as Array<{ code: string }>, {
+      get(_target, property) {
+        if (property === "map") {
+          mapReads += 1;
+          return () => [{ code: "Bearer secret" }];
+        }
+        if (property === "length") {
+          lengthReads += 1;
+          return 1;
+        }
+        if (property === "0") {
+          elementReads += 1;
+          return { code: elementReads === 1 ? "AUTH_ERROR" : "Bearer secret" };
+        }
+        return undefined;
+      }
+    });
+    const input = validInput(directory);
+    input.errors = errors as DiagnosticReportInput["errors"];
+
+    const result = await writeDiagnosticReport(input);
+
+    const markdown = await readFile(result.path, "utf8");
+    expect(markdown).toContain("AUTH_ERROR");
+    expect(markdown).not.toContain("Bearer secret");
+    expect({ mapReads, lengthReads, elementReads }).toEqual({
+      mapReads: 0,
+      lengthReads: 1,
+      elementReads: 1
+    });
+  });
+
   it("returns an absolute path for a relative configured directory", async () => {
     const directory = await mkdtemp(join(process.cwd(), "hud-relative-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -111,6 +149,21 @@ describe("diagnostic report", () => {
 
     await expect(writeDiagnosticReport(validInput(linked))).rejects.toThrow(/link|trusted directory/iu);
     await expect(readdir(target)).resolves.toEqual([]);
+  });
+
+  it("rejects an ancestor junction before creating a missing child through it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hud-diagnostic-ancestor-link-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const outside = join(root, "outside");
+    const linkedAncestor = join(root, "linked-ancestor");
+    const missingChild = join(linkedAncestor, "must-not-be-created");
+    await mkdir(outside);
+    await symlink(outside, linkedAncestor, process.platform === "win32" ? "junction" : "dir");
+
+    await expect(writeDiagnosticReport(validInput(missingChild))).rejects.toThrow(
+      /link|trusted directory/iu
+    );
+    await expect(readdir(outside)).resolves.toEqual([]);
   });
 
   it("never overwrites an existing predictable report filename", async () => {
