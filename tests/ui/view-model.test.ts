@@ -70,6 +70,17 @@ describe("HUD view model", () => {
     });
   });
 
+  it("shows explicit tracking pause and stop states distinctly", () => {
+    const paused = buildHudView({ task: task({ status: "paused" }), eta: null });
+    const stopped = buildHudView({ task: task({ status: "stopped" }), eta: null });
+
+    expect(paused.statusLabel).toBe("跟踪已暂停");
+    expect(paused.progressMode).toBe("paused");
+    expect(paused.etaLabel).toContain("跟踪已暂停");
+    expect(stopped.statusLabel).toBe("跟踪已停止");
+    expect(stopped.etaLabel).toContain("跟踪已停止");
+  });
+
   it("shows suspected interruption as a warning rather than a failure", () => {
     const view = buildHudView(
       { task: task({ status: "stalled_suspected" }), eta: null },

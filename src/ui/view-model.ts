@@ -18,6 +18,8 @@ export interface HudView {
 const statusPresentation: Record<TaskStatus, { label: string; tone: HudTone }> = {
   idle: { label: "空闲", tone: "idle" },
   running: { label: "执行中", tone: "active" },
+  paused: { label: "跟踪已暂停", tone: "waiting" },
+  stopped: { label: "跟踪已停止", tone: "idle" },
   waiting_approval: { label: "等待审批", tone: "waiting" },
   waiting_user: { label: "等待用户", tone: "waiting" },
   stalled_suspected: { label: "疑似中断", tone: "warning" },
@@ -33,6 +35,8 @@ function minuteLabel(seconds: number): number {
 
 function etaLabel(snapshot: HudSnapshot): string {
   const status = snapshot.task?.status;
+  if (status === "paused") return "跟踪已暂停，工作计时已暂停";
+  if (status === "stopped") return "跟踪已停止，任务仍可继续执行";
   if (status === "waiting_approval" || status === "waiting_user") return "工作计时已暂停";
   if (status === "stalled_suspected") return "正在检查任务连接";
   if (
@@ -51,7 +55,9 @@ function etaLabel(snapshot: HudSnapshot): string {
 
 function progressMode(status: TaskStatus, progress: number | undefined): ProgressMode {
   if (status === "succeeded_verified" || status === "completed_unverified") return "complete";
-  if (status === "waiting_approval" || status === "waiting_user") return "paused";
+  if (status === "paused" || status === "waiting_approval" || status === "waiting_user") {
+    return "paused";
+  }
   return progress === undefined ? "indeterminate" : "determinate";
 }
 
@@ -91,4 +97,3 @@ export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView
     updatedLabel: `${ageSeconds} 秒前更新`
   };
 }
-

@@ -9,6 +9,10 @@ const planStepSchema = z.object({
 
 export const progressEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("turn_started") }),
+  z.object({ type: z.literal("tracking_started") }),
+  z.object({ type: z.literal("tracking_paused") }),
+  z.object({ type: z.literal("tracking_resumed") }),
+  z.object({ type: z.literal("tracking_stopped") }),
   z.object({ type: z.literal("plan_updated"), steps: z.array(planStepSchema).max(100) }),
   z.object({
     type: z.literal("waiting"),
@@ -59,4 +63,3 @@ export interface ProgressEnvelope {
 export function parseProgressEnvelope(value: unknown): ProgressEnvelope {
   return progressEnvelopeSchema.parse(value) as ProgressEnvelope;
 }
-

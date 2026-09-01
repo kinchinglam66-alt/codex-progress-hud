@@ -113,4 +113,69 @@ describe("MCP progress tool handlers", () => {
       "Progress HUD is not reachable. Start the local companion and retry."
     );
   });
+
+  it("starts tracking the supplied task without requiring a progress report", async () => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const status = vi.fn(async () => ({ task: null, eta: null }));
+    const handlers = createToolHandlers({ submit, status });
+
+    const result = await handlers.trackingStart({
+      task_id: "task-1",
+      title: "Implement controls"
+    });
+
+    expect(status).toHaveBeenCalledOnce();
+    expect(submit).toHaveBeenCalledWith({
+      taskId: "task-1",
+      title: "Implement controls",
+      event: { type: "tracking_started" }
+    });
+    expect(result.content[0]?.text).toContain("Tracking started");
+  });
+
+  it("controls the current task and exposes status as a read-only action", async () => {
+    const submit = vi.fn(async (envelope) => ({
+      task: { status: envelope.event.type === "tracking_stopped" ? "stopped" : "paused" },
+      eta: null
+    }));
+    const status = vi.fn(async () => ({
+      task: { id: "task-1", title: "Implement controls", status: "running" },
+      eta: null
+    }));
+    const handlers = createToolHandlers({ submit, status });
+
+    await handlers.trackingPause({});
+    await handlers.trackingResume({});
+    await handlers.trackingStop({});
+    const statusResult = await handlers.trackingStatus();
+
+    expect(submit).toHaveBeenNthCalledWith(1, {
+      taskId: "task-1",
+      title: "Implement controls",
+      event: { type: "tracking_paused" }
+    });
+    expect(submit).toHaveBeenNthCalledWith(2, {
+      taskId: "task-1",
+      title: "Implement controls",
+      event: { type: "tracking_resumed" }
+    });
+    expect(submit).toHaveBeenNthCalledWith(3, {
+      taskId: "task-1",
+      title: "Implement controls",
+      event: { type: "tracking_stopped" }
+    });
+    expect(statusResult.content[0]?.text).toContain('"status":"running"');
+  });
+
+  it("returns a clear error when a control needs a current task but none exists", async () => {
+    const handlers = createToolHandlers({
+      submit: vi.fn(),
+      status: vi.fn(async () => ({ task: null, eta: null }))
+    });
+
+    const result = await handlers.trackingPause({});
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toBe("No active task to control.");
+  });
 });

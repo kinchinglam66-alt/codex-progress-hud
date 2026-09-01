@@ -82,6 +82,8 @@ describe("ETA estimator", () => {
   it.each([
     "waiting_approval",
     "waiting_user",
+    "paused",
+    "stopped",
     "stalled_suspected",
     "completed_unverified",
     "succeeded_verified",

@@ -2,6 +2,8 @@ import type { EtaEstimate, TaskSnapshot } from "./types.js";
 
 const NO_ACTIVE_ETA = new Set<TaskSnapshot["status"]>([
   "idle",
+  "paused",
+  "stopped",
   "waiting_approval",
   "waiting_user",
   "stalled_suspected",
@@ -69,4 +71,3 @@ export function estimateRemaining(
     confidence
   };
 }
-

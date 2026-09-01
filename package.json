@@ -24,6 +24,7 @@
     "start": "npm run build && electron .",
     "mcp": "node dist/mcp/main.js",
     "smoke": "npm run build && node scripts/smoke-test.mjs",
+    "diagnose:mcp": "vitest --run tests/mcp/stdio-server.test.ts --reporter=verbose",
     "validate:plugin": "node scripts/validate-plugin.mjs"
   },
   "dependencies": {

@@ -1,6 +1,8 @@
 export type TaskStatus =
   | "idle"
   | "running"
+  | "paused"
+  | "stopped"
   | "waiting_approval"
   | "waiting_user"
   | "stalled_suspected"
@@ -44,6 +46,10 @@ export interface EtaEstimate {
 
 export type ProgressEvent =
   | { type: "turn_started" }
+  | { type: "tracking_started" }
+  | { type: "tracking_paused" }
+  | { type: "tracking_resumed" }
+  | { type: "tracking_stopped" }
   | { type: "plan_updated"; steps: PlanStep[] }
   | { type: "waiting"; reason: "approval" | "user"; detail?: string }
   | {
@@ -64,4 +70,3 @@ export type ProgressEvent =
   | { type: "runtime_interrupted"; message?: string }
   | { type: "stale_detected"; message?: string }
   | { type: "activity_resumed" };
-

@@ -5,6 +5,10 @@ import type { ProgressClient } from "./report-client.js";
 
 const id = z.string().trim().min(1).max(128);
 const title = z.string().trim().min(1).max(160);
+export const trackingStartSchema = z.object({
+  task_id: id.optional(),
+  title: title.optional()
+});
 
 export const progressReportSchema = z
   .object({
@@ -61,6 +65,36 @@ function offlineResult(): ToolResult {
     ],
     isError: true
   };
+}
+
+function noActiveTaskResult(): ToolResult {
+  return { content: [{ type: "text", text: "No active task to control." }], isError: true };
+}
+
+async function submitForCurrentTask(
+  client: ProgressClient,
+  event: ProgressEnvelope["event"]
+): Promise<ToolResult> {
+  try {
+    const current = await client.status();
+    if (
+      current.task === null ||
+      current.task.id === undefined ||
+      current.task.title === undefined
+    ) {
+      return noActiveTaskResult();
+    }
+    const snapshot = await client.submit({
+      taskId: current.task.id,
+      title: current.task.title,
+      event
+    });
+    return textResult(
+      `Tracking ${event.type.replace("tracking_", "")}: ${snapshot.task?.status ?? "idle"}.`
+    );
+  } catch {
+    return offlineResult();
+  }
 }
 
 export function createToolHandlers(client: ProgressClient) {
@@ -130,6 +164,40 @@ export function createToolHandlers(client: ProgressClient) {
       } catch {
         return offlineResult();
       }
+    },
+
+    async trackingStart(input: unknown): Promise<ToolResult> {
+      const parsed = trackingStartSchema.safeParse(input ?? {});
+      if (!parsed.success) return invalidResult("tracking start");
+      try {
+        const current = await client.status();
+        const taskId = parsed.data.task_id ?? current.task?.id ?? "current";
+        const taskTitle = parsed.data.title ?? current.task?.title ?? "当前 Codex 任务";
+        const snapshot = await client.submit({
+          taskId,
+          title: taskTitle,
+          event: { type: "tracking_started" }
+        });
+        return textResult(`Tracking started: ${snapshot.task?.status ?? "idle"}.`);
+      } catch {
+        return offlineResult();
+      }
+    },
+
+    async trackingPause(_input?: unknown): Promise<ToolResult> {
+      return submitForCurrentTask(client, { type: "tracking_paused" });
+    },
+
+    async trackingResume(_input?: unknown): Promise<ToolResult> {
+      return submitForCurrentTask(client, { type: "tracking_resumed" });
+    },
+
+    async trackingStop(_input?: unknown): Promise<ToolResult> {
+      return submitForCurrentTask(client, { type: "tracking_stopped" });
+    },
+
+    async trackingStatus(): Promise<ToolResult> {
+      return this.taskStatus();
     }
   };
 }

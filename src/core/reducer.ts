@@ -6,6 +6,13 @@ import type {
 } from "./types.js";
 
 const AUTHORITATIVE_TERMINAL = new Set<TaskStatus>(["failed", "interrupted"]);
+const MANUAL_INACTIVE = new Set<TaskStatus>(["paused", "stopped"]);
+const CONTROL_EVENTS = new Set<ProgressEvent["type"]>([
+  "tracking_started",
+  "tracking_paused",
+  "tracking_resumed",
+  "tracking_stopped"
+]);
 const TERMINAL = new Set<TaskStatus>([
   "completed_unverified",
   "succeeded_verified",
@@ -81,6 +88,14 @@ export function reduceTask(
   ) {
     return state;
   }
+  if (
+    MANUAL_INACTIVE.has(state.status) &&
+    !CONTROL_EVENTS.has(event.type) &&
+    event.type !== "runtime_failed" &&
+    event.type !== "runtime_interrupted"
+  ) {
+    return state;
+  }
 
   let nextStatus = state.status;
   let patch: Partial<TaskSnapshot> = {};
@@ -93,6 +108,26 @@ export function reduceTask(
         statusDetail: undefined,
         completedAt: undefined
       };
+      break;
+    case "tracking_started":
+      nextStatus = "running";
+      patch = {
+        startedAt: state.startedAt ?? nowMs,
+        statusDetail: undefined,
+        completedAt: undefined
+      };
+      break;
+    case "tracking_paused":
+      nextStatus = state.status === "running" ? "paused" : state.status;
+      break;
+    case "tracking_resumed":
+      nextStatus = state.status === "paused" ? "running" : state.status;
+      patch = { statusDetail: undefined };
+      break;
+    case "tracking_stopped":
+      nextStatus =
+        state.status === "running" || state.status === "paused" ? "stopped" : state.status;
+      patch = { completedAt: nextStatus === "stopped" ? nowMs : state.completedAt };
       break;
     case "plan_updated":
       nextStatus = TERMINAL.has(state.status) ? state.status : "running";
@@ -158,4 +193,3 @@ export function reduceTask(
     lastActivityAt: nowMs
   };
 }
-

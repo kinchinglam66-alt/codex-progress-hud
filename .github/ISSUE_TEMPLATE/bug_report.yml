@@ -39,4 +39,13 @@ body:
       label: Expected behavior
     validations:
       required: true
-
+  - type: textarea
+    id: mcp-diagnostic
+    attributes:
+      label: MCP diagnostic result
+      description: Run npm run diagnose:mcp and paste only the redacted summary. Do not include tokens or private paths.
+  - type: input
+    id: activated-cache-version
+    attributes:
+      label: Activated plugin cache version
+      description: Record the version segment from the skill path shown in the affected task, without including private task data.

@@ -116,4 +116,49 @@ describe("task lifecycle reducer", () => {
 
     expect(next.status).toBe("interrupted");
   });
+
+  it("starts, pauses, resumes, and stops tracking without losing active time", () => {
+    const initial = createInitialTask("task-1", "Fix login", 1_000);
+    const started = reduceTask(
+      initial,
+      { type: "tracking_started" },
+      2_000
+    );
+    const paused = reduceTask(started, { type: "tracking_paused" }, 5_000);
+    const resumed = reduceTask(paused, { type: "tracking_resumed" }, 7_000);
+    const stopped = reduceTask(resumed, { type: "tracking_stopped" }, 11_000);
+
+    expect(started.status).toBe("running");
+    expect(started.activeElapsedMs).toBe(0);
+    expect(paused.status).toBe("paused");
+    expect(paused.activeElapsedMs).toBe(3_000);
+    expect(resumed.status).toBe("running");
+    expect(resumed.activeElapsedMs).toBe(3_000);
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.activeElapsedMs).toBe(7_000);
+    expect(stopped.activeSince).toBeUndefined();
+  });
+
+  it("does not let cooperative reports reactivate explicitly paused or stopped tracking", () => {
+    const initial = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      { type: "tracking_started" },
+      2_000
+    );
+    const paused = reduceTask(initial, { type: "tracking_paused" }, 3_000);
+    const pausedReport = reduceTask(
+      paused,
+      { type: "model_progress", phase: "testing", progress: 0.7 },
+      4_000
+    );
+    const stopped = reduceTask(initial, { type: "tracking_stopped" }, 5_000);
+    const stoppedReport = reduceTask(
+      stopped,
+      { type: "turn_started" },
+      6_000
+    );
+
+    expect(pausedReport).toEqual(paused);
+    expect(stoppedReport).toEqual(stopped);
+  });
 });

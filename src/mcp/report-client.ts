@@ -9,7 +9,7 @@ export interface ProgressClient {
 }
 
 export interface ProgressClientSnapshot {
-  task: { status: string } | null;
+  task: { id?: string; title?: string; status: string } | null;
   eta: unknown;
 }
 
