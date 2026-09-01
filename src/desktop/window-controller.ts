@@ -14,6 +14,7 @@ export interface BrowserWindowOptionsLike {
     contextIsolation: boolean;
     nodeIntegration: boolean;
     sandbox: boolean;
+    partition: string;
   };
 }
 
@@ -73,13 +74,15 @@ const WINDOW_OPTIONS: BrowserWindowOptionsLike = {
   webPreferences: {
     contextIsolation: true,
     nodeIntegration: false,
-    sandbox: true
+    sandbox: true,
+    partition: "codex-progress-hud"
   }
 };
 
 export class WindowController {
   private window: BrowserWindowLike | undefined;
   private authorizationRequest: BrowserWindowLike["webContents"]["session"]["webRequest"] | undefined;
+  private authorizationRegistered = false;
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -102,6 +105,7 @@ export class WindowController {
           });
         }
       );
+      this.authorizationRegistered = true;
       window.on("close", (event) => {
         if (this.dependencies.quitting()) return;
         event.preventDefault();
@@ -143,8 +147,11 @@ export class WindowController {
   }
 
   private detachAuthorization(): void {
-    this.authorizationRequest?.onBeforeSendHeaders(null);
+    const webRequest = this.authorizationRequest;
     this.authorizationRequest = undefined;
+    if (!this.authorizationRegistered) return;
+    this.authorizationRegistered = false;
+    webRequest?.onBeforeSendHeaders(null);
   }
 
   private release(window: BrowserWindowLike): void {

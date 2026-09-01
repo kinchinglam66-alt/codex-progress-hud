@@ -58,7 +58,8 @@ describe("WindowController", () => {
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: true
+        sandbox: true,
+        partition: "codex-progress-hud"
       }
     });
   });
@@ -171,6 +172,8 @@ describe("WindowController", () => {
     await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
 
     expect(firstWindow.destroy).toHaveBeenCalledOnce();
+    expect(firstWindow.webContents.session.webRequest.onBeforeSendHeaders)
+      .toHaveBeenCalledOnce();
     expect(secondWindow.loadURL).toHaveBeenCalledOnce();
     expect(createWindow).toHaveBeenCalledTimes(2);
   });

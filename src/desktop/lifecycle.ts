@@ -83,12 +83,34 @@ export interface DesktopDependencies {
   port: number;
   diagnose(): void | Promise<void>;
   reportError(error: unknown, context: string): void;
+  cleanupTimeoutMs: number;
+  withTimeout<T>(operation: Promise<T>, timeoutMs: number, name: string): Promise<T>;
 }
 
+const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
 const TRAY_PNG_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 class StartupCancelledError extends Error {}
+
+function withTimeout<T>(operation: Promise<T>, timeoutMs: number, name: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${name} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref();
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
   const electron = await import("electron");
@@ -122,7 +144,9 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     uiDirectory: resolve(currentDirectory, "../ui"),
     port: Number.isFinite(configuredPort) ? configuredPort : 17_837,
     diagnose: () => undefined,
-    reportError: (error, context) => console.error(`Codex Progress HUD ${context}`, error)
+    reportError: (error, context) => console.error(`Codex Progress HUD ${context}`, error),
+    cleanupTimeoutMs: DEFAULT_CLEANUP_TIMEOUT_MS,
+    withTimeout
   };
 }
 
@@ -135,11 +159,6 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
 
   let quitting = false;
   let cleanupComplete = false;
-  let cleanupPromise: Promise<void> | undefined;
-  let settleStartup!: () => void;
-  const startupSettled = new Promise<void>((resolve) => {
-    settleStartup = resolve;
-  });
   let trayController: TrayController | undefined;
   let tray: TrayLike | undefined;
   let progressServer: DesktopProgressServer | undefined;
@@ -153,31 +172,43 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
     }
   };
 
-  const cleanup = (): Promise<void> => {
-    cleanupPromise ??= (async () => {
-      const steps: Array<[string, () => void | Promise<void>]> = [
-        ["server close", () => progressServer?.close()],
-        ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
-        ["window dispose", () => windowController?.dispose()],
-        ["runtime clear", () => resolved.stateStore.clearRuntime()]
-      ];
-      for (const [name, step] of steps) {
-        try {
-          await step();
-        } catch (error) {
-          reportError(error, `desktop cleanup: ${name}`);
-        }
+  const quit = (): void => {
+    try {
+      resolved.app.quit();
+    } catch (error) {
+      reportError(error, "desktop quit");
+    }
+  };
+
+  const cleanup = async (): Promise<void> => {
+    const steps: Array<[string, () => void | Promise<void>]> = [
+      ["server close", () => progressServer?.close()],
+      ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
+      ["window dispose", () => windowController?.dispose()],
+      ["runtime clear", () => resolved.stateStore.clearRuntime()]
+    ];
+    const attempts = steps.map(async ([name, step]) => {
+      let operation: Promise<void>;
+      try {
+        operation = Promise.resolve(step());
+      } catch (error) {
+        reportError(error, `desktop cleanup: ${name}`);
+        return;
       }
-      cleanupComplete = true;
-    })();
-    return cleanupPromise;
+      try {
+        await resolved.withTimeout(operation, resolved.cleanupTimeoutMs, name);
+      } catch (error) {
+        reportError(error, `desktop cleanup: ${name}`);
+      }
+    });
+    await Promise.all(attempts);
+    cleanupComplete = true;
   };
 
   let finishQuitPromise: Promise<void> | undefined;
   const finishQuitAfterStartup = (): void => {
-    finishQuitPromise ??= startupSettled
-      .then(cleanup)
-      .then(() => resolved.app.quit())
+    finishQuitPromise ??= cleanup()
+      .then(quit)
       .catch((error: unknown) => reportError(error, "desktop quit"));
   };
   const assertStarting = (): void => {
@@ -224,7 +255,7 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       hideWindow: () => windowController?.hide(),
       requestShutdown: () => {
         quitting = true;
-        resolved.app.quit();
+        quit();
       }
     });
 
@@ -250,19 +281,23 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       onExit: async () => {
         await resolved.stateStore.setDesiredState("off");
         quitting = true;
-        resolved.app.quit();
+        quit();
       },
       onError: (error, action) => reportError(error, `tray action: ${action}`)
     });
     tray = undefined;
   } catch (error) {
     quitting = true;
+    if (!(error instanceof StartupCancelledError)) {
+      reportError(error, "desktop startup");
+    }
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      reportError(cleanupError, "desktop cleanup");
+    }
+    quit();
     if (error instanceof StartupCancelledError) return;
-    await cleanup();
-    reportError(error, "desktop startup");
-    resolved.app.quit();
     throw error;
-  } finally {
-    settleStartup();
   }
 }

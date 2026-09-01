@@ -72,7 +72,9 @@ function desktopHarness(lockAcquired = true) {
     uiDirectory: "C:\\hud\\ui",
     port: 17_837,
     diagnose: vi.fn(async () => undefined),
-    reportError: vi.fn()
+    reportError: vi.fn(),
+    cleanupTimeoutMs: 25,
+    withTimeout: vi.fn(async (operation) => operation)
   };
   return {
     dependencies,
@@ -306,10 +308,9 @@ describe("desktop lifecycle", () => {
     const event = { preventDefault: vi.fn() };
     const result = harness.listeners.get("before-quit")?.(event);
     expect(result).toBeUndefined();
-    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalled());
     token.resolve("secret");
     await starting;
-    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalled());
 
     expect(harness.windowController.create).not.toHaveBeenCalled();
     expect(harness.dependencies.createTrayImage).not.toHaveBeenCalled();
@@ -325,5 +326,86 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.createTray).not.toHaveBeenCalled();
     expect(harness.dependencies.app.quit).toHaveBeenCalled();
     expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("times out a stuck server close while later cleanup and quit still run", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+    harness.progressServer.close.mockReturnValue(new Promise<undefined>(() => undefined));
+    const timeoutFailure = new Error("server close timed out");
+    vi.mocked(harness.dependencies.withTimeout).mockImplementation(
+      async (operation, timeoutMs, name) => {
+        expect(timeoutMs).toBe(25);
+        if (name === "server close") throw timeoutFailure;
+        return operation;
+      }
+    );
+    const event = { preventDefault: vi.fn() };
+
+    harness.listeners.get("before-quit")?.(event);
+
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalled());
+    expect(harness.trayController.dispose).toHaveBeenCalledOnce();
+    expect(harness.windowController.dispose).toHaveBeenCalledOnce();
+    expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
+    expect(harness.dependencies.reportError).toHaveBeenCalledWith(
+      timeoutFailure,
+      "desktop cleanup: server close"
+    );
+  });
+
+  it("reports app quit failure but rethrows the original startup error", async () => {
+    const harness = desktopHarness();
+    const startupFailure = new Error("token failed");
+    const quitFailure = new Error("quit failed");
+    vi.mocked(harness.dependencies.readToken).mockRejectedValue(startupFailure);
+    vi.mocked(harness.dependencies.app.quit).mockImplementation(() => { throw quitFailure; });
+
+    await expect(runDesktop(harness.dependencies)).rejects.toBe(startupFailure);
+
+    expect(harness.dependencies.reportError).toHaveBeenCalledWith(
+      startupFailure,
+      "desktop startup"
+    );
+    expect(harness.dependencies.reportError).toHaveBeenCalledWith(
+      quitFailure,
+      "desktop quit"
+    );
+  });
+
+  it("does not wait for never-settling startup before cleanup and quit", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.app.whenReady).mockReturnValue(
+      new Promise<void>(() => undefined)
+    );
+    void runDesktop(harness.dependencies);
+    const event = { preventDefault: vi.fn() };
+
+    harness.listeners.get("before-quit")?.(event);
+
+    await vi.waitFor(
+      () => expect(harness.dependencies.app.quit).toHaveBeenCalled(),
+      { timeout: 100 }
+    );
+    expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("prevents late startup continuation from creating runtime, window, or tray", async () => {
+    const harness = desktopHarness();
+    const ready = deferred<void>();
+    vi.mocked(harness.dependencies.app.whenReady).mockReturnValue(ready.promise);
+    const starting = runDesktop(harness.dependencies);
+    const event = { preventDefault: vi.fn() };
+    harness.listeners.get("before-quit")?.(event);
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalled());
+
+    ready.resolve(undefined);
+    await starting;
+
+    expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
+    expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
+    expect(harness.windowController.create).not.toHaveBeenCalled();
+    expect(harness.dependencies.createTray).not.toHaveBeenCalled();
+    expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledTimes(2);
   });
 });
