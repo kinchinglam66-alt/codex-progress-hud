@@ -7,8 +7,10 @@ import { writeDiagnosticReport } from "../diagnostics/report.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
 import {
   PROTOCOL_VERSION,
+  type HudErrorCode,
   type HudHealth,
   type LifecycleStateStore,
+  type ObservedHudState,
   type RuntimeIdentity
 } from "../lifecycle/types.js";
 import { createProgressServer, type ProgressServerOptions } from "../server/http-server.js";
@@ -86,11 +88,17 @@ export interface DesktopDependencies {
   tokenPath: string;
   uiDirectory: string;
   port: number;
-  diagnose(): void | Promise<void>;
+  diagnose(snapshot: DesktopDiagnosticSnapshot): void | Promise<void>;
   operationalLogger?: OperationalLogger;
   reportError(error: unknown, context: string): void;
   cleanupTimeoutMs: number;
   withTimeout<T>(operation: Promise<T>, timeoutMs: number, name: string): Promise<T>;
+}
+
+export interface DesktopDiagnosticSnapshot {
+  observedState: ObservedHudState;
+  runtimeAgeMs: number;
+  errors: Array<{ code: HudErrorCode | "OFFLINE"; occurredAt: string }>;
 }
 
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
@@ -165,10 +173,9 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     tokenPath,
     uiDirectory: resolve(currentDirectory, "../ui"),
     port: Number.isFinite(configuredPort) ? configuredPort : 17_837,
-    diagnose: async () => {
+    diagnose: async (snapshot) => {
       const generatedAt = new Date().toISOString();
       const settings = await stateStore.readSettings();
-      const runtime = await stateStore.readRuntime();
       const version = electron.app.getVersion();
       await writeDiagnosticReport({
         directory: defaultDiagnosticsDirectory(),
@@ -181,17 +188,15 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
         },
         lifecycle: {
           ...(settings.desiredState === undefined ? {} : { desiredState: settings.desiredState }),
-          observedState: runtime === null ? "stopped" : "running"
+          observedState: snapshot.observedState
         },
         paths: {
           installManifestExists: await pathExists(installManifestPath),
           dataDirectoryExists: await pathExists(dataDirectory)
         },
         endpoint: { host: "127.0.0.1", port: Number.isFinite(configuredPort) ? configuredPort : 17_837 },
-        ...(runtime === null
-          ? {}
-          : { runtimeAgeMs: Math.max(0, Date.parse(generatedAt) - Date.parse(runtime.startedAt)) }),
-        errors: []
+        runtimeAgeMs: snapshot.runtimeAgeMs,
+        errors: snapshot.errors
       });
     },
     operationalLogger,
@@ -215,19 +220,38 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
   let progressServer: DesktopProgressServer | undefined;
   let windowController: DesktopWindowController | undefined;
   let startupAt: Date | undefined;
+  const recentErrors: DesktopDiagnosticSnapshot["errors"] = [];
 
-  const record = async (
+  const rememberError = (error: unknown): void => {
+    const candidate = typeof error === "object" && error !== null
+      ? (error as { code?: unknown }).code
+      : undefined;
+    const code: HudErrorCode | "OFFLINE" = candidate === "EADDRINUSE"
+      ? "PORT_CONFLICT"
+      : candidate === "VERSION_MISMATCH"
+        ? "VERSION_MISMATCH"
+        : candidate === "AUTH_ERROR"
+          ? "AUTH_ERROR"
+          : "INTERNAL_ERROR";
+    recentErrors.push({ code, occurredAt: resolved.now().toISOString() });
+    if (recentErrors.length > 10) recentErrors.shift();
+  };
+
+  const record = (
     entry: Omit<OperationalLogEntry, "at">,
     at: Date = startupAt ?? resolved.now()
-  ): Promise<void> => {
+  ): void => {
     try {
-      await resolved.operationalLogger?.write({ at: at.toISOString(), ...entry });
+      void resolved.operationalLogger
+        ?.write({ at: at.toISOString(), ...entry })
+        .catch(() => undefined);
     } catch {
       // Operational logging is best effort and must not alter desktop lifecycle behavior.
     }
   };
 
   const reportError = (error: unknown, context: string): void => {
+    rememberError(error);
     try {
       resolved.reportError(error, context);
     } catch {
@@ -246,7 +270,7 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
   const cleanup = async (recordShutdown: boolean): Promise<void> => {
     const shutdownAt = resolved.now();
     if (recordShutdown) {
-      await record({
+      record({
         level: "info",
         event: "shutdown_requested",
         lifecycleState: "stopped",
@@ -279,7 +303,7 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
     await Promise.all(attempts);
     cleanupComplete = true;
     if (recordShutdown) {
-      await record({
+      record({
         level: cleanupFailed ? "error" : "info",
         event: cleanupFailed ? "shutdown_timeout" : "shutdown_complete",
         lifecycleState: "stopped",
@@ -313,7 +337,7 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
     await resolved.app.whenReady();
     assertStarting();
     startupAt = resolved.now();
-    await record({
+    record({
       level: "info",
       event: "startup_requested",
       lifecycleState: "starting",
@@ -368,7 +392,15 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       onShow: () => windowController?.show(),
       onHide: () => windowController?.hide(),
       onToggleLogin: (enabled) => resolved.app.setLoginItemSettings({ openAtLogin: enabled }),
-      onDiagnose: resolved.diagnose,
+      onDiagnose: () => resolved.diagnose({
+        observedState: quitting
+          ? "stopped"
+          : windowController?.visibility() === "visible"
+            ? "running"
+            : "hidden",
+        runtimeAgeMs: Math.max(0, resolved.now().getTime() - startupAt!.getTime()),
+        errors: [...recentErrors]
+      }),
       onExit: async () => {
         await resolved.stateStore.setDesiredState("off");
         quitting = true;
@@ -377,23 +409,27 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       onError: (error, action) => reportError(error, `tray action: ${action}`)
     });
     tray = undefined;
-    await record({
+    const startupReadyAt = resolved.now();
+    record({
       level: "info",
       event: "startup_ready",
       lifecycleState: windowController.visibility() === "visible" ? "running" : "hidden",
       protocolVersion: PROTOCOL_VERSION,
-      elapsedMs: 0
-    }, startupAt);
+      elapsedMs: Math.max(0, startupReadyAt.getTime() - startupAt.getTime())
+    }, startupReadyAt);
   } catch (error) {
     quitting = true;
     if (!(error instanceof StartupCancelledError)) {
-      await record({
+      const startupFailedAt = resolved.now();
+      record({
         level: "error",
         event: "startup_failed",
         lifecycleState: "stopped",
         protocolVersion: PROTOCOL_VERSION,
-        elapsedMs: 0
-      });
+        elapsedMs: startupAt === undefined
+          ? 0
+          : Math.max(0, startupFailedAt.getTime() - startupAt.getTime())
+      }, startupFailedAt);
       reportError(error, "desktop startup");
     }
     try {

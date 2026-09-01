@@ -16,6 +16,7 @@ import {
 } from "../mcp/report-client.js";
 import { classifyLifecycle } from "./classify.js";
 import type { ProcessLauncher, SpawnedHud } from "./process-launcher.js";
+import { PROTOCOL_VERSION } from "./types.js";
 import type {
   DiagnosticReport,
   EnsureResult,
@@ -125,39 +126,39 @@ export function createCompanionManager(
   let lastRecoveryAt = Number.NEGATIVE_INFINITY;
   const recentErrors: DiagnosticReportInput["errors"] = [];
 
-  async function record(entry: Omit<OperationalLogEntry, "at">): Promise<void> {
+  function record(entry: Omit<OperationalLogEntry, "at">): void {
     try {
-      await logger.write({ at: new Date(now()).toISOString(), ...entry });
+      void logger.write({ at: new Date(now()).toISOString(), ...entry }).catch(() => undefined);
     } catch {
       // Operational logging is best effort and must not alter lifecycle behavior.
     }
   }
 
-  async function recordCompatibilityFailure(
+  function recordCompatibilityFailure(
     code: HudErrorCode,
     lifecycleState: "port_conflict" | "incompatible"
-  ): Promise<void> {
+  ): void {
     if (code !== "PORT_CONFLICT" && code !== "VERSION_MISMATCH") return;
-    await record({
+    record({
       level: "error",
       event: code === "PORT_CONFLICT" ? "port_conflict" : "protocol_mismatch",
       lifecycleState,
-      protocolVersion: 1
+      protocolVersion: PROTOCOL_VERSION
     });
   }
 
-  async function recordStartupFailure(
+  function recordStartupFailure(
     code: HudErrorCode,
     lifecycleState: "stopped" | "port_conflict" | "incompatible"
-  ): Promise<void> {
+  ): void {
     if (lifecycleState === "port_conflict" || lifecycleState === "incompatible") {
-      await recordCompatibilityFailure(code, lifecycleState);
+      recordCompatibilityFailure(code, lifecycleState);
     }
-    await record({
+    record({
       level: "error",
       event: "startup_failed",
       lifecycleState,
-      protocolVersion: 1,
+      protocolVersion: PROTOCOL_VERSION,
       elapsedMs: Math.max(0, now() - startStartedAt)
     });
   }
@@ -256,7 +257,7 @@ export function createCompanionManager(
     });
     if (manifest === null || !isAbsolute(manifest.executablePath) || !isAbsolute(manifest.installDirectory)) {
       remember("COMPANION_NOT_INSTALLED");
-      await recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
+      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
       return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
     }
     const executablePath = resolve(manifest.executablePath);
@@ -269,7 +270,7 @@ export function createCompanionManager(
       !(await pathExists(executablePath))
     ) {
       remember("COMPANION_NOT_INSTALLED");
-      await recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
+      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
       return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
     }
 
@@ -278,7 +279,7 @@ export function createCompanionManager(
       spawned = await dependencies.launcher.spawnHud(executablePath);
     } catch {
       remember("INTERNAL_ERROR");
-      await recordStartupFailure("INTERNAL_ERROR", "stopped");
+      recordStartupFailure("INTERNAL_ERROR", "stopped");
       const snapshot = withDesiredState(settings.desiredState, {
         observedState: "stopped",
         code: "INTERNAL_ERROR"
@@ -306,7 +307,7 @@ export function createCompanionManager(
         observedState,
         code: readiness.code
       });
-      await recordStartupFailure(readiness.code, observedState);
+      recordStartupFailure(readiness.code, observedState);
       return { kind: "error", code: readiness.code, snapshot };
     }
     if (readiness.kind === "offline") {
@@ -315,17 +316,17 @@ export function createCompanionManager(
         observedState: "stopped",
         code: "START_TIMEOUT"
       });
-      await recordStartupFailure("START_TIMEOUT", "stopped");
+      recordStartupFailure("START_TIMEOUT", "stopped");
       return { kind: "error", code: "START_TIMEOUT", snapshot };
     }
     const health = readiness.health;
     await dependencies.store.writeRuntime(health);
     ownedHud = { process: spawned, instanceNonce: health.instanceNonce };
-    await record({
+    record({
       level: "info",
       event: "startup_ready",
       lifecycleState: health.visibility === "visible" ? "running" : "hidden",
-      protocolVersion: 1,
+      protocolVersion: PROTOCOL_VERSION,
       elapsedMs: Math.max(0, now() - startStartedAt)
     });
     return {
@@ -341,12 +342,13 @@ export function createCompanionManager(
   function sharedStart(): Promise<RunningResult> {
     if (startupPromise !== undefined) return startupPromise;
     startStartedAt = now();
-    startupPromise = record({
+    record({
       level: "info",
       event: "startup_requested",
       lifecycleState: "starting",
-      protocolVersion: 1
-    }).then(start).finally(() => {
+      protocolVersion: PROTOCOL_VERSION
+    });
+    startupPromise = start().finally(() => {
       startupPromise = undefined;
     });
     return startupPromise;
@@ -361,9 +363,9 @@ export function createCompanionManager(
     if (snapshot.code === "PORT_CONFLICT" || snapshot.code === "VERSION_MISMATCH" || snapshot.code === "AUTH_ERROR") {
       remember(snapshot.code);
       if (snapshot.code === "PORT_CONFLICT") {
-        await recordCompatibilityFailure(snapshot.code, "port_conflict");
+        recordCompatibilityFailure(snapshot.code, "port_conflict");
       } else if (snapshot.code === "VERSION_MISMATCH") {
-        await recordCompatibilityFailure(snapshot.code, "incompatible");
+        recordCompatibilityFailure(snapshot.code, "incompatible");
       }
       return { kind: "error", code: snapshot.code, snapshot };
     }
@@ -375,11 +377,11 @@ export function createCompanionManager(
         return { kind: "error", code: "COMPANION_CRASHED", snapshot: cooled };
       }
       lastRecoveryAt = now();
-      await record({
+      record({
         level: "warn",
         event: "crash_recovery",
         lifecycleState: "crashed",
-        protocolVersion: 1
+        protocolVersion: PROTOCOL_VERSION
       });
     }
     return sharedStart();
@@ -406,11 +408,11 @@ export function createCompanionManager(
     async close(): Promise<HudLifecycleSnapshot> {
       await dependencies.store.setDesiredState("off");
       const shutdownStartedAt = now();
-      await record({
+      record({
         level: "info",
         event: "shutdown_requested",
         lifecycleState: "stopped",
-        protocolVersion: 1
+        protocolVersion: PROTOCOL_VERSION
       });
       let health: HudHealth;
       try {
@@ -418,11 +420,11 @@ export function createCompanionManager(
       } catch (error) {
         if (errorCode(error) === "OFFLINE") await dependencies.store.clearRuntime();
         if (errorCode(error) === "OFFLINE") {
-          await record({
+          record({
             level: "info",
             event: "shutdown_complete",
             lifecycleState: "stopped",
-            protocolVersion: 1,
+            protocolVersion: PROTOCOL_VERSION,
             elapsedMs: Math.max(0, now() - shutdownStartedAt)
           });
         }
@@ -444,11 +446,11 @@ export function createCompanionManager(
           if (errorCode(error) === "OFFLINE") {
             await dependencies.store.clearRuntime();
             ownedHud = undefined;
-            await record({
+            record({
               level: "info",
               event: "shutdown_complete",
               lifecycleState: "stopped",
-              protocolVersion: 1,
+              protocolVersion: PROTOCOL_VERSION,
               elapsedMs: Math.max(0, now() - shutdownStartedAt)
             });
             return { desiredState: "off", observedState: "stopped" };
@@ -464,21 +466,21 @@ export function createCompanionManager(
         await ownedHud.process.terminate();
         await dependencies.store.clearRuntime();
         ownedHud = undefined;
-        await record({
+        record({
           level: "info",
           event: "shutdown_complete",
           lifecycleState: "stopped",
-          protocolVersion: 1,
+          protocolVersion: PROTOCOL_VERSION,
           elapsedMs: Math.max(0, now() - shutdownStartedAt)
         });
         return { desiredState: "off", observedState: "stopped" };
       }
       remember("SHUTDOWN_TIMEOUT");
-      await record({
+      record({
         level: "error",
         event: "shutdown_timeout",
         lifecycleState: "stopped",
-        protocolVersion: 1,
+        protocolVersion: PROTOCOL_VERSION,
         elapsedMs: Math.max(0, now() - shutdownStartedAt)
       });
       return {
@@ -507,7 +509,7 @@ export function createCompanionManager(
           plugin: dependencies.diagnostics.pluginVersion,
           mcp: dependencies.diagnostics.mcpVersion,
           ...(snapshot.health === undefined ? {} : { companion: snapshot.health.version }),
-          protocol: 1
+          protocol: PROTOCOL_VERSION
         },
         lifecycle: {
           ...(snapshot.desiredState === undefined ? {} : { desiredState: snapshot.desiredState }),

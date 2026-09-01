@@ -31,6 +31,7 @@ async function harness(options: {
   online?: boolean;
   spawnMakesOnline?: boolean;
   shutdownStops?: boolean;
+  logger?: { write(entry: OperationalLogEntry): Promise<void> };
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hud-manager-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -82,7 +83,7 @@ async function harness(options: {
     })
   };
   const delays: number[] = [];
-  const logger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
+  const logger = options.logger ?? { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
   const manager = createCompanionManager({
     store,
     client,
@@ -190,7 +191,7 @@ describe("companion lifecycle manager", () => {
 
     await manager.open();
 
-    expect(logger.write.mock.calls.map(([entry]) => entry)).toEqual([
+    expect(vi.mocked(logger.write).mock.calls.map(([entry]) => entry)).toEqual([
       {
         at: "1970-01-01T00:00:00.000Z",
         level: "info",
@@ -207,6 +208,23 @@ describe("companion lifecycle manager", () => {
         elapsedMs: 0
       }
     ]);
+  });
+
+  it("does not wait for a permanently pending logger before startup", async () => {
+    const pendingLogger = {
+      write: vi.fn((_entry: OperationalLogEntry) => new Promise<void>(() => undefined))
+    };
+    const { manager, launcher } = await harness({ logger: pendingLogger });
+
+    const result = await Promise.race([
+      manager.open(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("startup waited for logger")), 100)
+      )
+    ]);
+
+    expect(result.observedState).toBe("running");
+    expect(launcher.spawnHud).toHaveBeenCalledOnce();
   });
 
   it("uses bounded readiness backoff and makes only one launch attempt", async () => {
@@ -316,10 +334,27 @@ describe("companion lifecycle manager", () => {
     expect((await store.readSettings()).desiredState).toBe("off");
     expect(client.shutdown).toHaveBeenCalledOnce();
     expect(terminate).not.toHaveBeenCalled();
-    expect(logger.write.mock.calls.map(([entry]) => entry.event)).toEqual([
+    expect(vi.mocked(logger.write).mock.calls.map(([entry]) => entry.event)).toEqual([
       "shutdown_requested",
       "shutdown_complete"
     ]);
+  });
+
+  it("does not wait for a permanently pending logger before shutdown", async () => {
+    const pendingLogger = {
+      write: vi.fn((_entry: OperationalLogEntry) => new Promise<void>(() => undefined))
+    };
+    const { manager, client } = await harness({ online: true, logger: pendingLogger });
+
+    const result = await Promise.race([
+      manager.close(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("shutdown waited for logger")), 100)
+      )
+    ]);
+
+    expect(result).toEqual({ desiredState: "off", observedState: "stopped" });
+    expect(client.shutdown).toHaveBeenCalledOnce();
   });
 
   it("never force-terminates a PID that this manager did not spawn", async () => {
@@ -368,7 +403,7 @@ describe("companion lifecycle manager", () => {
       lifecycleState,
       protocolVersion: 1
     });
-    expect(JSON.stringify(logger.write.mock.calls)).not.toContain("Bearer secret");
+    expect(JSON.stringify(vi.mocked(logger.write).mock.calls)).not.toContain("Bearer secret");
   });
 
   it("force-terminates only a spawned process whose live identity still matches", async () => {

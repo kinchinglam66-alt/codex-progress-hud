@@ -1,6 +1,11 @@
-import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { open, rename, rm, type FileHandle } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { ObservedHudState } from "../lifecycle/types.js";
+import {
+  ensureTrustedDirectory,
+  openVerifiedAppend,
+  regularFileInformation
+} from "./safe-files.js";
 
 export type OperationalEventCode =
   | "startup_requested"
@@ -74,61 +79,76 @@ function optionalNonNegativeNumber(value: number | undefined, name: string): voi
 }
 
 function sanitizeEntry(entry: OperationalLogEntry): OperationalLogEntry {
-  const parsedAt = new Date(entry.at);
-  if (Number.isNaN(parsedAt.getTime()) || parsedAt.toISOString() !== entry.at) {
+  const at = entry.at;
+  const level = entry.level;
+  const event = entry.event;
+  const lifecycleState = entry.lifecycleState;
+  const protocolVersion = entry.protocolVersion;
+  const httpStatusCategory = entry.httpStatusCategory;
+  const elapsedMs = entry.elapsedMs;
+  const parsedAt = new Date(at);
+  if (Number.isNaN(parsedAt.getTime()) || parsedAt.toISOString() !== at) {
     throw new TypeError("at must be a canonical ISO timestamp");
   }
-  if (!LEVELS.has(entry.level)) throw new TypeError("level must be an allowed category");
-  if (!EVENT_CODES.has(entry.event)) throw new TypeError("event code must be allowed");
-  if (entry.lifecycleState !== undefined && !LIFECYCLE_STATES.has(entry.lifecycleState)) {
+  if (!LEVELS.has(level)) throw new TypeError("level must be an allowed category");
+  if (!EVENT_CODES.has(event)) throw new TypeError("event code must be allowed");
+  if (lifecycleState !== undefined && !LIFECYCLE_STATES.has(lifecycleState)) {
     throw new TypeError("lifecycle state must be allowed");
   }
-  if (entry.protocolVersion !== undefined && !Number.isSafeInteger(entry.protocolVersion)) {
+  if (protocolVersion !== undefined && !Number.isSafeInteger(protocolVersion)) {
     throw new TypeError("protocol version must be an integer");
   }
   if (
-    entry.httpStatusCategory !== undefined &&
-    !HTTP_STATUS_CATEGORIES.has(entry.httpStatusCategory)
+    httpStatusCategory !== undefined &&
+    !HTTP_STATUS_CATEGORIES.has(httpStatusCategory)
   ) {
     throw new TypeError("HTTP status category must be allowed");
   }
-  optionalNonNegativeNumber(entry.elapsedMs, "elapsedMs");
+  optionalNonNegativeNumber(elapsedMs, "elapsedMs");
 
   return {
-    at: entry.at,
-    level: entry.level,
-    event: entry.event,
-    ...(entry.lifecycleState === undefined ? {} : { lifecycleState: entry.lifecycleState }),
-    ...(entry.protocolVersion === undefined ? {} : { protocolVersion: entry.protocolVersion }),
-    ...(entry.httpStatusCategory === undefined
+    at,
+    level,
+    event,
+    ...(lifecycleState === undefined ? {} : { lifecycleState }),
+    ...(protocolVersion === undefined ? {} : { protocolVersion }),
+    ...(httpStatusCategory === undefined
       ? {}
-      : { httpStatusCategory: entry.httpStatusCategory }),
-    ...(entry.elapsedMs === undefined ? {} : { elapsedMs: entry.elapsedMs })
+      : { httpStatusCategory }),
+    ...(elapsedMs === undefined ? {} : { elapsedMs })
   };
 }
 
 async function fileSize(path: string): Promise<number> {
-  try {
-    return (await stat(path)).size;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
-    throw error;
-  }
+  return Number((await regularFileInformation(path))?.size ?? 0);
 }
 
 async function moveIfPresent(source: string, destination: string): Promise<void> {
+  const sourceInformation = await regularFileInformation(source);
+  if (sourceInformation === null) return;
+  await regularFileInformation(destination);
   await rm(destination, { force: true });
-  try {
-    await rename(source, destination);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  await rename(source, destination);
+}
+
+async function acquireLock(lockPath: string): Promise<FileHandle> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      return await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      await new Promise((resolve_) => setTimeout(resolve_, 5));
+    }
   }
+  throw new Error("operational log rotation lock timed out");
 }
 
 export function createOperationalLogger(options: OperationalLoggerOptions): OperationalLogger {
   positiveInteger(options.maxBytes, "maxBytes");
   positiveInteger(options.maxFiles, "maxFiles");
-  const activePath = join(options.logDirectory, "companion.log");
+  const logDirectory = resolve(options.logDirectory);
+  const activePath = join(logDirectory, "companion.log");
+  const lockPath = join(logDirectory, ".companion.log.lock");
   let pending = Promise.resolve();
 
   const write = async (entry: OperationalLogEntry): Promise<void> => {
@@ -137,18 +157,30 @@ export function createOperationalLogger(options: OperationalLoggerOptions): Oper
     if (entryBytes > options.maxBytes) {
       throw new RangeError("operational log entry exceeds maxBytes");
     }
-    await mkdir(options.logDirectory, { recursive: true });
-    if ((await fileSize(activePath)) + entryBytes > options.maxBytes) {
-      if (options.maxFiles === 1) {
-        await rm(activePath, { force: true });
-      } else {
-        for (let index = options.maxFiles - 1; index >= 1; index -= 1) {
-          const source = index === 1 ? activePath : `${activePath}.${index - 1}`;
-          await moveIfPresent(source, `${activePath}.${index}`);
+    await ensureTrustedDirectory(logDirectory);
+    const lock = await acquireLock(lockPath);
+    try {
+      if ((await fileSize(activePath)) + entryBytes > options.maxBytes) {
+        if (options.maxFiles === 1) {
+          await regularFileInformation(activePath);
+          await rm(activePath, { force: true });
+        } else {
+          for (let index = options.maxFiles - 1; index >= 1; index -= 1) {
+            const source = index === 1 ? activePath : `${activePath}.${index - 1}`;
+            await moveIfPresent(source, `${activePath}.${index}`);
+          }
         }
       }
+      const handle = await openVerifiedAppend(activePath);
+      try {
+        await handle.appendFile(serialized, { encoding: "utf8" });
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      await lock.close().catch(() => undefined);
+      await rm(lockPath, { force: true });
     }
-    await appendFile(activePath, serialized, { encoding: "utf8", mode: 0o600 });
   };
 
   return {

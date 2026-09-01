@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 import {
   runDesktop,
   scheduleAfterReady,
@@ -184,6 +185,40 @@ describe("desktop lifecycle", () => {
     ]);
   });
 
+  it("does not wait for a permanently pending logger before desktop startup", async () => {
+    const harness = desktopHarness();
+    harness.dependencies.operationalLogger = {
+      write: vi.fn(() => new Promise<void>(() => undefined))
+    };
+
+    await expect(Promise.race([
+      runDesktop(harness.dependencies),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("desktop startup waited for logger")), 100)
+      )
+    ])).resolves.toBeUndefined();
+
+    expect(harness.dependencies.createProgressServer).toHaveBeenCalledOnce();
+  });
+
+  it("records real desktop startup elapsed time", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.now)
+      .mockReturnValueOnce(new Date("2026-09-02T00:00:00.000Z"))
+      .mockReturnValueOnce(new Date("2026-09-02T00:00:00.275Z"));
+
+    await runDesktop(harness.dependencies);
+
+    expect(harness.dependencies.operationalLogger!.write).toHaveBeenLastCalledWith({
+      at: "2026-09-02T00:00:00.275Z",
+      level: "info",
+      event: "startup_ready",
+      lifecycleState: "hidden",
+      protocolVersion: 1,
+      elapsedMs: 275
+    });
+  });
+
   it("records the runtime start time only after Electron readiness", async () => {
     const harness = desktopHarness();
     let markReady!: () => void;
@@ -198,7 +233,7 @@ describe("desktop lifecycle", () => {
     markReady();
     await starting;
 
-    expect(harness.dependencies.now).toHaveBeenCalledOnce();
+    expect(harness.dependencies.now).toHaveBeenCalledTimes(2);
   });
 
   it("connects authenticated HTTP controls to the window and clean shutdown", async () => {
@@ -229,7 +264,31 @@ describe("desktop lifecycle", () => {
 
     await harness.trayCallbacks?.onDiagnose();
 
-    expect(harness.dependencies.diagnose).toHaveBeenCalledOnce();
+    expect(harness.dependencies.diagnose).toHaveBeenCalledWith({
+      observedState: "hidden",
+      runtimeAgeMs: 0,
+      errors: []
+    });
+  });
+
+  it("passes categorized desktop errors into Diagnose without raw payloads", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+    harness.trayCallbacks?.onError(
+      new Error("Bearer secret token=secret private command output"),
+      "Show HUD"
+    );
+
+    await harness.trayCallbacks?.onDiagnose();
+
+    expect(harness.dependencies.diagnose).toHaveBeenLastCalledWith({
+      observedState: "hidden",
+      runtimeAgeMs: 0,
+      errors: [{ code: "INTERNAL_ERROR", occurredAt: "2026-09-02T00:00:00.000Z" }]
+    });
+    expect(JSON.stringify(vi.mocked(harness.dependencies.diagnose).mock.calls)).not.toContain(
+      "Bearer secret"
+    );
   });
 
   it("updates the per-user login item only after an explicit tray click", async () => {
@@ -262,6 +321,25 @@ describe("desktop lifecycle", () => {
       "shutdown_requested",
       "shutdown_complete"
     ]);
+  });
+
+  it("does not wait for a permanently pending logger before cleanup and quit", async () => {
+    const harness = desktopHarness();
+    const write = vi
+      .fn<(_entry: OperationalLogEntry) => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValue(new Promise<void>(() => undefined));
+    harness.dependencies.operationalLogger = { write };
+    await runDesktop(harness.dependencies);
+    const event = { preventDefault: vi.fn() };
+
+    harness.listeners.get("before-quit")?.(event);
+
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalledOnce(), {
+      timeout: 100
+    });
+    expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
   });
 
   it.each([

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -86,6 +86,31 @@ describe("operational logger", () => {
     }
   });
 
+  it("snapshots each allowed property once before validation", async () => {
+    const directory = await logDirectory();
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+    let eventReads = 0;
+    const entry = {
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      get event() {
+        eventReads += 1;
+        return eventReads === 1 ? "startup_requested" : "Bearer secret";
+      }
+    } as unknown as OperationalLogEntry;
+
+    await logger.write(entry);
+
+    const text = await readFile(join(directory, "companion.log"), "utf8");
+    expect(eventReads).toBe(1);
+    expect(JSON.parse(text.trim())).toMatchObject({ event: "startup_requested" });
+    expect(text).not.toContain("Bearer secret");
+  });
+
   it("rejects a payload-like value in the event-code field", async () => {
     const directory = await logDirectory();
     const logger = createOperationalLogger({
@@ -142,4 +167,110 @@ describe("operational logger", () => {
     const sizes = await Promise.all(files.map(async (file) => (await stat(join(directory, file))).size));
     expect(sizes.every((size) => size > 0 && size <= maxBytes)).toBe(true);
   }, 10_000);
+
+  it("serializes rotation across two logger instances sharing one directory", async () => {
+    const directory = await logDirectory();
+    const maxBytes = 512;
+    await writeFile(join(directory, "companion.log"), "x".repeat(maxBytes - 1));
+    const first = createOperationalLogger({ logDirectory: directory, maxBytes, maxFiles: 3 });
+    const second = createOperationalLogger({ logDirectory: directory, maxBytes, maxFiles: 3 });
+    const entry: OperationalLogEntry = {
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    };
+
+    await expect(Promise.all([first.write(entry), second.write(entry)])).resolves.toEqual([
+      undefined,
+      undefined
+    ]);
+
+    const files = (await readdir(directory)).filter((file) => file.startsWith("companion.log"));
+    const sizes = await Promise.all(files.map(async (file) => (await stat(join(directory, file))).size));
+    expect(sizes.every((size) => size <= maxBytes)).toBe(true);
+    expect(files).not.toContain("companion.log.lock");
+  });
+
+  it("honors the shared directory lock before touching the rotation set", async () => {
+    const directory = await logDirectory();
+    const activePath = join(directory, "companion.log");
+    const lockPath = join(directory, ".companion.log.lock");
+    await writeFile(activePath, "existing-category\n");
+    await writeFile(lockPath, "held");
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    const writing = logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(readFile(activePath, "utf8")).resolves.toBe("existing-category\n");
+
+    await rm(lockPath, { force: true });
+    await writing;
+    await expect(readFile(activePath, "utf8")).resolves.toContain("startup_requested");
+  });
+
+  it("preserves an older archive when an intermediate archive is absent", async () => {
+    const directory = await logDirectory();
+    const maxBytes = 512;
+    await writeFile(join(directory, "companion.log"), "x".repeat(maxBytes - 1));
+    await writeFile(join(directory, "companion.log.2"), "older-retained-category\n");
+    const logger = createOperationalLogger({ logDirectory: directory, maxBytes, maxFiles: 3 });
+
+    await logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    });
+
+    await expect(readFile(join(directory, "companion.log.2"), "utf8")).resolves.toBe(
+      "older-retained-category\n"
+    );
+  });
+
+  it("rejects a linked log directory instead of writing through it", async () => {
+    const root = await logDirectory();
+    const target = join(root, "redirect-target");
+    const linked = join(root, "linked-logs");
+    await mkdir(target);
+    await symlink(target, linked, process.platform === "win32" ? "junction" : "dir");
+    const logger = createOperationalLogger({
+      logDirectory: linked,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    await expect(logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    })).rejects.toThrow(/link|trusted directory/iu);
+
+    await expect(readdir(target)).resolves.toEqual([]);
+  });
+
+  it("rejects a linked active log file without changing its target", async () => {
+    const directory = await logDirectory();
+    const target = join(directory, "redirect-target.txt");
+    await writeFile(target, "do-not-change");
+    await link(target, join(directory, "companion.log"));
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    await expect(logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    })).rejects.toThrow(/regular file|link/iu);
+    await expect(readFile(target, "utf8")).resolves.toBe("do-not-change");
+  });
 });
