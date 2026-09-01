@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
@@ -34,6 +35,8 @@ const installManifestSchema = z.object({
   version: z.string()
 });
 
+const pendingWrites = new Map<string, Promise<void>>();
+
 async function readJson<T>(path: string, schema: z.ZodType<T>): Promise<T | null> {
   let content: string;
   try {
@@ -51,10 +54,19 @@ async function readJson<T>(path: string, schema: z.ZodType<T>): Promise<T | null
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
+  const previous = pendingWrites.get(path) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(async () => {
+    await mkdir(dirname(path), { recursive: true });
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    await rename(temporary, path);
+  });
+  pendingWrites.set(path, current);
+  try {
+    await current;
+  } finally {
+    if (pendingWrites.get(path) === current) pendingWrites.delete(path);
+  }
 }
 
 export function createLifecycleStateStore(paths: LifecycleStatePaths): LifecycleStateStore {

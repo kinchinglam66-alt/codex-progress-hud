@@ -87,4 +87,29 @@ describe("lifecycle classification", () => {
   ])("classifies %o as %s", (input, expected) => {
     expect(classifyLifecycle(input)).toBe(expected);
   });
+
+  it.each<[LifecycleObservation, ObservedHudState]>([
+    [
+      {
+        desiredState: "on",
+        starting: false,
+        identity: { service: "other", protocolVersion: 2 },
+        health: compatibleHealth,
+        hadHealthyRuntime: true
+      },
+      "port_conflict"
+    ],
+    [
+      {
+        desiredState: "on",
+        starting: false,
+        identity: { service: "codex-progress-hud", protocolVersion: 2 },
+        health: compatibleHealth,
+        hadHealthyRuntime: true
+      },
+      "incompatible"
+    ]
+  ])("prefers identity conflict when classifying %o", (input, expected) => {
+    expect(classifyLifecycle(input)).toBe(expected);
+  });
 });

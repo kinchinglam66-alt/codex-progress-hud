@@ -77,6 +77,28 @@ describe("lifecycle state store", () => {
     });
   });
 
+  it("settles overlapping desired-state writes with a valid final document", async () => {
+    const paths = testPaths();
+    const store = createLifecycleStateStore(paths);
+
+    const writes = Array.from({ length: 32 }, (_, index) =>
+      store.setDesiredState(index % 2 === 0 ? "on" : "off")
+    );
+    const results = await Promise.allSettled(writes);
+    const rejections = results.filter((result) => result.status === "rejected");
+
+    expect(
+      rejections,
+      rejections.map((result) => String(result.reason)).join("\n")
+    ).toEqual([]);
+    expect(JSON.parse(await readFile(paths.settingsPath, "utf8"))).toEqual(
+      expect.objectContaining({
+        desiredState: expect.stringMatching(/^(on|off)$/),
+        startWithWindows: false
+      })
+    );
+  });
+
   it("writes and reads valid runtime identity", async () => {
     const store = createLifecycleStateStore(testPaths());
     const identity = {
