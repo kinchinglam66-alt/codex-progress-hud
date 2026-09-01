@@ -17,7 +17,10 @@ async function startServer(options: { withUi?: boolean } = {}) {
   const uiDirectory = options.withUi ? join(directory, "ui") : undefined;
   if (uiDirectory !== undefined) {
     await mkdir(uiDirectory);
+    await mkdir(join(uiDirectory, "api"));
     await writeFile(join(uiDirectory, "index.html"), "<h1>HUD</h1>");
+    await writeFile(join(uiDirectory, "health"), "shadowed health");
+    await writeFile(join(uiDirectory, "api", "health"), "shadowed API health");
   }
   const health: HudHealth = {
     service: "codex-progress-hud",
@@ -70,6 +73,20 @@ describe("local progress HTTP service", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("does not let UI files shadow reserved health routes", async () => {
+    const { baseUrl } = await startServer({ withUi: true });
+
+    const identityResponse = await fetch(`${baseUrl}/health`);
+    const apiResponse = await fetch(`${baseUrl}/api/health`);
+
+    expect(identityResponse.status).toBe(200);
+    expect(await identityResponse.json()).toEqual({
+      service: "codex-progress-hud",
+      protocolVersion: 1
+    });
+    expect(apiResponse.status).toBe(401);
   });
 
   it("rejects unauthenticated access to every new API route", async () => {
@@ -141,6 +158,31 @@ describe("local progress HTTP service", () => {
 
     expect(response.status).toBe(415);
     expect(hideWindow).not.toHaveBeenCalled();
+  });
+
+  it("accepts JSON parameters but rejects a prefix-spoofed control media type", async () => {
+    const { baseUrl, token, hideWindow } = await startServer();
+
+    const acceptedResponse = await fetch(`${baseUrl}/api/window/hide`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=utf-8"
+      },
+      body: "{}"
+    });
+    const spoofedResponse = await fetch(`${baseUrl}/api/window/hide`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/jsonx"
+      },
+      body: "{}"
+    });
+
+    expect(acceptedResponse.status).toBe(202);
+    expect(spoofedResponse.status).toBe(415);
+    expect(hideWindow).toHaveBeenCalledOnce();
   });
 
   it("applies the 64 KiB body limit to authenticated controls", async () => {

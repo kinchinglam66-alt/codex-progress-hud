@@ -99,6 +99,11 @@ function bearerToken(request: IncomingMessage): string {
   return header.startsWith("Bearer ") ? header.slice(7) : "";
 }
 
+function hasJsonMediaType(request: IncomingMessage): boolean {
+  const mediaType = (request.headers["content-type"] ?? "").split(";", 1)[0]?.trim();
+  return mediaType?.toLowerCase() === "application/json";
+}
+
 export function createProgressServer(options: ProgressServerOptions) {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 17_837;
@@ -132,13 +137,6 @@ export function createProgressServer(options: ProgressServerOptions) {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", `http://${host}`);
-      if (
-        request.method === "GET" &&
-        options.uiDirectory !== undefined &&
-        (await serveUi(response, options.uiDirectory, url.pathname))
-      ) {
-        return;
-      }
       if (request.method === "GET" && url.pathname === "/health") {
         writeJson(response, 200, {
           service: "codex-progress-hud",
@@ -147,6 +145,13 @@ export function createProgressServer(options: ProgressServerOptions) {
         return;
       }
       if (!url.pathname.startsWith("/api/")) {
+        if (
+          request.method === "GET" &&
+          options.uiDirectory !== undefined &&
+          (await serveUi(response, options.uiDirectory, url.pathname))
+        ) {
+          return;
+        }
         writeJson(response, 404, { error: "not found" });
         return;
       }
@@ -185,7 +190,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           url.pathname === "/api/window/hide" ||
           url.pathname === "/api/shutdown")
       ) {
-        if (!(request.headers["content-type"] ?? "").startsWith("application/json")) {
+        if (!hasJsonMediaType(request)) {
           writeJson(response, 415, { error: "content-type must be application/json" });
           return;
         }
