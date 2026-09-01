@@ -14,6 +14,7 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "start": "npm run build && electron .",
     "mcp": "node dist/mcp/main.js",
+    "smoke": "npm run build && node scripts/smoke-test.mjs",
     "validate:plugin": "node scripts/validate-plugin.mjs"
   },
   "dependencies": {
