@@ -1,0 +1,170 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) await cleanups.pop()?.();
+});
+
+async function fixture(
+  handler: (request: IncomingMessage, response: ServerResponse) => void
+): Promise<{ baseUrl: string; tokenPath: string; close(): Promise<void> }> {
+  const directory = await mkdtemp(join(tmpdir(), "hud-client-"));
+  const tokenPath = join(directory, "auth.token");
+  await writeFile(tokenPath, "test-token\n");
+  const server = createServer(handler);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("missing fixture address");
+  const close = async () => {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error === undefined ? resolve() : reject(error)))
+    );
+    await rm(directory, { recursive: true, force: true });
+  };
+  cleanups.push(close);
+  return { baseUrl: `http://127.0.0.1:${address.port}`, tokenPath, close };
+}
+
+function json(response: ServerResponse, status: number, value: unknown): void {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(value));
+}
+
+const health = {
+  service: "codex-progress-hud" as const,
+  pid: 4312,
+  version: "0.2.0",
+  protocolVersion: 1 as const,
+  instanceNonce: "fixture-nonce",
+  startedAt: "2026-09-01T01:02:03.000Z",
+  visibility: "visible" as const
+};
+
+describe("CompanionHttpClient", () => {
+  it("reads only minimal identity without sending the bearer token", async () => {
+    let authorization: string | undefined;
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      authorization = request.headers.authorization;
+      json(response, 200, { service: "codex-progress-hud", protocolVersion: 1 });
+    });
+
+    const result = await new CompanionHttpClient(baseUrl, tokenPath).identity();
+
+    expect(result).toEqual({ service: "codex-progress-hud", protocolVersion: 1 });
+    expect(authorization).toBeUndefined();
+  });
+
+  it("authenticates full health and validates its complete shape", async () => {
+    let authorization: string | undefined;
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      authorization = request.headers.authorization;
+      json(response, 200, health);
+    });
+
+    expect(await new CompanionHttpClient(baseUrl, tokenPath).health()).toEqual(health);
+    expect(authorization).toBe("Bearer test-token");
+  });
+
+  it("uses authenticated JSON controls and preserves task requests", async () => {
+    const seen: Array<{
+      method: string | undefined;
+      path: string | undefined;
+      authorization: string | undefined;
+      body: string;
+    }> = [];
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        seen.push({
+          method: request.method,
+          path: request.url,
+          authorization: request.headers.authorization,
+          body: Buffer.concat(chunks).toString("utf8")
+        });
+        if (request.url === "/api/health") json(response, 200, health);
+        else if (request.url === "/api/snapshot") json(response, 200, { task: null, eta: null });
+        else if (request.url === "/api/events") json(response, 202, { task: null, eta: null });
+        else json(response, 202, { accepted: true });
+      });
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+
+    await client.show();
+    await client.hide();
+    await client.shutdown();
+    await client.status();
+    await client.submit({ taskId: "task-1", title: "Test", event: { type: "turn_started" } });
+
+    expect(seen.map(({ method, path }) => [method, path])).toEqual([
+      ["POST", "/api/window/show"],
+      ["POST", "/api/window/hide"],
+      ["POST", "/api/shutdown"],
+      ["GET", "/api/snapshot"],
+      ["POST", "/api/events"]
+    ]);
+    expect(seen.every(({ authorization }) => authorization === "Bearer test-token")).toBe(true);
+    expect(seen.slice(0, 3).map(({ body }) => body)).toEqual(["{}", "{}", "{}"]);
+    expect(JSON.parse(seen[4]!.body)).toEqual({
+      taskId: "task-1",
+      title: "Test",
+      event: { type: "turn_started" }
+    });
+  });
+
+  it("categorizes network refusal separately from authentication failure", async () => {
+    const offlineFixture = await fixture((_request, response) => json(response, 200, {}));
+    await offlineFixture.close();
+    cleanups.pop();
+    const authFixture = await fixture((_request, response) =>
+      json(response, 401, { error: "secret raw response" })
+    );
+
+    await expect(
+      new CompanionHttpClient(offlineFixture.baseUrl, offlineFixture.tokenPath).identity()
+    ).rejects.toMatchObject({ code: "OFFLINE" });
+    await expect(
+      new CompanionHttpClient(authFixture.baseUrl, authFixture.tokenPath).health()
+    ).rejects.toMatchObject({ code: "AUTH_ERROR" });
+  });
+
+  it("does not expose raw response bodies or tokens in typed errors", async () => {
+    const secretBody = "server-secret-body";
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 500, { error: secretBody, token: "test-token" })
+    );
+
+    const error = await new CompanionHttpClient(baseUrl, tokenPath).health().catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(HudClientError);
+    expect(String(error)).not.toContain(secretBody);
+    expect(String(error)).not.toContain("test-token");
+  });
+
+  it("rejects foreign services and incompatible protocol versions with distinct codes", async () => {
+    let incompatible = false;
+    const { baseUrl, tokenPath } = await fixture((_request, response) => {
+      json(
+        response,
+        200,
+        incompatible
+          ? { service: "codex-progress-hud", protocolVersion: 2 }
+          : { service: "other-service", protocolVersion: 1 }
+      );
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+
+    await expect(client.identity()).rejects.toMatchObject({ code: "PORT_CONFLICT" });
+    incompatible = true;
+    await expect(client.identity()).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
+  });
+});
