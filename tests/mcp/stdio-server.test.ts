@@ -64,6 +64,11 @@ describe("plugin MCP stdio server", () => {
 
         expect(result.tools.map((tool) => tool.name).sort()).toEqual(
           [
+            "hud_close",
+            "hud_diagnose",
+            "hud_hide",
+            "hud_open",
+            "hud_status",
             "progress_report",
             "task_outcome",
             "task_status",

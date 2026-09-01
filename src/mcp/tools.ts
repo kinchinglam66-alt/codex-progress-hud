@@ -1,6 +1,13 @@
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ProgressEnvelope } from "../core/schema.js";
+import type { CompanionManager } from "../lifecycle/companion-manager.js";
+import type {
+  EnsureResult,
+  HudErrorCode,
+  HudLifecycleSnapshot,
+  ObservedHudState
+} from "../lifecycle/types.js";
 import type { ProgressClient } from "./report-client.js";
 
 const id = z.string().trim().min(1).max(128);
@@ -45,10 +52,28 @@ export interface ToolResult extends CallToolResult {
   [key: string]: unknown;
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
+  structuredContent?: HudToolPayload;
+}
+
+export interface HudToolPayload {
+  [key: string]: unknown;
+  ok: boolean;
+  desiredState?: "on" | "off";
+  observedState?: ObservedHudState;
+  code?: HudErrorCode;
+  reportPath?: string;
 }
 
 function textResult(text: string): ToolResult {
   return { content: [{ type: "text", text }] };
+}
+
+function structuredResult(text: string, payload: HudToolPayload, isError = false): ToolResult {
+  return {
+    content: [{ type: "text", text }],
+    structuredContent: payload,
+    ...(isError ? { isError: true } : {})
+  };
 }
 
 function invalidResult(kind: string): ToolResult {
@@ -56,15 +81,11 @@ function invalidResult(kind: string): ToolResult {
 }
 
 function offlineResult(): ToolResult {
-  return {
-    content: [
-      {
-        type: "text",
-        text: "Progress HUD is not reachable. Start the local companion and retry."
-      }
-    ],
-    isError: true
-  };
+  return structuredResult(
+    "Progress HUD is not reachable. Start the local companion and retry.",
+    { ok: false, observedState: "crashed", code: "COMPANION_CRASHED" },
+    true
+  );
 }
 
 function noActiveTaskResult(): ToolResult {
@@ -75,29 +96,113 @@ async function submitForCurrentTask(
   client: ProgressClient,
   event: ProgressEnvelope["event"]
 ): Promise<ToolResult> {
-  try {
-    const current = await client.status();
-    if (
-      current.task === null ||
-      current.task.id === undefined ||
-      current.task.title === undefined
-    ) {
-      return noActiveTaskResult();
-    }
-    const snapshot = await client.submit({
-      taskId: current.task.id,
-      title: current.task.title,
-      event
-    });
-    return textResult(
-      `Tracking ${event.type.replace("tracking_", "")}: ${snapshot.task?.status ?? "idle"}.`
-    );
-  } catch {
-    return offlineResult();
+  const current = await client.status();
+  if (
+    current.task === null ||
+    current.task.id === undefined ||
+    current.task.title === undefined
+  ) {
+    return noActiveTaskResult();
   }
+  const snapshot = await client.submit({
+    taskId: current.task.id,
+    title: current.task.title,
+    event
+  });
+  return textResult(
+    `Tracking ${event.type.replace("tracking_", "")}: ${snapshot.task?.status ?? "idle"}.`
+  );
 }
 
-export function createToolHandlers(client: ProgressClient) {
+export interface ToolHandlerDependencies {
+  progressClient: ProgressClient;
+  companionManager: CompanionManager;
+}
+
+export function createToolHandlers({
+  progressClient: client,
+  companionManager
+}: ToolHandlerDependencies) {
+  function lifecycleErrorResult(result: Extract<EnsureResult, { kind: "error" }>): ToolResult {
+    return structuredResult(
+      `Progress HUD lifecycle failed (${result.code}). Check HUD status or run diagnostics.`,
+      {
+        ok: false,
+        ...(result.snapshot.desiredState === undefined
+          ? {}
+          : { desiredState: result.snapshot.desiredState }),
+        observedState: result.snapshot.observedState,
+        code: result.code
+      },
+      true
+    );
+  }
+
+  function suppressedResult(text: string): ToolResult {
+    return structuredResult(text, {
+      ok: true,
+      desiredState: "off",
+      code: "MANUALLY_DISABLED"
+    });
+  }
+
+  async function ensure(
+    reason: Parameters<CompanionManager["ensureForWrite"]>[0],
+    suppressedText: string
+  ): Promise<ToolResult | undefined> {
+    try {
+      const result = await companionManager.ensureForWrite(reason);
+      if (result.kind === "suppressed") return suppressedResult(suppressedText);
+      if (result.kind === "error") return lifecycleErrorResult(result);
+      return undefined;
+    } catch {
+      return structuredResult(
+        "Progress HUD lifecycle failed (INTERNAL_ERROR). Run HUD diagnostics.",
+        { ok: false, code: "INTERNAL_ERROR" },
+        true
+      );
+    }
+  }
+
+  async function runWrite(
+    reason: Parameters<CompanionManager["ensureForWrite"]>[0],
+    suppressedText: string,
+    operation: () => Promise<ToolResult>
+  ): Promise<ToolResult> {
+    const blocked = await ensure(reason, suppressedText);
+    if (blocked !== undefined) return blocked;
+    try {
+      return await operation();
+    } catch {
+      const recoveryBlocked = await ensure(reason, suppressedText);
+      if (recoveryBlocked !== undefined) return recoveryBlocked;
+      try {
+        return await operation();
+      } catch {
+        return offlineResult();
+      }
+    }
+  }
+
+  function lifecycleResult(
+    action: "open" | "hidden" | "closed",
+    snapshot: HudLifecycleSnapshot,
+    observational = false
+  ): ToolResult {
+    const payload: HudToolPayload = {
+      ok: observational || snapshot.code === undefined,
+      ...(snapshot.desiredState === undefined ? {} : { desiredState: snapshot.desiredState }),
+      observedState: snapshot.observedState,
+      ...(snapshot.code === undefined ? {} : { code: snapshot.code })
+    };
+    const text = observational
+      ? `Progress HUD is ${snapshot.observedState}.`
+      : snapshot.code === undefined
+        ? `Progress HUD is ${action}.`
+        : `Progress HUD lifecycle failed (${snapshot.code}). Check HUD status or run diagnostics.`;
+    return structuredResult(text, payload, !observational && snapshot.code !== undefined);
+  }
+
   return {
     async progressReport(input: unknown): Promise<ToolResult> {
       const parsed = progressReportSchema.safeParse(input);
@@ -124,37 +229,41 @@ export function createToolHandlers(client: ProgressClient) {
           ...(remainingSeconds === undefined ? {} : { remainingSeconds })
         };
       }
-      try {
-        const snapshot = await client.submit({
-          taskId: value.task_id,
-          title: value.title,
-          event
-        });
-        return textResult(`Progress recorded: ${snapshot.task?.status ?? "idle"}.`);
-      } catch {
-        return offlineResult();
-      }
+      return runWrite(
+        "progress_report",
+        "HUD is manually closed; progress was not displayed.",
+        async () => {
+          const snapshot = await client.submit({
+            taskId: value.task_id,
+            title: value.title,
+            event
+          });
+          return textResult(`Progress recorded: ${snapshot.task?.status ?? "idle"}.`);
+        }
+      );
     },
 
     async taskOutcome(input: unknown): Promise<ToolResult> {
       const parsed = taskOutcomeSchema.safeParse(input);
       if (!parsed.success) return invalidResult("task outcome");
       const value = parsed.data;
-      try {
-        const snapshot = await client.submit({
-          taskId: value.task_id,
-          title: value.title,
-          event: {
-            type: "model_outcome",
-            outcome: value.outcome,
-            verified: value.verified,
-            ...(value.detail === undefined ? {} : { detail: value.detail })
-          }
-        });
-        return textResult(`Outcome recorded: ${snapshot.task?.status ?? "idle"}.`);
-      } catch {
-        return offlineResult();
-      }
+      return runWrite(
+        "task_outcome",
+        "HUD is manually closed; the outcome was not displayed.",
+        async () => {
+          const snapshot = await client.submit({
+            taskId: value.task_id,
+            title: value.title,
+            event: {
+              type: "model_outcome",
+              outcome: value.outcome,
+              verified: value.verified,
+              ...(value.detail === undefined ? {} : { detail: value.detail })
+            }
+          });
+          return textResult(`Outcome recorded: ${snapshot.task?.status ?? "idle"}.`);
+        }
+      );
     },
 
     async taskStatus(): Promise<ToolResult> {
@@ -169,35 +278,113 @@ export function createToolHandlers(client: ProgressClient) {
     async trackingStart(input: unknown): Promise<ToolResult> {
       const parsed = trackingStartSchema.safeParse(input ?? {});
       if (!parsed.success) return invalidResult("tracking start");
-      try {
-        const current = await client.status();
-        const taskId = parsed.data.task_id ?? current.task?.id ?? "current";
-        const taskTitle = parsed.data.title ?? current.task?.title ?? "当前 Codex 任务";
-        const snapshot = await client.submit({
-          taskId,
-          title: taskTitle,
-          event: { type: "tracking_started" }
-        });
-        return textResult(`Tracking started: ${snapshot.task?.status ?? "idle"}.`);
-      } catch {
-        return offlineResult();
-      }
+      return runWrite(
+        "tracking_start",
+        "HUD is manually closed; tracking was not started.",
+        async () => {
+          const current = await client.status();
+          const taskId = parsed.data.task_id ?? current.task?.id ?? "current";
+          const taskTitle = parsed.data.title ?? current.task?.title ?? "当前 Codex 任务";
+          const snapshot = await client.submit({
+            taskId,
+            title: taskTitle,
+            event: { type: "tracking_started" }
+          });
+          return textResult(`Tracking started: ${snapshot.task?.status ?? "idle"}.`);
+        }
+      );
     },
 
     async trackingPause(_input?: unknown): Promise<ToolResult> {
-      return submitForCurrentTask(client, { type: "tracking_paused" });
+      return runWrite(
+        "progress_report",
+        "HUD is manually closed; tracking was not paused.",
+        () => submitForCurrentTask(client, { type: "tracking_paused" })
+      );
     },
 
     async trackingResume(_input?: unknown): Promise<ToolResult> {
-      return submitForCurrentTask(client, { type: "tracking_resumed" });
+      return runWrite(
+        "progress_report",
+        "HUD is manually closed; tracking was not resumed.",
+        () => submitForCurrentTask(client, { type: "tracking_resumed" })
+      );
     },
 
     async trackingStop(_input?: unknown): Promise<ToolResult> {
-      return submitForCurrentTask(client, { type: "tracking_stopped" });
+      return runWrite(
+        "progress_report",
+        "HUD is manually closed; tracking was not stopped.",
+        () => submitForCurrentTask(client, { type: "tracking_stopped" })
+      );
     },
 
     async trackingStatus(): Promise<ToolResult> {
       return this.taskStatus();
+    },
+
+    async hudOpen(): Promise<ToolResult> {
+      try {
+        return lifecycleResult("open", await companionManager.open());
+      } catch {
+        return structuredResult(
+          "Progress HUD could not be opened (INTERNAL_ERROR). Run HUD diagnostics.",
+          { ok: false, code: "INTERNAL_ERROR" },
+          true
+        );
+      }
+    },
+
+    async hudHide(): Promise<ToolResult> {
+      try {
+        return lifecycleResult("hidden", await companionManager.hide());
+      } catch {
+        return structuredResult(
+          "Progress HUD could not be hidden (INTERNAL_ERROR). Run HUD diagnostics.",
+          { ok: false, code: "INTERNAL_ERROR" },
+          true
+        );
+      }
+    },
+
+    async hudClose(): Promise<ToolResult> {
+      try {
+        return lifecycleResult("closed", await companionManager.close());
+      } catch {
+        return structuredResult(
+          "Progress HUD could not be closed (INTERNAL_ERROR). Run HUD diagnostics.",
+          { ok: false, code: "INTERNAL_ERROR" },
+          true
+        );
+      }
+    },
+
+    async hudStatus(): Promise<ToolResult> {
+      try {
+        return lifecycleResult("open", await companionManager.status(), true);
+      } catch {
+        return structuredResult(
+          "Progress HUD status could not be read (INTERNAL_ERROR). Run HUD diagnostics.",
+          { ok: false, code: "INTERNAL_ERROR" },
+          true
+        );
+      }
+    },
+
+    async hudDiagnose(): Promise<ToolResult> {
+      try {
+        const report = await companionManager.diagnose();
+        return structuredResult(`HUD diagnostic report created: ${report.path}`, {
+          ok: true,
+          reportPath: report.path
+        });
+      } catch {
+        return structuredResult(
+          "Progress HUD diagnostics failed (INTERNAL_ERROR).",
+          { ok: false, code: "INTERNAL_ERROR" },
+          true
+        );
+      }
     }
   };
 }

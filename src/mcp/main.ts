@@ -1,6 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { HttpProgressClient } from "./report-client.js";
+import { createCompanionManager } from "../lifecycle/companion-manager.js";
+import { processLauncher } from "../lifecycle/process-launcher.js";
+import { createLifecycleStateStore } from "../lifecycle/state-store.js";
+import {
+  defaultDataDirectory,
+  defaultDiagnosticsDirectory,
+  defaultInstallManifestPath,
+  defaultRuntimePath,
+  defaultServiceUrl,
+  defaultSettingsPath
+} from "../server/paths.js";
+import { CompanionHttpClient } from "./report-client.js";
 import {
   createToolHandlers,
   progressReportSchema,
@@ -8,8 +19,29 @@ import {
   trackingStartSchema
 } from "./tools.js";
 
-const server = new McpServer({ name: "codex-progress-hud", version: "0.1.0" });
-const handlers = createToolHandlers(new HttpProgressClient());
+const version = "0.1.0";
+const server = new McpServer({ name: "codex-progress-hud", version });
+const progressClient = new CompanionHttpClient();
+const serviceUrl = new URL(defaultServiceUrl());
+const companionManager = createCompanionManager({
+  store: createLifecycleStateStore({
+    settingsPath: defaultSettingsPath(),
+    runtimePath: defaultRuntimePath(),
+    installManifestPath: defaultInstallManifestPath()
+  }),
+  client: progressClient,
+  launcher: processLauncher,
+  diagnostics: {
+    directory: defaultDiagnosticsDirectory(),
+    pluginVersion: version,
+    mcpVersion: version,
+    host: serviceUrl.hostname,
+    port: Number(serviceUrl.port || (serviceUrl.protocol === "https:" ? 443 : 80)),
+    installManifestPath: defaultInstallManifestPath(),
+    dataDirectoryPath: defaultDataDirectory()
+  }
+});
+const handlers = createToolHandlers({ progressClient, companionManager });
 
 server.registerTool(
   "progress_report",
@@ -89,6 +121,36 @@ server.registerTool(
     description: "Read the current Progress HUD snapshot without changing it."
   },
   () => handlers.trackingStatus()
+);
+
+server.registerTool(
+  "hud_open",
+  { title: "Open Progress HUD" },
+  () => handlers.hudOpen()
+);
+
+server.registerTool(
+  "hud_hide",
+  { title: "Hide Progress HUD" },
+  () => handlers.hudHide()
+);
+
+server.registerTool(
+  "hud_close",
+  { title: "Close Progress HUD" },
+  () => handlers.hudClose()
+);
+
+server.registerTool(
+  "hud_status",
+  { title: "Read Progress HUD lifecycle" },
+  () => handlers.hudStatus()
+);
+
+server.registerTool(
+  "hud_diagnose",
+  { title: "Diagnose Progress HUD" },
+  () => handlers.hudDiagnose()
 );
 
 await server.connect(new StdioServerTransport());

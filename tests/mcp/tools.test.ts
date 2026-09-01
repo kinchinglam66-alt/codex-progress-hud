@@ -1,10 +1,42 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CompanionManager } from "../../src/lifecycle/companion-manager.js";
 import { createToolHandlers } from "../../src/mcp/tools.js";
+
+function createManager(overrides: Partial<CompanionManager> = {}): CompanionManager {
+  return {
+    status: vi.fn(async () => ({ observedState: "running" as const })),
+    open: vi.fn(async () => ({
+      desiredState: "on" as const,
+      observedState: "running" as const
+    })),
+    hide: vi.fn(async () => ({
+      desiredState: "on" as const,
+      observedState: "hidden" as const
+    })),
+    close: vi.fn(async () => ({
+      desiredState: "off" as const,
+      observedState: "stopped" as const
+    })),
+    ensureForWrite: vi.fn(async () => ({
+      kind: "ready" as const,
+      snapshot: { desiredState: "on" as const, observedState: "running" as const }
+    })),
+    diagnose: vi.fn(async () => ({ path: "C:\\diagnostics\\hud.md" })),
+    ...overrides
+  };
+}
+
+function createHandlers(
+  progressClient: Parameters<typeof createToolHandlers>[0]["progressClient"],
+  companionManager: CompanionManager = createManager()
+) {
+  return createToolHandlers({ progressClient, companionManager });
+}
 
 describe("MCP progress tool handlers", () => {
   it("normalizes a progress report into a minimal model event", async () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
-    const handlers = createToolHandlers({ submit, status: vi.fn() });
+    const handlers = createHandlers({ submit, status: vi.fn() });
 
     const result = await handlers.progressReport({
       task_id: "task-1",
@@ -34,7 +66,7 @@ describe("MCP progress tool handlers", () => {
 
   it("turns a waiting report into a waiting event without a fabricated percentage", async () => {
     const submit = vi.fn(async () => ({ task: { status: "waiting_approval" }, eta: null }));
-    const handlers = createToolHandlers({ submit, status: vi.fn() });
+    const handlers = createHandlers({ submit, status: vi.fn() });
 
     await handlers.progressReport({
       task_id: "task-1",
@@ -56,7 +88,7 @@ describe("MCP progress tool handlers", () => {
   });
 
   it("rejects progress and confidence outside the public 0..1 contract", async () => {
-    const handlers = createToolHandlers({ submit: vi.fn(), status: vi.fn() });
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() });
 
     const result = await handlers.progressReport({
       task_id: "task-1",
@@ -72,7 +104,7 @@ describe("MCP progress tool handlers", () => {
 
   it("reports a verified completion without inventing validation evidence", async () => {
     const submit = vi.fn(async () => ({ task: { status: "succeeded_verified" }, eta: null }));
-    const handlers = createToolHandlers({ submit, status: vi.fn() });
+    const handlers = createHandlers({ submit, status: vi.fn() });
 
     await handlers.taskOutcome({
       task_id: "task-1",
@@ -95,7 +127,7 @@ describe("MCP progress tool handlers", () => {
   });
 
   it("returns a safe diagnostic when the companion is offline", async () => {
-    const handlers = createToolHandlers({
+    const handlers = createHandlers({
       submit: vi.fn(async () => {
         throw new Error("connect ECONNREFUSED 127.0.0.1 token=secret");
       }),
@@ -117,7 +149,7 @@ describe("MCP progress tool handlers", () => {
   it("starts tracking the supplied task without requiring a progress report", async () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
     const status = vi.fn(async () => ({ task: null, eta: null }));
-    const handlers = createToolHandlers({ submit, status });
+    const handlers = createHandlers({ submit, status });
 
     const result = await handlers.trackingStart({
       task_id: "task-1",
@@ -142,7 +174,7 @@ describe("MCP progress tool handlers", () => {
       task: { id: "task-1", title: "Implement controls", status: "running" },
       eta: null
     }));
-    const handlers = createToolHandlers({ submit, status });
+    const handlers = createHandlers({ submit, status });
 
     await handlers.trackingPause({});
     await handlers.trackingResume({});
@@ -168,7 +200,7 @@ describe("MCP progress tool handlers", () => {
   });
 
   it("returns a clear error when a control needs a current task but none exists", async () => {
-    const handlers = createToolHandlers({
+    const handlers = createHandlers({
       submit: vi.fn(),
       status: vi.fn(async () => ({ task: null, eta: null }))
     });
@@ -177,5 +209,213 @@ describe("MCP progress tool handlers", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toBe("No active task to control.");
+  });
+
+  it("maps lifecycle operations to exact structured HUD states", async () => {
+    const companionManager = createManager();
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    await expect(handlers.hudOpen()).resolves.toMatchObject({
+      content: [{ type: "text", text: "Progress HUD is open." }],
+      structuredContent: { ok: true, desiredState: "on", observedState: "running" }
+    });
+    await expect(handlers.hudHide()).resolves.toMatchObject({
+      content: [{ type: "text", text: "Progress HUD is hidden." }],
+      structuredContent: { ok: true, desiredState: "on", observedState: "hidden" }
+    });
+    await expect(handlers.hudClose()).resolves.toMatchObject({
+      content: [{ type: "text", text: "Progress HUD is closed." }],
+      structuredContent: { ok: true, desiredState: "off", observedState: "stopped" }
+    });
+    expect(companionManager.open).toHaveBeenCalledOnce();
+    expect(companionManager.hide).toHaveBeenCalledOnce();
+    expect(companionManager.close).toHaveBeenCalledOnce();
+  });
+
+  it("returns lifecycle failures with their exact state and code", async () => {
+    const companionManager = createManager({
+      open: vi.fn(async () => ({
+        desiredState: "on" as const,
+        observedState: "port_conflict" as const,
+        code: "PORT_CONFLICT" as const
+      }))
+    });
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    const result = await handlers.hudOpen();
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      desiredState: "on",
+      observedState: "port_conflict",
+      code: "PORT_CONFLICT"
+    });
+  });
+
+  it("keeps lifecycle status observational and preserves observed failures", async () => {
+    const companionManager = createManager({
+      status: vi.fn(async () => ({
+        desiredState: "on" as const,
+        observedState: "incompatible" as const,
+        code: "VERSION_MISMATCH" as const
+      }))
+    });
+    const progressClient = { submit: vi.fn(), status: vi.fn() };
+    const handlers = createHandlers(progressClient, companionManager);
+
+    const result = await handlers.hudStatus();
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      desiredState: "on",
+      observedState: "incompatible",
+      code: "VERSION_MISMATCH"
+    });
+    expect(companionManager.ensureForWrite).not.toHaveBeenCalled();
+    expect(progressClient.status).not.toHaveBeenCalled();
+  });
+
+  it("returns the sanitized diagnostic report path", async () => {
+    const companionManager = createManager();
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    const result = await handlers.hudDiagnose();
+
+    expect(companionManager.diagnose).toHaveBeenCalledOnce();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      reportPath: "C:\\diagnostics\\hud.md"
+    });
+  });
+
+  it("suppresses a progress report successfully while manually disabled", async () => {
+    const companionManager = createManager({
+      ensureForWrite: vi.fn(async () => ({
+        kind: "suppressed" as const,
+        code: "MANUALLY_DISABLED" as const
+      }))
+    });
+    const progressClient = { submit: vi.fn(), status: vi.fn() };
+    const handlers = createHandlers(progressClient, companionManager);
+
+    const result = await handlers.progressReport({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toBe(
+      "HUD is manually closed; progress was not displayed."
+    );
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      desiredState: "off",
+      code: "MANUALLY_DISABLED"
+    });
+    expect(companionManager.ensureForWrite).toHaveBeenCalledWith("progress_report");
+    expect(progressClient.submit).not.toHaveBeenCalled();
+  });
+
+  it("returns ensure failures before attempting the report", async () => {
+    const companionManager = createManager({
+      ensureForWrite: vi.fn(async () => ({
+        kind: "error" as const,
+        code: "COMPANION_NOT_INSTALLED" as const,
+        snapshot: {
+          desiredState: "on" as const,
+          observedState: "stopped" as const,
+          code: "COMPANION_NOT_INSTALLED" as const
+        }
+      }))
+    });
+    const progressClient = { submit: vi.fn(), status: vi.fn() };
+    const handlers = createHandlers(progressClient, companionManager);
+
+    const result = await handlers.progressReport({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      desiredState: "on",
+      observedState: "stopped",
+      code: "COMPANION_NOT_INSTALLED"
+    });
+    expect(progressClient.submit).not.toHaveBeenCalled();
+  });
+
+  it("ensures tracking start before reading task state and can clear explicit off", async () => {
+    const companionManager = createManager();
+    const status = vi.fn(async () => ({ task: null, eta: null }));
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status }, companionManager);
+
+    await handlers.trackingStart({ task_id: "task-1", title: "Implement controls" });
+
+    expect(companionManager.ensureForWrite).toHaveBeenCalledWith("tracking_start");
+    expect(vi.mocked(companionManager.ensureForWrite).mock.invocationCallOrder[0]).toBeLessThan(
+      status.mock.invocationCallOrder[0]!
+    );
+  });
+
+  it("tracking stop never closes the HUD", async () => {
+    const companionManager = createManager();
+    const handlers = createHandlers(
+      {
+        submit: vi.fn(async () => ({ task: { status: "stopped" }, eta: null })),
+        status: vi.fn(async () => ({
+          task: { id: "task-1", title: "Implement controls", status: "running" },
+          eta: null
+        }))
+      },
+      companionManager
+    );
+
+    await handlers.trackingStop({});
+
+    expect(companionManager.close).not.toHaveBeenCalled();
+  });
+
+  it("retries the original report exactly once after a recovered startup", async () => {
+    const companionManager = createManager();
+    const submit = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("companion disappeared"))
+      .mockResolvedValueOnce({ task: { status: "running" }, eta: null });
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    const result = await handlers.progressReport({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(companionManager.ensureForWrite).toHaveBeenCalledTimes(2);
+    expect(submit).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry the original report more than once", async () => {
+    const companionManager = createManager();
+    const submit = vi.fn(async () => {
+      throw new Error("companion disappeared");
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    const result = await handlers.progressReport({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBe(true);
+    expect(companionManager.ensureForWrite).toHaveBeenCalledTimes(2);
+    expect(submit).toHaveBeenCalledTimes(2);
   });
 });
