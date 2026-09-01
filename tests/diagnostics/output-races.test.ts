@@ -1,4 +1,5 @@
 import * as actualFs from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,11 +16,53 @@ import {
 const race = {
   beforeOpen: undefined as undefined | ((path: string) => Promise<boolean>),
   beforeMutation: undefined as undefined | ((kind: string, path: string) => Promise<boolean>),
-  openCalls: 0
+  openCalls: 0,
+  lockCollision: undefined as undefined | {
+    published: boolean;
+    ownerStats: number;
+  }
 };
+
+const COLLIDING_IDENTITIES = {
+  path: { dev: 1_152_921_504_606_846_976n, ino: 2_305_843_009_213_693_952n },
+  handle: { dev: 1_152_921_504_606_846_977n, ino: 2_305_843_009_213_693_953n },
+  ownerRecord: { dev: 1_152_921_504_606_846_978n, ino: 2_305_843_009_213_693_954n },
+  ownerCurrent: { dev: 1_152_921_504_606_846_979n, ino: 2_305_843_009_213_693_955n }
+} as const;
+
+function withIdentity(
+  information: BigIntStats,
+  identity: { readonly dev: bigint; readonly ino: bigint }
+): BigIntStats {
+  return new Proxy(information, {
+    get(target, property) {
+      if (property === "dev" || property === "ino") return identity[property];
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
 
 const injectedFileSystem: FileSystemOperations = {
   ...nodeFileSystemOperations,
+  lstatBigInt: async (path) => {
+    const information = await nodeFileSystemOperations.lstatBigInt(path);
+    const collision = race.lockCollision;
+    const text = String(path);
+    if (collision === undefined) return information;
+    if (text.endsWith(".companion.log.lock")) {
+      collision.published = true;
+      return withIdentity(information, COLLIDING_IDENTITIES.path);
+    }
+    if (collision.published && text.includes(".companion.log.lock.owner-")) {
+      collision.ownerStats += 1;
+      const identity = collision.ownerStats === 1
+        ? COLLIDING_IDENTITIES.ownerRecord
+        : COLLIDING_IDENTITIES.ownerCurrent;
+      return withIdentity(information, identity);
+    }
+    return information;
+  },
   open: async (...arguments_: Parameters<typeof nodeFileSystemOperations.open>) => {
     race.openCalls += 1;
     const path = String(arguments_[0]);
@@ -31,6 +74,19 @@ const injectedFileSystem: FileSystemOperations = {
     return new Proxy(handle, {
       get(target, property) {
         const value = Reflect.get(target, property, target);
+        if (property === "stat" && typeof value === "function") {
+          return async (...methodArguments: unknown[]) => {
+            const information = await Reflect.apply(value, target, methodArguments);
+            if (
+              race.lockCollision !== undefined &&
+              path.endsWith(".companion.log.lock") &&
+              (methodArguments[0] as { bigint?: boolean } | undefined)?.bigint === true
+            ) {
+              return withIdentity(information as BigIntStats, COLLIDING_IDENTITIES.handle);
+            }
+            return information;
+          };
+        }
         if ((property === "truncate" || property === "write") && typeof value === "function") {
           return async (...methodArguments: unknown[]) => {
             const beforeMutation = race.beforeMutation;
@@ -63,6 +119,7 @@ afterEach(async () => {
   race.beforeOpen = undefined;
   race.beforeMutation = undefined;
   race.openCalls = 0;
+  race.lockCollision = undefined;
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
@@ -93,6 +150,35 @@ function reportInput(directory: string): DiagnosticReportInput {
 }
 
 describe("diagnostic output race defenses", () => {
+  it("rejects lock and owner files whose distinct bigint identities collide as numbers", async () => {
+    const directory = await actualFs.mkdtemp(join(tmpdir(), "hud-lock-identity-collision-"));
+    cleanups.push(() => actualFs.rm(directory, { recursive: true, force: true }));
+    race.lockCollision = { published: false, ownerStats: 0 };
+    const numericIdentities = Object.values(COLLIDING_IDENTITIES).map(({ dev, ino }) => [
+      Number(dev),
+      Number(ino)
+    ]);
+    expect(new Set(numericIdentities.map(([dev]) => dev))).toHaveLength(1);
+    expect(new Set(numericIdentities.map(([, ino]) => ino))).toHaveLength(1);
+    expect(new Set(Object.values(COLLIDING_IDENTITIES).map(({ dev }) => dev))).toHaveLength(4);
+    expect(new Set(Object.values(COLLIDING_IDENTITIES).map(({ ino }) => ino))).toHaveLength(4);
+    const logger = createOperationalLogger({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    });
+
+    await expect(logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    })).rejects.toThrow(/lock changed|lock path changed/iu);
+
+    const files = await actualFs.readdir(directory);
+    expect(files.some((file) => file.startsWith(".companion.log.lock.owner-"))).toBe(true);
+    expect(files).not.toContain("companion.log");
+  });
+
   it("rejects a directory substitution before report content is written", async () => {
     const root = await actualFs.mkdtemp(join(tmpdir(), "hud-output-swap-"));
     cleanups.push(() => actualFs.rm(root, { recursive: true, force: true }));

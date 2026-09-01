@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, lstat, unlink, type FileHandle } from "node:fs/promises";
+import { link, unlink, type FileHandle } from "node:fs/promises";
 import { connect, createServer, type Server } from "node:net";
 import { resolve } from "node:path";
 import type { ObservedHudState } from "../lifecycle/types.js";
@@ -210,8 +210,8 @@ async function ownerIsAlive(address: string): Promise<boolean> {
 }
 
 interface LockRecord {
-  device: number | bigint;
-  inode: number | bigint;
+  device: bigint;
+  inode: bigint;
   owner: string;
   tempName: string;
   token: string;
@@ -223,23 +223,23 @@ async function readLockRecord(
 ): Promise<LockRecord | null> {
   let before;
   try {
-    before = await lstat(lockPath);
+    before = await fileSystem.lstatBigInt(lockPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink < 1 || before.nlink > 2) {
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink < 1n || before.nlink > 2n) {
     throw new Error("operational log lock must be a regular owned file");
   }
-  if (before.size > 512) throw new Error("operational log lock metadata is invalid");
+  if (before.size > 512n) throw new Error("operational log lock metadata is invalid");
   const handle = await fileSystem.open(lockPath, "r");
   try {
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     if (opened.dev !== before.dev || opened.ino !== before.ino) {
       throw new Error("operational log lock changed while being opened");
     }
     const text = await handle.readFile({ encoding: "utf8" });
-    const current = await lstat(lockPath);
+    const current = await fileSystem.lstatBigInt(lockPath);
     if (current.dev !== opened.dev || current.ino !== opened.ino) {
       throw new Error("operational log lock path changed while being read");
     }
@@ -264,10 +264,14 @@ async function readLockRecord(
   }
 }
 
-async function unlinkIfOwned(path: string, record: LockRecord): Promise<boolean> {
+async function unlinkIfOwned(
+  path: string,
+  record: LockRecord,
+  fileSystem: FileSystemOperations
+): Promise<boolean> {
   let information;
   try {
-    information = await lstat(path);
+    information = await fileSystem.lstatBigInt(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
@@ -307,10 +311,10 @@ async function acquireLock(
       if (published === null || published.token !== token || published.owner !== owner.address) {
         throw new Error("operational log lock publication could not be verified");
       }
-      await unlinkIfOwned(tempPath, published);
+      await unlinkIfOwned(tempPath, published, fileSystem);
       return { ...published, lockPath };
     } catch (error) {
-      const tempInformation = await lstat(tempPath);
+      const tempInformation = await fileSystem.lstatBigInt(tempPath);
       const tempRecord: LockRecord = {
         device: tempInformation.dev,
         inode: tempInformation.ino,
@@ -318,15 +322,15 @@ async function acquireLock(
         tempName,
         token
       };
-      await unlinkIfOwned(tempPath, tempRecord);
+      await unlinkIfOwned(tempPath, tempRecord, fileSystem);
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     const transaction = await acquireTransaction(logDirectory);
     try {
       const existing = await readLockRecord(lockPath, fileSystem);
       if (existing !== null && !await ownerIsAlive(existing.owner)) {
-        await unlinkIfOwned(lockPath, existing);
-        await unlinkIfOwned(resolve(logDirectory, existing.tempName), existing);
+        await unlinkIfOwned(lockPath, existing, fileSystem);
+        await unlinkIfOwned(resolve(logDirectory, existing.tempName), existing, fileSystem);
       }
     } finally {
       await closeServer(transaction);
@@ -351,7 +355,7 @@ async function releaseLock(
   ) {
     return;
   }
-  await unlinkIfOwned(lock.lockPath, lock);
+  await unlinkIfOwned(lock.lockPath, lock, fileSystem);
 }
 
 async function readBounded(handle: FileHandle, maxBytes: number): Promise<Buffer> {

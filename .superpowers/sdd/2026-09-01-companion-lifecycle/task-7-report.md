@@ -50,6 +50,40 @@ All mutations were temporary and restored exactly before final verification.
 - Existing explicit-off, crash cooldown, bounded startup/shutdown, forced-termination ownership, and executable-mode tests remain covered by the passing targeted and full suites.
 - No unresolved validation or privacy concern.
 
+## Fix round 5
+
+### Root cause and outcome
+
+The remaining Important finding was the lock protocol's separate identity path. `readLockRecord` used default numeric pathname and handle stats, `LockRecord` allowed `number | bigint`, and temporary-owner cleanup plus `unlinkIfOwned` returned to default numeric pathname stats. On Windows, distinct 64-bit device/inode values can round to the same JavaScript numbers, so those guards could accept a different lock or owner file.
+
+Lock identity is now bigint end to end. The lock pathname precheck and post-read check use the existing internal `FileSystemOperations.lstatBigInt` seam, the opened lock handle uses `handle.stat({ bigint: true })`, `LockRecord.device` and `.inode` are fixed `bigint`, and temporary-owner recording, failed-publication cleanup, stale recovery, release, and every `unlinkIfOwned` check use the same bigint seam. Token validation, owner pipes, hard-link atomic publication, and release ordering are unchanged. No public product API was added.
+
+### TDD and collision evidence
+
+- Deterministic RED on unchanged commit `0bafb0e`: `npm test -- --run tests/diagnostics/output-races.test.ts -t "distinct bigint identities collide as numbers"` exited 1 because `logger.write` resolved instead of rejecting. The failure was behavioral, not a type or fixture error.
+- The fixture supplies four distinct bigint path/handle/owner identities whose device values all convert to one numeric value and whose inode values all convert to one numeric value. It retains real directories, files, handles, hard-link publication, writes, and cleanup while injecting only exact stat identities through the round-4 internal seam.
+- Under the fixed code, the lock path/handle mismatch is rejected before log content is written. Failed-publication cleanup then compares two different exact owner-file identities and preserves the file rather than unlinking a numerically colliding replacement.
+- The unchanged-HEAD RED is the precise rollback proof: restoring the prior numeric implementation makes the same test resolve successfully. After the bigint fix, three focused runs passed identically (the initial GREEN plus two repeat runs).
+- A production-source search found no remaining default numeric lock identity stat and no `Number(dev)` or `Number(ino)`. Remaining numeric handle stats in logger rotation are bounded file sizes and write offsets, not identities.
+
+### Verification
+
+- `npm test -- --run tests/diagnostics/output-races.test.ts tests/diagnostics/logger.test.ts` — 2 files, 21/21 tests passed.
+- `npm test -- --run tests/diagnostics` — 3 files, 41/41 tests passed.
+- `npm test -- --run tests/lifecycle tests/desktop tests/mcp tests/integration/companion-lifecycle.test.ts` — 11 files, 122/122 tests passed.
+- Three consecutive `npm test -- --run --reporter=dot` runs — each passed 18 files and 210/210 tests.
+- `npm run typecheck` — exit 0.
+- `npm run build` — exit 0.
+- `git diff --check` — exit 0 before this report update; repeated in the final commit gate.
+
+### Files changed and concerns
+
+- `src/diagnostics/logger.ts` — bigint lock records and exact stat usage throughout the lock lifecycle.
+- `tests/diagnostics/output-races.test.ts` — deterministic numeric-collision lock/owner regression fixture.
+- `.superpowers/sdd/2026-09-01-companion-lifecycle/task-7-report.md` — this evidence.
+
+The previously accepted Node pathname-create residual remains unchanged: a same-user directory replacement in the final kernel-call gap can leave an empty exclusively created artifact, but content is withheld until exact post-open validation succeeds. No new unresolved Task 7 concern was found.
+
 ## Fix round 4
 
 ### Root cause and outcome
