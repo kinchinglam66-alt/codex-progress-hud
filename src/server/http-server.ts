@@ -25,7 +25,8 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   runIfGeneration?(
     generation: number,
     desiredState: DesiredHudState,
-    operation: (signal: AbortSignal) => unknown | Promise<unknown>
+    operation: (signal: AbortSignal) => unknown | Promise<unknown>,
+    signal: AbortSignal
   ): Promise<{ accepted: false } | { accepted: true; value: unknown }>;
 }
 
@@ -38,12 +39,41 @@ export interface ProgressServerAddress {
 class BodyTooLargeError extends Error {}
 
 function writeJson(response: ServerResponse, status: number, payload: unknown): void {
+  if (response.destroyed || response.writableEnded) return;
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "x-content-type-options": "nosniff"
   });
   response.end(JSON.stringify(payload));
+}
+
+function connectionCancellation(
+  request: IncomingMessage,
+  response: ServerResponse
+): { signal: AbortSignal; complete(): void; dispose(): void } {
+  const controller = new AbortController();
+  const socket = request.socket;
+  let completed = false;
+  const cancel = () => {
+    if (!completed) controller.abort();
+  };
+  const dispose = () => {
+    request.removeListener("aborted", cancel);
+    response.removeListener("close", cancel);
+    socket.removeListener("close", cancel);
+  };
+  request.once("aborted", cancel);
+  response.once("close", cancel);
+  socket.once("close", cancel);
+  return {
+    signal: controller.signal,
+    complete() {
+      completed = true;
+      dispose();
+    },
+    dispose
+  };
 }
 
 async function serveUi(
@@ -133,15 +163,17 @@ export function createProgressServer(options: ProgressServerOptions) {
   async function runMutation(
     request: IncomingMessage,
     desiredState: DesiredHudState,
+    signal: AbortSignal,
     operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ): Promise<{ accepted: false } | { accepted: true; value: unknown }> {
     if (shuttingDown) return { accepted: false };
     if (options.runIfGeneration === undefined) {
-      return { accepted: true, value: await operation(new AbortController().signal) };
+      if (signal.aborted) throw signal.reason;
+      return { accepted: true, value: await operation(signal) };
     }
     const generation = requestGeneration(request);
     if (generation === undefined) return { accepted: false };
-    return options.runIfGeneration(generation, desiredState, operation);
+    return options.runIfGeneration(generation, desiredState, operation, signal);
   }
 
   async function handleSse(response: ServerResponse, token: string): Promise<void> {
@@ -163,6 +195,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const cancellation = connectionCancellation(request, response);
     try {
       const url = new URL(request.url ?? "/", `http://${host}`);
       if (request.method === "GET" && url.pathname === "/health") {
@@ -209,10 +242,11 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         const envelope = parseProgressEnvelope(await readJson(request));
-        const result = await runMutation(request, "on", (signal) => {
+        const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
           return store.apply(envelope);
         });
+        cancellation.complete();
         if (!result.accepted) {
           writeJson(response, 409, { error: "lifecycle generation rejected" });
           return;
@@ -239,11 +273,16 @@ export function createProgressServer(options: ProgressServerOptions) {
               : options.requestShutdown;
         if (callback === undefined) throw new Error("control callback is unavailable");
         const desiredState = url.pathname === "/api/shutdown" ? "off" : "on";
-        const result = await runMutation(request, desiredState, async (signal) => {
+        const result = await runMutation(request, desiredState, cancellation.signal, async (signal) => {
           if (signal.aborted) throw signal.reason;
-          if (url.pathname === "/api/shutdown") shuttingDown = true;
+          if (url.pathname === "/api/shutdown") {
+            if (signal.aborted) throw signal.reason;
+            shuttingDown = true;
+          }
+          if (signal.aborted) throw signal.reason;
           await callback();
         });
+        cancellation.complete();
         if (!result.accepted) {
           writeJson(response, 409, { error: "lifecycle generation rejected" });
           return;
@@ -260,6 +299,8 @@ export function createProgressServer(options: ProgressServerOptions) {
       } else {
         writeJson(response, 500, { error: "internal server error" });
       }
+    } finally {
+      cancellation.dispose();
     }
   }
 

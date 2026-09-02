@@ -1,6 +1,6 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
@@ -17,6 +17,7 @@ import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { ProcessLauncher, SpawnedHud } from "../../src/lifecycle/process-launcher.js";
 import { CompanionHttpClient } from "../../src/mcp/report-client.js";
 import { createProgressServer } from "../../src/server/http-server.js";
+import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 
 interface TestOwnedCompanion extends SpawnedHud {
   serviceUrl: string;
@@ -185,6 +186,157 @@ process.on("disconnect", () => {
 }
 
 describe("source-mode companion lifecycle", () => {
+  it("does not apply an event after its real client disconnects behind the generation lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-disconnected-event-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const settings = await store.setDesiredState("on");
+    const held = await holdLifecycleLock(join(directory, ".lifecycle-state.lock"));
+    let lockReleased = false;
+    cleanups.push(async () => {
+      if (!lockReleased) await held.release();
+    });
+    let guardEntered!: () => void;
+    const guardEntry = new Promise<void>((resolve_) => { guardEntered = resolve_; });
+    let guardSettled!: () => void;
+    const guardSettlement = new Promise<void>((resolve_) => { guardSettled = resolve_; });
+    const server = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      runIfGeneration: (generation, desiredState, operation, signal) => {
+        guardEntered();
+        return store.runIfGeneration(
+          generation,
+          desiredState,
+          operation,
+          { signal }
+        ).finally(guardSettled);
+      }
+    });
+    await server.listen();
+    cleanups.push(() => server.close());
+    const token = (await readFile(join(directory, "auth.token"), "utf8")).trim();
+    const client = new CompanionHttpClient(
+      server.address().url,
+      join(directory, "auth.token"),
+      async () => token
+    );
+    const startedAt = performance.now();
+
+    const pending = client.submit({
+      taskId: "late-task",
+      title: "Must not be accepted",
+      event: { type: "tracking_started" }
+    }, { generation: settings.generation, timeoutMs: 20 });
+    await guardEntry;
+    const result = await Promise.race([
+      pending.then(
+        (value) => ({ kind: "resolved" as const, value }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) =>
+        setTimeout(() => resolve_({ kind: "watchdog" }), 90)
+      )
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { code: "REQUEST_TIMEOUT" }
+    });
+    expect(elapsedMs).toBeLessThan(90);
+
+    await held.release();
+    lockReleased = true;
+    await guardSettlement;
+    const snapshot = await client.status({ timeoutMs: 90 });
+
+    expect(snapshot.task?.id).not.toBe("late-task");
+  }, 5_000);
+
+  it.each([
+    ["hide", "on", (client: CompanionHttpClient, generation: number) =>
+      client.hide({ generation, timeoutMs: 20 })],
+    ["shutdown", "off", (client: CompanionHttpClient, generation: number) =>
+      client.shutdown({ generation, timeoutMs: 20 })]
+  ] as const)(
+    "does not apply a disconnected %s control behind the generation lock",
+    async (control, desiredState, invoke) => {
+      const directory = await mkdtemp(join(tmpdir(), `codex-progress-hud-disconnected-${control}-`));
+      cleanups.push(() => rm(directory, { recursive: true, force: true }));
+      const store = createLifecycleStateStore({
+        settingsPath: join(directory, "settings.json"),
+        runtimePath: join(directory, "runtime.json"),
+        installManifestPath: join(directory, "install.json")
+      });
+      const settings = await store.setDesiredState(desiredState);
+      const held = await holdLifecycleLock(join(directory, ".lifecycle-state.lock"));
+      let lockReleased = false;
+      cleanups.push(async () => {
+        if (!lockReleased) await held.release();
+      });
+      let guardEntered!: () => void;
+      const guardEntry = new Promise<void>((resolve_) => { guardEntered = resolve_; });
+      let guardSettled!: () => void;
+      const guardSettlement = new Promise<void>((resolve_) => { guardSettled = resolve_; });
+      const hideWindow = vi.fn();
+      const requestShutdown = vi.fn();
+      const server = createProgressServer({
+        port: 0,
+        tokenPath: join(directory, "auth.token"),
+        hideWindow,
+        requestShutdown,
+        runIfGeneration: (generation, state, operation, signal) => {
+          guardEntered();
+          return store.runIfGeneration(
+            generation,
+            state,
+            operation,
+            { signal }
+          ).finally(guardSettled);
+        }
+      });
+      await server.listen();
+      cleanups.push(() => server.close());
+      const token = (await readFile(join(directory, "auth.token"), "utf8")).trim();
+      const client = new CompanionHttpClient(
+        server.address().url,
+        join(directory, "auth.token"),
+        async () => token
+      );
+
+      const pending = invoke(client, settings.generation);
+      await guardEntry;
+      await expect(Promise.race([
+        pending,
+        new Promise<"watchdog">((resolve_) =>
+          setTimeout(() => resolve_("watchdog"), 90)
+        )
+      ])).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
+      await held.release();
+      lockReleased = true;
+      await guardSettlement;
+
+      expect(hideWindow).not.toHaveBeenCalled();
+      expect(requestShutdown).not.toHaveBeenCalled();
+      if (control === "shutdown") {
+        const reopened = await store.setDesiredState("on");
+        const snapshot = await client.submit({
+          taskId: "after-cancelled-shutdown",
+          title: "Server remains writable",
+          event: { type: "tracking_started" }
+        }, { generation: reopened.generation, timeoutMs: 90 });
+        expect(snapshot.task?.id).toBe("after-cancelled-shutdown");
+      }
+    },
+    5_000
+  );
+
   it("keeps close authoritative across two real MCP processes after tracking_start leases but before submit", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-two-mcp-race-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -220,9 +372,9 @@ describe("source-mode companion lifecycle", () => {
       showWindow: () => undefined,
       hideWindow: () => undefined,
       requestShutdown: () => shutdownRequested(),
-      runIfGeneration: (generation, desiredState, operation) => {
+      runIfGeneration: (generation, desiredState, operation, signal) => {
         generationGuardCalls.push({ generation, desiredState });
-        return store.runIfGeneration(generation, desiredState, operation);
+        return store.runIfGeneration(generation, desiredState, operation, { signal });
       }
     });
     await target.listen();

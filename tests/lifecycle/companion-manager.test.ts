@@ -350,8 +350,8 @@ describe("companion lifecycle manager", () => {
       showWindow: () => undefined,
       hideWindow,
       requestShutdown: () => undefined,
-      runIfGeneration: (generation, desiredState, operation) =>
-        store.runIfGeneration(generation, desiredState, operation)
+      runIfGeneration: (generation, desiredState, operation, signal) =>
+        store.runIfGeneration(generation, desiredState, operation, { signal })
     });
     await server.listen();
     cleanups.push(() => server.close());
@@ -549,15 +549,22 @@ describe("companion lifecycle manager", () => {
   it("does not retry a locally in-flight write after close commits off", async () => {
     const { manager } = await harness({ desiredState: "on", online: true });
     let attempts = 0;
+    let operationSettled!: () => void;
+    const operationSettlement = new Promise<void>((resolve_) => { operationSettled = resolve_; });
 
-    const result = await (manager as any).executeWrite(
+    const result = await manager.executeWrite(
       "progress_report",
       async () => {
-        attempts += 1;
-        await manager.close();
-        throw new HudClientError("OFFLINE", "closed during first submit");
+        try {
+          attempts += 1;
+          await manager.close();
+          throw new HudClientError("OFFLINE", "closed during first submit");
+        } finally {
+          operationSettled();
+        }
       }
     );
+    await operationSettlement;
 
     expect(result).toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
     expect(attempts).toBe(1);

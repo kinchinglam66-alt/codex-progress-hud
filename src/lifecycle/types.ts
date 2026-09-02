@@ -26,6 +26,7 @@ export interface InstallManifest {
 
 export interface StateOperationOptions {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 /**

@@ -26,6 +26,8 @@ Task 7 closes the two Important findings from final re-review round 2. `hud_hide
 
 Task 8 closes the remaining Important finding from final re-review round 3. `executeWrite()` now supplies the tool callback only a `makeRequestOptions()` function, which recomputes the remaining time to one absolute write deadline before every HTTP request. A manager-owned deadline race bounds the complete callback, including a callback that never settles, and records the first abort cause so deadline expiry maps to `START_TIMEOUT` while a close that wins still maps to `MANUALLY_DISABLED`. Only a first-attempt `OFFLINE` enters the existing one-shot same-generation recovery. Deterministic 90 ms / `<300 ms` tests cover tracking start, pause, resume, and stop after status consumes most of the budget; submit is aborted, no late event is accepted, and the second request receives a smaller timeout. The complete non-packaging gate passed. Independent re-review remains required, so this report does not authorize Windows packaging.
 
+Task 8 independent review found that the manager/client deadline did not cancel a request already queued behind the server's real lifecycle generation lock. Review fix round 1 propagates request/response/socket disconnection through the server mutation boundary into the state store's combined abort signal. Real client/server/store tests hold the cross-process lock, observe a 20 ms `REQUEST_TIMEOUT` inside a 90 ms watchdog, release the lock, await guard settlement, and prove that event apply, window control, shutdown callback, and `shuttingDown` mutation do not occur late. The manager cleanup test now explicitly awaits its raced callback settlement instead of relying on a longer delay. Fresh re-review remains required, so this report does not authorize Windows packaging.
+
 ## Task 3 TDD evidence
 
 Production mutation caught by the new test: replacing exact calendar round-trip validation with shape plus finite `Date.parse` allows JavaScript date normalization to accept an impossible calendar date.
@@ -317,6 +319,31 @@ Task 7 changes no tool registration, public MCP payload schema, response-size li
 | `npm run validate:plugin` | Exit 0; plugin manifest and MCP launch configuration valid. |
 | `git diff --check` | Exit 0; no output. |
 
+### Task 8 review fix round 1 — disconnected server mutations
+
+The independent Task 8 review reproduced a real late acceptance: `CompanionHttpClient` timed out while `/api/events` was queued in `runIfGeneration`, but the server had no signal tied to the disconnected response. Releasing the lifecycle lock therefore allowed the current generation to enter `TaskStore.apply` after the caller had already received `START_TIMEOUT`.
+
+Deterministic RED evidence:
+
+1. Event path — `npm test -- --run tests/integration/companion-lifecycle.test.ts -t "real client disconnects behind the generation lock"`.
+   - Exit 1; client returned `REQUEST_TIMEOUT`, guard release completed, and the real snapshot incorrectly contained `late-task`; 1 failed and 3 skipped; Vitest duration 1.36 s.
+2. Control paths — `npm test -- --run tests/integration/companion-lifecycle.test.ts -t "disconnected .* control behind"`.
+   - Exit 1; both selected tests returned `REQUEST_TIMEOUT`, then hide and shutdown callbacks each ran once after lock release; 2 failed and 4 skipped; Vitest duration 1.24 s.
+
+GREEN implementation and evidence:
+
+- The HTTP server observes request abort plus response and captured-socket close. It removes all three listeners on completion or handler exit. Capturing the socket at listener registration prevents oversized-body teardown from nulling the later cleanup target.
+- A successful or generation-rejected mutation calls `complete()` before writing its response, so the response's normal close cannot cancel or reinterpret an already completed operation.
+- `runMutation()` forwards the connection signal to `runIfGeneration`. Desktop wiring supplies it as `StateOperationOptions.signal`; `locallyOrdered()` merges it into the same controller used by lock acquisition and mutation callbacks and removes the external listener on settlement.
+- Event apply, control callback, and the `shuttingDown` write each check the combined signal immediately before their side effect. The state store rechecks before mutation entry and around the guarded operation. Existing generation rejection remains 409.
+- The event, hide, and shutdown real-boundary tests passed 3/3. After release and complete guard settlement, the event snapshot excludes `late-task`, neither control callback ran, and a canceled shutdown did not prevent a later generation from accepting a real event.
+- The first combined focused run passed all 150 assertions but reported two unhandled listener-cleanup errors on 64 KiB rejection because Node had nulled `request.socket`. The captured-socket correction made the complete server file pass 23/23 with no unhandled errors.
+- Combined server/integration/tools/manager/state gate: exit 0; 5/5 files and 150/150 tests passed; Vitest duration 9.72 s.
+- Final requested server/integration/tools/manager gate: exit 0; 4/4 files and 111/111 tests passed; Vitest duration 7.40 s.
+- Submission full-suite reruns: both exited 0 with 18/18 files and 329/329 tests; Vitest durations 10.36 s and 10.04 s.
+- Typecheck, build, smoke, diagnose:mcp, validate:plugin, and `git diff --check` all exited 0. The diagnostic retained the exact 13 tools and protocol-only stdout.
+- The manager close/write cleanup test now owns an operation-settlement promise and awaits it before assertions and temporary-directory cleanup; no timeout or arbitrary delay was increased. Three additional fresh manager-file processes passed 54/54 tests each without `ENOTEMPTY`.
+
 Task 8 changes no tool registration, public MCP payload schema, request/response-size limit, privacy behavior, OFFLINE recovery breadth, generation authority, close semantics, PID/nonce termination ownership, packaging, installation, merge, push, or release behavior.
 
 ## Review, limitations, and prohibited actions
@@ -325,7 +352,7 @@ Task 8 changes no tool registration, public MCP payload schema, request/response
 - The first staged `git diff --cached --check` failed on two Markdown hard-break trailing spaces in this report. The cause was report formatting; both spaces were removed before commit and the cached check was rerun. No production or test file was implicated.
 - Independent task review and whole-correction review remain required before any packaging decision.
 - Task 6 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
-- Task 8 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
+- Task 8 implementation, independent review finding, and review-fix-round-1 self-verification are recorded above. A fresh independent re-review has not yet occurred.
 - **No packaged Electron validation has occurred in this plan.**
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.

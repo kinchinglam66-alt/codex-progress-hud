@@ -419,8 +419,8 @@ export async function runDesktop(
             quitting = true;
             quit();
           },
-          runIfGeneration: (generation, desiredState, operation) =>
-            resolved.stateStore.runIfGeneration(generation, desiredState, operation)
+          runIfGeneration: (generation, desiredState, operation, signal) =>
+            resolved.stateStore.runIfGeneration(generation, desiredState, operation, { signal })
         });
 
         await progressServer.listen();
