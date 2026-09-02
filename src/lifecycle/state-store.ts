@@ -166,8 +166,7 @@ async function clearUnlocked(
   const identity = await identityOf(path, fileSystem);
   throwIfAborted(signal);
   if (identity !== null) {
-    enterMutation();
-    await unlinkIfIdentical(path, identity, signal, fileSystem);
+    await unlinkIfIdentical(path, identity, signal, fileSystem, enterMutation);
   }
 }
 

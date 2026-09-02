@@ -501,8 +501,11 @@ describe("companion lifecycle manager", () => {
       });
       let held: Awaited<ReturnType<typeof holdLifecycleLock>> | undefined;
       cleanups.push(async () => held?.release());
+      let requestHeldLock!: () => void;
+      const heldLockRequested = new Promise<void>((resolve_) => { requestHeldLock = resolve_; });
+      let allowHeldLockRejection!: () => void;
+      const heldLockReady = new Promise<void>((resolve_) => { allowHeldLockRejection = resolve_; });
       let attempts = 0;
-      const startedAt = performance.now();
 
       const pending = manager.executeWrite("tracking_start", async () => {
         attempts += 1;
@@ -514,10 +517,17 @@ describe("companion lifecycle manager", () => {
           clock = 100;
         } else {
           await manager.close();
-          held = await holdLifecycleLock(join(fixture.directory, ".lifecycle-state.lock"));
+          requestHeldLock();
+          await heldLockReady;
         }
         throw new HudClientError(code, "stale submit result");
       });
+      if (boundary === "held lock") {
+        await heldLockRequested;
+        held = await holdLifecycleLock(join(fixture.directory, ".lifecycle-state.lock"));
+      }
+      const startedAt = performance.now();
+      if (boundary === "held lock") allowHeldLockRejection();
       const result = await Promise.race([
         pending.then(
           (value) => ({ kind: "resolved" as const, value }),

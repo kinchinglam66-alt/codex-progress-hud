@@ -69,7 +69,8 @@ export async function unlinkIfIdentical(
   path: string,
   identity: FileIdentity,
   signal?: AbortSignal,
-  fileSystem: LifecycleStateLockFileSystem = nodeLifecycleStateLockFileSystem
+  fileSystem: LifecycleStateLockFileSystem = nodeLifecycleStateLockFileSystem,
+  beforeUnlink?: () => void
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
     if (signal?.aborted) throw new LifecycleStateTimeoutError();
@@ -77,6 +78,7 @@ export async function unlinkIfIdentical(
     if (current === null || !sameIdentity(current, identity)) return false;
     if (signal?.aborted) throw new LifecycleStateTimeoutError();
     try {
+      beforeUnlink?.();
       await fileSystem.unlink(path);
       return true;
     } catch (error) {

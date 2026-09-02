@@ -394,6 +394,79 @@ describe("lifecycle state store", () => {
     expect(await baseline.readRuntime()).toEqual(successorRuntime);
   }, 2_000);
 
+  it.each([
+    ["without expected identity", false],
+    ["after reading expected identity", true]
+  ] as const)(
+    "hard-bounds clearRuntime %s before the final identity-matched unlink",
+    async (_name, useExpected) => {
+      const paths = testPaths();
+      const baseline = createLifecycleStateStore(paths);
+      const originalRuntime = {
+        pid: 4312,
+        version: "0.1.0",
+        protocolVersion: 1,
+        instanceNonce: "runtime-to-clear",
+        startedAt: "2026-09-01T01:02:03.000Z"
+      };
+      await baseline.writeRuntime(originalRuntime);
+      const finalIdentityReadEntered = deferred();
+      const allowFinalIdentityRead = deferred();
+      let runtimeIdentityReads = 0;
+      let expectedRuntimeReadCompleted = false;
+      const stalled = storeWithFileSystem({
+        readFile: (async (...arguments_: Parameters<typeof readFile>) => {
+          const content = await readFile(...arguments_);
+          if (String(arguments_[0]) === paths.runtimePath) expectedRuntimeReadCompleted = true;
+          return content;
+        }) as typeof readFile,
+        lstat: (async (...arguments_: Parameters<typeof lstat>) => {
+          if (String(arguments_[0]) === paths.runtimePath && ++runtimeIdentityReads === 2) {
+            finalIdentityReadEntered.resolve();
+            await allowFinalIdentityRead.promise;
+          }
+          return lstat(...arguments_);
+        }) as typeof lstat
+      });
+      const startedAt = performance.now();
+      const pending = stalled.clearRuntime(
+        useExpected ? originalRuntime : undefined,
+        { timeoutMs: 90 }
+      );
+      await finalIdentityReadEntered.promise;
+
+      const result = await Promise.race([
+        pending.then(
+          () => ({ kind: "resolved" as const }),
+          (error: unknown) => ({ kind: "rejected" as const, error })
+        ),
+        new Promise<{ kind: "watchdog" }>((resolve_) =>
+          setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+        )
+      ]);
+      const elapsedMs = performance.now() - startedAt;
+      const successorRuntime = {
+        ...originalRuntime,
+        pid: 9003,
+        instanceNonce: "successor-after-clear-timeout"
+      };
+      await unlink(paths.runtimePath);
+      await writeFile(paths.runtimePath, `${JSON.stringify(successorRuntime)}\n`);
+      allowFinalIdentityRead.resolve();
+      await pending.catch(() => undefined);
+      await new Promise((resolve_) => setTimeout(resolve_, 150));
+
+      expect(expectedRuntimeReadCompleted).toBe(useExpected);
+      expect(result).toMatchObject({
+        kind: "rejected",
+        error: { name: "LifecycleStateTimeoutError" }
+      });
+      expect(elapsedMs).toBeLessThan(300);
+      expect(await baseline.readRuntime()).toEqual(successorRuntime);
+    },
+    2_000
+  );
+
   it("does not return a post-acquisition timeout until the callback cannot commit late", async () => {
     const store = createLifecycleStateStore(testPaths());
     await store.setDesiredState("on");
