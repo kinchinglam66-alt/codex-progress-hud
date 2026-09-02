@@ -51,6 +51,7 @@ const controlSchema = z.object({ accepted: z.literal(true) }).strict();
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
 class InvalidResponseError extends Error {}
 
 async function readBoundedJson(response: Response, controller: AbortController): Promise<unknown> {
@@ -121,7 +122,12 @@ export class CompanionHttpClient implements ProgressClient {
     options: HudRequestOptions
   ): Promise<{ response: Response; payload: unknown }> {
     const controller = new AbortController();
-    const timeoutMs = Math.max(0, Math.min(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 60_000));
+    const requestedTimeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const boundedTimeoutMs = Math.max(0, Math.min(requestedTimeoutMs, 60_000));
+    const timeoutMs = Number.isFinite(boundedTimeoutMs)
+      ? Math.floor(boundedTimeoutMs)
+      : 0;
+    const deadlineMs = Date.now() + timeoutMs;
     let abortCause: "deadline" | "external" | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const claimAbortCause = (cause: "deadline" | "external") => {
@@ -145,7 +151,12 @@ export class CompanionHttpClient implements ProgressClient {
         signal: controller.signal,
         headers: {
           ...init.headers,
-          ...(authenticated ? { authorization: `Bearer ${await this.#token(controller.signal)}` } : {}),
+          ...(authenticated
+            ? {
+                authorization: `Bearer ${await this.#token(controller.signal)}`,
+                [REQUEST_DEADLINE_HEADER]: String(deadlineMs)
+              }
+            : {}),
           ...(options.generation === undefined
             ? {}
             : { "x-codex-progress-hud-generation": String(options.generation) })
@@ -178,6 +189,9 @@ export class CompanionHttpClient implements ProgressClient {
     }
     if (result.response.status === 409) {
       throw new HudClientError("GENERATION_REJECTED", "HUD lifecycle generation was rejected");
+    }
+    if (result.response.status === 408) {
+      throw new HudClientError("REQUEST_TIMEOUT", "Progress HUD request timed out");
     }
     if (!result.response.ok) {
       throw new HudClientError("VERSION_MISMATCH", "HUD endpoint response is incompatible");

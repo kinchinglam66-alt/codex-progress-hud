@@ -364,13 +364,31 @@ Deterministic RED used the real state store: a first same-generation `runIfGener
 
 The round-2 fix does not change entered mutation settlement, cross-process lock recovery, generation/409 behavior, the 64 KiB request limit, privacy, OFFLINE recovery, deadline-versus-close first-cause classification, tools, payloads, packaging, installation, merge, push, or release behavior.
 
+### Task 8 review fix round 3 — server-authoritative request deadlines
+
+Final whole-correction re-review round 4 found that client timeout could precede delivery of request/response/socket close to the server. The remaining production ordering allowed a same-generation event or control queued behind the lifecycle lock to execute after the caller had already received `START_TIMEOUT`.
+
+The deterministic RED uses the real official client, HTTP server, lifecycle store, and cross-process lifecycle lock while deliberately keeping the underlying HTTP connection open after client fetch abort. All three selected cases failed before the fix: the event was stored, and hide and shutdown each executed once after lock release. This proves the regression does not rely on favorable socket-close scheduling and fails if server deadline authority is removed.
+
+The official authenticated client now sends a canonical safe-integer wall-clock deadline. The server strictly parses it, independently schedules cancellation, and combines that first-cause signal with request abort, response close, socket close, and the state-store cancellation path. Missing or malformed headers remain backward-compatible and do not create a deadline; every current official authenticated request supplies one. Server-first expiry returns generic HTTP 408 and is classified by the client as `REQUEST_TIMEOUT`, preserving the public manager timeout contract. Timers and listeners are cleaned on every completion path, and event/control/shutdown side effects retain immediate signal checks.
+
+Fresh candidate evidence:
+
+- Server deadline RED: exit 1; 3/3 selected real-boundary cases failed with late event/hide/shutdown side effects.
+- Server deadline GREEN: exit 0; 3/3 selected cases passed; Vitest duration 1.60 s.
+- Focused integration/server/client/tools/manager: exit 0; 5/5 files and 136/136 tests passed; final Vitest duration 8.43 s.
+- Full suite: exit 0; 18/18 files and 337/337 tests passed; final Vitest duration 13.31 s.
+- Typecheck, build, smoke, diagnose:mcp, validate:plugin, and `git diff --check` all exited 0. The MCP diagnostic retained the exact 13 tools and protocol-only stdout.
+
+This correction changes no MCP tool registration or public payload, response-size limit, privacy behavior, OFFLINE recovery, generation authority, PID/nonce ownership, packaging, installation, merge, push, or release behavior. Fresh independent re-review remains required before packaging.
+
 ## Review, limitations, and prohibited actions
 
 - Task 3 self-review found no scope expansion in the timestamp implementation or tests. Task 4 closes the diagnostics flaky concern with the deterministic evidence above.
 - The first staged `git diff --cached --check` failed on two Markdown hard-break trailing spaces in this report. The cause was report formatting; both spaces were removed before commit and the cached check was rerun. No production or test file was implicated.
 - Independent task review and whole-correction review remain required before any packaging decision.
 - Task 6 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
-- Task 8 implementation, both independent review findings, and review-fix-round-2 self-verification are recorded above. A fresh independent re-review has not yet occurred.
+- Task 8 implementation, all three review-fix rounds, and current self-verification are recorded above. A fresh independent re-review of round 3 has not yet occurred.
 - **No packaged Electron validation has occurred in this plan.**
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.

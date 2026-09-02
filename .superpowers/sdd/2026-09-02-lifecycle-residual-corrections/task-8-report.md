@@ -6,9 +6,9 @@ Baseline: `98a697e297406e81a1256050329fb9c0e7c38cbb`
 
 ## Outcome
 
-The final round-3 Important finding is addressed in the Task 8 candidate. All status-then-submit tracking controls share one absolute write deadline. Each HTTP request receives a freshly computed remaining budget, and the manager bounds the complete callback even when it never settles. Deadline and close cancellation retain distinct first-cause classifications: deadline returns `START_TIMEOUT`; close remains successful `MANUALLY_DISABLED` suppression.
+The final round-4 Important finding is addressed in the Task 8 candidate. All status-then-submit tracking controls share one absolute write deadline. Each HTTP request receives a freshly computed remaining budget, the official authenticated request transmits its absolute deadline to the server, and the manager bounds the complete callback even when it never settles. Deadline and close cancellation retain distinct first-cause classifications: deadline returns `START_TIMEOUT`; close remains successful `MANUALLY_DISABLED` suppression.
 
-This report records implementation, both independent review findings, and review-fix-round-2 self-verification. A fresh independent re-review remains required before any packaging decision.
+This report records implementation, all three independent review findings, and review-fix-round-3 self-verification. A fresh independent re-review remains required before any packaging decision.
 
 ## Root cause
 
@@ -144,3 +144,41 @@ The regression passed in 30 ms with the `<100 ms` caller bound. A later same-sto
 | `git diff --check` | Exit 0; no output. |
 
 No package, install, merge, push, or release action was performed. This fix changes only cancellation while waiting to enter the process-local state queue. It does not change entered-mutation settlement, cross-process lock recovery, generation/409 behavior, 64 KiB limits, privacy, OFFLINE recovery, deadline-versus-close classification, tool registration, or public payloads.
+
+## Review fix round 3 — server-authoritative request deadlines
+
+### Final re-review finding and deterministic RED
+
+Final whole-correction re-review round 4 identified an ordering that socket cancellation cannot close: the client deadline can expire before the server event loop observes the socket close. A same-generation mutation already queued behind the lifecycle lock could therefore enter after the MCP caller received `START_TIMEOUT`.
+
+The new real-boundary regression uses the production `CompanionHttpClient`, `createProgressServer`, and `LifecycleStateStore`. Its transport deliberately rejects the client fetch on abort without closing the underlying HTTP connection, so the server cannot receive a disconnect signal. Event, hide, and shutdown requests enter the generation guard under an 80 ms deadline, the client returns `REQUEST_TIMEOUT`, and only then is the same-generation cross-process lock released.
+
+Command: `npm test -- --run tests/integration/companion-lifecycle.test.ts -t "enforces the server deadline"`
+
+- RED exit 1: 3/3 selected cases failed. The event became `late-deadline-task`; hide and shutdown callbacks each ran once after lock release. Vitest duration 1.69 s.
+- The test would fail if the server-side deadline timer were removed because the transport intentionally keeps the socket open through mutation settlement.
+
+### GREEN
+
+- Every official authenticated client request sends `x-codex-progress-hud-deadline-ms` as a canonical decimal safe integer computed once from `Date.now() + bounded timeoutMs`. Token loading and the HTTP request remain inside that same client budget. The unauthenticated identity probe sends neither bearer token nor deadline.
+- The server strictly accepts only canonical non-negative safe-integer deadline headers. Missing headers and malformed, non-canonical, or unsafe values are treated as absent for compatibility with older/manual clients. Current official-client requests always carry the header.
+- One server cancellation controller records only the first cause among the absolute deadline, `request.aborted`, response close, and captured socket close. Its signal is passed into `runIfGeneration`, where the state store merges it with local queue, cross-process lock, and operation cancellation.
+- Event apply, show/hide/shutdown callbacks, and the `shuttingDown` write retain immediate signal checks before side effects. Deadline timers and all connection listeners are removed on accepted/rejected completion or handler exit.
+- A server deadline that wins the same-timestamp race returns a bounded generic HTTP 408. `CompanionHttpClient` maps it to `REQUEST_TIMEOUT`, preserving manager-level `START_TIMEOUT` truth instead of misclassifying it as `VERSION_MISMATCH`.
+- The 64 KiB bounds, bearer authentication, generation guard, sanitized errors, privacy contract, 13-tool catalog, and shutdown first-cause behavior are unchanged.
+
+### Verification
+
+| Command | Result |
+|---|---|
+| Server-authoritative deadline regression | Exit 0; 1/1 file, 3/3 selected tests; Vitest duration 1.60 s. |
+| Focused integration/server/client/tools/manager | Exit 0; 5/5 files, 136/136 tests; final Vitest duration 8.43 s. |
+| `npm test -- --run` | Exit 0; 18/18 files, 337/337 tests; final Vitest duration 13.31 s. |
+| `npm run typecheck` | Exit 0. |
+| `npm run build` | Exit 0. |
+| `npm run smoke` | Exit 0; protocol health, authenticated event flow, and shutdown callback verified. |
+| `npm run diagnose:mcp` | Exit 0; 1/1 test; exact 13-tool catalog and protocol-only stdout verified; Vitest duration 747 ms. |
+| `npm run validate:plugin` | Exit 0. |
+| `git diff --check` | Exit 0; no output. |
+
+No package, install, merge, push, or release action was performed. Fresh independent re-review remains required before any Windows packaging decision.

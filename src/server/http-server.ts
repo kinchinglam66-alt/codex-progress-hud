@@ -9,6 +9,7 @@ import { loadOrCreateToken, tokensEqual } from "./token-store.js";
 import { TaskStore, type HudSnapshot } from "./task-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
+const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
 
 export interface ProgressServerControls {
   health(): HudHealth;
@@ -37,6 +38,7 @@ export interface ProgressServerAddress {
 }
 
 class BodyTooLargeError extends Error {}
+class RequestDeadlineExpiredError extends Error {}
 
 function writeJson(response: ServerResponse, status: number, payload: unknown): void {
   if (response.destroyed || response.writableEnded) return;
@@ -48,24 +50,47 @@ function writeJson(response: ServerResponse, status: number, payload: unknown): 
   response.end(JSON.stringify(payload));
 }
 
-function connectionCancellation(
+function requestDeadline(request: IncomingMessage): number | undefined {
+  const header = request.headers[REQUEST_DEADLINE_HEADER];
+  if (typeof header !== "string" || !/^(?:0|[1-9]\d*)$/u.test(header)) return undefined;
+  const deadline = Number(header);
+  return Number.isSafeInteger(deadline) ? deadline : undefined;
+}
+
+function requestCancellation(
   request: IncomingMessage,
   response: ServerResponse
 ): { signal: AbortSignal; complete(): void; dispose(): void } {
   const controller = new AbortController();
   const socket = request.socket;
+  const deadline = requestDeadline(request);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let completed = false;
-  const cancel = () => {
-    if (!completed) controller.abort();
+  const cancel = (reason?: unknown) => {
+    if (!completed && !controller.signal.aborted) controller.abort(reason);
   };
+  const cancelDisconnected = () => cancel();
   const dispose = () => {
-    request.removeListener("aborted", cancel);
-    response.removeListener("close", cancel);
-    socket.removeListener("close", cancel);
+    request.removeListener("aborted", cancelDisconnected);
+    response.removeListener("close", cancelDisconnected);
+    socket.removeListener("close", cancelDisconnected);
+    if (timer !== undefined) clearTimeout(timer);
   };
-  request.once("aborted", cancel);
-  response.once("close", cancel);
-  socket.once("close", cancel);
+  request.once("aborted", cancelDisconnected);
+  response.once("close", cancelDisconnected);
+  socket.once("close", cancelDisconnected);
+  if (deadline !== undefined) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      cancel(new RequestDeadlineExpiredError("HUD request deadline expired"));
+    } else {
+      timer = setTimeout(
+        () => cancel(new RequestDeadlineExpiredError("HUD request deadline expired")),
+        remainingMs
+      );
+      timer.unref();
+    }
+  }
   return {
     signal: controller.signal,
     complete() {
@@ -195,7 +220,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const cancellation = connectionCancellation(request, response);
+    const cancellation = requestCancellation(request, response);
     try {
       const url = new URL(request.url ?? "/", `http://${host}`);
       if (request.method === "GET" && url.pathname === "/health") {
@@ -292,7 +317,9 @@ export function createProgressServer(options: ProgressServerOptions) {
       }
       writeJson(response, 404, { error: "not found" });
     } catch (error) {
-      if (error instanceof BodyTooLargeError) {
+      if (cancellation.signal.reason instanceof RequestDeadlineExpiredError) {
+        writeJson(response, 408, { error: "request deadline expired" });
+      } else if (error instanceof BodyTooLargeError) {
         writeJson(response, 413, { error: error.message });
       } else if (error instanceof SyntaxError || error instanceof ZodError) {
         writeJson(response, 400, { error: "invalid request payload" });

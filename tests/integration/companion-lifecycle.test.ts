@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -186,6 +186,139 @@ process.on("disconnect", () => {
 }
 
 describe("source-mode companion lifecycle", () => {
+  it.each(["event", "hide", "shutdown"] as const)(
+    "enforces the server deadline for a queued %s mutation before disconnect is observed",
+    async (mutation) => {
+      const directory = await mkdtemp(join(tmpdir(), `codex-progress-hud-server-deadline-${mutation}-`));
+      cleanups.push(() => rm(directory, { recursive: true, force: true }));
+      const paths = {
+        settingsPath: join(directory, "settings.json"),
+        runtimePath: join(directory, "runtime.json"),
+        installManifestPath: join(directory, "install.json")
+      };
+      const store = createLifecycleStateStore(paths);
+      const settings = await store.setDesiredState(mutation === "shutdown" ? "off" : "on");
+      const held = await holdLifecycleLock(join(directory, ".lifecycle-state.lock"));
+      let lockReleased = false;
+      cleanups.push(async () => {
+        if (!lockReleased) await held.release();
+      });
+      let guardEntered!: () => void;
+      const guardEntry = new Promise<void>((resolve_) => { guardEntered = resolve_; });
+      let guardSettled!: () => void;
+      const guardSettlement = new Promise<void>((resolve_) => { guardSettled = resolve_; });
+      const hideWindow = vi.fn();
+      const requestShutdown = vi.fn();
+      const server = createProgressServer({
+        port: 0,
+        tokenPath: join(directory, "auth.token"),
+        hideWindow,
+        requestShutdown,
+        runIfGeneration: (generation, desiredState, operation, signal) => {
+          guardEntered();
+          return store.runIfGeneration(
+            generation,
+            desiredState,
+            operation,
+            { signal }
+          ).finally(guardSettled);
+        }
+      });
+      await server.listen();
+      cleanups.push(() => server.close());
+      const token = (await readFile(join(directory, "auth.token"), "utf8")).trim();
+      const client = new CompanionHttpClient(
+        server.address().url,
+        join(directory, "auth.token"),
+        async () => token
+      );
+
+      const originalFetch = globalThis.fetch;
+      let transportSettled!: () => void;
+      const transportSettlement = new Promise<void>((resolve_) => { transportSettled = resolve_; });
+      vi.stubGlobal("fetch", ((input: string | URL | Request, init?: RequestInit) => {
+        const url = input instanceof Request ? new URL(input.url) : new URL(input.toString());
+        const headers = Object.fromEntries(new Headers(init?.headers).entries());
+        return new Promise<Response>((resolve_, reject) => {
+          let clientSettled = false;
+          const request = httpRequest(url, {
+            method: init?.method ?? "GET",
+            headers
+          }, (response) => {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+            response.once("end", () => {
+              transportSettled();
+              if (clientSettled) return;
+              clientSettled = true;
+              resolve_(new Response(Buffer.concat(chunks), {
+                status: response.statusCode ?? 500,
+                headers: response.headers as HeadersInit
+              }));
+            });
+          });
+          request.once("error", (error) => {
+            transportSettled();
+            if (clientSettled) return;
+            clientSettled = true;
+            reject(error);
+          });
+          const abort = () => {
+            if (clientSettled) return;
+            clientSettled = true;
+            reject(init?.signal?.reason ?? new Error("request aborted"));
+          };
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener("abort", abort, { once: true });
+          request.end(typeof init?.body === "string" ? init.body : undefined);
+        });
+      }) satisfies typeof fetch);
+
+      const startedAt = performance.now();
+      const pending = mutation === "event"
+        ? client.submit({
+            taskId: "late-deadline-task",
+            title: "Must expire on the server",
+            event: { type: "tracking_started" }
+          }, { generation: settings.generation, timeoutMs: 80 })
+        : mutation === "hide"
+          ? client.hide({ generation: settings.generation, timeoutMs: 80 })
+          : client.shutdown({ generation: settings.generation, timeoutMs: 80 });
+
+      try {
+        await guardEntry;
+        await expect(Promise.race([
+          pending,
+          new Promise<"watchdog">((resolve_) => setTimeout(() => resolve_("watchdog"), 300))
+        ])).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
+        expect(performance.now() - startedAt).toBeLessThan(300);
+      } finally {
+        vi.stubGlobal("fetch", originalFetch);
+      }
+
+      await held.release();
+      lockReleased = true;
+      await guardSettlement;
+      await transportSettlement;
+
+      expect(hideWindow).not.toHaveBeenCalled();
+      expect(requestShutdown).not.toHaveBeenCalled();
+      if (mutation === "event") {
+        expect((await client.status({ timeoutMs: 300 })).task?.id).not.toBe("late-deadline-task");
+      }
+      if (mutation === "shutdown") {
+        const reopened = await store.setDesiredState("on");
+        const snapshot = await client.submit({
+          taskId: "after-expired-shutdown",
+          title: "Server remains writable",
+          event: { type: "tracking_started" }
+        }, { generation: reopened.generation, timeoutMs: 300 });
+        expect(snapshot.task?.id).toBe("after-expired-shutdown");
+      }
+    },
+    5_000
+  );
+
   it("does not apply an event after its real client disconnects behind the generation lock", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-disconnected-event-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

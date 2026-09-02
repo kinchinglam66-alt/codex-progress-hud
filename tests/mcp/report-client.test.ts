@@ -53,8 +53,10 @@ const health = {
 describe("CompanionHttpClient", () => {
   it("reads only minimal identity without sending the bearer token", async () => {
     let authorization: string | undefined;
+    let deadline: string | string[] | undefined;
     const { baseUrl, tokenPath } = await fixture((request, response) => {
       authorization = request.headers.authorization;
+      deadline = request.headers["x-codex-progress-hud-deadline-ms"];
       json(response, 200, { service: "codex-progress-hud", protocolVersion: 1 });
     });
 
@@ -62,17 +64,24 @@ describe("CompanionHttpClient", () => {
 
     expect(result).toEqual({ service: "codex-progress-hud", protocolVersion: 1 });
     expect(authorization).toBeUndefined();
+    expect(deadline).toBeUndefined();
   });
 
   it("authenticates full health and validates its complete shape", async () => {
     let authorization: string | undefined;
+    let deadline: string | string[] | undefined;
     const { baseUrl, tokenPath } = await fixture((request, response) => {
       authorization = request.headers.authorization;
+      deadline = request.headers["x-codex-progress-hud-deadline-ms"];
       json(response, 200, health);
     });
+    const earliestDeadline = Date.now() + 400;
 
-    expect(await new CompanionHttpClient(baseUrl, tokenPath).health()).toEqual(health);
+    expect(await new CompanionHttpClient(baseUrl, tokenPath).health({ timeoutMs: 500 })).toEqual(health);
     expect(authorization).toBe("Bearer test-token");
+    expect(deadline).toMatch(/^\d+$/u);
+    expect(Number(deadline)).toBeGreaterThanOrEqual(earliestDeadline);
+    expect(Number.isSafeInteger(Number(deadline))).toBe(true);
   });
 
   it("uses authenticated JSON controls and preserves task requests", async () => {
@@ -206,6 +215,15 @@ describe("CompanionHttpClient", () => {
 
     expect(error).toMatchObject({ code: "REQUEST_TIMEOUT" });
     expect(performance.now() - startedAt).toBeLessThan(500);
+  });
+
+  it("categorizes a server-enforced request deadline as a request timeout", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 408, { error: "request deadline expired" })
+    );
+
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).health({ timeoutMs: 500 }))
+      .rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
   });
 
   it("gives a pre-aborted external signal precedence over a zero client budget", async () => {

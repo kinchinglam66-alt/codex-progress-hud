@@ -357,6 +357,28 @@ describe("local progress HTTP service", () => {
     expect(snapshot.task).toMatchObject({ id: "task-1", status: "running" });
   });
 
+  it.each(["not-a-deadline", "0001", "9007199254740992"])(
+    "treats malformed request deadline %s as absent for compatibility",
+    async (deadline) => {
+      const { baseUrl, token } = await startServer();
+      const response = await fetch(`${baseUrl}/api/events`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-codex-progress-hud-deadline-ms": deadline
+        },
+        body: JSON.stringify({
+          taskId: "legacy-deadline-client",
+          title: "Compatibility",
+          event: { type: "turn_started" }
+        })
+      });
+
+      expect(response.status).toBe(202);
+    }
+  );
+
   it("rejects malformed JSON without changing state", async () => {
     const { baseUrl, token } = await startServer();
     const response = await fetch(`${baseUrl}/api/events`, {
