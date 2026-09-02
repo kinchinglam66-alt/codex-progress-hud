@@ -24,6 +24,10 @@ export interface InstallManifest {
   version: string;
 }
 
+export interface StateOperationOptions {
+  timeoutMs?: number;
+}
+
 export interface HudHealth extends RuntimeIdentity {
   service: "codex-progress-hud";
   protocolVersion: 1;
@@ -60,12 +64,17 @@ export interface LifecycleObservation {
 }
 
 export interface LifecycleStateStore {
-  readSettings(): Promise<HudSettings>;
-  setDesiredState(state: DesiredHudState): Promise<HudSettings>;
-  setStartWithWindows(enabled: boolean): Promise<HudSettings>;
-  writeRuntime(identity: RuntimeIdentity, generation?: number): Promise<boolean>;
-  readRuntime(): Promise<RuntimeIdentity | null>;
-  clearRuntime(expected?: RuntimeIdentity): Promise<void>;
-  readInstallManifest(): Promise<InstallManifest | null>;
-  runIfGeneration<T>(generation: number, desiredState: DesiredHudState, operation: () => T | Promise<T>): Promise<{ accepted: false } | { accepted: true; value: T }>;
+  readSettings(options?: StateOperationOptions): Promise<HudSettings>;
+  setDesiredState(state: DesiredHudState, options?: StateOperationOptions): Promise<HudSettings>;
+  setStartWithWindows(enabled: boolean, options?: StateOperationOptions): Promise<HudSettings>;
+  writeRuntime(identity: RuntimeIdentity, generation?: number, options?: StateOperationOptions): Promise<boolean>;
+  readRuntime(options?: StateOperationOptions): Promise<RuntimeIdentity | null>;
+  clearRuntime(expected?: RuntimeIdentity, options?: StateOperationOptions): Promise<void>;
+  readInstallManifest(options?: StateOperationOptions): Promise<InstallManifest | null>;
+  runIfGeneration<T>(
+    generation: number,
+    desiredState: DesiredHudState,
+    operation: () => T | Promise<T>,
+    options?: StateOperationOptions
+  ): Promise<{ accepted: false } | { accepted: true; value: T }>;
 }

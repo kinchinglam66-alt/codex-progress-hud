@@ -12,11 +12,13 @@ import {
 import {
   HudClientError,
   type CompanionHttpClient,
+  type HudClientErrorCode,
   type HudIdentity,
   type HudRequestOptions
 } from "../mcp/report-client.js";
 import { classifyLifecycle } from "./classify.js";
 import type { ProcessLauncher, SpawnedHud } from "./process-launcher.js";
+import { LifecycleStateTimeoutError } from "./state-lock.js";
 import { PROTOCOL_VERSION } from "./types.js";
 import type {
   DiagnosticReport,
@@ -28,6 +30,7 @@ import type {
   LifecycleStateStore,
   RuntimeIdentity
 } from "./types.js";
+import type { StateOperationOptions } from "./types.js";
 
 export interface CompanionManager {
   status(): Promise<HudLifecycleSnapshot>;
@@ -88,13 +91,18 @@ function withDesiredState(
   return desiredState === undefined ? snapshot : { desiredState, ...snapshot };
 }
 
-function errorCode(error: unknown): HudErrorCode | "OFFLINE" {
+type ManagerErrorCode = HudErrorCode | HudClientErrorCode;
+
+function errorCode(error: unknown): ManagerErrorCode {
   if (!(error instanceof HudClientError)) return "INTERNAL_ERROR";
   return error.code === "GENERATION_REJECTED" ? "INTERNAL_ERROR" : error.code;
 }
 
-function lifecycleCode(code: HudErrorCode | "OFFLINE"): HudErrorCode {
-  return code === "OFFLINE" ? "COMPANION_CRASHED" : code;
+function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
+  if (code === "OFFLINE") return "COMPANION_CRASHED";
+  if (code === "REQUEST_TIMEOUT") return "START_TIMEOUT";
+  if (code === "GENERATION_REJECTED") return "INTERNAL_ERROR";
+  return code;
 }
 
 function identityMatches(health: HudHealth, owned: OwnedHud): boolean {
@@ -183,6 +191,18 @@ export function createCompanionManager(
     if (recentErrors.length > 10) recentErrors.shift();
   }
 
+  function shutdownTimedOut(shutdownStartedAt: number): HudLifecycleSnapshot {
+    remember("SHUTDOWN_TIMEOUT");
+    record({
+      level: "error",
+      event: "shutdown_timeout",
+      lifecycleState: "stopped",
+      protocolVersion: PROTOCOL_VERSION,
+      elapsedMs: Math.max(0, now() - shutdownStartedAt)
+    });
+    return { desiredState: "off", observedState: "stopped", code: "SHUTDOWN_TIMEOUT" };
+  }
+
   function requestOptions(
     deadline: number | undefined,
     generation?: number,
@@ -190,23 +210,37 @@ export function createCompanionManager(
   ): HudRequestOptions | undefined {
     if (deadline === undefined && generation === undefined && signal === undefined) return undefined;
     return {
-      ...(deadline === undefined ? {} : { timeoutMs: Math.max(1, deadline - now()) }),
+      ...(deadline === undefined ? {} : { timeoutMs: Math.max(0, deadline - now()) }),
       ...(generation === undefined ? {} : { generation }),
       ...(signal === undefined ? {} : { signal })
     };
   }
 
-  async function currentOnGeneration(generation: number): Promise<boolean> {
-    const settings = await dependencies.store.readSettings();
+  function stateOptions(deadline: number): StateOperationOptions {
+    return { timeoutMs: Math.max(0, deadline - now()) };
+  }
+
+  async function clearRuntimeBefore(deadline: number): Promise<boolean> {
+    try {
+      await dependencies.store.clearRuntime(undefined, stateOptions(deadline));
+      return true;
+    } catch (error) {
+      if (error instanceof LifecycleStateTimeoutError) return false;
+      throw error;
+    }
+  }
+
+  async function currentOnGeneration(generation: number, deadline: number): Promise<boolean> {
+    const settings = await dependencies.store.readSettings(stateOptions(deadline));
     return settings.desiredState === "on" && settings.generation === generation;
   }
 
-  async function observe(deadline?: number): Promise<HudLifecycleSnapshot> {
-    const settings = await dependencies.store.readSettings();
+  async function observe(deadline = now() + startupTimeoutMs): Promise<HudLifecycleSnapshot> {
+    const settings = await dependencies.store.readSettings(stateOptions(deadline));
     if (settings.desiredState === "off") {
       return { desiredState: "off", observedState: "stopped" };
     }
-    const runtime = await dependencies.store.readRuntime();
+    const runtime = await dependencies.store.readRuntime(stateOptions(deadline));
     let identity: HudIdentity | undefined;
     try {
       identity = await dependencies.client.identity(requestOptions(deadline));
@@ -228,6 +262,12 @@ export function createCompanionManager(
         return withDesiredState(settings.desiredState, {
           observedState: runtime === null ? "stopped" : "crashed",
           code: "AUTH_ERROR"
+        });
+      }
+      if (code === "REQUEST_TIMEOUT") {
+        return withDesiredState(settings.desiredState, {
+          observedState: runtime === null ? "stopped" : "crashed",
+          code: "START_TIMEOUT"
         });
       }
       return withDesiredState(settings.desiredState, {
@@ -258,6 +298,12 @@ export function createCompanionManager(
           code: "VERSION_MISMATCH"
         });
       }
+      if (code === "REQUEST_TIMEOUT") {
+        return withDesiredState(settings.desiredState, {
+          observedState: runtime === null ? "stopped" : "crashed",
+          code: "START_TIMEOUT"
+        });
+      }
       return withDesiredState(settings.desiredState, {
         observedState: classifyLifecycle({
           ...(settings.desiredState === undefined ? {} : { desiredState: settings.desiredState }),
@@ -275,7 +321,7 @@ export function createCompanionManager(
       return { kind: "ready", health: await dependencies.client.health(requestOptions(deadline)) };
     } catch (error) {
       const code = errorCode(error);
-      return code === "OFFLINE"
+      return code === "OFFLINE" || code === "REQUEST_TIMEOUT"
         ? { kind: "offline" }
         : { kind: "terminal", code: lifecycleCode(code) };
     }
@@ -286,7 +332,7 @@ export function createCompanionManager(
     health: HudHealth | undefined,
     deadline: number
   ): Promise<void> {
-    const current = await dependencies.store.readSettings();
+    const current = await dependencies.store.readSettings(stateOptions(deadline));
     if (current.desiredState === "off") {
       await dependencies.client.shutdown(
         requestOptions(deadline, current.generation)
@@ -304,8 +350,8 @@ export function createCompanionManager(
     }
   }
 
-  async function staleStartupResult(generation: number): Promise<RunningResult> {
-    const settings = await dependencies.store.readSettings();
+  async function staleStartupResult(generation: number, deadline: number): Promise<RunningResult> {
+    const settings = await dependencies.store.readSettings(stateOptions(deadline));
     const code = settings.desiredState === "off" ? "MANUALLY_DISABLED" : "INTERNAL_ERROR";
     return {
       kind: "error",
@@ -335,16 +381,17 @@ export function createCompanionManager(
     if (result !== SPAWN_DEADLINE) return result;
 
     void spawnPromise.then(async (lateSpawn) => {
-      if (!(await currentOnGeneration(generation))) {
-        await retireStaleSpawn(lateSpawn, undefined, now() + shutdownTimeoutMs);
+      const cleanupDeadline = now() + shutdownTimeoutMs;
+      if (!(await currentOnGeneration(generation, cleanupDeadline))) {
+        await retireStaleSpawn(lateSpawn, undefined, cleanupDeadline);
       }
     }).catch(() => undefined);
     return SPAWN_DEADLINE;
   }
 
   async function start(generation: number, deadline: number): Promise<RunningResult> {
-    const settings = await dependencies.store.readSettings();
-    const manifest = await dependencies.store.readInstallManifest();
+    const settings = await dependencies.store.readSettings(stateOptions(deadline));
+    const manifest = await dependencies.store.readInstallManifest(stateOptions(deadline));
     const unavailable = withDesiredState(settings.desiredState, {
       observedState: "stopped" as const,
       code: "COMPANION_NOT_INSTALLED" as const
@@ -393,9 +440,9 @@ export function createCompanionManager(
       };
     }
 
-    if (!(await currentOnGeneration(generation))) {
+    if (!(await currentOnGeneration(generation, deadline))) {
       await retireStaleSpawn(spawned, undefined, deadline);
-      return staleStartupResult(generation);
+      return staleStartupResult(generation, deadline);
     }
 
     let readiness = await readinessProbe(deadline);
@@ -431,9 +478,9 @@ export function createCompanionManager(
       return { kind: "error", code: "START_TIMEOUT", snapshot };
     }
     const health = readiness.health;
-    if (!(await dependencies.store.writeRuntime(health, generation))) {
+    if (!(await dependencies.store.writeRuntime(health, generation, stateOptions(deadline)))) {
       await retireStaleSpawn(spawned, health, deadline);
-      return staleStartupResult(generation);
+      return staleStartupResult(generation, deadline);
     }
     ownedHud = { process: spawned, instanceNonce: health.instanceNonce };
     record({
@@ -477,12 +524,12 @@ export function createCompanionManager(
   ): Promise<RunningResult> {
     if (startupPromise !== undefined) {
       if (startupGeneration === generation) return startupPromise;
-      return staleStartupResult(generation);
+      return staleStartupResult(generation, deadline);
     }
-    if (!(await currentOnGeneration(generation))) return staleStartupResult(generation);
+    if (!(await currentOnGeneration(generation, deadline))) return staleStartupResult(generation, deadline);
     const snapshot = await observe(deadline);
     if (snapshot.observedState === "running" || snapshot.observedState === "hidden") {
-      if (!(await currentOnGeneration(generation))) return staleStartupResult(generation);
+      if (!(await currentOnGeneration(generation, deadline))) return staleStartupResult(generation, deadline);
       return { kind: "ready", generation, snapshot };
     }
     if (snapshot.code === "PORT_CONFLICT" || snapshot.code === "VERSION_MISMATCH" || snapshot.code === "AUTH_ERROR") {
@@ -513,21 +560,33 @@ export function createCompanionManager(
   }
 
   async function ensureForWrite(
-    reason: HudWriteReason
+    reason: HudWriteReason,
+    deadline = now() + startupTimeoutMs
   ): Promise<EnsureResult> {
-    const deadline = now() + startupTimeoutMs;
-    let settings = await dependencies.store.readSettings();
-    if (settings.desiredState === "off" && reason !== "tracking_start") {
-      return { kind: "suppressed", code: "MANUALLY_DISABLED" };
+    try {
+      let settings = await dependencies.store.readSettings(stateOptions(deadline));
+      if (settings.desiredState === "off" && reason !== "tracking_start") {
+        return { kind: "suppressed", code: "MANUALLY_DISABLED" };
+      }
+      if (settings.desiredState !== "on") {
+        settings = await dependencies.store.setDesiredState("on", stateOptions(deadline));
+      }
+      return await ensureRunningOnce(settings.generation, deadline);
+    } catch (error) {
+      if (!(error instanceof LifecycleStateTimeoutError)) throw error;
+      return {
+        kind: "error",
+        code: "START_TIMEOUT",
+        snapshot: { observedState: "stopped", code: "START_TIMEOUT" }
+      };
     }
-    if (settings.desiredState !== "on") settings = await dependencies.store.setDesiredState("on");
-    return ensureRunningOnce(settings.generation, deadline);
   }
 
   async function staleWriteResult(
-    generation: number
+    generation: number,
+    deadline: number
   ): Promise<Exclude<EnsureResult, { kind: "ready" }>> {
-    const settings = await dependencies.store.readSettings();
+    const settings = await dependencies.store.readSettings(stateOptions(deadline));
     if (settings.desiredState === "off") {
       return { kind: "suppressed", code: "MANUALLY_DISABLED" };
     }
@@ -547,25 +606,39 @@ export function createCompanionManager(
 
     async open(): Promise<HudLifecycleSnapshot> {
       const deadline = now() + startupTimeoutMs;
-      const settings = await dependencies.store.setDesiredState("on");
-      const ensured = await ensureRunningOnce(settings.generation, deadline);
-      if (ensured.kind !== "ready") return ensured.snapshot;
-      if (!(await currentOnGeneration(ensured.generation))) return (await staleStartupResult(ensured.generation)).snapshot;
-      await dependencies.client.show(requestOptions(deadline, ensured.generation));
-      return observe();
+      try {
+        const settings = await dependencies.store.setDesiredState("on", stateOptions(deadline));
+        const ensured = await ensureRunningOnce(settings.generation, deadline);
+        if (ensured.kind !== "ready") return ensured.snapshot;
+        if (!(await currentOnGeneration(ensured.generation, deadline))) {
+          return (await staleStartupResult(ensured.generation, deadline)).snapshot;
+        }
+        await dependencies.client.show(requestOptions(deadline, ensured.generation));
+        return await observe(deadline);
+      } catch (error) {
+        if (!(error instanceof LifecycleStateTimeoutError)) throw error;
+        return { observedState: "stopped", code: "START_TIMEOUT" };
+      }
     },
 
     async hide(): Promise<HudLifecycleSnapshot> {
-      const snapshot = await observe();
+      const deadline = now() + startupTimeoutMs;
+      const snapshot = await observe(deadline);
       if (snapshot.observedState !== "running" && snapshot.observedState !== "hidden") return snapshot;
-      await dependencies.client.hide();
-      return observe();
+      await dependencies.client.hide(requestOptions(deadline));
+      return observe(deadline);
     },
 
     async close(): Promise<HudLifecycleSnapshot> {
       const shutdownStartedAt = now();
       const shutdownDeadline = shutdownStartedAt + shutdownTimeoutMs;
-      const offSettings = await dependencies.store.setDesiredState("off");
+      let offSettings;
+      try {
+        offSettings = await dependencies.store.setDesiredState("off", stateOptions(shutdownDeadline));
+      } catch (error) {
+        if (!(error instanceof LifecycleStateTimeoutError)) throw error;
+        return shutdownTimedOut(shutdownStartedAt);
+      }
       for (const controller of activeWriteControllers) controller.abort();
       record({
         level: "info",
@@ -573,13 +646,12 @@ export function createCompanionManager(
         lifecycleState: "stopped",
         protocolVersion: PROTOCOL_VERSION
       });
-      let health: HudHealth;
       try {
-        health = await dependencies.client.health(requestOptions(shutdownDeadline));
+        await dependencies.client.health(requestOptions(shutdownDeadline));
       } catch (error) {
         const code = errorCode(error);
         if (code === "OFFLINE") {
-          await dependencies.store.clearRuntime();
+          if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
           record({
             level: "info",
             event: "shutdown_complete",
@@ -589,6 +661,7 @@ export function createCompanionManager(
           });
           return { desiredState: "off", observedState: "stopped" };
         }
+        if (code === "REQUEST_TIMEOUT") return shutdownTimedOut(shutdownStartedAt);
         const mapped = lifecycleCode(code);
         remember(mapped);
         return { desiredState: "off", observedState: "stopped", code: mapped };
@@ -596,19 +669,28 @@ export function createCompanionManager(
       try {
         await dependencies.client.shutdown(requestOptions(shutdownDeadline, offSettings.generation));
       } catch (error) {
-        const code = lifecycleCode(errorCode(error));
+        const clientCode = errorCode(error);
+        if (clientCode === "REQUEST_TIMEOUT") return shutdownTimedOut(shutdownStartedAt);
+        const code = lifecycleCode(clientCode);
         remember(code);
         return { desiredState: "off", observedState: "stopped", code };
       }
       let latestHealth: HudHealth | undefined;
       for (const delay of SHUTDOWN_DELAYS) {
         if (now() >= shutdownDeadline) break;
+        if (
+          ownedHud !== undefined &&
+          latestHealth !== undefined &&
+          identityMatches(latestHealth, ownedHud) &&
+          delay >= shutdownDeadline - now()
+        ) break;
         await sleep(Math.min(delay, shutdownDeadline - now()));
         try {
           latestHealth = await dependencies.client.health(requestOptions(shutdownDeadline));
         } catch (error) {
-          if (errorCode(error) === "OFFLINE") {
-            await dependencies.store.clearRuntime();
+          const code = errorCode(error);
+          if (code === "OFFLINE") {
+            if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
             ownedHud = undefined;
             record({
               level: "info",
@@ -619,6 +701,7 @@ export function createCompanionManager(
             });
             return { desiredState: "off", observedState: "stopped" };
           }
+          if (code === "REQUEST_TIMEOUT") break;
           latestHealth = undefined;
         }
       }
@@ -628,7 +711,7 @@ export function createCompanionManager(
         identityMatches(latestHealth, ownedHud)
       ) {
         await ownedHud.process.terminate();
-        await dependencies.store.clearRuntime();
+        if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
         ownedHud = undefined;
         record({
           level: "info",
@@ -639,37 +722,30 @@ export function createCompanionManager(
         });
         return { desiredState: "off", observedState: "stopped" };
       }
-      remember("SHUTDOWN_TIMEOUT");
-      record({
-        level: "error",
-        event: "shutdown_timeout",
-        lifecycleState: "stopped",
-        protocolVersion: PROTOCOL_VERSION,
-        elapsedMs: Math.max(0, now() - shutdownStartedAt)
-      });
-      return {
-        desiredState: "off",
-        observedState: "stopped",
-        code: "SHUTDOWN_TIMEOUT"
-      };
+      return shutdownTimedOut(shutdownStartedAt);
     },
 
     ensureForWrite,
 
     async executeWrite(reason, operation) {
+      const deadline = now() + startupTimeoutMs;
       const controller = new AbortController();
       activeWriteControllers.add(controller);
       try {
-        let ensured = await ensureForWrite(reason);
+        let ensured = await ensureForWrite(reason, deadline);
         if (ensured.kind !== "ready") return ensured;
         const writeGeneration = ensured.generation;
-        if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration))) {
-          return staleWriteResult(writeGeneration);
+        if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration, deadline))) {
+          return staleWriteResult(writeGeneration, deadline);
         }
         try {
           return {
             kind: "completed",
-            value: await operation({ generation: writeGeneration, signal: controller.signal })
+            value: await operation({
+              generation: writeGeneration,
+              signal: controller.signal,
+              timeoutMs: Math.max(0, deadline - now())
+            })
           };
         } catch (error) {
           if (
@@ -677,23 +753,27 @@ export function createCompanionManager(
             (error.code !== "OFFLINE" && error.code !== "GENERATION_REJECTED")
           ) throw error;
           if (error.code === "GENERATION_REJECTED" || controller.signal.aborted) {
-            return staleWriteResult(writeGeneration);
+            return staleWriteResult(writeGeneration, deadline);
           }
-          if (!(await currentOnGeneration(writeGeneration))) {
-            return staleWriteResult(writeGeneration);
+          if (!(await currentOnGeneration(writeGeneration, deadline))) {
+            return staleWriteResult(writeGeneration, deadline);
           }
-          ensured = await ensureRunningOnce(writeGeneration);
+          ensured = await ensureRunningOnce(writeGeneration, deadline);
           if (ensured.kind !== "ready") {
             return ensured.code === "MANUALLY_DISABLED"
-              ? staleWriteResult(writeGeneration)
+              ? staleWriteResult(writeGeneration, deadline)
               : ensured;
           }
-          if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration))) {
-            return staleWriteResult(writeGeneration);
+          if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration, deadline))) {
+            return staleWriteResult(writeGeneration, deadline);
           }
           return {
             kind: "completed",
-            value: await operation({ generation: writeGeneration, signal: controller.signal })
+            value: await operation({
+              generation: writeGeneration,
+              signal: controller.signal,
+              timeoutMs: Math.max(0, deadline - now())
+            })
           };
         }
       } finally {
@@ -702,8 +782,9 @@ export function createCompanionManager(
     },
 
     async diagnose(): Promise<DiagnosticReport> {
-      const snapshot = await observe();
-      const runtime: RuntimeIdentity | null = await dependencies.store.readRuntime();
+      const deadline = now() + startupTimeoutMs;
+      const snapshot = await observe(deadline);
+      const runtime: RuntimeIdentity | null = await dependencies.store.readRuntime(stateOptions(deadline));
       return reportWriter({
         directory: dependencies.diagnostics.directory,
         generatedAt: new Date(now()).toISOString(),

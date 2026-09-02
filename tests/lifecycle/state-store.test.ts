@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
+import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 import {
   defaultDiagnosticsDirectory,
   defaultInstallManifestPath,
@@ -104,6 +105,29 @@ describe("lifecycle state store", () => {
       })
     );
   });
+
+  it("expires a caller-budgeted real lock wait without a delayed mutation", async () => {
+    const paths = testPaths();
+    const store = createLifecycleStateStore(paths);
+    await store.setDesiredState("off");
+    const lock = await holdLifecycleLock(join(directory, ".lifecycle-state.lock"));
+    const startedAt = performance.now();
+
+    const result = await store.setDesiredState("on", { timeoutMs: 90 })
+      .then(() => ({ kind: "resolved" as const }))
+      .catch((error: unknown) => ({ kind: "rejected" as const, error }));
+    const elapsedMs = performance.now() - startedAt;
+    await lock.releaseWithWrites([{
+      path: paths.settingsPath,
+      content: '{"desiredState":"off","startWithWindows":false,"generation":2}\n'
+    }]);
+
+    expect(result).toMatchObject({ kind: "rejected" });
+    expect(elapsedMs).toBeLessThan(300);
+    await lock.release();
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+    expect(await store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
+  }, 10_000);
 
   it("writes and reads valid runtime identity", async () => {
     const store = createLifecycleStateStore(testPaths());

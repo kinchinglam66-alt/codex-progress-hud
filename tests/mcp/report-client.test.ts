@@ -193,7 +193,7 @@ describe("CompanionHttpClient", () => {
     expect(String(error)).not.toContain("private");
   });
 
-  it("aborts a listener that accepts an identity request but never responds", async () => {
+  it("categorizes its own deadline abort separately from an offline connection", async () => {
     const { baseUrl, tokenPath } = await fixture(() => undefined);
     const startedAt = performance.now();
 
@@ -201,7 +201,7 @@ describe("CompanionHttpClient", () => {
       .identity({ timeoutMs: 75 })
       .catch((caught) => caught);
 
-    expect(error).toMatchObject({ code: "OFFLINE" });
+    expect(error).toMatchObject({ code: "REQUEST_TIMEOUT" });
     expect(performance.now() - startedAt).toBeLessThan(500);
   });
 

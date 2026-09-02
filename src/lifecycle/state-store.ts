@@ -2,9 +2,22 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { identityOf, retryWindowsSharing, unlinkIfIdentical, withLifecycleStateLock } from "./state-lock.js";
+import {
+  identityOf,
+  LifecycleStateTimeoutError,
+  retryWindowsSharing,
+  unlinkIfIdentical,
+  withLifecycleStateLock
+} from "./state-lock.js";
 import { PROTOCOL_VERSION } from "./types.js";
-import type { DesiredHudState, HudSettings, InstallManifest, LifecycleStateStore, RuntimeIdentity } from "./types.js";
+import type {
+  DesiredHudState,
+  HudSettings,
+  InstallManifest,
+  LifecycleStateStore,
+  RuntimeIdentity,
+  StateOperationOptions
+} from "./types.js";
 
 export interface LifecycleStatePaths { settingsPath: string; runtimePath: string; installManifestPath: string; }
 
@@ -33,14 +46,40 @@ const installManifestSchema = z.object({
 
 const localQueues = new Map<string, Promise<unknown>>();
 
-async function locallyOrdered<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+async function locallyOrdered<T>(
+  lockPath: string,
+  operation: (remainingMs?: number, signal?: AbortSignal) => Promise<T>,
+  options: StateOperationOptions = {}
+): Promise<T> {
+  const deadline = options.timeoutMs === undefined
+    ? undefined
+    : Date.now() + Math.max(0, options.timeoutMs);
   const previous = localQueues.get(lockPath) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(operation);
+  const controller = new AbortController();
+  const current = previous.catch(() => undefined).then(() => {
+    const remainingMs = deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
+    if (remainingMs === 0 || controller.signal.aborted) throw new LifecycleStateTimeoutError();
+    return operation(remainingMs, controller.signal);
+  });
   localQueues.set(lockPath, current);
-  try {
-    return await current;
-  } finally {
+  const removeCurrent = () => {
     if (localQueues.get(lockPath) === current) localQueues.delete(lockPath);
+  };
+  void current.then(removeCurrent, removeCurrent);
+  if (deadline === undefined) return await current;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      current,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new LifecycleStateTimeoutError());
+        }, Math.max(0, deadline - Date.now()));
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -83,14 +122,15 @@ function normalizedSettings(settings: z.infer<typeof settingsSchema> | null): Hu
 
 export function createLifecycleStateStore(paths: LifecycleStatePaths): LifecycleStateStore {
   const lockPath = join(dirname(paths.settingsPath), ".lifecycle-state.lock");
-  const locked = <T>(operation: () => Promise<T>) => locallyOrdered(
+  const locked = <T>(options: StateOperationOptions | undefined, operation: () => Promise<T>) => locallyOrdered(
     lockPath,
-    () => withLifecycleStateLock(lockPath, operation)
+    (remainingMs, signal) => withLifecycleStateLock(lockPath, operation, remainingMs, signal),
+    options
   );
   const readSettingsUnlocked = async () => normalizedSettings(await readJsonUnlocked(paths.settingsPath, settingsSchema));
   return {
-    readSettings: () => locked(readSettingsUnlocked),
-    setDesiredState: (state) => locked(async () => {
+    readSettings: (options) => locked(options, readSettingsUnlocked),
+    setDesiredState: (state, options) => locked(options, async () => {
       const current = await readSettingsUnlocked();
       if (current.desiredState === state) return current;
       const settings: HudSettings = {
@@ -101,12 +141,12 @@ export function createLifecycleStateStore(paths: LifecycleStatePaths): Lifecycle
       await writeJsonUnlocked(paths.settingsPath, settings);
       return settings;
     }),
-    setStartWithWindows: (enabled) => locked(async () => {
+    setStartWithWindows: (enabled, options) => locked(options, async () => {
       const settings: HudSettings = { ...(await readSettingsUnlocked()), startWithWindows: enabled };
       await writeJsonUnlocked(paths.settingsPath, settings);
       return settings;
     }),
-    writeRuntime: (identity, generation) => locked(async () => {
+    writeRuntime: (identity, generation, options) => locked(options, async () => {
       if (generation !== undefined) {
         const settings = await readSettingsUnlocked();
         if (settings.desiredState !== "on" || settings.generation !== generation) return false;
@@ -120,8 +160,8 @@ export function createLifecycleStateStore(paths: LifecycleStatePaths): Lifecycle
       }));
       return true;
     }),
-    readRuntime: () => locked(() => readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema)),
-    clearRuntime: (expected) => locked(async () => {
+    readRuntime: (options) => locked(options, () => readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema)),
+    clearRuntime: (expected, options) => locked(options, async () => {
       if (expected !== undefined) {
         const current = await readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema);
         if (
@@ -132,8 +172,8 @@ export function createLifecycleStateStore(paths: LifecycleStatePaths): Lifecycle
       }
       await clearUnlocked(paths.runtimePath);
     }),
-    readInstallManifest: () => locked(() => readJsonUnlocked(paths.installManifestPath, installManifestSchema)),
-    runIfGeneration: (generation, desiredState, operation) => locked(async () => {
+    readInstallManifest: (options) => locked(options, () => readJsonUnlocked(paths.installManifestPath, installManifestSchema)),
+    runIfGeneration: (generation, desiredState, operation, options) => locked(options, async () => {
       const settings = await readSettingsUnlocked();
       if (settings.generation !== generation || settings.desiredState !== desiredState) return { accepted: false };
       return { accepted: true, value: await operation() };

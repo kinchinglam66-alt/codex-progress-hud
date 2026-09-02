@@ -9,6 +9,7 @@ import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
+import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -592,7 +593,51 @@ describe("companion lifecycle manager", () => {
     expect(performance.now() - startedAt).toBeLessThan(700);
   }, 2_000);
 
-  it("derives hanging close request deadlines from the shutdown wall-clock budget", async () => {
+  it("bounds complete open while another process holds the lifecycle lock without a late runtime publication", async () => {
+    const fixture = await harness({ desiredState: "off" });
+    const lock = await holdLifecycleLock(join(fixture.directory, ".lifecycle-state.lock"));
+    cleanups.push(() => lock.release());
+    const manager = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      startupTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-lock-open"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const startedAt = performance.now();
+
+    await expect(manager.open()).resolves.toMatchObject({ code: "START_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    const successor = {
+      pid: 9001,
+      version: "0.2.0",
+      protocolVersion: 1,
+      instanceNonce: "successor-open",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    };
+    await lock.releaseWithWrites([
+      {
+        path: fixture.paths.settingsPath,
+        content: '{"desiredState":"off","startWithWindows":false,"generation":2}\n'
+      },
+      { path: fixture.paths.runtimePath, content: `${JSON.stringify(successor)}\n` }
+    ]);
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+    expect(await fixture.store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
+    expect(await fixture.store.readRuntime()).toEqual(successor);
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it("reports a live hanging listener as a degraded shutdown timeout without claiming completion", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-close-budget-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     const tokenPath = join(directory, "auth.token");
@@ -613,12 +658,14 @@ describe("companion lifecycle manager", () => {
       runtimePath: join(directory, "runtime.json"),
       installManifestPath: join(directory, "install.json")
     });
+    await store.writeRuntime(compatibleHealth);
+    const logger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
     const manager = createCompanionManager({
       store,
       client: new CompanionHttpClient(`http://127.0.0.1:${address.port}`, tokenPath),
       launcher: { spawnHud: vi.fn() },
       shutdownTimeoutMs: 90,
-      logger: { write: async () => undefined },
+      logger,
       diagnostics: {
         directory: join(directory, "diagnostics"),
         pluginVersion: "0.2.0",
@@ -631,9 +678,65 @@ describe("companion lifecycle manager", () => {
     });
     const startedAt = performance.now();
 
-    await expect(manager.close()).resolves.toEqual({ desiredState: "off", observedState: "stopped" });
-    expect(performance.now() - startedAt).toBeLessThan(700);
+    await expect(manager.close()).resolves.toEqual({
+      desiredState: "off",
+      observedState: "stopped",
+      code: "SHUTDOWN_TIMEOUT"
+    });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect((await store.readSettings()).desiredState).toBe("off");
+    expect(await store.readRuntime()).toEqual({
+      pid: 4312,
+      version: "0.2.0",
+      protocolVersion: 1,
+      instanceNonce: "owned-instance",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    });
+    expect(vi.mocked(logger.write).mock.calls.map(([entry]) => entry.event)).not.toContain("shutdown_complete");
   }, 2_000);
+
+  it("bounds a close-time runtime clear behind a real process lock and never deletes its successor", async () => {
+    const fixture = await harness({ desiredState: "on", runtime: true, online: true });
+    let heldLock: Awaited<ReturnType<typeof holdLifecycleLock>> | undefined;
+    fixture.client.health.mockImplementationOnce(async () => {
+      heldLock = await holdLifecycleLock(join(fixture.directory, ".lifecycle-state.lock"));
+      cleanups.push(() => heldLock!.release());
+      throw new HudClientError("OFFLINE", "not reachable");
+    });
+    const manager = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      shutdownTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-lock-close"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const startedAt = performance.now();
+
+    await expect(manager.close()).resolves.toMatchObject({ code: "SHUTDOWN_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    if (heldLock === undefined) throw new Error("close did not reach the locked runtime clear");
+    const successor = {
+      pid: 9002,
+      version: "0.2.0",
+      protocolVersion: 1,
+      instanceNonce: "successor-close",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    };
+    await heldLock.releaseWithWrites([
+      { path: fixture.paths.runtimePath, content: `${JSON.stringify(successor)}\n` }
+    ]);
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+    expect(await fixture.store.readRuntime()).toEqual(successor);
+  }, 10_000);
 
   it("does not wait for a permanently pending logger before shutdown", async () => {
     const pendingLogger = {
