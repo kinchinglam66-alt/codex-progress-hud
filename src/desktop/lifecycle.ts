@@ -285,16 +285,22 @@ export async function runDesktop(
       }, shutdownAt);
     }
     let cleanupFailed = false;
+    let singletonReleased = false;
     try {
       // Release process ownership before the listener can become unreachable so
       // a manager replacement cannot spend its only launch on the retiring app.
       resolved.app.releaseSingleInstanceLock();
+      singletonReleased = true;
     } catch (error) {
       cleanupFailed = true;
       reportError(error, "desktop cleanup: singleton release");
     }
     const steps: Array<[string, () => void | Promise<void>]> = [
-      ["server close", () => progressServer?.close()],
+      // If explicit release failed, keep the listener reachable (and returning
+      // SHUTTING_DOWN) until process exit releases both resources atomically.
+      ...(singletonReleased
+        ? [["server close", () => progressServer?.close()] as [string, () => void | Promise<void>]]
+        : []),
       ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
       ["window dispose", () => windowController?.dispose()],
       ["runtime clear", () => resolved.stateStore.clearRuntime(runtimeIdentity)]

@@ -429,6 +429,12 @@ Round 10 identified the remaining process-handoff gap between HTTP listener reti
 
 The cleanup-gated desktop test now asserts singleton release is the first cleanup publication, before the intentionally blocked server close. This preserves the one-owner and one-launch startup model without adding speculative process retries. Fresh evidence: desktop 45/45, full suite 18/18 and 353/353, typecheck, build, smoke, diagnose:mcp, validate:plugin, and diff-check passed. No package, install, merge, push, or release action was performed.
 
+## Whole-correction review round 11 fix
+
+Round 11 examined failure of Electron's explicit singleton-release call. Cleanup now closes the HTTP listener only after singleton release succeeds. If release throws, the error is reported and marked as cleanup failure, but the latched listener remains reachable until final process exit lets the operating system release the listener and singleton together. This prevents a manager from observing offline and spending its launch while the old singleton is still owned.
+
+The injected-failure test proves cleanup continues to final quit, records the singleton error, and does not close the server early. Fresh evidence: desktop 46/46, full suite 18/18 and 354/354, typecheck, build, smoke, diagnose:mcp, validate:plugin, and diff-check passed. No package, install, merge, push, or release action was performed.
+
 ## Whole-correction review round 6 Important fix
 
 Round 6 found that the server's process-local shutdown latch and lifecycle generation guard both produced HTTP 409. The official client therefore classified an old listener that was still retiring as `GENERATION_REJECTED`; close could report stopped before retirement, and a successor open could report running from the old listener's health.

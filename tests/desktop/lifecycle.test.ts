@@ -188,6 +188,26 @@ describe("desktop lifecycle", () => {
     await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalledOnce());
   });
 
+  it("keeps the shutdown listener reachable when singleton release fails", async () => {
+    const harness = desktopHarness();
+    const failure = new Error("singleton release failed");
+    vi.mocked(harness.dependencies.app.releaseSingleInstanceLock).mockImplementation(() => {
+      throw failure;
+    });
+    await runDesktop(harness.dependencies);
+
+    const event = { preventDefault: vi.fn() };
+    harness.listeners.get("before-quit")?.(event);
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalledOnce());
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.progressServer.close).not.toHaveBeenCalled();
+    expect(harness.dependencies.reportError).toHaveBeenCalledWith(
+      failure,
+      "desktop cleanup: singleton release"
+    );
+  });
+
   it("shows the existing window when a second GUI instance has explicit intent", async () => {
     const harness = desktopHarness();
     await runDesktop(harness.dependencies);
