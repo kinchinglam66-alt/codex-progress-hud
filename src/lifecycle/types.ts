@@ -77,6 +77,11 @@ export interface LifecycleStateStore {
   writeRuntime(identity: RuntimeIdentity, generation?: number, options?: StateOperationOptions): Promise<boolean>;
   readRuntime(options?: StateOperationOptions): Promise<RuntimeIdentity | null>;
   clearRuntime(expected?: RuntimeIdentity, options?: StateOperationOptions): Promise<void>;
+  clearRuntimeIfGeneration(
+    generation: number,
+    expected: RuntimeIdentity | null,
+    options?: StateOperationOptions
+  ): Promise<boolean>;
   readInstallManifest(options?: StateOperationOptions): Promise<InstallManifest | null>;
   runIfGeneration<T>(
     generation: number,

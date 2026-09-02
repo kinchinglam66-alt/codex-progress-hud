@@ -178,6 +178,14 @@ function normalizedSettings(settings: z.infer<typeof settingsSchema> | null): Hu
   };
 }
 
+function runtimeIdentityMatches(left: RuntimeIdentity, right: RuntimeIdentity): boolean {
+  return left.pid === right.pid &&
+    left.version === right.version &&
+    left.protocolVersion === right.protocolVersion &&
+    left.instanceNonce === right.instanceNonce &&
+    left.startedAt === right.startedAt;
+}
+
 export function createLifecycleStateStore(
   paths: LifecycleStatePaths,
   dependencies: LifecycleStateStoreDependencies = {}
@@ -248,6 +256,18 @@ export function createLifecycleStateStore(
       }
       await clearUnlocked(paths.runtimePath, signal, enterMutation, fileSystem);
     }),
+    clearRuntimeIfGeneration: (generation, expected, options) => locked(
+      options,
+      async (signal, enterMutation) => {
+        const settings = await readSettingsUnlocked();
+        if (settings.desiredState !== "off" || settings.generation !== generation) return false;
+        const current = await readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema, fileSystem);
+        if (current === null) return true;
+        if (expected === null || !runtimeIdentityMatches(current, expected)) return false;
+        await clearUnlocked(paths.runtimePath, signal, enterMutation, fileSystem);
+        return true;
+      }
+    ),
     readInstallManifest: (options) => locked(
       options,
       async () => readJsonUnlocked(paths.installManifestPath, installManifestSchema, fileSystem)

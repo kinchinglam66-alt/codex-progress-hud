@@ -8,6 +8,8 @@ Task 4 baseline: `e631c46a857752d2c9f1b7a801550d007fb3028d`
 
 Task 6 baseline: `7f3f0facb5e36f35028c43ebf03f2aa32af30bbf`
 
+Task 7 baseline: `de22fb38ce72c3fcdf8298943f0703e0f344a9e4`
+
 Worktree: `.worktrees/release-lifecycle` on `feat/release-lifecycle`
 
 ## Outcome
@@ -19,6 +21,8 @@ Task 4 closes the diagnostics logger lock-disappearance race exposed by Task 3. 
 Task 5 closes the three Important gaps from the first whole-correction review. Second-instance activation is now explicit-intent-only; retry-submit generation rejection and manager-owned cancellation converge through the same stale/manual-off classifier used by the first submit; and authenticated token reads, executable existence checks, and stale-spawn termination share their enclosing absolute deadline. Deterministic 90ms / `<300ms` tests cover all newly bounded paths and assert no late runtime/state/window publication. A fresh whole-correction re-review remains required, so this report still does not authorize Windows packaging.
 
 Task 6 closes the final re-review's publication, complete state-operation boundary, and stale-classification gaps. Desktop readiness now runs inside the existing on-generation state guard after runtime publication. Deterministic tests prove both lock orderings: off-first publishes no server/window/tray/startup-ready/runtime, while guard-first blocks close's off commit until close can observe the complete instance. The state-store deadline is established before lock setup; non-cooperative setup and reads are caller-hard-bounded, cooperative product mutations remain awaited once entered, and delayed release is limited to identity-safe lock cleanup that cannot delete a successor or mutate settings/runtime. First- and second-submit generation rejection or manager-owned cancellation now settle as stable `START_TIMEOUT` or `MANUALLY_DISABLED`, never `INTERNAL_ERROR`, retry, reopen, extra spawn, or show. An independent final whole-correction re-review remains required, so this report does not authorize Windows packaging.
+
+Task 7 closes the two Important findings from final re-review round 2. `hud_hide` now reads a current `desiredState: "on"` generation and sends it through the real authenticated HTTP client; a generation race returns the successor's current lifecycle snapshot and never invokes the stale hide callback. Close captures its target runtime after committing off and every manager cleanup point uses one state-store lock to validate the exact off generation, desired state, and full expected runtime identity before the existing inode-safe unlink. Deterministic initial-offline, graceful, and forced-termination races preserve a G+1 same-PID/same-nonce successor; timeout continues to retain runtime evidence and cannot record completion. The complete non-packaging gate passed. Independent re-review remains required, so this report does not authorize Windows packaging.
 
 ## Task 3 TDD evidence
 
@@ -242,6 +246,39 @@ Fresh correction evidence:
 | `git diff --check` | Exit 0; no output. |
 
 Task 6 changes no tool registration, public payload schema, response-size limit, privacy behavior, PID/nonce ownership rule, packaging, installation, merge, push, or release behavior.
+
+## Task 7 generation-aware hide and successor-safe close
+
+### RED evidence
+
+Command: `npm test -- --run tests/lifecycle/companion-manager.test.ts -t "sends the current on generation|returns current lifecycle truth|older close clear"`
+
+- Exit 1; 3 selected tests failed and 48 were skipped.
+- The real `CompanionHttpClient` request without generation received `GENERATION_REJECTED` from the production generation-guarded server, and `manager.hide()` failed the same way because it omitted the header.
+- A hide raced by a lifecycle generation change rejected instead of returning current truth.
+- An older close returned off/stopped after a G+1 explicit on/runtime publication and deleted the successor runtime even though the successor reused the exact PID and nonce.
+
+### GREEN implementation and focused evidence
+
+- `hide()` observes a running/hidden HUD, reads and validates the current on generation under the original deadline, sends that generation, and converts a raced 409 into a fresh lifecycle observation. The real server/store tests prove headerless hide is rejected, matching hide runs once, and stale hide cannot affect a visible G+2 successor.
+- `clearRuntimeIfGeneration(generation, expected)` performs settings validation, full runtime identity validation, and unlink under one lifecycle lock. It reaches the existing final inode identity check and mutation-entry callback only after all product-state checks pass.
+- `close()` captures the expected runtime after committing its off generation. Initial offline, post-shutdown offline, and owned forced-termination cleanup all call the atomic store operation. A stale/mismatched close observes current lifecycle truth and does not record shutdown completion. Timeout paths retain runtime evidence and do not clear.
+- Focused manager/state/server/desktop gate: 4/4 files and 156/156 tests passed; Vitest duration 13.19 s.
+- Source-mode integration gate: 1/1 file and 3/3 tests passed; Vitest duration 4.47 s. Its delegated client now forwards request options, and the test-owned server rejects hide without the expected generation.
+
+### Complete Task 7 gate
+
+| Command | Exact result |
+|---|---|
+| `npm test -- --run` | Exit 0; 18/18 files and 321/321 tests passed; final Vitest duration 10.50 s. |
+| `npm run typecheck` | Exit 0; `tsc --noEmit` reported no errors. |
+| `npm run build` | Exit 0; TypeScript build and asset copy completed. |
+| `npm run smoke` | Exit 0; build completed; protocol health, authenticated event flow, and shutdown callback verified. |
+| `npm run diagnose:mcp` | Exit 0; 1/1 test passed; exact tool catalog and protocol-only child stdout remained valid; final Vitest duration 424 ms. |
+| `npm run validate:plugin` | Exit 0; plugin manifest and MCP launch configuration valid. |
+| `git diff --check` | Exit 0; no output. |
+
+Task 7 changes no tool registration, public MCP payload schema, response-size limit, privacy behavior, PID/nonce termination ownership, packaging, installation, merge, push, or release behavior.
 
 ## Review, limitations, and prohibited actions
 

@@ -40,7 +40,10 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
-async function startTestOwnedCompanion(directory: string): Promise<TestOwnedCompanion> {
+async function startTestOwnedCompanion(
+  directory: string,
+  expectedHideGeneration?: number
+): Promise<TestOwnedCompanion> {
   const ownerNonce = randomUUID();
   const tokenPath = join(directory, `auth-${ownerNonce}.token`);
   const fixturePath = join(directory, `companion-${ownerNonce}.mjs`);
@@ -51,6 +54,7 @@ import { writeFile } from "node:fs/promises";
 
 const ownerNonce = process.env.CODEX_PROGRESS_HUD_TEST_OWNED;
 const tokenPath = process.env.CODEX_PROGRESS_HUD_TEST_TOKEN_PATH;
+const expectedHideGeneration = process.env.CODEX_PROGRESS_HUD_TEST_HIDE_GENERATION;
 if (!ownerNonce || !tokenPath) throw new Error("fixture must be test-owned");
 const token = "test-" + ownerNonce;
 await writeFile(tokenPath, token + "\\n", { mode: 0o600 });
@@ -90,6 +94,13 @@ const server = createServer((request, response) => {
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/window/hide") {
+    if (
+      expectedHideGeneration &&
+      request.headers["x-codex-progress-hud-generation"] !== expectedHideGeneration
+    ) {
+      sendJson(response, 409, { accepted: false });
+      return;
+    }
     visibility = "hidden";
     sendJson(response, 202, { accepted: true });
     return;
@@ -117,7 +128,10 @@ process.on("disconnect", () => {
     env: {
       ...process.env,
       CODEX_PROGRESS_HUD_TEST_OWNED: ownerNonce,
-      CODEX_PROGRESS_HUD_TEST_TOKEN_PATH: tokenPath
+      CODEX_PROGRESS_HUD_TEST_TOKEN_PATH: tokenPath,
+      ...(expectedHideGeneration === undefined
+        ? {}
+        : { CODEX_PROGRESS_HUD_TEST_HIDE_GENERATION: String(expectedHideGeneration) })
     },
     stdio: ["ignore", "ignore", "pipe", "ipc"],
     windowsHide: true
@@ -364,8 +378,8 @@ describe("source-mode companion lifecycle", () => {
     let client: CompanionHttpClient | undefined;
     let launches = 0;
     const launcher: ProcessLauncher = {
-      async spawnHud(): Promise<SpawnedHud> {
-        const spawned = await startTestOwnedCompanion(directory);
+      async spawnHud(_executablePath, options): Promise<SpawnedHud> {
+        const spawned = await startTestOwnedCompanion(directory, options.generation);
         active = spawned;
         cleanups.push(() => spawned.terminate());
         client = new CompanionHttpClient(spawned.serviceUrl, spawned.tokenPath);
@@ -374,11 +388,16 @@ describe("source-mode companion lifecycle", () => {
       }
     };
     const delegatedClient = {
-      identity: () => client === undefined ? Promise.reject(new Error("offline")) : client.identity(),
-      health: () => client === undefined ? Promise.reject(new Error("offline")) : client.health(),
-      show: () => client === undefined ? Promise.reject(new Error("offline")) : client.show(),
-      hide: () => client === undefined ? Promise.reject(new Error("offline")) : client.hide(),
-      shutdown: () => client === undefined ? Promise.reject(new Error("offline")) : client.shutdown()
+      identity: (options?: Parameters<CompanionHttpClient["identity"]>[0]) =>
+        client === undefined ? Promise.reject(new Error("offline")) : client.identity(options),
+      health: (options?: Parameters<CompanionHttpClient["health"]>[0]) =>
+        client === undefined ? Promise.reject(new Error("offline")) : client.health(options),
+      show: (options?: Parameters<CompanionHttpClient["show"]>[0]) =>
+        client === undefined ? Promise.reject(new Error("offline")) : client.show(options),
+      hide: (options?: Parameters<CompanionHttpClient["hide"]>[0]) =>
+        client === undefined ? Promise.reject(new Error("offline")) : client.hide(options),
+      shutdown: (options?: Parameters<CompanionHttpClient["shutdown"]>[0]) =>
+        client === undefined ? Promise.reject(new Error("offline")) : client.shutdown(options)
     };
     const manager = createCompanionManager({
       store: createLifecycleStateStore(paths),
@@ -421,7 +440,13 @@ describe("source-mode companion lifecycle", () => {
   it("calls the lifecycle tools over stdio instead of only discovering them", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-stdio-lifecycle-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
-    const companion = await startTestOwnedCompanion(directory);
+    const store = createLifecycleStateStore({
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    });
+    const settings = await store.setDesiredState("on");
+    const companion = await startTestOwnedCompanion(directory, settings.generation);
     cleanups.push(() => companion.terminate());
     const transport = new StdioClientTransport({
       command: process.execPath,

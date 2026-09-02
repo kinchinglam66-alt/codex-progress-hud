@@ -77,6 +77,7 @@ function desktopHarness(lockAcquired = true) {
       writeRuntime: vi.fn(async () => true),
       readRuntime: vi.fn(async () => null),
       clearRuntime: vi.fn(async () => undefined),
+      clearRuntimeIfGeneration: vi.fn(async () => true),
       readInstallManifest: vi.fn(async () => null),
       runIfGeneration: vi.fn(async (_generation, _state, operation) => ({
         accepted: true as const,

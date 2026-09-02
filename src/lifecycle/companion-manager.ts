@@ -250,12 +250,19 @@ export function createCompanionManager(
     return await resultBeforeDeadline(operation, deadline) !== OPERATION_DEADLINE;
   }
 
-  async function clearRuntimeBefore(deadline: number): Promise<boolean> {
+  async function clearRuntimeBefore(
+    deadline: number,
+    generation: number,
+    expected: RuntimeIdentity | null
+  ): Promise<boolean | undefined> {
     try {
-      await dependencies.store.clearRuntime(undefined, stateOptions(deadline));
-      return true;
+      return await dependencies.store.clearRuntimeIfGeneration(
+        generation,
+        expected,
+        stateOptions(deadline)
+      );
     } catch (error) {
-      if (error instanceof LifecycleStateTimeoutError) return false;
+      if (error instanceof LifecycleStateTimeoutError) return undefined;
       throw error;
     }
   }
@@ -710,7 +717,14 @@ export function createCompanionManager(
       const deadline = now() + startupTimeoutMs;
       const snapshot = await observe(deadline);
       if (snapshot.observedState !== "running" && snapshot.observedState !== "hidden") return snapshot;
-      await dependencies.client.hide(requestOptions(deadline));
+      const settings = await dependencies.store.readSettings(stateOptions(deadline));
+      if (settings.desiredState !== "on") return observe(deadline);
+      try {
+        await dependencies.client.hide(requestOptions(deadline, settings.generation));
+      } catch (error) {
+        if (!(error instanceof HudClientError) || error.code !== "GENERATION_REJECTED") throw error;
+        return observe(deadline);
+      }
       return observe(deadline);
     },
 
@@ -720,6 +734,13 @@ export function createCompanionManager(
       let offSettings;
       try {
         offSettings = await dependencies.store.setDesiredState("off", stateOptions(shutdownDeadline));
+      } catch (error) {
+        if (!(error instanceof LifecycleStateTimeoutError)) throw error;
+        return shutdownTimedOut(shutdownStartedAt);
+      }
+      let closingRuntime: RuntimeIdentity | null;
+      try {
+        closingRuntime = await dependencies.store.readRuntime(stateOptions(shutdownDeadline));
       } catch (error) {
         if (!(error instanceof LifecycleStateTimeoutError)) throw error;
         return shutdownTimedOut(shutdownStartedAt);
@@ -736,7 +757,13 @@ export function createCompanionManager(
       } catch (error) {
         const code = errorCode(error);
         if (code === "OFFLINE") {
-          if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
+          const cleared = await clearRuntimeBefore(
+            shutdownDeadline,
+            offSettings.generation,
+            closingRuntime
+          );
+          if (cleared === undefined) return shutdownTimedOut(shutdownStartedAt);
+          if (!cleared) return observe(shutdownDeadline);
           record({
             level: "info",
             event: "shutdown_complete",
@@ -775,7 +802,13 @@ export function createCompanionManager(
         } catch (error) {
           const code = errorCode(error);
           if (code === "OFFLINE") {
-            if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
+            const cleared = await clearRuntimeBefore(
+              shutdownDeadline,
+              offSettings.generation,
+              closingRuntime
+            );
+            if (cleared === undefined) return shutdownTimedOut(shutdownStartedAt);
+            if (!cleared) return observe(shutdownDeadline);
             ownedHud = undefined;
             record({
               level: "info",
@@ -798,7 +831,13 @@ export function createCompanionManager(
         if (!(await settlesBeforeDeadline(ownedHud.process.terminate(), shutdownDeadline))) {
           return shutdownTimedOut(shutdownStartedAt);
         }
-        if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
+        const cleared = await clearRuntimeBefore(
+          shutdownDeadline,
+          offSettings.generation,
+          closingRuntime
+        );
+        if (cleared === undefined) return shutdownTimedOut(shutdownStartedAt);
+        if (!cleared) return observe(shutdownDeadline);
         ownedHud = undefined;
         record({
           level: "info",

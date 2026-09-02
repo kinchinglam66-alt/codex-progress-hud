@@ -8,6 +8,7 @@ import { createProcessLauncher } from "../../src/lifecycle/process-launcher.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
+import { createProgressServer } from "../../src/server/http-server.js";
 import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 
@@ -327,6 +328,114 @@ describe("companion lifecycle manager", () => {
     expect((await manager.hide()).observedState).toBe("hidden");
     expect(client.show).toHaveBeenCalledOnce();
     expect(client.hide).toHaveBeenCalledOnce();
+  });
+
+  it("sends the current on generation when hiding through the real guarded server", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-manager-real-hide-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const settings = await store.setDesiredState("on");
+    await store.writeRuntime(compatibleHealth, settings.generation);
+    let visibility: HudHealth["visibility"] = "visible";
+    const hideWindow = vi.fn(() => { visibility = "hidden"; });
+    const server = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => ({ ...compatibleHealth, visibility }),
+      showWindow: () => undefined,
+      hideWindow,
+      requestShutdown: () => undefined,
+      runIfGeneration: (generation, desiredState, operation) =>
+        store.runIfGeneration(generation, desiredState, operation)
+    });
+    await server.listen();
+    cleanups.push(() => server.close());
+    const client = new CompanionHttpClient(server.address().url, join(directory, "auth.token"));
+    const manager = createCompanionManager({
+      store,
+      client,
+      launcher: { spawnHud: vi.fn() },
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(directory, "diagnostics"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: server.address().port,
+        installManifestPath: paths.installManifestPath,
+        dataDirectoryPath: directory
+      }
+    });
+
+    await expect(client.hide()).rejects.toMatchObject({ code: "GENERATION_REJECTED" });
+    expect(hideWindow).not.toHaveBeenCalled();
+    await expect(manager.hide()).resolves.toMatchObject({ observedState: "hidden" });
+    expect(hideWindow).toHaveBeenCalledOnce();
+  });
+
+  it("returns current lifecycle truth when hide loses a generation race", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-manager-raced-hide-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const settings = await store.setDesiredState("on");
+    await store.writeRuntime(compatibleHealth, settings.generation);
+    const hideWindow = vi.fn();
+    const server = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => compatibleHealth,
+      showWindow: () => undefined,
+      hideWindow,
+      requestShutdown: () => undefined,
+      runIfGeneration: (generation, desiredState, operation) =>
+        store.runIfGeneration(generation, desiredState, operation)
+    });
+    await server.listen();
+    cleanups.push(() => server.close());
+    const realClient = new CompanionHttpClient(server.address().url, join(directory, "auth.token"));
+    const client = {
+      identity: realClient.identity.bind(realClient),
+      health: realClient.health.bind(realClient),
+      show: realClient.show.bind(realClient),
+      shutdown: realClient.shutdown.bind(realClient),
+      hide: async (options?: Parameters<CompanionHttpClient["hide"]>[0]) => {
+        await store.setDesiredState("off");
+        await store.setDesiredState("on");
+        return realClient.hide(options);
+      }
+    };
+    const manager = createCompanionManager({
+      store,
+      client,
+      launcher: { spawnHud: vi.fn() },
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(directory, "diagnostics"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: server.address().port,
+        installManifestPath: paths.installManifestPath,
+        dataDirectoryPath: directory
+      }
+    });
+
+    await expect(manager.hide()).resolves.toEqual({
+      desiredState: "on",
+      observedState: "running",
+      health: compatibleHealth
+    });
+    expect(hideWindow).not.toHaveBeenCalled();
   });
 
   it("maps a final show request timeout to the public startup timeout snapshot", async () => {
@@ -970,6 +1079,89 @@ describe("companion lifecycle manager", () => {
     await new Promise((resolve_) => setTimeout(resolve_, 150));
     expect(await fixture.store.readRuntime()).toEqual(successor);
   }, 10_000);
+
+  it("does not let an older close clear an explicitly reopened same-identity runtime", async () => {
+    const fixture = await harness({ desiredState: "on", runtime: true, online: true });
+    const explicitOpenStore = createLifecycleStateStore(fixture.paths);
+    let healthEntered!: () => void;
+    const healthEntry = new Promise<void>((resolve) => { healthEntered = resolve; });
+    let releaseHealth!: () => void;
+    const healthGate = new Promise<void>((resolve) => { releaseHealth = resolve; });
+    fixture.client.health.mockImplementationOnce(async () => {
+      healthEntered();
+      await healthGate;
+      throw new HudClientError("OFFLINE", "old companion is offline");
+    });
+
+    const closing = fixture.manager.close();
+    await healthEntry;
+    const closed = await explicitOpenStore.readSettings();
+    expect(closed).toMatchObject({ desiredState: "off" });
+    const reopened = await explicitOpenStore.setDesiredState("on");
+    expect(await explicitOpenStore.writeRuntime(compatibleHealth, reopened.generation)).toBe(true);
+    releaseHealth();
+
+    await expect(closing).resolves.toMatchObject({
+      desiredState: "on",
+      observedState: "running"
+    });
+    expect(await explicitOpenStore.readSettings()).toEqual(reopened);
+    expect(await explicitOpenStore.readRuntime()).toEqual({
+      pid: 4312,
+      version: "0.2.0",
+      protocolVersion: 1,
+      instanceNonce: "owned-instance",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    });
+  });
+
+  it("preserves a same-identity reopen that supersedes graceful shutdown cleanup", async () => {
+    const fixture = await harness({ desiredState: "on", runtime: true, online: true });
+    const explicitOpenStore = createLifecycleStateStore(fixture.paths);
+    let reopenedSettings: Awaited<ReturnType<LifecycleStateStore["readSettings"]>> | undefined;
+    fixture.client.health.mockImplementation(async () => {
+      if (fixture.client.shutdown.mock.calls.length === 0) return compatibleHealth;
+      reopenedSettings = await explicitOpenStore.setDesiredState("on");
+      await explicitOpenStore.writeRuntime(compatibleHealth, reopenedSettings.generation);
+      throw new HudClientError("OFFLINE", "old companion stopped gracefully");
+    });
+
+    await expect(fixture.manager.close()).resolves.toMatchObject({ desiredState: "on" });
+    expect(reopenedSettings).toBeDefined();
+    expect(await explicitOpenStore.readSettings()).toEqual(reopenedSettings);
+    expect(await explicitOpenStore.readRuntime()).toMatchObject({
+      pid: compatibleHealth.pid,
+      instanceNonce: compatibleHealth.instanceNonce
+    });
+  });
+
+  it("preserves a same-identity reopen that supersedes forced termination cleanup", async () => {
+    const fixture = await harness({ shutdownStops: false });
+    const explicitOpenStore = createLifecycleStateStore(fixture.paths);
+    let reopenedSettings: Awaited<ReturnType<LifecycleStateStore["readSettings"]>> | undefined;
+    const terminate = vi.fn(async () => {
+      reopenedSettings = await explicitOpenStore.setDesiredState("on");
+      await explicitOpenStore.writeRuntime(compatibleHealth, reopenedSettings.generation);
+      fixture.setOnline(true);
+    });
+    fixture.launcher.spawnHud.mockImplementation(async () => {
+      fixture.setOnline(true);
+      return { pid: compatibleHealth.pid, terminate };
+    });
+    await fixture.manager.open();
+
+    await expect(fixture.manager.close()).resolves.toMatchObject({
+      desiredState: "on",
+      observedState: "running"
+    });
+    expect(terminate).toHaveBeenCalledOnce();
+    expect(reopenedSettings).toBeDefined();
+    expect(await explicitOpenStore.readSettings()).toEqual(reopenedSettings);
+    expect(await explicitOpenStore.readRuntime()).toMatchObject({
+      pid: compatibleHealth.pid,
+      instanceNonce: compatibleHealth.instanceNonce
+    });
+  });
 
   it("does not wait for a permanently pending logger before shutdown", async () => {
     const pendingLogger = {

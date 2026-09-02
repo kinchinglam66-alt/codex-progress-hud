@@ -561,6 +561,40 @@ describe("lifecycle state store", () => {
     expect(await store.readRuntime()).toEqual(identity);
   });
 
+  it("clears runtime only for the current off generation and exact expected identity", async () => {
+    const firstStore = createLifecycleStateStore(testPaths());
+    const secondStore = createLifecycleStateStore(testPaths());
+    const identity = {
+      pid: 4312,
+      version: "0.2.0",
+      protocolVersion: 1,
+      instanceNonce: "same-process",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    };
+    const firstOn = await firstStore.setDesiredState("on");
+    await firstStore.writeRuntime(identity, firstOn.generation);
+    const oldClose = await firstStore.setDesiredState("off");
+    const successorOn = await secondStore.setDesiredState("on");
+    await secondStore.writeRuntime(identity, successorOn.generation);
+
+    await expect(
+      firstStore.clearRuntimeIfGeneration(oldClose.generation, identity)
+    ).resolves.toBe(false);
+    expect(await firstStore.readRuntime()).toEqual(identity);
+
+    const currentClose = await firstStore.setDesiredState("off");
+    await expect(firstStore.clearRuntimeIfGeneration(currentClose.generation, {
+      ...identity,
+      startedAt: "2026-09-01T01:02:04.000Z"
+    })).resolves.toBe(false);
+    expect(await firstStore.readRuntime()).toEqual(identity);
+
+    await expect(
+      firstStore.clearRuntimeIfGeneration(currentClose.generation, identity)
+    ).resolves.toBe(true);
+    expect(await firstStore.readRuntime()).toBeNull();
+  });
+
   it("rejects a canonical timestamp shape with an impossible calendar date", async () => {
     const paths = testPaths();
     const identity = {
