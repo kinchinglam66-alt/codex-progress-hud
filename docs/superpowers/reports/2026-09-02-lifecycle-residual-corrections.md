@@ -435,6 +435,10 @@ Round 11 examined failure of Electron's explicit singleton-release call. Cleanup
 
 The injected-failure test proves cleanup continues to final quit, records the singleton error, and does not close the server early. Fresh evidence: desktop 46/46, full suite 18/18 and 354/354, typecheck, build, smoke, diagnose:mcp, validate:plugin, and diff-check passed. No package, install, merge, push, or release action was performed.
 
+## Final independent release-gate decision
+
+Independent final re-review round 12 closed the round-11 singleton-release failure finding and reported **0 Critical / 0 Important / 0 Minor**. The lifecycle residual-correction branch is ready to enter a separate Windows packaging and installed-artifact validation plan. This decision does not claim that packaged Electron or Windows artifacts have been built or tested, and does not authorize package, install, merge, push, tag, or release actions.
+
 ## Whole-correction review round 6 Important fix
 
 Round 6 found that the server's process-local shutdown latch and lifecycle generation guard both produced HTTP 409. The official client therefore classified an old listener that was still retiring as `GENERATION_REJECTED`; close could report stopped before retirement, and a successor open could report running from the old listener's health.
