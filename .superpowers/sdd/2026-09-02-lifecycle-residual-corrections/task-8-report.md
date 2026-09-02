@@ -182,3 +182,11 @@ Command: `npm test -- --run tests/integration/companion-lifecycle.test.ts -t "en
 | `git diff --check` | Exit 0; no output. |
 
 No package, install, merge, push, or release action was performed. Fresh independent re-review remains required before any Windows packaging decision.
+
+## Review fix round 4 — stable timeout classification and timer bounds
+
+Independent round-3 review found that three post-readiness/recovery `currentOnGeneration()` reads could leak `LifecycleStateTimeoutError` instead of returning public `START_TIMEOUT`. Deterministic tests inject the timeout at each exact read boundary (before first submit, after first OFFLINE result, and after recovery before retry). All 3/3 failed before the fix with the internal exception and pass after `executeWrite()` consistently classifies lifecycle-state expiry; a previously claimed close first cause still returns `MANUALLY_DISABLED`.
+
+The review also found that a canonical far-future safe integer overflowed Node's timer range and emitted `TimeoutOverflowWarning`. The server now treats deadlines more than the official 60-second request window ahead as absent for compatible/manual clients. The server test includes `Number.MAX_SAFE_INTEGER`, asserts the request remains accepted, and asserts no process warning.
+
+Fresh evidence after the correction: focused integration/server/client/tools/manager 140/140; full suite 341/341 on two consecutive runs; targeted state-boundary 3/3; targeted deadline parsing 4/4; typecheck passed. Final build/smoke/diagnostic/plugin validation and independent review remain required.

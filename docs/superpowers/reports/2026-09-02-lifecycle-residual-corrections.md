@@ -393,3 +393,11 @@ This correction changes no MCP tool registration or public payload, response-siz
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.
 - This report is an acceptance boundary record, not authorization to begin Windows packaging.
+
+## Task 8 review fix round 4
+
+The round-3 independent review identified one remaining Important classification gap and one Minor timer-bound issue. `executeWrite()` now catches lifecycle-state expiry across all post-readiness and recovery reads and returns `START_TIMEOUT`, while preserving an already-claimed close as `MANUALLY_DISABLED`. Three deterministic injected-boundary regressions failed before the fix and pass afterward.
+
+Server deadline parsing now excludes values more than 60 seconds in the future, matching the official client cap and preventing Node timer overflow warnings for compatible/manual requests. The far-future compatibility test asserts both HTTP acceptance and absence of `emitWarning`.
+
+Fresh pre-review evidence: focused 140/140; full 341/341 twice consecutively; typecheck passed. No package, install, merge, push, or release action was performed. Independent Task 8 and whole-correction review are still mandatory.

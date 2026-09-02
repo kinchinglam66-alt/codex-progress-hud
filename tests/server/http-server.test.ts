@@ -357,9 +357,11 @@ describe("local progress HTTP service", () => {
     expect(snapshot.task).toMatchObject({ id: "task-1", status: "running" });
   });
 
-  it.each(["not-a-deadline", "0001", "9007199254740992"])(
+  it.each(["not-a-deadline", "0001", "9007199254740992", "9007199254740991"])(
     "treats malformed request deadline %s as absent for compatibility",
     async (deadline) => {
+      const emitWarning = vi.spyOn(process, "emitWarning");
+      cleanups.push(async () => emitWarning.mockRestore());
       const { baseUrl, token } = await startServer();
       const response = await fetch(`${baseUrl}/api/events`, {
         method: "POST",
@@ -376,6 +378,7 @@ describe("local progress HTTP service", () => {
       });
 
       expect(response.status).toBe(202);
+      expect(emitWarning).not.toHaveBeenCalled();
     }
   );
 

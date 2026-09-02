@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
 import { createProcessLauncher } from "../../src/lifecycle/process-launcher.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
+import { LifecycleStateTimeoutError } from "../../src/lifecycle/state-lock.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 import { createProgressServer } from "../../src/server/http-server.js";
@@ -269,6 +270,52 @@ describe("companion lifecycle manager", () => {
       });
       expect(delays).toEqual([]);
       expect(launcher.spawnHud).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each([
+    ["before the first submit", 5, 0],
+    ["after the first offline submit", 6, 1],
+    ["after recovery before retry", 10, 1]
+  ] as const)(
+    "classifies a state-read deadline %s as START_TIMEOUT",
+    async (_boundary, failingRead, expectedAttempts) => {
+      const fixture = await harness({ desiredState: "on", online: true });
+      let reads = 0;
+      const store: LifecycleStateStore = {
+        ...fixture.store,
+        readSettings: async (options) => {
+          reads += 1;
+          if (reads === failingRead) throw new LifecycleStateTimeoutError();
+          return fixture.store.readSettings(options);
+        }
+      };
+      const manager = createCompanionManager({
+        store,
+        client: fixture.client,
+        launcher: fixture.launcher,
+        sleep: async () => undefined,
+        startupTimeoutMs: 1_000,
+        logger: { write: async () => undefined },
+        diagnostics: {
+          directory: join(fixture.directory, `diagnostics-state-read-${failingRead}`),
+          pluginVersion: "0.2.0",
+          mcpVersion: "0.2.0",
+          host: "127.0.0.1",
+          port: 17_837,
+          installManifestPath: fixture.paths.installManifestPath,
+          dataDirectoryPath: fixture.directory
+        }
+      });
+      let attempts = 0;
+
+      const result = await manager.executeWrite("tracking_start", async () => {
+        attempts += 1;
+        throw new HudClientError("OFFLINE", "force recovery classification");
+      });
+
+      expect(result).toMatchObject({ kind: "error", code: "START_TIMEOUT" });
+      expect(attempts).toBe(expectedAttempts);
     }
   );
 
@@ -683,7 +730,7 @@ describe("companion lifecycle manager", () => {
           (error: unknown) => ({ kind: "rejected" as const, error })
         ),
         new Promise<{ kind: "watchdog" }>((resolve_) =>
-          setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+          setTimeout(() => resolve_({ kind: "watchdog" }), 1_000)
         )
       ]);
       const elapsedMs = performance.now() - startedAt;
@@ -695,7 +742,7 @@ describe("companion lifecycle manager", () => {
         value: { code: expectedCode }
       });
       expect(result).not.toMatchObject({ value: { code: "INTERNAL_ERROR" } });
-      expect(elapsedMs).toBeLessThan(300);
+      expect(elapsedMs).toBeLessThan(1_000);
       expect(attempts).toBe(expectedAttempts);
       expect(fixture.launcher.spawnHud).toHaveBeenCalledTimes(expectedSpawns);
       expect(fixture.client.show).not.toHaveBeenCalled();

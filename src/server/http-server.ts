@@ -10,6 +10,7 @@ import { TaskStore, type HudSnapshot } from "./task-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
+const MAX_REQUEST_DEADLINE_AHEAD_MS = 60_000;
 
 export interface ProgressServerControls {
   health(): HudHealth;
@@ -54,7 +55,8 @@ function requestDeadline(request: IncomingMessage): number | undefined {
   const header = request.headers[REQUEST_DEADLINE_HEADER];
   if (typeof header !== "string" || !/^(?:0|[1-9]\d*)$/u.test(header)) return undefined;
   const deadline = Number(header);
-  return Number.isSafeInteger(deadline) ? deadline : undefined;
+  if (!Number.isSafeInteger(deadline)) return undefined;
+  return deadline - Date.now() <= MAX_REQUEST_DEADLINE_AHEAD_MS ? deadline : undefined;
 }
 
 function requestCancellation(

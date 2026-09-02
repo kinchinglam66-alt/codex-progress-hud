@@ -892,11 +892,12 @@ export function createCompanionManager(
       };
       scheduleDeadline();
       activeWriteCancellations.add(cancelForClose);
+      let writeSnapshot: HudLifecycleSnapshot = { observedState: "stopped" };
       try {
         let ensured = await ensureForWrite(reason, deadline);
         if (ensured.kind !== "ready") return ensured;
         const writeGeneration = ensured.generation;
-        const writeSnapshot = ensured.snapshot;
+        writeSnapshot = ensured.snapshot;
         const manuallyDisabled = (): Exclude<EnsureResult, { kind: "ready" }> => ({
           kind: "suppressed",
           code: "MANUALLY_DISABLED"
@@ -975,6 +976,16 @@ export function createCompanionManager(
         const staleRetry = classifyStaleAttempt(retry.error);
         if (staleRetry !== undefined) return staleRetry;
         throw retry.error;
+      } catch (error) {
+        if (!(error instanceof LifecycleStateTimeoutError)) throw error;
+        if (abortCause === "close") {
+          return { kind: "suppressed", code: "MANUALLY_DISABLED" };
+        }
+        return {
+          kind: "error",
+          code: "START_TIMEOUT",
+          snapshot: { ...writeSnapshot, code: "START_TIMEOUT" }
+        };
       } finally {
         if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
         activeWriteCancellations.delete(cancelForClose);
