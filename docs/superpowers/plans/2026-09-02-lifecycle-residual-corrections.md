@@ -290,3 +290,14 @@ Add deterministic post-runtime off, lock setup/read/release stall, and expired-c
 - [ ] Send the current on generation with `hud_hide`; handle a raced generation rejection without exposing a generic internal failure.
 - [ ] Make close-time runtime clearing atomically conditional on both the close's off generation and the expected runtime identity. A superseding explicit open must preserve its runtime file even if the process identity is unchanged.
 - [ ] Add real server hide coverage and deterministic close-vs-reopen successor tests, then run the complete final gate and fresh whole-correction review.
+
+---
+
+### Task 8: Enforce one deadline across multi-request tracking controls
+
+**Reason for amendment:** Final re-review round 3 found that four status-then-submit tools can reuse one stale timeout twice.
+
+- [ ] Carry a live remaining-budget provider or absolute deadline through the write callback and recompute timeout before every HTTP request.
+- [ ] Enforce the same deadline around the complete callback; deadline cancellation maps to `START_TIMEOUT`, while close-owned cancellation still maps to manual-off suppression.
+- [ ] Add short-budget status-near-deadline plus hanging-submit tests for tracking start/pause/resume/stop, assert `<300 ms` and no late accepted event.
+- [ ] Run the final gate and fresh whole-correction review before packaging.
