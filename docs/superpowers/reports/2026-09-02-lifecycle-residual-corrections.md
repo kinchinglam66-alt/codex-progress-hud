@@ -401,3 +401,12 @@ The round-3 independent review identified one remaining Important classification
 Server deadline parsing now excludes values more than 60 seconds in the future, matching the official client cap and preventing Node timer overflow warnings for compatible/manual requests. The far-future compatibility test asserts both HTTP acceptance and absence of `emitWarning`.
 
 Fresh pre-review evidence: focused 140/140; full 341/341 twice consecutively; typecheck passed. No package, install, merge, push, or release action was performed. Independent Task 8 and whole-correction review are still mandatory.
+
+## Whole-correction review round 5 fixes
+
+Round 5 found one Critical stale second-instance visibility publication and one Important stale open/close result. Both were reproduced before implementation.
+
+- Explicit second-instance activation now retains its committed on generation and publishes `show()` only inside `runIfGeneration(generation, "on", ...)`, with a final quitting check. Deterministic two-store and shutdown tests failed 2/2 before the fix and pass afterward.
+- `open()` and `close()` now catch a generation-rejected show/shutdown and converge through a deadline-bounded observation of current lifecycle truth. Four guarded-control tests failed before the fix and now return current off/stopped or on/running truth; exhausted original budgets remain `START_TIMEOUT` and `SHUTDOWN_TIMEOUT`.
+
+Fresh combined evidence after both fixes: full suite 18/18 files and 347/347 tests; typecheck, build, smoke, diagnose:mcp, validate:plugin, and diff-check all passed. No stale control is retried. No package, install, merge, push, or release action was performed; independent focused and whole-correction re-review remain required.

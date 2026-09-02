@@ -716,6 +716,17 @@ export function createCompanionManager(
         await dependencies.client.show(requestOptions(deadline, ensured.generation));
         return await observe(deadline);
       } catch (error) {
+        if (error instanceof HudClientError && error.code === "GENERATION_REJECTED") {
+          try {
+            return await observe(deadline);
+          } catch (observationError) {
+            if (
+              !(observationError instanceof LifecycleStateTimeoutError) &&
+              (!(observationError instanceof HudClientError) || observationError.code !== "REQUEST_TIMEOUT")
+            ) throw observationError;
+            return withDesiredState(desiredState, { observedState: "stopped", code: "START_TIMEOUT" });
+          }
+        }
         if (
           !(error instanceof LifecycleStateTimeoutError) &&
           (!(error instanceof HudClientError) || error.code !== "REQUEST_TIMEOUT")
@@ -792,6 +803,20 @@ export function createCompanionManager(
       try {
         await dependencies.client.shutdown(requestOptions(shutdownDeadline, offSettings.generation));
       } catch (error) {
+        if (error instanceof HudClientError && error.code === "GENERATION_REJECTED") {
+          try {
+            const snapshot = await observe(shutdownDeadline);
+            return snapshot.code === "START_TIMEOUT"
+              ? shutdownTimedOut(shutdownStartedAt)
+              : snapshot;
+          } catch (observationError) {
+            if (
+              !(observationError instanceof LifecycleStateTimeoutError) &&
+              (!(observationError instanceof HudClientError) || observationError.code !== "REQUEST_TIMEOUT")
+            ) throw observationError;
+            return shutdownTimedOut(shutdownStartedAt);
+          }
+        }
         const clientCode = errorCode(error);
         if (clientCode === "REQUEST_TIMEOUT") return shutdownTimedOut(shutdownStartedAt);
         const code = lifecycleCode(clientCode);

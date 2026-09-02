@@ -345,7 +345,14 @@ export async function runDesktop(
         return;
       }
       void resolved.stateStore.setDesiredState("on")
-        .then(() => windowController?.show())
+        .then(({ generation }) => resolved.stateStore.runIfGeneration(
+          generation,
+          "on",
+          () => {
+            if (quitting) return;
+            windowController?.show();
+          }
+        ))
         .catch((error: unknown) => reportError(error, "second-instance activation"));
     });
     resolved.app.on("before-quit", (event: { preventDefault(): void }) => {

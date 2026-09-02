@@ -172,6 +172,95 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.stateStore.setDesiredState).toHaveBeenCalledWith("on");
   });
 
+  it("does not show for a second-instance on generation superseded by another store", async () => {
+    const harness = desktopHarness();
+    const { desktopStore, closingStore } = await realStateStores();
+    const activationCommitted = deferred<number>();
+    const allowActivationReturn = deferred<void>();
+    const activationGuardComplete = deferred<void>();
+    let activation: ReturnType<LifecycleStateStore["setDesiredState"]> | undefined;
+    const activationStore: LifecycleStateStore = {
+      ...desktopStore,
+      setDesiredState: (state, options) => {
+        const pending = (async () => {
+          const settings = await desktopStore.setDesiredState(state, options);
+          if (state === "on") {
+            activationCommitted.resolve(settings.generation);
+            await allowActivationReturn.promise;
+          }
+          return settings;
+        })();
+        if (state === "on") activation = pending;
+        return pending;
+      },
+      runIfGeneration: async (generation, desiredState, operation, options) => {
+        const result = await desktopStore.runIfGeneration(
+          generation,
+          desiredState,
+          operation,
+          options
+        );
+        activationGuardComplete.resolve();
+        return result;
+      }
+    };
+    harness.dependencies.stateStore = activationStore;
+    await runDesktop(harness.dependencies, { kind: "manager", generation: 1 });
+    await closingStore.setDesiredState("off");
+
+    harness.listeners.get("second-instance")?.({}, ["app.exe", "--hud"]);
+    const activationGeneration = await activationCommitted.promise;
+    const closingSettings = await closingStore.setDesiredState("off");
+    expect(closingSettings.generation).toBe(activationGeneration + 1);
+
+    allowActivationReturn.resolve();
+    await activation;
+    await Promise.resolve();
+    expect(harness.windowController.show).not.toHaveBeenCalled();
+    await activationGuardComplete.promise;
+    expect(await closingStore.readSettings()).toMatchObject({
+      desiredState: "off",
+      generation: closingSettings.generation
+    });
+  });
+
+  it("does not show for a second-instance activation resumed after shutdown begins", async () => {
+    const harness = desktopHarness();
+    const { desktopStore, closingStore } = await realStateStores();
+    const activationCommitted = deferred<void>();
+    const allowActivationReturn = deferred<void>();
+    let activation: ReturnType<LifecycleStateStore["setDesiredState"]> | undefined;
+    harness.dependencies.stateStore = {
+      ...desktopStore,
+      setDesiredState: (state, options) => {
+        const pending = (async () => {
+          const settings = await desktopStore.setDesiredState(state, options);
+          if (state === "on") {
+            activationCommitted.resolve();
+            await allowActivationReturn.promise;
+          }
+          return settings;
+        })();
+        if (state === "on") activation = pending;
+        return pending;
+      }
+    };
+    await runDesktop(harness.dependencies, { kind: "manager", generation: 1 });
+    await closingStore.setDesiredState("off");
+
+    harness.listeners.get("second-instance")?.({}, ["app.exe", "--hud"]);
+    await activationCommitted.promise;
+    const event = { preventDefault: vi.fn() };
+    harness.listeners.get("before-quit")?.(event);
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalledOnce());
+
+    allowActivationReturn.resolve();
+    await activation;
+    await Promise.resolve();
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.windowController.show).not.toHaveBeenCalled();
+  });
+
   it("does not reinterpret a manager-launched second instance as explicit activation", async () => {
     const harness = desktopHarness();
     await runDesktop(harness.dependencies);

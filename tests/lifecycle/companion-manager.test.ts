@@ -126,12 +126,205 @@ async function harness(options: {
   };
 }
 
+async function guardedControlHarness(options: {
+  initialDesiredState: "on" | "off";
+  guardedDesiredState: "on" | "off";
+  timeoutMs?: number;
+  lockAfterRejection?: boolean;
+}) {
+  const directory = await mkdtemp(join(tmpdir(), "hud-manager-guarded-control-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const paths = {
+    settingsPath: join(directory, "settings.json"),
+    runtimePath: join(directory, "runtime.json"),
+    installManifestPath: join(directory, "install.json")
+  };
+  const store = createLifecycleStateStore(paths);
+  const initialSettings = await store.setDesiredState(options.initialDesiredState);
+  if (options.initialDesiredState === "on") {
+    await store.writeRuntime(compatibleHealth, initialSettings.generation);
+  }
+
+  let guardEntered!: () => void;
+  const guardEntry = new Promise<void>((resolve) => { guardEntered = resolve; });
+  let releaseGuard!: () => void;
+  const guardGate = new Promise<void>((resolve) => { releaseGuard = resolve; });
+  let rejectionLockAcquired!: () => void;
+  const rejectionLockEntry = new Promise<void>((resolve) => { rejectionLockAcquired = resolve; });
+  let rejectionLock: Awaited<ReturnType<typeof holdLifecycleLock>> | undefined;
+  let rejectionLockReleased = false;
+  const releaseRejectionLock = async () => {
+    if (rejectionLock === undefined || rejectionLockReleased) return;
+    rejectionLockReleased = true;
+    await rejectionLock.release();
+  };
+  cleanups.push(releaseRejectionLock);
+
+  const server = createProgressServer({
+    port: 0,
+    tokenPath: join(directory, "auth.token"),
+    health: () => compatibleHealth,
+    showWindow: () => undefined,
+    requestShutdown: () => undefined,
+    runIfGeneration: async (generation, desiredState, operation, signal) => {
+      const isTarget = desiredState === options.guardedDesiredState;
+      if (isTarget) {
+        guardEntered();
+        await guardGate;
+      }
+      return store.runIfGeneration(generation, desiredState, operation, { signal });
+    }
+  });
+  await server.listen();
+  cleanups.push(() => server.close());
+  const httpClient = new CompanionHttpClient(server.address().url, join(directory, "auth.token"));
+  const rejectAfterLock = async (operation: Promise<void>): Promise<void> => {
+    try {
+      await operation;
+    } catch (error) {
+      if (!(error instanceof HudClientError) || error.code !== "GENERATION_REJECTED") {
+        rejectionLockAcquired();
+        throw error;
+      }
+      rejectionLock = await holdLifecycleLock(join(directory, ".lifecycle-state.lock"));
+      rejectionLockAcquired();
+      throw error;
+    }
+  };
+  const client = options.lockAfterRejection ? {
+    identity: (requestOptions?: Parameters<CompanionHttpClient["identity"]>[0]) =>
+      httpClient.identity(requestOptions),
+    health: (requestOptions?: Parameters<CompanionHttpClient["health"]>[0]) =>
+      httpClient.health(requestOptions),
+    show: (requestOptions?: Parameters<CompanionHttpClient["show"]>[0]) =>
+      options.guardedDesiredState === "on"
+        ? rejectAfterLock(httpClient.show(requestOptions))
+        : httpClient.show(requestOptions),
+    hide: (requestOptions?: Parameters<CompanionHttpClient["hide"]>[0]) =>
+      httpClient.hide(requestOptions),
+    shutdown: (requestOptions?: Parameters<CompanionHttpClient["shutdown"]>[0]) =>
+      options.guardedDesiredState === "off"
+        ? rejectAfterLock(httpClient.shutdown(requestOptions))
+        : httpClient.shutdown(requestOptions)
+  } : httpClient;
+  const timeoutMs = options.timeoutMs ?? 1_000;
+  const manager = createCompanionManager({
+    store,
+    client,
+    launcher: { spawnHud: vi.fn() },
+    startupTimeoutMs: timeoutMs,
+    shutdownTimeoutMs: timeoutMs,
+    logger: { write: async () => undefined },
+    diagnostics: {
+      directory: join(directory, "diagnostics"),
+      pluginVersion: "0.2.0",
+      mcpVersion: "0.2.0",
+      host: "127.0.0.1",
+      port: server.address().port,
+      installManifestPath: paths.installManifestPath,
+      dataDirectoryPath: directory
+    }
+  });
+
+  return {
+    manager,
+    store,
+    successorStore: createLifecycleStateStore(paths),
+    guardEntry,
+    releaseGuard,
+    rejectionLockEntry,
+    releaseRejectionLock
+  };
+}
+
 describe("companion lifecycle manager", () => {
   it("does not start a process while observing status", async () => {
     const { manager, launcher } = await harness();
 
     expect(await manager.status()).toEqual({ observedState: "stopped" });
     expect(launcher.spawnHud).not.toHaveBeenCalled();
+  });
+
+  it("observes off/stopped when close supersedes open after its final generation check", async () => {
+    const fixture = await guardedControlHarness({
+      initialDesiredState: "off",
+      guardedDesiredState: "on"
+    });
+
+    const opening = fixture.manager.open();
+    await fixture.guardEntry;
+    const successor = await fixture.successorStore.setDesiredState("off");
+    fixture.releaseGuard();
+
+    await expect(opening).resolves.toEqual({
+      desiredState: "off",
+      observedState: "stopped"
+    });
+    expect(await fixture.store.readSettings()).toEqual(successor);
+  });
+
+  it("keeps START_TIMEOUT when open convergence cannot observe within its original budget", async () => {
+    const fixture = await guardedControlHarness({
+      initialDesiredState: "off",
+      guardedDesiredState: "on",
+      timeoutMs: 1_000,
+      lockAfterRejection: true
+    });
+
+    const opening = fixture.manager.open();
+    await fixture.guardEntry;
+    await fixture.successorStore.setDesiredState("off");
+    fixture.releaseGuard();
+    await fixture.rejectionLockEntry;
+
+    await expect(opening).resolves.toEqual({
+      desiredState: "on",
+      observedState: "stopped",
+      code: "START_TIMEOUT"
+    });
+    await fixture.releaseRejectionLock();
+  });
+
+  it("observes on/running when open supersedes close after health but before shutdown guard", async () => {
+    const fixture = await guardedControlHarness({
+      initialDesiredState: "on",
+      guardedDesiredState: "off"
+    });
+
+    const closing = fixture.manager.close();
+    await fixture.guardEntry;
+    const successor = await fixture.successorStore.setDesiredState("on");
+    await fixture.successorStore.writeRuntime(compatibleHealth, successor.generation);
+    fixture.releaseGuard();
+
+    await expect(closing).resolves.toMatchObject({
+      desiredState: "on",
+      observedState: "running",
+      health: compatibleHealth
+    });
+    expect(await fixture.store.readSettings()).toEqual(successor);
+  });
+
+  it("keeps SHUTDOWN_TIMEOUT when close convergence cannot observe within its original budget", async () => {
+    const fixture = await guardedControlHarness({
+      initialDesiredState: "on",
+      guardedDesiredState: "off",
+      timeoutMs: 1_000,
+      lockAfterRejection: true
+    });
+
+    const closing = fixture.manager.close();
+    await fixture.guardEntry;
+    await fixture.successorStore.setDesiredState("on");
+    fixture.releaseGuard();
+    await fixture.rejectionLockEntry;
+
+    await expect(closing).resolves.toEqual({
+      desiredState: "off",
+      observedState: "stopped",
+      code: "SHUTDOWN_TIMEOUT"
+    });
+    await fixture.releaseRejectionLock();
   });
 
   it("suppresses background writes after explicit off", async () => {
