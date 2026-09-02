@@ -258,3 +258,25 @@ Make authenticated token loading abort/deadline aware with first-cause classific
 - [ ] **Step 4: Verify, report, and review**
 
 Add deterministic behavior tests with the existing 90 ms / `<300 ms` contract, run the focused and full release gates, update the acceptance report, and commit `fix: close final lifecycle review gaps`. Perform a fresh whole-correction re-review. Do not package/install/merge/push/release.
+
+---
+
+### Task 6: Close final re-review publication and deadline gaps
+
+**Reason for amendment:** The fresh whole-correction re-review found one Critical publication race and two Important deadline/classification gaps.
+
+- [ ] **Atomically guard desktop readiness publication**
+
+After runtime publication, hold the on-generation guard across server listen and window/tray readiness publication, or provide an equivalent protocol. If off wins before the guard, publish nothing and clean owned runtime; if off waits behind the guard, close must observe and retire the fully published instance.
+
+- [ ] **Bound complete state-lock setup, operation, and release**
+
+Start the caller deadline before directory/owner setup. Bound non-cooperative setup/read/release waits without allowing late product-state mutation or successor deletion. Preserve cooperative mutation completion and identity-safe cleanup.
+
+- [ ] **Make stale classification deadline-safe**
+
+Manager-owned cancellation and generation rejection after either submit must not degrade to `INTERNAL_ERROR` because the original deadline is exhausted or the state lock is contended. Preserve truthful classification and one-shot recovery.
+
+- [ ] **Verify and re-review**
+
+Add deterministic post-runtime off, lock setup/read/release stall, and expired-classifier tests. Run the complete final-HEAD gate, correct the acceptance report, and perform another fresh whole-correction review. Do not package/install/merge/push/release.
