@@ -213,7 +213,6 @@ export async function runDesktop(
 ): Promise<void> {
   const resolved = dependencies ?? await defaultDesktopDependencies();
   if (!resolved.app.requestSingleInstanceLock()) {
-    if (launchReason.kind === "explicit") await resolved.stateStore.setDesiredState("on");
     resolved.app.quit();
     return;
   }
@@ -344,6 +343,7 @@ export async function runDesktop(
         reportError(error, "second-instance launch intent");
         return;
       }
+      if (quitting) return;
       void resolved.stateStore.setDesiredState("on")
         .then(({ generation }) => resolved.stateStore.runIfGeneration(
           generation,

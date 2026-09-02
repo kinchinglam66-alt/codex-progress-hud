@@ -160,6 +160,30 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
     expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
     expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+  });
+
+  it("ignores explicit second-instance activation after quit cleanup begins", async () => {
+    const harness = desktopHarness();
+    const cleanupGate = deferred<void>();
+    harness.progressServer.close.mockImplementation(async () => {
+      await cleanupGate.promise;
+      return undefined;
+    });
+    await runDesktop(harness.dependencies);
+    vi.mocked(harness.dependencies.stateStore.setDesiredState).mockClear();
+
+    const event = { preventDefault: vi.fn() };
+    harness.listeners.get("before-quit")?.(event);
+    harness.listeners.get("second-instance")?.({}, ["app.exe", "--hud"]);
+    await Promise.resolve();
+
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.windowController.show).not.toHaveBeenCalled();
+
+    cleanupGate.resolve();
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalledOnce());
   });
 
   it("shows the existing window when a second GUI instance has explicit intent", async () => {
