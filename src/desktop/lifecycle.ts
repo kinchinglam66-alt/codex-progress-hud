@@ -464,9 +464,11 @@ export async function runDesktop(
             errors: [...recentErrors]
           }),
           onExit: async () => {
-            await resolved.stateStore.setDesiredState("off");
-            quitting = true;
-            quit();
+            const { generation } = await resolved.stateStore.setDesiredState("off");
+            await resolved.stateStore.runIfGeneration(generation, "off", () => {
+              quitting = true;
+              quit();
+            });
           },
           onError: (error, action) => reportError(error, `tray action: ${action}`)
         });

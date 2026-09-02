@@ -411,6 +411,12 @@ Round 5 found one Critical stale second-instance visibility publication and one 
 
 Fresh combined evidence after both fixes: full suite 18/18 files and 347/347 tests; typecheck, build, smoke, diagnose:mcp, validate:plugin, and diff-check all passed. No stale control is retried. No package, install, merge, push, or release action was performed; independent focused and whole-correction re-review remain required.
 
+## Whole-correction review round 8 fix
+
+Round 8 identified the off-side counterpart to stale second-instance activation: Tray Exit could commit off generation G, be superseded by explicit on generation G+1, then publish an unguarded quit. Tray Exit now retains G and performs `quitting = true` plus `app.quit()` only inside `runIfGeneration(G, "off", ...)`.
+
+A deterministic shared-store test pauses Exit after the off commit, writes the newer explicit on generation, then resumes the stale continuation. It proves the primary does not quit, its quitting predicate remains false, current on intent remains authoritative, and runtime publication is preserved. The uncontended test still proves off is committed before quit. Fresh evidence: desktop 44/44, full suite 18/18 and 352/352, typecheck and diff-check passed. No package, install, merge, push, or release action was performed.
+
 ## Whole-correction review round 6 Important fix
 
 Round 6 found that the server's process-local shutdown latch and lifecycle generation guard both produced HTTP 409. The official client therefore classified an old listener that was still retiring as `GENERATION_REJECTED`; close could report stopped before retirement, and a successor open could report running from the old listener's health.

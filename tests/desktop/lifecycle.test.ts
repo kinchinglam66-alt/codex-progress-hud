@@ -615,6 +615,42 @@ describe("desktop lifecycle", () => {
     expect(harness.order).toEqual(["desired:off", "quit"]);
   });
 
+  it("does not publish a stale tray Exit after a newer explicit on generation", async () => {
+    const harness = desktopHarness();
+    const { desktopStore, closingStore } = await realStateStores();
+    const offCommitted = deferred<number>();
+    const allowOffReturn = deferred<void>();
+    harness.dependencies.stateStore = {
+      ...desktopStore,
+      setDesiredState: async (state, options) => {
+        const settings = await desktopStore.setDesiredState(state, options);
+        if (state === "off") {
+          offCommitted.resolve(settings.generation);
+          await allowOffReturn.promise;
+        }
+        return settings;
+      }
+    };
+    await runDesktop(harness.dependencies, { kind: "manager", generation: 1 });
+    const runtimeBefore = await closingStore.readRuntime();
+
+    const exiting = harness.trayCallbacks?.onExit();
+    const exitGeneration = await offCommitted.promise;
+    const activation = await closingStore.setDesiredState("on");
+    expect(activation.generation).toBe(exitGeneration + 1);
+
+    allowOffReturn.resolve();
+    await exiting;
+
+    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+    expect(harness.isQuitting()).toBe(false);
+    expect(await closingStore.readSettings()).toMatchObject({
+      desiredState: "on",
+      generation: activation.generation
+    });
+    expect(await closingStore.readRuntime()).toEqual(runtimeBefore);
+  });
+
   it("runs the safe diagnostic action from the tray seam", async () => {
     const harness = desktopHarness();
     await runDesktop(harness.dependencies);
