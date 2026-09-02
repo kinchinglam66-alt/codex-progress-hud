@@ -8,7 +8,7 @@ Baseline: `98a697e297406e81a1256050329fb9c0e7c38cbb`
 
 The final round-3 Important finding is addressed in the Task 8 candidate. All status-then-submit tracking controls share one absolute write deadline. Each HTTP request receives a freshly computed remaining budget, and the manager bounds the complete callback even when it never settles. Deadline and close cancellation retain distinct first-cause classifications: deadline returns `START_TIMEOUT`; close remains successful `MANUALLY_DISABLED` suppression.
 
-This report records implementation, the independent review finding, and review-fix-round-1 self-verification. A fresh independent re-review remains required before any packaging decision.
+This report records implementation, both independent review findings, and review-fix-round-2 self-verification. A fresh independent re-review remains required before any packaging decision.
 
 ## Root cause
 
@@ -118,3 +118,29 @@ The tests use a 20 ms client request deadline and a 90 ms watchdog. They wait un
 | `git diff --check` | Exit 0; no output. |
 
 No package, install, merge, push, or release action was performed. Generation headers and 409 rejection, 64 KiB limits, sanitized errors, privacy behavior, all 13 tools, and the existing manager recovery/cancellation classifications remain unchanged. Fresh independent re-review is still required.
+
+## Review fix round 2 — canceled local queue entries
+
+### Re-review finding and deterministic RED
+
+The round-1 request signal reached `locallyOrdered()` but could not promptly release a caller queued behind an already entered same-process mutation when no `timeoutMs` was supplied. The external abort only canceled the controller; the no-deadline branch awaited the queued `current` promise directly, so the caller remained retained until its predecessor settled.
+
+A real-store regression starts one `runIfGeneration()` callback and holds it on a gate. It queues a second same-generation `runIfGeneration()` with only an external signal, aborts that signal, and races settlement against a 300 ms watchdog. Before the production change, the focused state test exited 1: the watchdog won at 300 ms instead of receiving `LifecycleStateTimeoutError`. The test then released the first callback and verified the second callback never entered.
+
+### GREEN
+
+`locallyOrdered()` now always races `current` against one pre-entry cancellation promise. Both the optional absolute deadline and the external signal reject that promise only while `operationEntered` is false. Once mutation entry is recorded, abort still reaches the shared controller but caller settlement continues to await the cooperative `current` promise. The external listener and optional timer are removed on caller settlement; the internal `current` remains the local queue tail, observes the already-aborted controller after its predecessor releases, and invokes the existing identity-checked map cleanup.
+
+The regression passed in 30 ms with the `<100 ms` caller bound. A later same-store read completed after the first operation was released, proving the canceled queue entry drained without executing its callback and did not strand the queue.
+
+### Verification
+
+| Command | Result |
+|---|---|
+| Focused state store | Exit 0; 1/1 file, 40/40 tests; new regression completed in 30 ms. |
+| Focused state/integration/server/tools/manager | Exit 0; 5/5 files, 151/151 tests; Vitest duration 9.48 s. |
+| `npm test -- --run` | Exit 0; 18/18 files, 330/330 tests; Vitest duration 10.03 s. |
+| `npm run typecheck` | Exit 0. |
+| `git diff --check` | Exit 0; no output. |
+
+No package, install, merge, push, or release action was performed. This fix changes only cancellation while waiting to enter the process-local state queue. It does not change entered-mutation settlement, cross-process lock recovery, generation/409 behavior, 64 KiB limits, privacy, OFFLINE recovery, deadline-versus-close classification, tool registration, or public payloads.

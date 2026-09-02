@@ -28,6 +28,8 @@ Task 8 closes the remaining Important finding from final re-review round 3. `exe
 
 Task 8 independent review found that the manager/client deadline did not cancel a request already queued behind the server's real lifecycle generation lock. Review fix round 1 propagates request/response/socket disconnection through the server mutation boundary into the state store's combined abort signal. Real client/server/store tests hold the cross-process lock, observe a 20 ms `REQUEST_TIMEOUT` inside a 90 ms watchdog, release the lock, await guard settlement, and prove that event apply, window control, shutdown callback, and `shuttingDown` mutation do not occur late. The manager cleanup test now explicitly awaits its raced callback settlement instead of relying on a longer delay. Fresh re-review remains required, so this report does not authorize Windows packaging.
 
+Task 8 round-2 re-review found that an external abort still could not release a request waiting behind an entered process-local state operation when no state timeout was present. Review fix round 2 gives external cancellation the same pre-entry hard-bound race as the optional deadline. It rejects the queued caller promptly without removing its internal queue tail; after the predecessor releases, that tail observes cancellation, never enters the mutation, and self-cleans. A real-store RED reached the 300 ms watchdog; GREEN settled in 30 ms under the required 100 ms bound. Fresh re-review remains required, so this report does not authorize Windows packaging.
+
 ## Task 3 TDD evidence
 
 Production mutation caught by the new test: replacing exact calendar round-trip validation with shape plus finite `Date.parse` allows JavaScript date normalization to accept an impossible calendar date.
@@ -346,13 +348,29 @@ GREEN implementation and evidence:
 
 Task 8 changes no tool registration, public MCP payload schema, request/response-size limit, privacy behavior, OFFLINE recovery breadth, generation authority, close semantics, PID/nonce termination ownership, packaging, installation, merge, push, or release behavior.
 
+### Task 8 review fix round 2 — canceled local queue entries
+
+Round-2 re-review showed that `locallyOrdered()` only created a caller-visible pre-entry race for `timeoutMs`. An external signal canceled the internal controller, but the no-timeout path still awaited a `current` promise chained behind the prior local mutation. One non-cooperative entered mutation could therefore retain every disconnected same-process request queued behind it.
+
+Deterministic RED used the real state store: a first same-generation `runIfGeneration()` entered and remained held; a second operation on the same store supplied only an external signal. After abort, the 300 ms watchdog won instead of receiving a rejection. The first operation was then released so cleanup completed, and the second mutation callback remained unentered.
+
+`locallyOrdered()` now always races its queue-tail promise against one pre-entry cancellation promise. External abort and the optional deadline reject that promise only before `operationEntered`; after entry, the caller still waits for cooperative settlement. Listener and timer cleanup occurs when the caller settles, while `current` remains the queue tail and retains its original eventual self-removal. The GREEN regression settled in 30 ms, below the required 100 ms bound. Releasing the first operation and completing a later same-store read proved that the canceled second mutation never entered and the queue continued normally.
+
+- Focused state store: exit 0; 1/1 file and 40/40 tests passed.
+- Focused state/integration/server/tools/manager: exit 0; 5/5 files and 151/151 tests passed; Vitest duration 9.48 s.
+- Full suite: exit 0; 18/18 files and 330/330 tests passed; Vitest duration 10.03 s.
+- Typecheck: exit 0; `tsc --noEmit` reported no errors.
+- Both round-2 and whole-Task-8 `git diff --check` gates exited 0 with no output.
+
+The round-2 fix does not change entered mutation settlement, cross-process lock recovery, generation/409 behavior, the 64 KiB request limit, privacy, OFFLINE recovery, deadline-versus-close first-cause classification, tools, payloads, packaging, installation, merge, push, or release behavior.
+
 ## Review, limitations, and prohibited actions
 
 - Task 3 self-review found no scope expansion in the timestamp implementation or tests. Task 4 closes the diagnostics flaky concern with the deterministic evidence above.
 - The first staged `git diff --cached --check` failed on two Markdown hard-break trailing spaces in this report. The cause was report formatting; both spaces were removed before commit and the cached check was rerun. No production or test file was implicated.
 - Independent task review and whole-correction review remain required before any packaging decision.
 - Task 6 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
-- Task 8 implementation, independent review finding, and review-fix-round-1 self-verification are recorded above. A fresh independent re-review has not yet occurred.
+- Task 8 implementation, both independent review findings, and review-fix-round-2 self-verification are recorded above. A fresh independent re-review has not yet occurred.
 - **No packaged Electron validation has occurred in this plan.**
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.

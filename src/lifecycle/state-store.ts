@@ -78,10 +78,17 @@ async function locallyOrdered<T>(
     : Date.now() + Math.max(0, options.timeoutMs);
   const previous = localQueues.get(lockPath) ?? Promise.resolve();
   const controller = new AbortController();
-  const abortFromExternal = () => controller.abort(options.signal?.reason);
+  let operationEntered = false;
+  let rejectBeforeEntry!: (error: LifecycleStateTimeoutError) => void;
+  const beforeEntryCancellation = new Promise<never>((_resolve, reject) => {
+    rejectBeforeEntry = reject;
+  });
+  const abortFromExternal = () => {
+    controller.abort(options.signal?.reason);
+    if (!operationEntered) rejectBeforeEntry(new LifecycleStateTimeoutError());
+  };
   if (options.signal?.aborted) abortFromExternal();
   else options.signal?.addEventListener("abort", abortFromExternal, { once: true });
-  let operationEntered = false;
   const current = previous.catch(() => undefined).then(() => {
     const remainingMs = deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
     if (remainingMs === 0 || controller.signal.aborted) throw new LifecycleStateTimeoutError();
@@ -93,20 +100,17 @@ async function locallyOrdered<T>(
   };
   void current.then(removeCurrent, removeCurrent);
   try {
-    if (deadline === undefined) return await current;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let rejectBeforeEntry!: (error: LifecycleStateTimeoutError) => void;
-    const beforeEntryTimeout = new Promise<never>((_resolve, reject) => {
-      rejectBeforeEntry = reject;
-    });
-    timer = setTimeout(() => {
-      controller.abort();
-      // Setup and reads may finish in the background, but they cannot enter a
-      // product mutation after this caller-visible deadline.
-      if (!operationEntered) rejectBeforeEntry(new LifecycleStateTimeoutError());
-    }, Math.max(0, deadline - Date.now()));
+    if (deadline !== undefined) {
+      timer = setTimeout(() => {
+        controller.abort();
+        // Setup and reads may finish in the background, but they cannot enter a
+        // product mutation after this caller-visible deadline.
+        if (!operationEntered) rejectBeforeEntry(new LifecycleStateTimeoutError());
+      }, Math.max(0, deadline - Date.now()));
+    }
     try {
-      return await Promise.race([current, beforeEntryTimeout]);
+      return await Promise.race([current, beforeEntryCancellation]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

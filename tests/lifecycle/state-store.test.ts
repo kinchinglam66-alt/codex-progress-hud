@@ -546,6 +546,51 @@ describe("lifecycle state store", () => {
     expect(await store.readSettings()).toMatchObject({ desiredState: "on", generation: 1 });
   });
 
+  it("releases an externally aborted operation queued behind an entered local mutation", async () => {
+    const store = createLifecycleStateStore(testPaths());
+    await store.setDesiredState("on");
+    const firstEntered = deferred();
+    const releaseFirst = deferred();
+    let secondMutationEntered = false;
+    const first = store.runIfGeneration(1, "on", async () => {
+      firstEntered.resolve();
+      await releaseFirst.promise;
+    });
+    await firstEntered.promise;
+
+    const controller = new AbortController();
+    const second = store.runIfGeneration(1, "on", async () => {
+      secondMutationEntered = true;
+    }, { signal: controller.signal });
+    await Promise.resolve();
+    const startedAt = performance.now();
+    controller.abort();
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      second.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) => {
+        watchdog = setTimeout(() => resolve_({ kind: "watchdog" }), 300);
+      })
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    if (watchdog !== undefined) clearTimeout(watchdog);
+
+    releaseFirst.resolve();
+    await first;
+    const settings = await store.readSettings();
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { name: "LifecycleStateTimeoutError" }
+    });
+    expect(elapsedMs).toBeLessThan(100);
+    expect(secondMutationEntered).toBe(false);
+    expect(settings).toMatchObject({ desiredState: "on", generation: 1 });
+  });
+
   it("writes and reads valid runtime identity", async () => {
     const store = createLifecycleStateStore(testPaths());
     const identity = {
