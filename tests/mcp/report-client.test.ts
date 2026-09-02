@@ -226,6 +226,20 @@ describe("CompanionHttpClient", () => {
       .rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
   });
 
+  it("categorizes shutdown-in-progress separately from generation rejection", async () => {
+    const secretBody = "private-retirement-detail";
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 423, { error: secretBody, code: "SHUTTING_DOWN" })
+    );
+
+    const error = await new CompanionHttpClient(baseUrl, tokenPath)
+      .show({ generation: 2 })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "SHUTTING_DOWN" });
+    expect(String(error)).not.toContain(secretBody);
+  });
+
   it("gives a pre-aborted external signal precedence over a zero client budget", async () => {
     const { baseUrl, tokenPath } = await fixture(() => undefined);
     const controller = new AbortController();

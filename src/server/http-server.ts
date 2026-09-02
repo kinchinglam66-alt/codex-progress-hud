@@ -192,15 +192,30 @@ export function createProgressServer(options: ProgressServerOptions) {
     desiredState: DesiredHudState,
     signal: AbortSignal,
     operation: (signal: AbortSignal) => unknown | Promise<unknown>
-  ): Promise<{ accepted: false } | { accepted: true; value: unknown }> {
-    if (shuttingDown) return { accepted: false };
+  ): Promise<
+    | { accepted: false; reason: "generation_rejected" | "shutting_down" }
+    | { accepted: true; value: unknown }
+  > {
+    if (shuttingDown) return { accepted: false, reason: "shutting_down" };
     if (options.runIfGeneration === undefined) {
       if (signal.aborted) throw signal.reason;
       return { accepted: true, value: await operation(signal) };
     }
     const generation = requestGeneration(request);
-    if (generation === undefined) return { accepted: false };
-    return options.runIfGeneration(generation, desiredState, operation, signal);
+    if (generation === undefined) return { accepted: false, reason: "generation_rejected" };
+    const result = await options.runIfGeneration(generation, desiredState, operation, signal);
+    return result.accepted ? result : { accepted: false, reason: "generation_rejected" };
+  }
+
+  function writeMutationRejection(
+    response: ServerResponse,
+    result: { accepted: false; reason: "generation_rejected" | "shutting_down" }
+  ): void {
+    if (result.reason === "shutting_down") {
+      writeJson(response, 423, { error: "shutdown in progress", code: "SHUTTING_DOWN" });
+      return;
+    }
+    writeJson(response, 409, { error: "lifecycle generation rejected" });
   }
 
   async function handleSse(response: ServerResponse, token: string): Promise<void> {
@@ -275,7 +290,7 @@ export function createProgressServer(options: ProgressServerOptions) {
         });
         cancellation.complete();
         if (!result.accepted) {
-          writeJson(response, 409, { error: "lifecycle generation rejected" });
+          writeMutationRejection(response, result);
           return;
         }
         writeJson(response, 202, result.value);
@@ -311,7 +326,7 @@ export function createProgressServer(options: ProgressServerOptions) {
         });
         cancellation.complete();
         if (!result.accepted) {
-          writeJson(response, 409, { error: "lifecycle generation rejected" });
+          writeMutationRejection(response, result);
           return;
         }
         writeJson(response, 202, { accepted: true });

@@ -252,7 +252,7 @@ describe("local progress HTTP service", () => {
     expect(requestShutdown).toHaveBeenCalledOnce();
   });
 
-  it("rejects stale ensured writes and rejects every write after shutdown begins", async () => {
+  it("reserves 409 for generation rejection and reports shutdown-in-progress as 423", async () => {
     const fixture = await startServer({ withGenerationGuard: true });
     const headers = {
       authorization: `Bearer ${fixture.token}`,
@@ -296,7 +296,11 @@ describe("local progress HTTP service", () => {
     });
 
     expect(shutdown.status).toBe(202);
-    expect(afterShutdown.status).toBe(409);
+    expect(afterShutdown.status).toBe(423);
+    expect(await afterShutdown.json()).toEqual({
+      error: "shutdown in progress",
+      code: "SHUTTING_DOWN"
+    });
     expect(fixture.requestShutdown).toHaveBeenCalledOnce();
   });
 

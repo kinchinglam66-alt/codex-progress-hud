@@ -410,3 +410,24 @@ Round 5 found one Critical stale second-instance visibility publication and one 
 - `open()` and `close()` now catch a generation-rejected show/shutdown and converge through a deadline-bounded observation of current lifecycle truth. Four guarded-control tests failed before the fix and now return current off/stopped or on/running truth; exhausted original budgets remain `START_TIMEOUT` and `SHUTDOWN_TIMEOUT`.
 
 Fresh combined evidence after both fixes: full suite 18/18 files and 347/347 tests; typecheck, build, smoke, diagnose:mcp, validate:plugin, and diff-check all passed. No stale control is retried. No package, install, merge, push, or release action was performed; independent focused and whole-correction re-review remain required.
+
+## Whole-correction review round 6 Important fix
+
+Round 6 found that the server's process-local shutdown latch and lifecycle generation guard both produced HTTP 409. The official client therefore classified an old listener that was still retiring as `GENERATION_REJECTED`; close could report stopped before retirement, and a successor open could report running from the old listener's health.
+
+RED evidence used the real `createProgressServer`, `CompanionHttpClient`, file-backed lifecycle store, and manager. The initial three-file run failed all four new assertions: the server returned 409 instead of 423, the client returned `VERSION_MISMATCH` instead of `SHUTTING_DOWN`, the second same-generation close returned code-free stopped while the listener remained live, and successor open returned running with the old health instead of `START_TIMEOUT`.
+
+The server now reserves HTTP 409 for generation rejection and returns HTTP 423 with machine code `SHUTTING_DOWN` after its shutdown latch is set. The client maps 423 to the new `HudClientErrorCode` without exposing response content. A close receiving `SHUTTING_DOWN` enters the existing bounded health/offline/owned-retirement path and only clears runtime through the existing off-generation plus full-identity guard. An open receiving `SHUTTING_DOWN` ignores the retiring server's subsequent health, repeatedly revalidates its current on generation under the immutable original startup deadline, and invokes existing same-generation recovery only after the listener is observed offline; otherwise it returns `START_TIMEOUT`.
+
+GREEN and final evidence:
+
+- Focused server/client/integration/manager gate: exit 0; 4/4 files and 119/119 tests passed.
+- The first full-suite run exposed a test-only 120 ms setup budget that could expire under parallel load before the first shutdown callback established the required latch. The regression's bounded shutdown budget was raised to 1 second; no product timeout was changed.
+- Fresh source-mode integration: exit 0; 11/11 tests passed with no unhandled errors.
+- Fresh full suite: exit 0; 18/18 files and 350/350 tests passed; Vitest duration 17.40 s.
+- Final focused integration/server/client/tools/manager gate: exit 0; 5/5 files and 147/147 tests passed; Vitest duration 9.81 s.
+- `npm run typecheck`, `npm run build`, `npm run smoke`, `npm run diagnose:mcp`, `npm run validate:plugin`, and `git diff --check` all exited 0.
+- Smoke retained protocol health, authenticated event flow, and shutdown callback behavior. MCP diagnosis retained protocol-only stdout and the exact 13-tool catalog.
+- Auth, generation authority, absolute deadlines, 64 KiB bounds, privacy-safe errors/logging, runtime identity ownership, and successor-safe cleanup remain covered. No package, install, merge, push, tag, publication, or release action was performed.
+
+This report records implementation self-verification only. The main agent will review and commit separately; this worktree remains uncommitted.

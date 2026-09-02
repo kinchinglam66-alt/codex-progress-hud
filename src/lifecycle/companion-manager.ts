@@ -108,7 +108,11 @@ function errorCode(error: unknown): ManagerErrorCode {
 function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
   if (code === "OFFLINE") return "COMPANION_CRASHED";
   if (code === "REQUEST_TIMEOUT") return "START_TIMEOUT";
-  if (code === "GENERATION_REJECTED" || code === "REQUEST_CANCELLED") return "INTERNAL_ERROR";
+  if (
+    code === "GENERATION_REJECTED" ||
+    code === "REQUEST_CANCELLED" ||
+    code === "SHUTTING_DOWN"
+  ) return "INTERNAL_ERROR";
   return code;
 }
 
@@ -647,6 +651,35 @@ export function createCompanionManager(
     return sharedStart(generation, deadline);
   }
 
+  async function recoverAfterShutdownLatch(
+    generation: number,
+    deadline: number
+  ): Promise<RunningResult> {
+    for (const delay of STARTUP_DELAYS) {
+      if (!(await currentOnGeneration(generation, deadline))) {
+        return staleStartupResult(generation, deadline);
+      }
+      if (now() >= deadline) break;
+      await sleep(Math.min(delay, deadline - now()));
+      if (now() >= deadline) break;
+      try {
+        await dependencies.client.health(requestOptions(deadline));
+      } catch (error) {
+        const code = errorCode(error);
+        if (code === "OFFLINE") return ensureRunningOnce(generation, deadline);
+        if (code === "REQUEST_TIMEOUT") break;
+        throw error;
+      }
+    }
+    remember("START_TIMEOUT");
+    recordStartupFailure("START_TIMEOUT", "stopped");
+    return {
+      kind: "error",
+      code: "START_TIMEOUT",
+      snapshot: { desiredState: "on", observedState: "stopped", code: "START_TIMEOUT" }
+    };
+  }
+
   async function ensureForWrite(
     reason: HudWriteReason,
     deadline = now() + startupTimeoutMs
@@ -708,13 +741,21 @@ export function createCompanionManager(
       try {
         const settings = await dependencies.store.setDesiredState("on", stateOptions(deadline));
         desiredState = settings.desiredState;
-        const ensured = await ensureRunningOnce(settings.generation, deadline);
-        if (ensured.kind !== "ready") return ensured.snapshot;
-        if (!(await currentOnGeneration(ensured.generation, deadline))) {
-          return (await staleStartupResult(ensured.generation, deadline)).snapshot;
+        let ensured = await ensureRunningOnce(settings.generation, deadline);
+        while (ensured.kind === "ready") {
+          if (!(await currentOnGeneration(ensured.generation, deadline))) {
+            return (await staleStartupResult(ensured.generation, deadline)).snapshot;
+          }
+          try {
+            await dependencies.client.show(requestOptions(deadline, ensured.generation));
+          } catch (error) {
+            if (!(error instanceof HudClientError) || error.code !== "SHUTTING_DOWN") throw error;
+            ensured = await recoverAfterShutdownLatch(ensured.generation, deadline);
+            continue;
+          }
+          return await observe(deadline);
         }
-        await dependencies.client.show(requestOptions(deadline, ensured.generation));
-        return await observe(deadline);
+        return ensured.snapshot;
       } catch (error) {
         if (error instanceof HudClientError && error.code === "GENERATION_REJECTED") {
           try {
@@ -817,11 +858,15 @@ export function createCompanionManager(
             return shutdownTimedOut(shutdownStartedAt);
           }
         }
-        const clientCode = errorCode(error);
-        if (clientCode === "REQUEST_TIMEOUT") return shutdownTimedOut(shutdownStartedAt);
-        const code = lifecycleCode(clientCode);
-        remember(code);
-        return { desiredState: "off", observedState: "stopped", code };
+        if (error instanceof HudClientError && error.code === "SHUTTING_DOWN") {
+          // Another same-generation close owns graceful shutdown; observe its bounded retirement below.
+        } else {
+          const clientCode = errorCode(error);
+          if (clientCode === "REQUEST_TIMEOUT") return shutdownTimedOut(shutdownStartedAt);
+          const code = lifecycleCode(clientCode);
+          remember(code);
+          return { desiredState: "off", observedState: "stopped", code };
+        }
       }
       let latestHealth: HudHealth | undefined;
       for (const delay of SHUTDOWN_DELAYS) {

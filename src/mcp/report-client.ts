@@ -28,6 +28,7 @@ export type HudClientErrorCode =
   | "AUTH_ERROR"
   | "PORT_CONFLICT"
   | "VERSION_MISMATCH"
+  | "SHUTTING_DOWN"
   | "GENERATION_REJECTED";
 
 export class HudClientError extends Error {
@@ -189,6 +190,9 @@ export class CompanionHttpClient implements ProgressClient {
     }
     if (result.response.status === 409) {
       throw new HudClientError("GENERATION_REJECTED", "HUD lifecycle generation was rejected");
+    }
+    if (result.response.status === 423) {
+      throw new HudClientError("SHUTTING_DOWN", "Progress HUD is shutting down");
     }
     if (result.response.status === 408) {
       throw new HudClientError("REQUEST_TIMEOUT", "Progress HUD request timed out");

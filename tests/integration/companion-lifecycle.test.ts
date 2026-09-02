@@ -13,6 +13,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
+import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { ProcessLauncher, SpawnedHud } from "../../src/lifecycle/process-launcher.js";
 import { CompanionHttpClient } from "../../src/mcp/report-client.js";
@@ -186,6 +187,140 @@ process.on("disconnect", () => {
 }
 
 describe("source-mode companion lifecycle", () => {
+  it("does not let a second same-generation close report stopped while the first shutdown listener is still live", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-concurrent-close-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const on = await store.setDesiredState("on");
+    const runtime = {
+      pid: process.pid,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: new Date().toISOString()
+    };
+    await store.writeRuntime(runtime, on.generation);
+    let shutdownRequested!: () => void;
+    const shutdownRequest = new Promise<void>((resolve_) => { shutdownRequested = resolve_; });
+    const server = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => ({ service: "codex-progress-hud", ...runtime, visibility: "visible" }),
+      requestShutdown: () => shutdownRequested(),
+      runIfGeneration: (generation, desiredState, operation, signal) =>
+        store.runIfGeneration(generation, desiredState, operation, { signal })
+    });
+    await server.listen();
+    cleanups.push(() => server.close());
+    const makeManager = (logger: { write(entry: OperationalLogEntry): Promise<void> }) => createCompanionManager({
+      store: createLifecycleStateStore(paths),
+      client: new CompanionHttpClient(server.address().url, join(directory, "auth.token")),
+      launcher: { spawnHud: vi.fn() },
+      shutdownTimeoutMs: 1_000,
+      logger,
+      diagnostics: {
+        directory: join(directory, "diagnostics"),
+        pluginVersion: "0.2.0-test",
+        mcpVersion: "0.2.0-test",
+        host: "127.0.0.1",
+        port: server.address().port,
+        installManifestPath: paths.installManifestPath,
+        dataDirectoryPath: directory
+      }
+    });
+    const firstLogger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
+    const secondLogger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
+    const firstClosing = makeManager(firstLogger).close();
+    await shutdownRequest;
+
+    await expect(makeManager(secondLogger).close()).resolves.toEqual({
+      desiredState: "off",
+      observedState: "stopped",
+      code: "SHUTDOWN_TIMEOUT"
+    });
+    await expect(firstClosing).resolves.toMatchObject({ code: "SHUTDOWN_TIMEOUT" });
+    expect(await store.readRuntime()).toEqual(runtime);
+    expect(secondLogger.write.mock.calls.flatMap(([entry]) => entry.event)).not.toContain(
+      "shutdown_complete"
+    );
+  }, 15_000);
+
+  it("does not report a successor open as running from a shutdown-latched old server", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-shutdown-open-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const on = await store.setDesiredState("on");
+    const runtime = {
+      pid: process.pid,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: new Date().toISOString()
+    };
+    await store.writeRuntime(runtime, on.generation);
+    let shutdownRequested!: () => void;
+    const shutdownRequest = new Promise<void>((resolve_) => { shutdownRequested = resolve_; });
+    const server = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => ({ service: "codex-progress-hud", ...runtime, visibility: "visible" }),
+      showWindow: () => undefined,
+      requestShutdown: () => shutdownRequested(),
+      runIfGeneration: (generation, desiredState, operation, signal) =>
+        store.runIfGeneration(generation, desiredState, operation, { signal })
+    });
+    await server.listen();
+    cleanups.push(() => server.close());
+    const client = () => new CompanionHttpClient(server.address().url, join(directory, "auth.token"));
+    const diagnostics = {
+      directory: join(directory, "diagnostics"),
+      pluginVersion: "0.2.0-test",
+      mcpVersion: "0.2.0-test",
+      host: "127.0.0.1",
+      port: server.address().port,
+      installManifestPath: paths.installManifestPath,
+      dataDirectoryPath: directory
+    };
+    const closing = createCompanionManager({
+      store: createLifecycleStateStore(paths),
+      client: client(),
+      launcher: { spawnHud: vi.fn() },
+      shutdownTimeoutMs: 300,
+      logger: { write: async () => undefined },
+      diagnostics
+    }).close();
+    await shutdownRequest;
+    const launcher = { spawnHud: vi.fn() };
+    const opening = createCompanionManager({
+      store: createLifecycleStateStore(paths),
+      client: client(),
+      launcher,
+      startupTimeoutMs: 120,
+      logger: { write: async () => undefined },
+      diagnostics
+    });
+
+    await expect(opening.open()).resolves.toEqual({
+      desiredState: "on",
+      observedState: "stopped",
+      code: "START_TIMEOUT"
+    });
+    await expect(closing).resolves.toMatchObject({ code: "SHUTDOWN_TIMEOUT" });
+    expect(await store.readSettings()).toMatchObject({ desiredState: "on", generation: on.generation + 2 });
+    expect(await store.readRuntime()).toEqual(runtime);
+    expect(launcher.spawnHud).not.toHaveBeenCalled();
+  }, 5_000);
+
   it.each(["event", "hide", "shutdown"] as const)(
     "enforces the server deadline for a queued %s mutation before disconnect is observed",
     async (mutation) => {
