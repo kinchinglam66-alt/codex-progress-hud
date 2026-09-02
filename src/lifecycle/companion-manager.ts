@@ -656,7 +656,17 @@ export function createCompanionManager(
     generation: number,
     deadline: number
   ): Promise<Exclude<EnsureResult, { kind: "ready" }>> {
-    const settings = await dependencies.store.readSettings(stateOptions(deadline));
+    let settings;
+    try {
+      settings = await dependencies.store.readSettings(stateOptions(deadline));
+    } catch (error) {
+      if (!(error instanceof LifecycleStateTimeoutError)) throw error;
+      return {
+        kind: "error",
+        code: "START_TIMEOUT",
+        snapshot: { observedState: "stopped", code: "START_TIMEOUT" }
+      };
+    }
     if (settings.desiredState === "off") {
       return { kind: "suppressed", code: "MANUALLY_DISABLED" };
     }
@@ -812,15 +822,22 @@ export function createCompanionManager(
         let ensured = await ensureForWrite(reason, deadline);
         if (ensured.kind !== "ready") return ensured;
         const writeGeneration = ensured.generation;
-        if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration, deadline))) {
+        const manuallyDisabled = (): Exclude<EnsureResult, { kind: "ready" }> => ({
+          kind: "suppressed",
+          code: "MANUALLY_DISABLED"
+        });
+        if (controller.signal.aborted) return manuallyDisabled();
+        if (!(await currentOnGeneration(writeGeneration, deadline))) {
           return staleWriteResult(writeGeneration, deadline);
         }
         const classifyStaleAttempt = (error: unknown) => {
           if (!(error instanceof HudClientError)) return undefined;
-          if (
-            error.code === "GENERATION_REJECTED" ||
-            (error.code === "REQUEST_CANCELLED" && controller.signal.aborted)
-          ) return staleWriteResult(writeGeneration, deadline);
+          if (error.code === "REQUEST_CANCELLED" && controller.signal.aborted) {
+            return Promise.resolve(manuallyDisabled());
+          }
+          if (error.code === "GENERATION_REJECTED") {
+            return staleWriteResult(writeGeneration, deadline);
+          }
           return undefined;
         };
         try {
@@ -837,7 +854,7 @@ export function createCompanionManager(
           if (staleAttempt !== undefined) return staleAttempt;
           if (!(error instanceof HudClientError)) throw error;
           if (error.code !== "OFFLINE") throw error;
-          if (controller.signal.aborted) return staleWriteResult(writeGeneration, deadline);
+          if (controller.signal.aborted) return manuallyDisabled();
           if (!(await currentOnGeneration(writeGeneration, deadline))) {
             return staleWriteResult(writeGeneration, deadline);
           }
@@ -847,7 +864,8 @@ export function createCompanionManager(
               ? staleWriteResult(writeGeneration, deadline)
               : ensured;
           }
-          if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration, deadline))) {
+          if (controller.signal.aborted) return manuallyDisabled();
+          if (!(await currentOnGeneration(writeGeneration, deadline))) {
             return staleWriteResult(writeGeneration, deadline);
           }
           try {

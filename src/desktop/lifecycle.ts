@@ -394,78 +394,89 @@ export async function runDesktop(
       throw new StartupCancelledError("desktop launch generation is no longer current");
     }
     assertStarting();
+    const publishingWindowController = windowController;
+    const publishingStartupAt = startupAt;
 
-    const health = (): HudHealth => ({
-      service: "codex-progress-hud",
-      ...runtimeIdentity!,
-      protocolVersion: PROTOCOL_VERSION,
-      visibility: windowController?.visibility() ?? "hidden"
-    });
-    assertStarting();
-    progressServer = resolved.createProgressServer({
-      port: resolved.port,
-      tokenPath: resolved.tokenPath,
-      uiDirectory: resolved.uiDirectory,
-      health,
-      showWindow: () => windowController?.show(),
-      hideWindow: () => windowController?.hide(),
-      requestShutdown: () => {
-        quitting = true;
-        quit();
-      },
-      runIfGeneration: (generation, desiredState, operation) =>
-        resolved.stateStore.runIfGeneration(generation, desiredState, operation)
-    });
-
-    await progressServer.listen();
-    assertStarting();
-    const token = await resolved.readToken(resolved.tokenPath);
-    assertStarting();
-    await windowController.create({ url: progressServer.address().url, token });
-    assertStarting();
-    const trayImage = resolved.createTrayImage();
-    if (trayImage.isEmpty()) throw new Error("tray image is empty");
-    assertStarting();
-    tray = resolved.createTray(trayImage);
-    assertStarting();
-    trayController = resolved.createTrayController({
-      tray,
-      buildMenu: resolved.buildMenu,
-      loginEnabled: resolved.app.getLoginItemSettings().openAtLogin,
-      onShow: () => windowController?.show(),
-      onHide: () => windowController?.hide(),
-      onToggleLogin: async (enabled) => {
-        resolved.app.setLoginItemSettings({
-          openAtLogin: enabled,
-          args: ["--automatic-login"]
+    const readiness = await resolved.stateStore.runIfGeneration(
+      launchSettings.generation,
+      "on",
+      async () => {
+        const health = (): HudHealth => ({
+          service: "codex-progress-hud",
+          ...runtimeIdentity!,
+          protocolVersion: PROTOCOL_VERSION,
+          visibility: publishingWindowController.visibility()
         });
-        await resolved.stateStore.setStartWithWindows(enabled);
-      },
-      onDiagnose: () => resolved.diagnose({
-        observedState: quitting
-          ? "stopped"
-          : windowController?.visibility() === "visible"
-            ? "running"
-            : "hidden",
-        runtimeAgeMs: Math.max(0, resolved.now().getTime() - startupAt!.getTime()),
-        errors: [...recentErrors]
-      }),
-      onExit: async () => {
-        await resolved.stateStore.setDesiredState("off");
-        quitting = true;
-        quit();
-      },
-      onError: (error, action) => reportError(error, `tray action: ${action}`)
-    });
-    tray = undefined;
-    const startupReadyAt = resolved.now();
-    record({
-      level: "info",
-      event: "startup_ready",
-      lifecycleState: windowController.visibility() === "visible" ? "running" : "hidden",
-      protocolVersion: PROTOCOL_VERSION,
-      elapsedMs: Math.max(0, startupReadyAt.getTime() - startupAt.getTime())
-    }, startupReadyAt);
+        assertStarting();
+        progressServer = resolved.createProgressServer({
+          port: resolved.port,
+          tokenPath: resolved.tokenPath,
+          uiDirectory: resolved.uiDirectory,
+          health,
+          showWindow: () => publishingWindowController.show(),
+          hideWindow: () => publishingWindowController.hide(),
+          requestShutdown: () => {
+            quitting = true;
+            quit();
+          },
+          runIfGeneration: (generation, desiredState, operation) =>
+            resolved.stateStore.runIfGeneration(generation, desiredState, operation)
+        });
+
+        await progressServer.listen();
+        assertStarting();
+        const token = await resolved.readToken(resolved.tokenPath);
+        assertStarting();
+        await publishingWindowController.create({ url: progressServer.address().url, token });
+        assertStarting();
+        const trayImage = resolved.createTrayImage();
+        if (trayImage.isEmpty()) throw new Error("tray image is empty");
+        assertStarting();
+        tray = resolved.createTray(trayImage);
+        assertStarting();
+        trayController = resolved.createTrayController({
+          tray,
+          buildMenu: resolved.buildMenu,
+          loginEnabled: resolved.app.getLoginItemSettings().openAtLogin,
+          onShow: () => publishingWindowController.show(),
+          onHide: () => publishingWindowController.hide(),
+          onToggleLogin: async (enabled) => {
+            resolved.app.setLoginItemSettings({
+              openAtLogin: enabled,
+              args: ["--automatic-login"]
+            });
+            await resolved.stateStore.setStartWithWindows(enabled);
+          },
+          onDiagnose: () => resolved.diagnose({
+            observedState: quitting
+              ? "stopped"
+              : publishingWindowController.visibility() === "visible"
+                ? "running"
+                : "hidden",
+            runtimeAgeMs: Math.max(0, resolved.now().getTime() - publishingStartupAt.getTime()),
+            errors: [...recentErrors]
+          }),
+          onExit: async () => {
+            await resolved.stateStore.setDesiredState("off");
+            quitting = true;
+            quit();
+          },
+          onError: (error, action) => reportError(error, `tray action: ${action}`)
+        });
+        tray = undefined;
+        const startupReadyAt = resolved.now();
+        record({
+          level: "info",
+          event: "startup_ready",
+          lifecycleState: publishingWindowController.visibility() === "visible" ? "running" : "hidden",
+          protocolVersion: PROTOCOL_VERSION,
+          elapsedMs: Math.max(0, startupReadyAt.getTime() - publishingStartupAt.getTime())
+        }, startupReadyAt);
+      }
+    );
+    if (!readiness.accepted) {
+      throw new StartupCancelledError("desktop readiness generation is no longer current");
+    }
   } catch (error) {
     quitting = true;
     if (!(error instanceof StartupCancelledError)) {

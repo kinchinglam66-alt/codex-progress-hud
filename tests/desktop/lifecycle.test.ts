@@ -1,10 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 import {
   runDesktop,
   scheduleAfterReady,
   type DesktopDependencies
 } from "../../src/desktop/lifecycle.js";
+import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
+import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
+import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
+import { HudClientError } from "../../src/mcp/report-client.js";
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) await cleanups.pop()?.();
+});
 
 function desktopHarness(lockAcquired = true) {
   const listeners = new Map<string, (...args: unknown[]) => unknown>();
@@ -104,6 +117,20 @@ function deferred<T>() {
     resolve = ready;
   });
   return { promise, resolve };
+}
+
+async function realStateStores() {
+  const directory = await mkdtemp(join(tmpdir(), "hud-desktop-publication-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  const paths = {
+    settingsPath: join(directory, "settings.json"),
+    runtimePath: join(directory, "runtime.json"),
+    installManifestPath: join(directory, "install.json")
+  };
+  const desktopStore = createLifecycleStateStore(paths);
+  const closingStore = createLifecycleStateStore(paths);
+  await desktopStore.setDesiredState("on");
+  return { directory, paths, desktopStore, closingStore };
 }
 
 describe("desktop lifecycle", () => {
@@ -265,6 +292,117 @@ describe("desktop lifecycle", () => {
       7
     );
     expect(harness.dependencies.createProgressServer).toHaveBeenCalledOnce();
+  });
+
+  it("publishes nothing when off commits after runtime but before the readiness guard", async () => {
+    const harness = desktopHarness();
+    const { desktopStore, closingStore } = await realStateStores();
+    const runtimeWritten = deferred<void>();
+    const allowRuntimeReturn = deferred<void>();
+    const writeRuntime = vi.fn<LifecycleStateStore["writeRuntime"]>(async (...arguments_) => {
+      const written = await desktopStore.writeRuntime(...arguments_);
+      runtimeWritten.resolve();
+      await allowRuntimeReturn.promise;
+      return written;
+    });
+    harness.dependencies.stateStore = { ...desktopStore, writeRuntime };
+
+    const starting = runDesktop(harness.dependencies, { kind: "manager", generation: 1 });
+    await runtimeWritten.promise;
+    await closingStore.setDesiredState("off");
+    allowRuntimeReturn.resolve();
+    await starting;
+
+    expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
+    expect(harness.progressServer.listen).not.toHaveBeenCalled();
+    expect(harness.windowController.create).not.toHaveBeenCalled();
+    expect(harness.dependencies.createTray).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(harness.dependencies.operationalLogger!.write).mock.calls
+        .some(([entry]) => entry.event === "startup_ready")
+    ).toBe(false);
+    expect(await closingStore.readRuntime()).toBeNull();
+  });
+
+  it("lets close observe the complete instance when the readiness guard wins first", async () => {
+    const harness = desktopHarness();
+    const { directory, paths, desktopStore, closingStore } = await realStateStores();
+    const guardEntered = deferred<void>();
+    const allowReadiness = deferred<void>();
+    const guardedStore: LifecycleStateStore = {
+      ...desktopStore,
+      runIfGeneration: (generation, desiredState, operation, options) =>
+        desktopStore.runIfGeneration(generation, desiredState, async (signal) => {
+          guardEntered.resolve();
+          await allowReadiness.promise;
+          return operation(signal);
+        }, options)
+    };
+    harness.dependencies.stateStore = guardedStore;
+    let online = true;
+    let observedCompleteInstance = false;
+    const health: HudHealth = {
+      service: "codex-progress-hud",
+      pid: 12_345,
+      version: "0.1.0",
+      protocolVersion: 1,
+      visibility: "hidden",
+      instanceNonce: "instance-nonce",
+      startedAt: "2026-09-02T00:00:00.000Z"
+    };
+    const closingManager = createCompanionManager({
+      store: closingStore,
+      client: {
+        identity: vi.fn(async () => ({ service: "codex-progress-hud" as const, protocolVersion: 1 as const })),
+        health: vi.fn(async () => {
+          if (!online) throw new HudClientError("OFFLINE", "stopped");
+          observedCompleteInstance =
+            harness.progressServer.listen.mock.calls.length === 1 &&
+            harness.windowController.create.mock.calls.length === 1 &&
+            vi.mocked(harness.dependencies.createTray).mock.calls.length === 1 &&
+            vi.mocked(harness.dependencies.operationalLogger!.write).mock.calls
+              .some(([entry]) => entry.event === "startup_ready");
+          return health;
+        }),
+        show: vi.fn(async () => undefined),
+        hide: vi.fn(async () => undefined),
+        shutdown: vi.fn(async () => { online = false; })
+      },
+      launcher: { spawnHud: vi.fn() },
+      sleep: async () => undefined,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(directory, "diagnostics"),
+        pluginVersion: "0.1.0",
+        mcpVersion: "0.1.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: paths.installManifestPath,
+        dataDirectoryPath: directory
+      }
+    });
+
+    const starting = runDesktop(harness.dependencies, { kind: "manager", generation: 1 });
+    await Promise.race([
+      guardEntered.promise,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("readiness guard was not entered")), 300)
+      )
+    ]);
+    let closeSettled = false;
+    const closing = closingManager.close().then((result) => {
+      closeSettled = true;
+      return result;
+    });
+    await new Promise((resolve_) => setTimeout(resolve_, 25));
+    expect(closeSettled).toBe(false);
+
+    allowReadiness.resolve();
+    await starting;
+    await expect(closing).resolves.toEqual({ desiredState: "off", observedState: "stopped" });
+
+    expect(observedCompleteInstance).toBe(true);
+    expect(await closingStore.readRuntime()).toBeNull();
   });
 
   it("writes runtime identity on readiness and exposes it through server controls", async () => {

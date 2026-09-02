@@ -1,5 +1,16 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -31,6 +42,22 @@ function testPaths() {
     runtimePath: join(directory, "runtime.json"),
     installManifestPath: join(directory, "install.json")
   };
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((ready) => { resolve = ready; });
+  return { promise, resolve };
+}
+
+const realFileSystem = { link, lstat, mkdir, readFile, rename, unlink, writeFile };
+
+function storeWithFileSystem(
+  overrides: Partial<typeof realFileSystem>
+) {
+  return createLifecycleStateStore(testPaths(), {
+    fileSystem: { ...realFileSystem, ...overrides }
+  });
 }
 
 describe("lifecycle state paths", () => {
@@ -128,6 +155,244 @@ describe("lifecycle state store", () => {
     await new Promise((resolve_) => setTimeout(resolve_, 150));
     expect(await store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
   }, 10_000);
+
+  it.each([
+    ["lock directory creation", "mkdir"],
+    ["owner file creation", "writeFile"],
+    ["owner identity read", "lstat"]
+  ] as const)("hard-bounds stalled %s before product mutation", async (_name, operationName) => {
+    const paths = testPaths();
+    const baseline = createLifecycleStateStore(paths);
+    await baseline.setDesiredState("off");
+    const entered = deferred();
+    const release = deferred();
+    const overrides: Partial<typeof realFileSystem> = {};
+    if (operationName === "mkdir") {
+      overrides.mkdir = (async (...arguments_: Parameters<typeof mkdir>) => {
+        entered.resolve();
+        await release.promise;
+        return mkdir(...arguments_);
+      }) as typeof mkdir;
+    } else if (operationName === "writeFile") {
+      overrides.writeFile = (async (...arguments_: Parameters<typeof writeFile>) => {
+        if (String(arguments_[0]).includes(".owner-")) {
+          entered.resolve();
+          await release.promise;
+        }
+        return writeFile(...arguments_);
+      }) as typeof writeFile;
+    } else {
+      overrides.lstat = (async (...arguments_: Parameters<typeof lstat>) => {
+        if (String(arguments_[0]).includes(".owner-")) {
+          entered.resolve();
+          await release.promise;
+        }
+        return lstat(...arguments_);
+      }) as typeof lstat;
+    }
+    const stalled = storeWithFileSystem(overrides);
+    const startedAt = performance.now();
+    const pending = stalled.setDesiredState("on", { timeoutMs: 90 });
+    await Promise.race([
+      entered.promise,
+      pending.then(
+        () => { throw new Error(`${operationName} stall seam was ignored`); },
+        () => { throw new Error(`${operationName} stall seam was ignored`); }
+      )
+    ]);
+
+    const result = await Promise.race([
+      pending.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) =>
+        setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+      )
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    release.resolve();
+    await pending.catch(() => undefined);
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { name: "LifecycleStateTimeoutError" }
+    });
+    expect(elapsedMs).toBeLessThan(300);
+    expect(await baseline.readSettings()).toMatchObject({ desiredState: "off", generation: 1 });
+    expect(await baseline.readRuntime()).toBeNull();
+    expect((await readdir(directory)).filter((name) => name.includes(".lock"))).toEqual([]);
+  }, 2_000);
+
+  it("hard-bounds a stalled lock metadata read without a late product mutation", async () => {
+    const paths = testPaths();
+    const baseline = createLifecycleStateStore(paths);
+    await baseline.setDesiredState("off");
+    const lockPath = join(directory, ".lifecycle-state.lock");
+    const held = await holdLifecycleLock(lockPath);
+    const entered = deferred();
+    const releaseRead = deferred();
+    const stalled = storeWithFileSystem({
+      readFile: (async (...arguments_: Parameters<typeof readFile>) => {
+        if (String(arguments_[0]) === lockPath) {
+          entered.resolve();
+          await releaseRead.promise;
+        }
+        return readFile(...arguments_);
+      }) as typeof readFile
+    });
+    const startedAt = performance.now();
+    const pending = stalled.setDesiredState("on", { timeoutMs: 90 });
+    await Promise.race([
+      entered.promise,
+      pending.then(
+        () => { throw new Error("lock read stall seam was ignored"); },
+        () => { throw new Error("lock read stall seam was ignored"); }
+      )
+    ]);
+
+    const result = await Promise.race([
+      pending.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) =>
+        setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+      )
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    releaseRead.resolve();
+    await held.releaseWithWrites([{
+      path: paths.settingsPath,
+      content: '{"desiredState":"off","startWithWindows":false,"generation":2}\n'
+    }]);
+    await pending.catch(() => undefined);
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { name: "LifecycleStateTimeoutError" }
+    });
+    expect(elapsedMs).toBeLessThan(300);
+    expect(await baseline.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
+    expect(await baseline.readRuntime()).toBeNull();
+  }, 2_000);
+
+  it("hard-bounds a stalled product-state read without mutating after timeout", async () => {
+    const paths = testPaths();
+    const baseline = createLifecycleStateStore(paths);
+    await baseline.setDesiredState("off");
+    const entered = deferred();
+    const releaseRead = deferred();
+    const stalled = storeWithFileSystem({
+      readFile: (async (...arguments_: Parameters<typeof readFile>) => {
+        if (String(arguments_[0]) === paths.settingsPath) {
+          entered.resolve();
+          await releaseRead.promise;
+        }
+        return readFile(...arguments_);
+      }) as typeof readFile
+    });
+    const startedAt = performance.now();
+    const pending = stalled.readSettings({ timeoutMs: 90 });
+    await Promise.race([
+      entered.promise,
+      pending.then(
+        () => { throw new Error("product read stall seam was ignored"); },
+        () => { throw new Error("product read stall seam was ignored"); }
+      )
+    ]);
+
+    const result = await Promise.race([
+      pending.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) =>
+        setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+      )
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    releaseRead.resolve();
+    await pending.catch(() => undefined);
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { name: "LifecycleStateTimeoutError" }
+    });
+    expect(elapsedMs).toBeLessThan(300);
+    expect(await baseline.readSettings()).toMatchObject({ desiredState: "off", generation: 1 });
+    expect(await baseline.readRuntime()).toBeNull();
+  }, 2_000);
+
+  it("returns after a committed mutation while identity-safe release finishes in the background", async () => {
+    const paths = testPaths();
+    const baseline = createLifecycleStateStore(paths);
+    await baseline.setDesiredState("off");
+    const lockPath = join(directory, ".lifecycle-state.lock");
+    const releaseReadEntered = deferred();
+    const allowReleaseRead = deferred();
+    let lockReads = 0;
+    const stalled = storeWithFileSystem({
+      readFile: (async (...arguments_: Parameters<typeof readFile>) => {
+        if (String(arguments_[0]) === lockPath && ++lockReads === 2) {
+          releaseReadEntered.resolve();
+          await allowReleaseRead.promise;
+        }
+        return readFile(...arguments_);
+      }) as typeof readFile
+    });
+    const startedAt = performance.now();
+    const pending = stalled.setDesiredState("on", { timeoutMs: 90 });
+    await Promise.race([
+      releaseReadEntered.promise,
+      pending.then(
+        () => { throw new Error("release read stall seam was ignored"); },
+        () => { throw new Error("release read stall seam was ignored"); }
+      )
+    ]);
+
+    const result = await Promise.race([
+      pending.then(
+        (settings) => ({ kind: "resolved" as const, settings }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) =>
+        setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+      )
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    await unlink(lockPath);
+    const successor = await holdLifecycleLock(lockPath);
+    allowReleaseRead.resolve();
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+
+    expect(result).toMatchObject({
+      kind: "resolved",
+      settings: { desiredState: "on", generation: 2 }
+    });
+    expect(elapsedMs).toBeLessThan(300);
+    await expect(lstat(lockPath)).resolves.toBeDefined();
+    const successorRuntime = {
+      pid: 9002,
+      version: "0.2.0",
+      protocolVersion: 1,
+      instanceNonce: "successor-release",
+      startedAt: "2026-09-01T01:02:03.000Z"
+    };
+    await successor.releaseWithWrites([
+      {
+        path: paths.settingsPath,
+        content: '{"desiredState":"off","startWithWindows":false,"generation":3}\n'
+      },
+      { path: paths.runtimePath, content: `${JSON.stringify(successorRuntime)}\n` }
+    ]);
+    await pending.catch(() => undefined);
+    expect(await baseline.readSettings()).toMatchObject({ desiredState: "off", generation: 3 });
+    expect(await baseline.readRuntime()).toEqual(successorRuntime);
+  }, 2_000);
 
   it("does not return a post-acquisition timeout until the callback cannot commit late", async () => {
     const store = createLifecycleStateStore(testPaths());

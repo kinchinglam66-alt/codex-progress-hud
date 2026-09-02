@@ -469,6 +469,84 @@ describe("companion lifecycle manager", () => {
     expect(client.show).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["first", "GENERATION_REJECTED", "expired deadline", 1, 0, "START_TIMEOUT"],
+    ["second", "GENERATION_REJECTED", "expired deadline", 2, 1, "START_TIMEOUT"],
+    ["first", "REQUEST_CANCELLED", "held lock", 1, 0, "MANUALLY_DISABLED"],
+    ["second", "REQUEST_CANCELLED", "held lock", 2, 1, "MANUALLY_DISABLED"]
+  ] as const)(
+    "classifies %s-submit %s across an %s without retry, reopen, spawn, or show",
+    async (_attemptName, code, boundary, expectedAttempts, expectedSpawns, expectedCode) => {
+      const fixture = await harness({ desiredState: "on", online: true });
+      let clock = 0;
+      const setDesiredState = vi.fn(fixture.store.setDesiredState);
+      const store = { ...fixture.store, setDesiredState } satisfies LifecycleStateStore;
+      const manager = createCompanionManager({
+        store,
+        client: fixture.client,
+        launcher: fixture.launcher,
+        sleep: async () => undefined,
+        now: () => clock,
+        startupTimeoutMs: 90,
+        logger: { write: async () => undefined },
+        diagnostics: {
+          directory: join(fixture.directory, `diagnostics-classifier-${code}-${expectedAttempts}`),
+          pluginVersion: "0.2.0",
+          mcpVersion: "0.2.0",
+          host: "127.0.0.1",
+          port: 17_837,
+          installManifestPath: fixture.paths.installManifestPath,
+          dataDirectoryPath: fixture.directory
+        }
+      });
+      let held: Awaited<ReturnType<typeof holdLifecycleLock>> | undefined;
+      cleanups.push(async () => held?.release());
+      let attempts = 0;
+      const startedAt = performance.now();
+
+      const pending = manager.executeWrite("tracking_start", async () => {
+        attempts += 1;
+        if (attempts < expectedAttempts) {
+          fixture.setOnline(false);
+          throw new HudClientError("OFFLINE", "first submit went offline");
+        }
+        if (boundary === "expired deadline") {
+          clock = 100;
+        } else {
+          await manager.close();
+          held = await holdLifecycleLock(join(fixture.directory, ".lifecycle-state.lock"));
+        }
+        throw new HudClientError(code, "stale submit result");
+      });
+      const result = await Promise.race([
+        pending.then(
+          (value) => ({ kind: "resolved" as const, value }),
+          (error: unknown) => ({ kind: "rejected" as const, error })
+        ),
+        new Promise<{ kind: "watchdog" }>((resolve_) =>
+          setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+        )
+      ]);
+      const elapsedMs = performance.now() - startedAt;
+      await held?.release();
+      held = undefined;
+
+      expect(result).toMatchObject({
+        kind: "resolved",
+        value: { code: expectedCode }
+      });
+      expect(result).not.toMatchObject({ value: { code: "INTERNAL_ERROR" } });
+      expect(elapsedMs).toBeLessThan(300);
+      expect(attempts).toBe(expectedAttempts);
+      expect(fixture.launcher.spawnHud).toHaveBeenCalledTimes(expectedSpawns);
+      expect(fixture.client.show).not.toHaveBeenCalled();
+      expect(setDesiredState.mock.calls.map(([state]) => state)).toEqual(
+        code === "REQUEST_CANCELLED" ? ["off"] : []
+      );
+    },
+    2_000
+  );
+
   it("keeps off authoritative when a second manager closes a first manager's deferred startup", async () => {
     const first = await harness({ spawnMakesOnline: false });
     let releaseSpawn!: () => void;

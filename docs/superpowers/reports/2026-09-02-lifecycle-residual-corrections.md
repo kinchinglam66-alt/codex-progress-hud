@@ -6,15 +6,19 @@ Task 3 baseline: `095a6cfda4906c1e68e0a6fee82d91017446ce57`
 
 Task 4 baseline: `e631c46a857752d2c9f1b7a801550d007fb3028d`
 
+Task 6 baseline: `7f3f0facb5e36f35028c43ebf03f2aa32af30bbf`
+
 Worktree: `.worktrees/release-lifecycle` on `feat/release-lifecycle`
 
 ## Outcome
 
-The targeted C1, I1, I3, and M2 lifecycle findings are closed by direct behavior tests and the Task 1–3 commits listed below. M2 now requires an exact canonical timestamp round-trip after the fixed-millisecond UTC shape check. `2026-02-31T01:02:03.000Z` is rejected, while `2028-02-29T01:02:03.000Z` is accepted unchanged.
+Tasks 1–3 targeted C1, I1, I3, and M2. The final whole-correction re-review later reopened C1 and I1 because readiness publication followed the last desktop generation guard, and state-lock setup/read/release could outlive the advertised caller boundary. I3 and M2 remained closed. M2 requires an exact canonical timestamp round-trip after the fixed-millisecond UTC shape check: `2026-02-31T01:02:03.000Z` is rejected, while `2028-02-29T01:02:03.000Z` is accepted unchanged.
 
 Task 4 closes the diagnostics logger lock-disappearance race exposed by Task 3. A deterministic filesystem seam removes a valid lock after `readLockRecord()` opens and reads it but before the second path identity `lstat`; the observation now retries instead of leaking `ENOENT`. The focused logger suite passed in 10 fresh processes, three fresh complete suites passed, and every required non-packaging gate passed. Independent Task 4 and whole-correction reviews remain required, so this report does not authorize Windows packaging.
 
 Task 5 closes the three Important gaps from the first whole-correction review. Second-instance activation is now explicit-intent-only; retry-submit generation rejection and manager-owned cancellation converge through the same stale/manual-off classifier used by the first submit; and authenticated token reads, executable existence checks, and stale-spawn termination share their enclosing absolute deadline. Deterministic 90ms / `<300ms` tests cover all newly bounded paths and assert no late runtime/state/window publication. A fresh whole-correction re-review remains required, so this report still does not authorize Windows packaging.
+
+Task 6 closes the final re-review's publication, complete state-operation boundary, and stale-classification gaps. Desktop readiness now runs inside the existing on-generation state guard after runtime publication. Deterministic tests prove both lock orderings: off-first publishes no server/window/tray/startup-ready/runtime, while guard-first blocks close's off commit until close can observe the complete instance. The state-store deadline is established before lock setup; non-cooperative setup and reads are caller-hard-bounded, cooperative product mutations remain awaited once entered, and delayed release is limited to identity-safe lock cleanup that cannot delete a successor or mutate settings/runtime. First- and second-submit generation rejection or manager-owned cancellation now settle as stable `START_TIMEOUT` or `MANUALLY_DISABLED`, never `INTERNAL_ERROR`, retry, reopen, extra spawn, or show. An independent final whole-correction re-review remains required, so this report does not authorize Windows packaging.
 
 ## Task 3 TDD evidence
 
@@ -111,12 +115,14 @@ Task 4 deterministically reproduces that exact boundary and closes it by treatin
 - Commits: `a18fee0` (`fix: keep manual off authoritative`) and `f143498` (`fix: close task one review gaps`).
 - Direct tests cover generation-bearing manager launch arguments, rejection of malformed/conflicting manager intent, manager desktop refusal after off or generation supersession, same-generation publication, one-shot write lease behavior, and stale `tracking_start` suppression.
 - The fresh real two-MCP test above passed and directly covers the originally missing cross-process stale retry path.
+- The final re-review reopened C1 at the post-runtime publication boundary. Task 6 adds the final on-generation guard around server listen, token read, window/tray creation, and `startup_ready`. Its two-store tests prove off-first cleanup and guard-first complete publication before close observes the instance.
 
 ### I1 — closed
 
 - Commits: `cb57360` (`fix: enforce lifecycle operation deadlines`), `1c04631` (`fix: close task two review gaps`), and `095a6cf` (`fix: complete task two cancellation handling`).
 - Full-suite behavior tests cover process-local queue waits, real cross-process lock waits, complete manager open, close-time runtime clear, and owned-process termination under one absolute deadline.
 - Elapsed assertions remain strict and were not relaxed: injected 90 ms store/open/close/hanging-listener budgets must settle in `<300 ms`; successor mutation checks wait 150 ms after lock release to prove no late publication/deletion; external cancellation and matching-owned-HUD termination also settle in `<300 ms`.
+- The final re-review reopened I1 for pre-lock setup, non-cooperative reads, and release. Task 6 injects the existing filesystem primitives and deterministically stalls lock-directory creation, owner write, owner identity `lstat`, lock metadata read, product-state read, and release. All caller-visible operations retain the 90 ms / `<300 ms` contract. After release, settings/runtime remain unchanged by timed-out work, and detached identity-safe release does not delete a successor lock or its successor state.
 
 ### I3 — closed
 
@@ -196,12 +202,53 @@ Fresh correction evidence:
 - Typecheck: exit 0.
 - No package, install, merge, push, or release action was performed.
 
+## Task 6 final re-review gap closure
+
+### RED evidence
+
+1. Desktop publication order:
+   - Command: `npm test -- --run tests/desktop/lifecycle.test.ts -t "readiness guard"`.
+   - Exit 1; 2 selected tests failed and 39 were skipped.
+   - Expected failures: off committed after runtime but `createProgressServer` still ran; the opposite-order test timed out because no readiness guard was entered.
+2. Complete state-operation boundary:
+   - Command: `npm test -- --run tests/lifecycle/state-store.test.ts -t "hard-bounds stalled|stalled lock metadata|stalled product-state|identity-safe release"`.
+   - Exit 1; 6 selected tests failed and 30 were skipped.
+   - Expected failures: the optional filesystem seam did not yet exist, so mkdir, owner write, owner `lstat`, lock/state read, and release stalls could not be injected or bounded.
+3. Deadline-safe stale classification:
+   - Command: `npm test -- --run tests/lifecycle/companion-manager.test.ts -t "classifies .*submit"`.
+   - Exit 1; 4 selected tests failed and 44 were skipped.
+   - Expected failures: first/second generation rejection with an expired deadline and first/second manager-owned cancellation behind a held lock all rejected instead of returning stable non-internal results; second cancellation reached the 300 ms watchdog.
+
+### GREEN implementation and focused evidence
+
+- Desktop readiness publication is the callback of `runIfGeneration(generation, "on", ...)`. A rejected guard enters identity-safe startup cleanup; a winning guard keeps off behind the same state lock until all readiness surfaces and the category-only `startup_ready` record exist.
+- `createLifecycleStateStore(paths, { fileSystem })` is an optional dependency seam over the same Node fs primitives used in production. The caller deadline is created before lock `mkdir`. The local queue distinguishes pre-mutation setup/read work from an entered product mutation. A timed-out caller can leave only abort-checked setup/read work and identity-safe owner/temp cleanup in the background. Release may detach at the caller boundary because it reads and unlinks only matching lock/owner identities.
+- Manager-owned abort is direct evidence that close won and returns `MANUALLY_DISABLED` without reacquiring state. A generation-rejection classifier that cannot read settings before the original deadline returns `START_TIMEOUT`; neither path enters OFFLINE recovery.
+- Desktop publication GREEN: 2/2 selected tests passed; Vitest duration 831 ms.
+- State deadline GREEN: 6/6 selected tests passed; Vitest duration 2.13 s.
+- Stale classifier GREEN: 4/4 selected tests passed; Vitest duration 997 ms.
+- Combined focused gate: 3/3 files and 125/125 tests passed; final Vitest duration 8.24 s.
+
+### Task 6 complete gate
+
+| Command | Exact result |
+|---|---|
+| `npm test -- --run` | Exit 0; 18/18 files and 313/313 tests passed; final Vitest duration 8.80 s. |
+| `npm run typecheck` | Exit 0; `tsc --noEmit` reported no errors. |
+| `npm run build` | Exit 0; TypeScript build and asset copy completed. |
+| `npm run smoke` | Exit 0; build completed; protocol health, authenticated event flow, and shutdown callback verified. |
+| `npm run diagnose:mcp` | Exit 0; 1/1 test passed; exact tool catalog and protocol-only child stdout remained valid; final Vitest duration 420 ms. |
+| `npm run validate:plugin` | Exit 0; plugin manifest and MCP launch configuration valid. |
+| `git diff --check` | Exit 0; no output. |
+
+Task 6 changes no tool registration, public payload schema, response-size limit, privacy behavior, PID/nonce ownership rule, packaging, installation, merge, push, or release behavior.
+
 ## Review, limitations, and prohibited actions
 
 - Task 3 self-review found no scope expansion in the timestamp implementation or tests. Task 4 closes the diagnostics flaky concern with the deterministic evidence above.
 - The first staged `git diff --cached --check` failed on two Markdown hard-break trailing spaces in this report. The cause was report formatting; both spaces were removed before commit and the cached check was rerun. No production or test file was implicated.
 - Independent task review and whole-correction review remain required before any packaging decision.
-- Task 5 implementation is complete, but its requested fresh whole-correction re-review has not yet occurred.
+- Task 6 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
 - **No packaged Electron validation has occurred in this plan.**
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.
