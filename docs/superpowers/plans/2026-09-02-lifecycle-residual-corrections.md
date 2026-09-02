@@ -200,3 +200,30 @@ Commit: `test: close lifecycle release blockers`
 - [ ] **Step 6: Stop before Windows packaging**
 
 Perform a task review and whole-correction review. Windows packaging begins only after both reviews report zero open Critical/Important findings.
+
+---
+
+### Task 4: Close the diagnostics logger lock-disappearance race
+
+**Reason for amendment:** Task 3's required repeated full-suite gate exposed a real concurrent-release race in diagnostics logger lock inspection. Independent Task 3 review classified it as an Important whole-plan/release blocker.
+
+**Files:**
+- Modify: `src/diagnostics/logger.ts`
+- Modify: `tests/diagnostics/logger.test.ts`
+- Modify: `docs/superpowers/reports/2026-09-02-lifecycle-residual-corrections.md`
+
+- [ ] **Step 1: Write a deterministic failing race test**
+
+Exercise lock disappearance after the reader opens the lock file but before its second path identity check. Normal `ENOENT` must be treated as a retryable/disappeared lock observation, not an operational logger failure.
+
+- [ ] **Step 2: Implement identity-safe disappearance handling**
+
+Return a non-owned/missing observation when the second path `lstat` sees `ENOENT`. Preserve regular-file/no-symlink checks, handle identity validation, stale-owner cleanup, bounded retries, privacy, and cross-process serialization.
+
+- [ ] **Step 3: Verify and update acceptance evidence**
+
+Run the focused logger suite repeatedly, the complete suite at least three fresh times, typecheck, build, smoke, diagnose:mcp, validate:plugin, and `git diff --check`. Update the acceptance report with the fix and replace the open logger concern with verification evidence.
+
+- [ ] **Step 4: Review and stop before packaging**
+
+Perform an independent Task 4 review and then a whole-correction review. Do not package, install, merge, push, or release until both report zero open Critical/Important findings.
