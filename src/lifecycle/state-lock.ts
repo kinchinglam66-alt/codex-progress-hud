@@ -37,10 +37,16 @@ async function information(path: string): Promise<(FileIdentity & { size: bigint
   }
 }
 
-export async function unlinkIfIdentical(path: string, identity: FileIdentity): Promise<boolean> {
+export async function unlinkIfIdentical(
+  path: string,
+  identity: FileIdentity,
+  signal?: AbortSignal
+): Promise<boolean> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (signal?.aborted) throw new LifecycleStateTimeoutError();
     const current = await information(path);
     if (current === null || !sameIdentity(current, identity)) return false;
+    if (signal?.aborted) throw new LifecycleStateTimeoutError();
     try {
       await unlink(path);
       return true;
@@ -115,7 +121,7 @@ async function acquire(
       }
       const existing = await readLock(lockPath);
       if (existing !== null && !processIsAlive(existing.pid)) {
-        await unlinkIfIdentical(lockPath, existing);
+        await unlinkIfIdentical(lockPath, existing, signal);
         continue;
       }
       const remainingMs = deadline - Date.now();
@@ -146,7 +152,9 @@ export async function withLifecycleStateLock<T>(
   const lock = await acquire(lockPath, timeoutMs, signal);
   try {
     if (signal?.aborted) throw new LifecycleStateTimeoutError();
-    return await operation();
+    const value = await operation();
+    if (signal?.aborted) throw new LifecycleStateTimeoutError();
+    return value;
   }
   finally { await release(lock); }
 }

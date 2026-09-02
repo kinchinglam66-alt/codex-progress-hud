@@ -24,6 +24,7 @@ export interface ProgressClientSnapshot {
 export type HudClientErrorCode =
   | "OFFLINE"
   | "REQUEST_TIMEOUT"
+  | "REQUEST_CANCELLED"
   | "AUTH_ERROR"
   | "PORT_CONFLICT"
   | "VERSION_MISMATCH"
@@ -100,20 +101,28 @@ export class CompanionHttpClient implements ProgressClient {
   ): Promise<{ response: Response; payload: unknown }> {
     const controller = new AbortController();
     const timeoutMs = Math.max(0, Math.min(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 60_000));
-    let deadlineExpired = false;
+    let abortCause: "deadline" | "external" | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (timeoutMs === 0) {
-      deadlineExpired = true;
+      abortCause = "deadline";
       controller.abort();
     } else {
       timer = setTimeout(() => {
-        deadlineExpired = true;
-        controller.abort();
+        if (abortCause === undefined) {
+          abortCause = "deadline";
+          controller.abort();
+        }
       }, timeoutMs);
       timer.unref();
     }
-    const abort = () => controller.abort();
-    if (options.signal?.aborted) controller.abort();
+    const externallyCancelled = options.signal?.aborted ?? false;
+    const abort = () => {
+      if (abortCause === undefined) {
+        abortCause = "external";
+        controller.abort();
+      }
+    };
+    if (externallyCancelled) abort();
     else options.signal?.addEventListener("abort", abort, { once: true });
     try {
       const response = await fetch(`${this.serviceUrl}${path}`, {
@@ -130,8 +139,11 @@ export class CompanionHttpClient implements ProgressClient {
       return { response, payload: await readBoundedJson(response, controller) };
     } catch (error) {
       if (error instanceof HudClientError || error instanceof InvalidResponseError) throw error;
-      if (deadlineExpired) {
+      if (abortCause === "deadline") {
         throw new HudClientError("REQUEST_TIMEOUT", "Progress HUD request timed out");
+      }
+      if (abortCause === "external") {
+        throw new HudClientError("REQUEST_CANCELLED", "Progress HUD request was cancelled");
       }
       throw new HudClientError("OFFLINE", "Progress HUD is not reachable");
     } finally {

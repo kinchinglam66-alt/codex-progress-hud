@@ -205,6 +205,22 @@ describe("CompanionHttpClient", () => {
     expect(performance.now() - startedAt).toBeLessThan(500);
   });
 
+  it("categorizes external cancellation separately from its own deadline and offline", async () => {
+    const { baseUrl, tokenPath } = await fixture(() => undefined);
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    const request = new CompanionHttpClient(baseUrl, tokenPath).identity({
+      timeoutMs: 500,
+      signal: controller.signal
+    });
+    setTimeout(() => controller.abort(), 20);
+
+    const error = await request.catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "REQUEST_CANCELLED" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+  });
+
   it("bounds streamed JSON responses without exposing their content", async () => {
     const secret = "oversized-private-content";
     const { baseUrl, tokenPath } = await fixture((_request, response) => {

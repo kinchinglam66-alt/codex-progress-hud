@@ -28,6 +28,13 @@ export interface StateOperationOptions {
   timeoutMs?: number;
 }
 
+/**
+ * A guarded mutation must stop before starting any irreversible side effect
+ * after `signal` aborts, then settle promptly. The state store waits for an
+ * entered callback to settle before returning a timeout to its caller.
+ */
+export type StateMutationOperation<T> = (signal: AbortSignal) => T | Promise<T>;
+
 export interface HudHealth extends RuntimeIdentity {
   service: "codex-progress-hud";
   protocolVersion: 1;
@@ -74,7 +81,7 @@ export interface LifecycleStateStore {
   runIfGeneration<T>(
     generation: number,
     desiredState: DesiredHudState,
-    operation: () => T | Promise<T>,
+    operation: StateMutationOperation<T>,
     options?: StateOperationOptions
   ): Promise<{ accepted: false } | { accepted: true; value: T }>;
 }

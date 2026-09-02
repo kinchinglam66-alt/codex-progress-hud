@@ -95,13 +95,15 @@ type ManagerErrorCode = HudErrorCode | HudClientErrorCode;
 
 function errorCode(error: unknown): ManagerErrorCode {
   if (!(error instanceof HudClientError)) return "INTERNAL_ERROR";
-  return error.code === "GENERATION_REJECTED" ? "INTERNAL_ERROR" : error.code;
+  return error.code === "GENERATION_REJECTED" || error.code === "REQUEST_CANCELLED"
+    ? "INTERNAL_ERROR"
+    : error.code;
 }
 
 function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
   if (code === "OFFLINE") return "COMPANION_CRASHED";
   if (code === "REQUEST_TIMEOUT") return "START_TIMEOUT";
-  if (code === "GENERATION_REJECTED") return "INTERNAL_ERROR";
+  if (code === "GENERATION_REJECTED" || code === "REQUEST_CANCELLED") return "INTERNAL_ERROR";
   return code;
 }
 
@@ -218,6 +220,25 @@ export function createCompanionManager(
 
   function stateOptions(deadline: number): StateOperationOptions {
     return { timeoutMs: Math.max(0, deadline - now()) };
+  }
+
+  async function settlesBeforeDeadline(operation: Promise<void>, deadline: number): Promise<boolean> {
+    const remainingMs = Math.max(0, deadline - now());
+    if (remainingMs === 0) {
+      void operation.catch(() => undefined);
+      return false;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation.then(() => true),
+        new Promise<false>((resolve_) => {
+          timer = setTimeout(() => resolve_(false), remainingMs);
+        })
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   async function clearRuntimeBefore(deadline: number): Promise<boolean> {
@@ -606,8 +627,10 @@ export function createCompanionManager(
 
     async open(): Promise<HudLifecycleSnapshot> {
       const deadline = now() + startupTimeoutMs;
+      let desiredState: "on" | "off" | undefined;
       try {
         const settings = await dependencies.store.setDesiredState("on", stateOptions(deadline));
+        desiredState = settings.desiredState;
         const ensured = await ensureRunningOnce(settings.generation, deadline);
         if (ensured.kind !== "ready") return ensured.snapshot;
         if (!(await currentOnGeneration(ensured.generation, deadline))) {
@@ -616,8 +639,11 @@ export function createCompanionManager(
         await dependencies.client.show(requestOptions(deadline, ensured.generation));
         return await observe(deadline);
       } catch (error) {
-        if (!(error instanceof LifecycleStateTimeoutError)) throw error;
-        return { observedState: "stopped", code: "START_TIMEOUT" };
+        if (
+          !(error instanceof LifecycleStateTimeoutError) &&
+          (!(error instanceof HudClientError) || error.code !== "REQUEST_TIMEOUT")
+        ) throw error;
+        return withDesiredState(desiredState, { observedState: "stopped", code: "START_TIMEOUT" });
       }
     },
 
@@ -710,7 +736,9 @@ export function createCompanionManager(
         latestHealth !== undefined &&
         identityMatches(latestHealth, ownedHud)
       ) {
-        await ownedHud.process.terminate();
+        if (!(await settlesBeforeDeadline(ownedHud.process.terminate(), shutdownDeadline))) {
+          return shutdownTimedOut(shutdownStartedAt);
+        }
         if (!(await clearRuntimeBefore(shutdownDeadline))) return shutdownTimedOut(shutdownStartedAt);
         ownedHud = undefined;
         record({

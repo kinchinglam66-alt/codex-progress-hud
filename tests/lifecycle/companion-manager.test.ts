@@ -329,6 +329,17 @@ describe("companion lifecycle manager", () => {
     expect(client.hide).toHaveBeenCalledOnce();
   });
 
+  it("maps a final show request timeout to the public startup timeout snapshot", async () => {
+    const { manager, client } = await harness({ desiredState: "on", online: true });
+    client.show.mockRejectedValueOnce(new HudClientError("REQUEST_TIMEOUT", "internal request timeout"));
+
+    await expect(manager.open()).resolves.toEqual({
+      desiredState: "on",
+      observedState: "stopped",
+      code: "START_TIMEOUT"
+    });
+  });
+
   it("closes gracefully after persisting explicit off", async () => {
     const { manager, store, client, logger, terminate } = await harness({ online: true });
 
@@ -811,6 +822,54 @@ describe("companion lifecycle manager", () => {
     expect(await manager.close()).toEqual({ desiredState: "off", observedState: "stopped" });
     expect(terminate).toHaveBeenCalledOnce();
   });
+
+  it("bounds a matching owned HUD terminate call with the same shutdown deadline", async () => {
+    const fixture = await harness({ shutdownStops: false });
+    let terminateStarted = false;
+    const terminate = vi.fn(() => {
+      terminateStarted = true;
+      return new Promise<void>(() => undefined);
+    });
+    fixture.launcher.spawnHud.mockImplementation(async () => {
+      fixture.setOnline(true);
+      return { pid: compatibleHealth.pid, terminate };
+    });
+    const logger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
+    const manager = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      shutdownTimeoutMs: 90,
+      logger,
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-terminate-timeout"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    await manager.open();
+    const startedAt = performance.now();
+
+    const closing = Promise.race([
+      manager.close(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("terminate exceeded the close deadline")), 300)
+      )
+    ]);
+    await expect(closing).resolves.toEqual({
+      desiredState: "off",
+      observedState: "stopped",
+      code: "SHUTDOWN_TIMEOUT"
+    });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect(terminateStarted).toBe(true);
+    expect(await fixture.store.readRuntime()).not.toBeNull();
+    expect(vi.mocked(logger.write).mock.calls.map(([entry]) => entry.event)).not.toContain("shutdown_complete");
+  }, 2_000);
 
   it.each([
     ["unauthorized", new HudClientError("AUTH_ERROR", "authentication failed")],

@@ -77,3 +77,72 @@ The full suite includes the public stdio catalog check for all 13 tools. Existin
 ## Concerns
 
 One first full-suite run had the pre-existing 500ms pending-logger timing test finish at 534ms under parallel load; its focused run and the next fresh full suite passed. No product assertion failed on the successful full run. This is recorded as test timing sensitivity, not an open Task 2 correctness blocker.
+
+---
+
+## Review fix round 1
+
+### Findings addressed
+
+1. A matching owned HUD whose `terminate()` promise never settles is now raced against the same absolute shutdown deadline. Timeout returns `SHUTDOWN_TIMEOUT`; runtime is retained and `shutdown_complete` is not recorded.
+2. State-operation timeout now has a provable post-acquisition commit boundary. An entered operation receives abort and must settle before the caller receives timeout; built-in rename/unlink paths check cancellation immediately before every irreversible attempt. A queued operation that has not entered may still return promptly because its aborted continuation cannot acquire or mutate.
+3. External request cancellation is `REQUEST_CANCELLED`, distinct from both the client's own `REQUEST_TIMEOUT` and a real connection-failure `OFFLINE`. First abort cause wins, and manager mapping cannot route cancellation through the code-free stopped path.
+4. A timeout from the final `show()` request is converted to a public `START_TIMEOUT` snapshot with the persisted desired state, rather than rejecting with an internal client code.
+
+### RED evidence
+
+All four review tests were added before production changes and run together:
+
+```text
+npm test -- --run tests/lifecycle/state-store.test.ts tests/lifecycle/companion-manager.test.ts tests/mcp/report-client.test.ts -t "post-acquisition|external cancellation|final show request timeout|matching owned HUD terminate"
+```
+
+Result: exit 1; 4 failed and 77 skipped.
+
+- I1: the 300ms watchdog won because `close()` remained blocked in the never-settling `terminate()` promise.
+- I2: the guarded callback set `committed` to true after the timeout result and later gate release.
+- I3: the real hanging listener's external abort returned `OFFLINE` instead of `REQUEST_CANCELLED`.
+- I4: `open()` rejected with internal `HudClientError { code: "REQUEST_TIMEOUT" }` instead of resolving a `START_TIMEOUT` snapshot.
+
+An additional process-local queue RED returned `{ kind: "watchdog" }` after 300ms instead of the expected 40ms timeout while queued behind an entered guarded callback. This established the safe distinction between pre-entry timeout and post-entry cancellation.
+
+### Cancellation and commit contract
+
+`StateMutationOperation<T>` now requires an `AbortSignal`. Its public contract requires the callback to stop before starting irreversible side effects after abort and to settle promptly. Once the protected operation has entered, the store does not independently race a timeout response ahead of that operation; it aborts, waits for the callback/filesystem operation to terminate, performs the final lock-level abort check, and only then returns `LifecycleStateTimeoutError`.
+
+For built-in persistence, cancellation is checked before temporary-file creation, before every atomic rename attempt, before target identity deletion, and before every identity-aware unlink attempt. A filesystem call already started before expiry is awaited; no later rename/unlink can begin after expiry, and no operation remains capable of committing after the timeout result is returned. Lock cleanup keeps its existing inode/token ownership checks.
+
+If an operation is still queued and has not entered, the timeout may return immediately: its queued continuation sees the aborted signal before acquisition and cannot mutate. The original separate-process held-lock and successor tests remain in place and green.
+
+### GREEN evidence
+
+- Review-focused Task 2: exit 0; 3 files passed; 82/82 tests passed.
+- Server/desktop/integration contract boundary: exit 0; 3 files passed; 64/64 tests passed.
+- Full regression: exit 0; 18 files passed; 289/289 tests passed.
+- `npm run typecheck`: exit 0.
+- `npm run build`: exit 0.
+- `git diff --check`: exit 0.
+
+Elapsed assertions remain strict: owned terminate, post-acquisition cancellation, process-local queue timeout, external request cancellation, and all existing 90ms lock/open/close cases must settle in less than 300ms. No threshold was relaxed.
+
+### Files changed in review fix round 1
+
+- `src/lifecycle/companion-manager.ts`
+- `src/lifecycle/state-lock.ts`
+- `src/lifecycle/state-store.ts`
+- `src/lifecycle/types.ts`
+- `src/mcp/report-client.ts`
+- `src/server/http-server.ts`
+- `tests/desktop/lifecycle.test.ts`
+- `tests/lifecycle/companion-manager.test.ts`
+- `tests/lifecycle/state-store.test.ts`
+- `tests/mcp/report-client.test.ts`
+- `tests/server/http-server.test.ts`
+- `.superpowers/sdd/2026-09-02-lifecycle-residual-corrections/task-2-report.md`
+
+### Self-review and concerns
+
+- Mutation checks fail if terminate is awaited directly, post-acquisition timeout returns before callback termination, a queued aborted operation later mutates, external cancellation maps to `OFFLINE`, or final show timeout escapes.
+- The real listener and real separate-process lock tests are retained. The public 13-tool catalog, 64 KiB response limit, privacy-safe errors/logs, generation guards, and PID/nonce ownership behavior remain covered by the full suite.
+- Arbitrary `runIfGeneration` callbacks must cooperate with their required `AbortSignal`; this is an explicit API contract rather than an assumption that arbitrary work is cancellable. All first-party guarded callbacks check the signal before mutation.
+- No open Critical, Important, or Minor concern was found in the review-fix diff.

@@ -67,7 +67,7 @@ function desktopHarness(lockAcquired = true) {
       readInstallManifest: vi.fn(async () => null),
       runIfGeneration: vi.fn(async (_generation, _state, operation) => ({
         accepted: true as const,
-        value: await operation()
+        value: await operation(new AbortController().signal)
       }))
     },
     readToken: vi.fn(async () => "secret"),

@@ -39,9 +39,9 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
   const runIfGeneration = vi.fn(async (
     requestedGeneration: number,
     requestedState: "on" | "off",
-    operation: () => unknown | Promise<unknown>
+    operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ) => requestedGeneration === generation && requestedState === desiredState
-    ? { accepted: true as const, value: await operation() }
+    ? { accepted: true as const, value: await operation(new AbortController().signal) }
     : { accepted: false as const });
   const server = createProgressServer({
     port: 0,

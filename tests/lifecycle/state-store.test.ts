@@ -129,6 +129,85 @@ describe("lifecycle state store", () => {
     expect(await store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
   }, 10_000);
 
+  it("does not return a post-acquisition timeout until the callback cannot commit late", async () => {
+    const store = createLifecycleStateStore(testPaths());
+    await store.setDesiredState("on");
+    let entered!: () => void;
+    const callbackEntered = new Promise<void>((resolve_) => { entered = resolve_; });
+    let release!: () => void;
+    const releaseGate = new Promise<void>((resolve_) => { release = resolve_; });
+    let committed = false;
+
+    const startedAt = performance.now();
+    const operation = store.runIfGeneration(1, "on", async (signal?: AbortSignal) => {
+      entered();
+      if (signal === undefined) {
+        await releaseGate;
+      } else if (!signal.aborted) {
+        await Promise.race([
+          releaseGate,
+          new Promise<void>((resolve_) =>
+            signal.addEventListener("abort", () => resolve_(), { once: true })
+          )
+        ]);
+      }
+      if (!signal?.aborted) committed = true;
+      return "callback-finished";
+    }, { timeoutMs: 40 });
+    await callbackEntered;
+
+    const result = await operation
+      .then(() => ({ kind: "resolved" as const }))
+      .catch((error: unknown) => ({ kind: "rejected" as const, error }));
+    const elapsedMs = performance.now() - startedAt;
+    release();
+    await new Promise((resolve_) => setTimeout(resolve_, 50));
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { name: "LifecycleStateTimeoutError" }
+    });
+    expect(elapsedMs).toBeLessThan(300);
+    expect(committed).toBe(false);
+  });
+
+  it("expires safely while queued behind an entered local mutation", async () => {
+    const store = createLifecycleStateStore(testPaths());
+    await store.setDesiredState("on");
+    let entered!: () => void;
+    const callbackEntered = new Promise<void>((resolve_) => { entered = resolve_; });
+    let release!: () => void;
+    const releaseGate = new Promise<void>((resolve_) => { release = resolve_; });
+    const first = store.runIfGeneration(1, "on", async () => {
+      entered();
+      await releaseGate;
+    });
+    await callbackEntered;
+    const startedAt = performance.now();
+
+    const second = store.setDesiredState("off", { timeoutMs: 40 });
+    const result = await Promise.race([
+      second.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error })
+      ),
+      new Promise<{ kind: "watchdog" }>((resolve_) =>
+        setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+      )
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    release();
+    await first;
+    await second.catch(() => undefined);
+
+    expect(result).toMatchObject({
+      kind: "rejected",
+      error: { name: "LifecycleStateTimeoutError" }
+    });
+    expect(elapsedMs).toBeLessThan(300);
+    expect(await store.readSettings()).toMatchObject({ desiredState: "on", generation: 1 });
+  });
+
   it("writes and reads valid runtime identity", async () => {
     const store = createLifecycleStateStore(testPaths());
     const identity = {

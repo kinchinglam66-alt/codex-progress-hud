@@ -25,7 +25,7 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   runIfGeneration?(
     generation: number,
     desiredState: DesiredHudState,
-    operation: () => unknown | Promise<unknown>
+    operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ): Promise<{ accepted: false } | { accepted: true; value: unknown }>;
 }
 
@@ -133,11 +133,11 @@ export function createProgressServer(options: ProgressServerOptions) {
   async function runMutation(
     request: IncomingMessage,
     desiredState: DesiredHudState,
-    operation: () => unknown | Promise<unknown>
+    operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ): Promise<{ accepted: false } | { accepted: true; value: unknown }> {
     if (shuttingDown) return { accepted: false };
     if (options.runIfGeneration === undefined) {
-      return { accepted: true, value: await operation() };
+      return { accepted: true, value: await operation(new AbortController().signal) };
     }
     const generation = requestGeneration(request);
     if (generation === undefined) return { accepted: false };
@@ -209,7 +209,10 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         const envelope = parseProgressEnvelope(await readJson(request));
-        const result = await runMutation(request, "on", () => store.apply(envelope));
+        const result = await runMutation(request, "on", (signal) => {
+          if (signal.aborted) throw signal.reason;
+          return store.apply(envelope);
+        });
         if (!result.accepted) {
           writeJson(response, 409, { error: "lifecycle generation rejected" });
           return;
@@ -236,7 +239,8 @@ export function createProgressServer(options: ProgressServerOptions) {
               : options.requestShutdown;
         if (callback === undefined) throw new Error("control callback is unavailable");
         const desiredState = url.pathname === "/api/shutdown" ? "off" : "on";
-        const result = await runMutation(request, desiredState, async () => {
+        const result = await runMutation(request, desiredState, async (signal) => {
+          if (signal.aborted) throw signal.reason;
           if (url.pathname === "/api/shutdown") shuttingDown = true;
           await callback();
         });

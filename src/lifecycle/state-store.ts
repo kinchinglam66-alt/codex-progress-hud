@@ -48,7 +48,7 @@ const localQueues = new Map<string, Promise<unknown>>();
 
 async function locallyOrdered<T>(
   lockPath: string,
-  operation: (remainingMs?: number, signal?: AbortSignal) => Promise<T>,
+  operation: (remainingMs: number | undefined, signal: AbortSignal) => Promise<T>,
   options: StateOperationOptions = {}
 ): Promise<T> {
   const deadline = options.timeoutMs === undefined
@@ -56,9 +56,11 @@ async function locallyOrdered<T>(
     : Date.now() + Math.max(0, options.timeoutMs);
   const previous = localQueues.get(lockPath) ?? Promise.resolve();
   const controller = new AbortController();
+  let operationEntered = false;
   const current = previous.catch(() => undefined).then(() => {
     const remainingMs = deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
     if (remainingMs === 0 || controller.signal.aborted) throw new LifecycleStateTimeoutError();
+    operationEntered = true;
     return operation(remainingMs, controller.signal);
   });
   localQueues.set(lockPath, current);
@@ -68,16 +70,16 @@ async function locallyOrdered<T>(
   void current.then(removeCurrent, removeCurrent);
   if (deadline === undefined) return await current;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let rejectBeforeEntry!: (error: LifecycleStateTimeoutError) => void;
+  const beforeEntryTimeout = new Promise<never>((_resolve, reject) => {
+    rejectBeforeEntry = reject;
+  });
   try {
-    return await Promise.race([
-      current,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(new LifecycleStateTimeoutError());
-        }, Math.max(0, deadline - Date.now()));
-      })
-    ]);
+    timer = setTimeout(() => {
+      controller.abort();
+      if (!operationEntered) rejectBeforeEntry(new LifecycleStateTimeoutError());
+    }, Math.max(0, deadline - Date.now()));
+    return await Promise.race([current, beforeEntryTimeout]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -94,22 +96,33 @@ async function readJsonUnlocked<T>(path: string, schema: z.ZodType<T>): Promise<
   catch { throw new Error(`Invalid lifecycle JSON file: ${path}`); }
 }
 
-async function writeJsonUnlocked(path: string, value: unknown): Promise<void> {
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new LifecycleStateTimeoutError();
+}
+
+async function writeJsonUnlocked(path: string, value: unknown, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   await mkdir(dirname(path), { recursive: true });
+  throwIfAborted(signal);
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let temporaryIdentity: Awaited<ReturnType<typeof identityOf>> = null;
   try {
     await writeFile(temporary, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
     temporaryIdentity = await identityOf(temporary);
-    await retryWindowsSharing(() => rename(temporary, path));
+    await retryWindowsSharing(() => {
+      throwIfAborted(signal);
+      return rename(temporary, path);
+    });
   } finally {
     if (temporaryIdentity !== null) await unlinkIfIdentical(temporary, temporaryIdentity).catch(() => undefined);
   }
 }
 
-async function clearUnlocked(path: string): Promise<void> {
+async function clearUnlocked(path: string, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
   const identity = await identityOf(path);
-  if (identity !== null) await unlinkIfIdentical(path, identity);
+  throwIfAborted(signal);
+  if (identity !== null) await unlinkIfIdentical(path, identity, signal);
 }
 
 function normalizedSettings(settings: z.infer<typeof settingsSchema> | null): HudSettings {
@@ -122,15 +135,23 @@ function normalizedSettings(settings: z.infer<typeof settingsSchema> | null): Hu
 
 export function createLifecycleStateStore(paths: LifecycleStatePaths): LifecycleStateStore {
   const lockPath = join(dirname(paths.settingsPath), ".lifecycle-state.lock");
-  const locked = <T>(options: StateOperationOptions | undefined, operation: () => Promise<T>) => locallyOrdered(
+  const locked = <T>(
+    options: StateOperationOptions | undefined,
+    operation: (signal: AbortSignal) => Promise<T>
+  ) => locallyOrdered(
     lockPath,
-    (remainingMs, signal) => withLifecycleStateLock(lockPath, operation, remainingMs, signal),
+    (remainingMs, signal) => withLifecycleStateLock(
+      lockPath,
+      () => operation(signal),
+      remainingMs,
+      signal
+    ),
     options
   );
   const readSettingsUnlocked = async () => normalizedSettings(await readJsonUnlocked(paths.settingsPath, settingsSchema));
   return {
-    readSettings: (options) => locked(options, readSettingsUnlocked),
-    setDesiredState: (state, options) => locked(options, async () => {
+    readSettings: (options) => locked(options, async () => readSettingsUnlocked()),
+    setDesiredState: (state, options) => locked(options, async (signal) => {
       const current = await readSettingsUnlocked();
       if (current.desiredState === state) return current;
       const settings: HudSettings = {
@@ -138,15 +159,15 @@ export function createLifecycleStateStore(paths: LifecycleStatePaths): Lifecycle
         generation: current.generation + 1,
         desiredState: state
       };
-      await writeJsonUnlocked(paths.settingsPath, settings);
+      await writeJsonUnlocked(paths.settingsPath, settings, signal);
       return settings;
     }),
-    setStartWithWindows: (enabled, options) => locked(options, async () => {
+    setStartWithWindows: (enabled, options) => locked(options, async (signal) => {
       const settings: HudSettings = { ...(await readSettingsUnlocked()), startWithWindows: enabled };
-      await writeJsonUnlocked(paths.settingsPath, settings);
+      await writeJsonUnlocked(paths.settingsPath, settings, signal);
       return settings;
     }),
-    writeRuntime: (identity, generation, options) => locked(options, async () => {
+    writeRuntime: (identity, generation, options) => locked(options, async (signal) => {
       if (generation !== undefined) {
         const settings = await readSettingsUnlocked();
         if (settings.desiredState !== "on" || settings.generation !== generation) return false;
@@ -157,11 +178,11 @@ export function createLifecycleStateStore(paths: LifecycleStatePaths): Lifecycle
         protocolVersion: identity.protocolVersion,
         instanceNonce: identity.instanceNonce,
         startedAt: identity.startedAt
-      }));
+      }), signal);
       return true;
     }),
-    readRuntime: (options) => locked(options, () => readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema)),
-    clearRuntime: (expected, options) => locked(options, async () => {
+    readRuntime: (options) => locked(options, async () => readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema)),
+    clearRuntime: (expected, options) => locked(options, async (signal) => {
       if (expected !== undefined) {
         const current = await readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema);
         if (
@@ -170,13 +191,16 @@ export function createLifecycleStateStore(paths: LifecycleStatePaths): Lifecycle
           current.instanceNonce !== expected.instanceNonce
         ) return;
       }
-      await clearUnlocked(paths.runtimePath);
+      await clearUnlocked(paths.runtimePath, signal);
     }),
-    readInstallManifest: (options) => locked(options, () => readJsonUnlocked(paths.installManifestPath, installManifestSchema)),
-    runIfGeneration: (generation, desiredState, operation, options) => locked(options, async () => {
+    readInstallManifest: (options) => locked(options, async () => readJsonUnlocked(paths.installManifestPath, installManifestSchema)),
+    runIfGeneration: (generation, desiredState, operation, options) => locked(options, async (signal) => {
       const settings = await readSettingsUnlocked();
       if (settings.generation !== generation || settings.desiredState !== desiredState) return { accepted: false };
-      return { accepted: true, value: await operation() };
+      throwIfAborted(signal);
+      const value = await operation(signal);
+      throwIfAborted(signal);
+      return { accepted: true, value };
     })
   };
 }
