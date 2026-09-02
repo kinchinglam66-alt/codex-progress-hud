@@ -431,3 +431,31 @@ GREEN and final evidence:
 - Auth, generation authority, absolute deadlines, 64 KiB bounds, privacy-safe errors/logging, runtime identity ownership, and successor-safe cleanup remain covered. No package, install, merge, push, tag, publication, or release action was performed.
 
 This report records implementation self-verification only. The main agent will review and commit separately; this worktree remains uncommitted.
+
+## Final whole-correction re-review round 7 Important fix
+
+Round 7 found that shutdown-latch recovery discarded every successful health probe. If two independent managers initially hit the same retiring listener, manager A could observe it offline and publish a same-generation replacement while manager B observed only that healthy successor. Manager B then waited until the immutable startup deadline and falsely returned `START_TIMEOUT`.
+
+The deterministic RED uses two real manager instances, the file-backed lifecycle store, official HTTP clients, and real old/replacement `createProgressServer` listeners on the same endpoint. Both opens first receive `SHUTTING_DOWN` from the old listener. A is released while the endpoint is offline and alone launches the replacement; B is released only after the new nonce is healthy. Before the fix, A returned running while B returned stopped/`START_TIMEOUT`.
+
+`recoverAfterShutdownLatch()` now receives the retiring `HudHealth` captured from the ready snapshot whose show received HTTP 423. A later successful health probe becomes a ready candidate only when its stable identity differs by PID, instance nonce, start time, protocol version, or companion version. Visibility is deliberately excluded. The existing `open()` loop then revalidates the original generation under the unchanged deadline and issues show; offline recovery, manual-off authority, timeout behavior, and single-spawn ownership remain unchanged.
+
+RED/GREEN and mutation evidence:
+
+- Primary RED: exit 1; the selected real-boundary test failed because manager B returned stopped instead of replacement running.
+- Focused GREEN: exit 0; both shutdown-latched tests passed, including the two-manager replacement ordering and same-identity visibility-only ordering.
+- Identity mutation check: temporarily accepting every successful health probe failed the visibility-only guard with two show attempts instead of one; restoring the stable-identity comparison returned the same 2/2 focused tests to green.
+
+Fresh acceptance evidence:
+
+- Focused integration/server/client/tools/manager gate: exit 0; 5/5 files and 148/148 tests passed; Vitest duration 10.55 s.
+- Full suite: exit 0; 18/18 files and 351/351 tests passed; Vitest duration 17.19 s.
+- Typecheck: exit 0; `tsc --noEmit` reported no errors.
+- Build: exit 0; the production TypeScript build and asset copy completed.
+- Smoke: exit 0; protocol health, authenticated event flow, and shutdown callback passed.
+- `diagnose:mcp`: exit 0; 1/1 test passed with protocol-only public child stdout and the exact tool catalog.
+- `validate:plugin`: exit 0; plugin manifest and MCP launch configuration are valid.
+- Pre-report `git diff --check`: exit 0 with no output.
+- Post-report `git diff --check`: exit 0 with no output; the final worktree contains exactly the manager, integration-test, and acceptance-report modifications listed above.
+
+No package or installer was built. No companion or plugin was installed. No commit, merge, push, tag, publication, or release action was performed. This remains implementation self-verification; a fresh independent release-gate review is still required before the Windows packaging plan.

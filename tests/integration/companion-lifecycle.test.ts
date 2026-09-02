@@ -268,12 +268,13 @@ describe("source-mode companion lifecycle", () => {
       startedAt: new Date().toISOString()
     };
     await store.writeRuntime(runtime, on.generation);
+    let visibility: "visible" | "hidden" = "visible";
     let shutdownRequested!: () => void;
     const shutdownRequest = new Promise<void>((resolve_) => { shutdownRequested = resolve_; });
     const server = createProgressServer({
       port: 0,
       tokenPath: join(directory, "auth.token"),
-      health: () => ({ service: "codex-progress-hud", ...runtime, visibility: "visible" }),
+      health: () => ({ service: "codex-progress-hud", ...runtime, visibility }),
       showWindow: () => undefined,
       requestShutdown: () => shutdownRequested(),
       runIfGeneration: (generation, desiredState, operation, signal) =>
@@ -301,11 +302,17 @@ describe("source-mode companion lifecycle", () => {
     }).close();
     await shutdownRequest;
     const launcher = { spawnHud: vi.fn() };
+    const openingClient = client();
+    const show = vi.spyOn(openingClient, "show");
     const opening = createCompanionManager({
       store: createLifecycleStateStore(paths),
-      client: client(),
+      client: openingClient,
       launcher,
-      startupTimeoutMs: 120,
+      startupTimeoutMs: 250,
+      sleep: async (milliseconds) => {
+        visibility = "hidden";
+        await new Promise((resolve_) => setTimeout(resolve_, milliseconds));
+      },
       logger: { write: async () => undefined },
       diagnostics
     });
@@ -319,7 +326,177 @@ describe("source-mode companion lifecycle", () => {
     expect(await store.readSettings()).toMatchObject({ desiredState: "on", generation: on.generation + 2 });
     expect(await store.readRuntime()).toEqual(runtime);
     expect(launcher.spawnHud).not.toHaveBeenCalled();
+    expect(show).toHaveBeenCalledTimes(1);
   }, 5_000);
+
+  it("lets two managers converge when one replaces the shutdown-latched server between recovery probes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-shutdown-replacement-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const initial = await store.setDesiredState("on");
+    const oldRuntime = {
+      pid: process.pid,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: "2026-09-03T00:00:00.000Z"
+    };
+    const replacementRuntime = {
+      pid: process.pid + 1,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: "2026-09-03T00:00:01.000Z"
+    };
+    await store.writeRuntime(oldRuntime, initial.generation);
+    await writeFile(
+      paths.installManifestPath,
+      `${JSON.stringify({
+        executablePath: process.execPath,
+        installDirectory: dirname(process.execPath),
+        version: "0.2.0-test"
+      })}\n`
+    );
+
+    let oldShutdownRequested!: () => void;
+    const oldShutdownRequest = new Promise<void>((resolve_) => { oldShutdownRequested = resolve_; });
+    const oldShow = vi.fn();
+    const oldServer = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => ({ service: "codex-progress-hud", ...oldRuntime, visibility: "visible" }),
+      showWindow: oldShow,
+      requestShutdown: () => oldShutdownRequested(),
+      runIfGeneration: (generation, desiredState, operation, signal) =>
+        store.runIfGeneration(generation, desiredState, operation, { signal })
+    });
+    await oldServer.listen();
+    let oldServerClosed = false;
+    cleanups.push(async () => {
+      if (!oldServerClosed) await oldServer.close();
+    });
+    const port = oldServer.address().port;
+    const serviceUrl = oldServer.address().url;
+    const tokenPath = join(directory, "auth.token");
+    const latchClient = new CompanionHttpClient(serviceUrl, tokenPath);
+    const off = await store.setDesiredState("off");
+    await latchClient.shutdown({ generation: off.generation, timeoutMs: 1_000 });
+    await oldShutdownRequest;
+
+    let replacementServer: ReturnType<typeof createProgressServer> | undefined;
+    let replacementVisible = false;
+    const replacementShow = vi.fn(() => { replacementVisible = true; });
+    cleanups.push(async () => {
+      await replacementServer?.close();
+    });
+    const firstLauncher = {
+      spawnHud: vi.fn(async (): Promise<SpawnedHud> => {
+        replacementServer = createProgressServer({
+          port,
+          tokenPath,
+          health: () => ({
+            service: "codex-progress-hud",
+            ...replacementRuntime,
+            visibility: replacementVisible ? "visible" : "hidden"
+          }),
+          showWindow: replacementShow,
+          requestShutdown: () => undefined,
+          runIfGeneration: (generation, desiredState, operation, signal) =>
+            store.runIfGeneration(generation, desiredState, operation, { signal })
+        });
+        await replacementServer.listen();
+        return {
+          pid: replacementRuntime.pid,
+          terminate: async () => replacementServer?.close()
+        };
+      })
+    };
+    const secondLauncher = { spawnHud: vi.fn() };
+    let firstRecoveryEntered!: () => void;
+    let secondRecoveryEntered!: () => void;
+    const firstRecoveryEntry = new Promise<void>((resolve_) => { firstRecoveryEntered = resolve_; });
+    const secondRecoveryEntry = new Promise<void>((resolve_) => { secondRecoveryEntered = resolve_; });
+    let releaseFirstRecovery!: () => void;
+    let releaseSecondRecovery!: () => void;
+    const firstRecoveryGate = new Promise<void>((resolve_) => { releaseFirstRecovery = resolve_; });
+    const secondRecoveryGate = new Promise<void>((resolve_) => { releaseSecondRecovery = resolve_; });
+    let firstSleep = true;
+    let secondSleep = true;
+    const controlledSleep = (
+      which: "first" | "second",
+      entered: () => void,
+      gate: Promise<void>
+    ) => async (milliseconds: number): Promise<void> => {
+      const isFirst = which === "first" ? firstSleep : secondSleep;
+      if (which === "first") firstSleep = false;
+      else secondSleep = false;
+      if (isFirst) {
+        entered();
+        await gate;
+        return;
+      }
+      await new Promise((resolve_) => setTimeout(resolve_, milliseconds));
+    };
+    const diagnostics = {
+      directory: join(directory, "diagnostics"),
+      pluginVersion: "0.2.0-test",
+      mcpVersion: "0.2.0-test",
+      host: "127.0.0.1",
+      port,
+      installManifestPath: paths.installManifestPath,
+      dataDirectoryPath: directory
+    };
+    const firstManager = createCompanionManager({
+      store: createLifecycleStateStore(paths),
+      client: new CompanionHttpClient(serviceUrl, tokenPath),
+      launcher: firstLauncher,
+      sleep: controlledSleep("first", firstRecoveryEntered, firstRecoveryGate),
+      startupTimeoutMs: 1_000,
+      logger: { write: async () => undefined },
+      diagnostics
+    });
+    const secondManager = createCompanionManager({
+      store: createLifecycleStateStore(paths),
+      client: new CompanionHttpClient(serviceUrl, tokenPath),
+      launcher: secondLauncher,
+      sleep: controlledSleep("second", secondRecoveryEntered, secondRecoveryGate),
+      startupTimeoutMs: 1_000,
+      logger: { write: async () => undefined },
+      diagnostics
+    });
+
+    const firstOpen = firstManager.open();
+    const secondOpen = secondManager.open();
+    await Promise.all([firstRecoveryEntry, secondRecoveryEntry]);
+    expect(oldShow).not.toHaveBeenCalled();
+    await oldServer.close();
+    oldServerClosed = true;
+    releaseFirstRecovery();
+    const firstResult = await firstOpen;
+    releaseSecondRecovery();
+    const secondResult = await secondOpen;
+    const current = await store.readSettings();
+
+    expect(current).toMatchObject({ desiredState: "on", generation: off.generation + 1 });
+    expect(firstResult).toMatchObject({
+      desiredState: "on",
+      observedState: "running",
+      health: replacementRuntime
+    });
+    expect(secondResult).toMatchObject({
+      desiredState: "on",
+      observedState: "running",
+      health: replacementRuntime
+    });
+    expect(firstLauncher.spawnHud).toHaveBeenCalledTimes(1);
+    expect(secondLauncher.spawnHud).not.toHaveBeenCalled();
+    expect(replacementShow).toHaveBeenCalledTimes(2);
+  }, 10_000);
 
   it.each(["event", "hide", "shutdown"] as const)(
     "enforces the server deadline for a queued %s mutation before disconnect is observed",

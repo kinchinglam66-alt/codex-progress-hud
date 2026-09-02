@@ -120,6 +120,14 @@ function identityMatches(health: HudHealth, owned: OwnedHud): boolean {
   return health.pid === owned.process.pid && health.instanceNonce === owned.instanceNonce;
 }
 
+function sameHudIdentity(left: HudHealth, right: HudHealth): boolean {
+  return left.pid === right.pid &&
+    left.instanceNonce === right.instanceNonce &&
+    left.startedAt === right.startedAt &&
+    left.protocolVersion === right.protocolVersion &&
+    left.version === right.version;
+}
+
 interface OwnedHud {
   process: SpawnedHud;
   instanceNonce: string;
@@ -653,7 +661,8 @@ export function createCompanionManager(
 
   async function recoverAfterShutdownLatch(
     generation: number,
-    deadline: number
+    deadline: number,
+    retiringHealth: HudHealth
   ): Promise<RunningResult> {
     for (const delay of STARTUP_DELAYS) {
       if (!(await currentOnGeneration(generation, deadline))) {
@@ -663,7 +672,18 @@ export function createCompanionManager(
       await sleep(Math.min(delay, deadline - now()));
       if (now() >= deadline) break;
       try {
-        await dependencies.client.health(requestOptions(deadline));
+        const health = await dependencies.client.health(requestOptions(deadline));
+        if (!sameHudIdentity(health, retiringHealth)) {
+          return {
+            kind: "ready",
+            generation,
+            snapshot: {
+              desiredState: "on",
+              observedState: health.visibility === "visible" ? "running" : "hidden",
+              health
+            }
+          };
+        }
       } catch (error) {
         const code = errorCode(error);
         if (code === "OFFLINE") return ensureRunningOnce(generation, deadline);
@@ -750,7 +770,13 @@ export function createCompanionManager(
             await dependencies.client.show(requestOptions(deadline, ensured.generation));
           } catch (error) {
             if (!(error instanceof HudClientError) || error.code !== "SHUTTING_DOWN") throw error;
-            ensured = await recoverAfterShutdownLatch(ensured.generation, deadline);
+            const retiringHealth = ensured.snapshot.health;
+            if (retiringHealth === undefined) throw error;
+            ensured = await recoverAfterShutdownLatch(
+              ensured.generation,
+              deadline,
+              retiringHealth
+            );
             continue;
           }
           return await observe(deadline);
