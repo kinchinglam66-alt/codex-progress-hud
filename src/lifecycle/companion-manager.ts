@@ -42,13 +42,18 @@ export interface CompanionManager {
   ): Promise<EnsureResult>;
   executeWrite<T>(
     reason: HudWriteReason,
-    operation: (options: HudRequestOptions & { generation: number; signal: AbortSignal }) => Promise<T>
+    operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<T>
   ): Promise<
     | { kind: "completed"; value: T }
     | Exclude<EnsureResult, { kind: "ready" }>
   >;
   diagnose(): Promise<DiagnosticReport>;
 }
+
+export type MakeHudRequestOptions = () => HudRequestOptions & {
+  generation: number;
+  signal: AbortSignal;
+};
 
 interface CompanionControlClient {
   identity(options?: HudRequestOptions): Promise<HudIdentity>;
@@ -116,6 +121,12 @@ interface OwnedHud {
   instanceNonce: string;
 }
 
+type WriteAbortCause = "deadline" | "close";
+type WriteAttempt<T> =
+  | { kind: "completed"; value: T }
+  | { kind: "failed"; error: unknown }
+  | { kind: "aborted"; cause: WriteAbortCause };
+
 type ReadinessResult =
   | { kind: "ready"; health: HudHealth }
   | { kind: "offline" }
@@ -149,7 +160,7 @@ export function createCompanionManager(
   let ownedHud: OwnedHud | undefined;
   let lastRecoveryAt = Number.NEGATIVE_INFINITY;
   const recentErrors: DiagnosticReportInput["errors"] = [];
-  const activeWriteControllers = new Set<AbortController>();
+  const activeWriteCancellations = new Set<() => void>();
 
   function record(entry: Omit<OperationalLogEntry, "at">): void {
     try {
@@ -745,7 +756,7 @@ export function createCompanionManager(
         if (!(error instanceof LifecycleStateTimeoutError)) throw error;
         return shutdownTimedOut(shutdownStartedAt);
       }
-      for (const controller of activeWriteControllers) controller.abort();
+      for (const cancel of activeWriteCancellations) cancel();
       record({
         level: "info",
         event: "shutdown_requested",
@@ -856,74 +867,117 @@ export function createCompanionManager(
     async executeWrite(reason, operation) {
       const deadline = now() + startupTimeoutMs;
       const controller = new AbortController();
-      activeWriteControllers.add(controller);
+      let abortCause: WriteAbortCause | undefined;
+      let notifyAbort!: (cause: WriteAbortCause) => void;
+      const aborted = new Promise<WriteAbortCause>((resolve_) => { notifyAbort = resolve_; });
+      const claimAbortCause = (cause: WriteAbortCause) => {
+        if (abortCause !== undefined) return;
+        abortCause = cause;
+        controller.abort();
+        notifyAbort(cause);
+      };
+      const cancelForClose = () => claimAbortCause("close");
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const scheduleDeadline = () => {
+        const remainingMs = Math.max(0, deadline - now());
+        if (remainingMs === 0) {
+          claimAbortCause("deadline");
+          return;
+        }
+        deadlineTimer = setTimeout(() => {
+          if (now() >= deadline) claimAbortCause("deadline");
+          else scheduleDeadline();
+        }, remainingMs);
+        deadlineTimer.unref();
+      };
+      scheduleDeadline();
+      activeWriteCancellations.add(cancelForClose);
       try {
         let ensured = await ensureForWrite(reason, deadline);
         if (ensured.kind !== "ready") return ensured;
         const writeGeneration = ensured.generation;
+        const writeSnapshot = ensured.snapshot;
         const manuallyDisabled = (): Exclude<EnsureResult, { kind: "ready" }> => ({
           kind: "suppressed",
           code: "MANUALLY_DISABLED"
         });
-        if (controller.signal.aborted) return manuallyDisabled();
+        const timedOut = (): Exclude<EnsureResult, { kind: "ready" }> => ({
+          kind: "error",
+          code: "START_TIMEOUT",
+          snapshot: { ...writeSnapshot, code: "START_TIMEOUT" }
+        });
+        const abortedResult = (cause: WriteAbortCause) =>
+          cause === "close" ? manuallyDisabled() : timedOut();
+        if (abortCause !== undefined) return abortedResult(abortCause);
         if (!(await currentOnGeneration(writeGeneration, deadline))) {
           return staleWriteResult(writeGeneration, deadline);
         }
+        if (abortCause !== undefined) return abortedResult(abortCause);
+        const makeRequestOptions: MakeHudRequestOptions = () => ({
+          generation: writeGeneration,
+          signal: controller.signal,
+          timeoutMs: Math.max(0, deadline - now())
+        });
+        const invokeOperation = async <Value>(
+          run: () => Promise<Value>
+        ): Promise<WriteAttempt<Value>> => {
+          if (abortCause !== undefined) return { kind: "aborted" as const, cause: abortCause };
+          const pending = Promise.resolve().then(run);
+          const result = await Promise.race<WriteAttempt<Value>>([
+            pending.then(
+              (value) => ({ kind: "completed" as const, value }),
+              (error: unknown) => ({ kind: "failed" as const, error })
+            ),
+            aborted.then((cause) => ({ kind: "aborted" as const, cause }))
+          ]);
+          if (result.kind === "completed" && now() >= deadline) {
+            claimAbortCause("deadline");
+            return { kind: "aborted", cause: "deadline" };
+          }
+          return result;
+        };
         const classifyStaleAttempt = (error: unknown) => {
           if (!(error instanceof HudClientError)) return undefined;
-          if (error.code === "REQUEST_CANCELLED" && controller.signal.aborted) {
-            return Promise.resolve(manuallyDisabled());
+          if (error.code === "REQUEST_TIMEOUT") return Promise.resolve(timedOut());
+          if (error.code === "REQUEST_CANCELLED" && abortCause !== undefined) {
+            return Promise.resolve(abortedResult(abortCause));
           }
           if (error.code === "GENERATION_REJECTED") {
             return staleWriteResult(writeGeneration, deadline);
           }
           return undefined;
         };
-        try {
-          return {
-            kind: "completed",
-            value: await operation({
-              generation: writeGeneration,
-              signal: controller.signal,
-              timeoutMs: Math.max(0, deadline - now())
-            })
-          };
-        } catch (error) {
-          const staleAttempt = classifyStaleAttempt(error);
-          if (staleAttempt !== undefined) return staleAttempt;
-          if (!(error instanceof HudClientError)) throw error;
-          if (error.code !== "OFFLINE") throw error;
-          if (controller.signal.aborted) return manuallyDisabled();
-          if (!(await currentOnGeneration(writeGeneration, deadline))) {
-            return staleWriteResult(writeGeneration, deadline);
-          }
-          ensured = await ensureRunningOnce(writeGeneration, deadline);
-          if (ensured.kind !== "ready") {
-            return ensured.code === "MANUALLY_DISABLED"
-              ? staleWriteResult(writeGeneration, deadline)
-              : ensured;
-          }
-          if (controller.signal.aborted) return manuallyDisabled();
-          if (!(await currentOnGeneration(writeGeneration, deadline))) {
-            return staleWriteResult(writeGeneration, deadline);
-          }
-          try {
-            return {
-              kind: "completed",
-              value: await operation({
-                generation: writeGeneration,
-                signal: controller.signal,
-                timeoutMs: Math.max(0, deadline - now())
-              })
-            };
-          } catch (retryError) {
-            const staleRetry = classifyStaleAttempt(retryError);
-            if (staleRetry !== undefined) return staleRetry;
-            throw retryError;
-          }
+        const attempt = await invokeOperation(() => operation(makeRequestOptions));
+        if (attempt.kind === "completed") return attempt;
+        if (attempt.kind === "aborted") return abortedResult(attempt.cause);
+        const error = attempt.error;
+        const staleAttempt = classifyStaleAttempt(error);
+        if (staleAttempt !== undefined) return staleAttempt;
+        if (!(error instanceof HudClientError)) throw error;
+        if (error.code !== "OFFLINE") throw error;
+        if (abortCause !== undefined) return abortedResult(abortCause);
+        if (!(await currentOnGeneration(writeGeneration, deadline))) {
+          return staleWriteResult(writeGeneration, deadline);
         }
+        ensured = await ensureRunningOnce(writeGeneration, deadline);
+        if (ensured.kind !== "ready") {
+          return ensured.code === "MANUALLY_DISABLED"
+            ? staleWriteResult(writeGeneration, deadline)
+            : ensured;
+        }
+        if (abortCause !== undefined) return abortedResult(abortCause);
+        if (!(await currentOnGeneration(writeGeneration, deadline))) {
+          return staleWriteResult(writeGeneration, deadline);
+        }
+        const retry = await invokeOperation(() => operation(makeRequestOptions));
+        if (retry.kind === "completed") return retry;
+        if (retry.kind === "aborted") return abortedResult(retry.cause);
+        const staleRetry = classifyStaleAttempt(retry.error);
+        if (staleRetry !== undefined) return staleRetry;
+        throw retry.error;
       } finally {
-        activeWriteControllers.delete(controller);
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        activeWriteCancellations.delete(cancelForClose);
       }
     },
 

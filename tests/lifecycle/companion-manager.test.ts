@@ -494,10 +494,11 @@ describe("companion lifecycle manager", () => {
     let release!: () => void;
     const operationGate = new Promise<void>((resolve) => { release = resolve; });
     let submitted = false;
-    const writing = (manager as any).executeWrite("progress_report", async (options: { signal: AbortSignal }) => {
+    const writing = manager.executeWrite("progress_report", async (makeRequestOptions) => {
+      const { signal } = makeRequestOptions();
       entered();
       await operationGate;
-      if (options.signal.aborted) throw new HudClientError("REQUEST_CANCELLED", "cancelled");
+      if (signal.aborted) throw new HudClientError("REQUEST_CANCELLED", "cancelled");
       submitted = true;
       return "submitted";
     });
@@ -513,6 +514,36 @@ describe("companion lifecycle manager", () => {
     expect(await store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
     expect(launcher.spawnHud).not.toHaveBeenCalled();
     expect(client.show).not.toHaveBeenCalled();
+  });
+
+  it("bounds a non-cooperative write callback with the complete operation deadline", async () => {
+    const fixture = await harness({ desiredState: "on", online: true });
+    const manager = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      startupTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-write-deadline"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const startedAt = performance.now();
+
+    const result = await Promise.race([
+      manager.executeWrite("progress_report", async () => await new Promise<never>(() => undefined)),
+      new Promise<"watchdog">((resolve_) => setTimeout(() => resolve_("watchdog"), 300))
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result).toMatchObject({ kind: "error", code: "START_TIMEOUT" });
+    expect(elapsedMs).toBeLessThan(300);
   });
 
   it("does not retry a locally in-flight write after close commits off", async () => {
@@ -536,7 +567,8 @@ describe("companion lifecycle manager", () => {
     const { manager, launcher, setOnline } = await harness({ desiredState: "on", online: true });
     const generations: number[] = [];
 
-    const result = await manager.executeWrite("tracking_start", async ({ generation }) => {
+    const result = await manager.executeWrite("tracking_start", async (makeRequestOptions) => {
+      const { generation } = makeRequestOptions();
       generations.push(generation);
       if (generations.length === 1) {
         setOnline(false);
@@ -560,7 +592,8 @@ describe("companion lifecycle manager", () => {
     });
     let attempts = 0;
 
-    const result = await manager.executeWrite("tracking_start", async ({ signal }) => {
+    const result = await manager.executeWrite("tracking_start", async (makeRequestOptions) => {
+      const { signal } = makeRequestOptions();
       attempts += 1;
       if (attempts === 1) {
         setOnline(false);

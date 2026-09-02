@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CompanionManager } from "../../src/lifecycle/companion-manager.js";
+import {
+  createCompanionManager,
+  type CompanionManager
+} from "../../src/lifecycle/companion-manager.js";
+import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { HudClientError } from "../../src/mcp/report-client.js";
 import { createToolHandlers } from "../../src/mcp/tools.js";
 
@@ -30,18 +34,26 @@ function createManager(overrides: Partial<CompanionManager> = {}): CompanionMana
   manager.executeWrite = overrides.executeWrite ?? vi.fn(async (reason, operation) => {
     let ensured = await manager.ensureForWrite(reason);
     if (ensured.kind !== "ready") return ensured;
+    const generation = ensured.generation;
     try {
       return {
         kind: "completed" as const,
-        value: await operation({ generation: ensured.generation, signal: controller.signal })
+        value: await operation(() => ({
+          generation,
+          signal: controller.signal
+        }))
       };
     } catch (error) {
       if (!(error instanceof HudClientError) || error.code !== "OFFLINE") throw error;
       ensured = await manager.ensureForWrite(reason);
       if (ensured.kind !== "ready") return ensured;
+      const retryGeneration = ensured.generation;
       return {
         kind: "completed" as const,
-        value: await operation({ generation: ensured.generation, signal: controller.signal })
+        value: await operation(() => ({
+          generation: retryGeneration,
+          signal: controller.signal
+        }))
       };
     }
   });
@@ -58,6 +70,48 @@ function createHandlers(
   companionManager: CompanionManager = createManager()
 ) {
   return createToolHandlers({ progressClient, companionManager });
+}
+
+function createRunningDeadlineManager(startupTimeoutMs: number): CompanionManager {
+  const settings = { desiredState: "on" as const, startWithWindows: false, generation: 7 };
+  const health: HudHealth = {
+    service: "codex-progress-hud",
+    pid: 4312,
+    version: "0.2.0",
+    protocolVersion: 1,
+    visibility: "visible",
+    instanceNonce: "deadline-instance",
+    startedAt: "2026-09-02T00:00:00.000Z"
+  };
+  const store = {
+    readSettings: vi.fn(async () => settings),
+    readRuntime: vi.fn(async () => null)
+  } as unknown as LifecycleStateStore;
+  return createCompanionManager({
+    store,
+    client: {
+      identity: vi.fn(async () => ({
+        service: "codex-progress-hud" as const,
+        protocolVersion: 1 as const
+      })),
+      health: vi.fn(async () => health),
+      show: vi.fn(async () => undefined),
+      hide: vi.fn(async () => undefined),
+      shutdown: vi.fn(async () => undefined)
+    },
+    launcher: { spawnHud: vi.fn() },
+    startupTimeoutMs,
+    logger: { write: async () => undefined },
+    diagnostics: {
+      directory: "C:\\diagnostics",
+      pluginVersion: "0.2.0",
+      mcpVersion: "0.2.0",
+      host: "127.0.0.1",
+      port: 17_837,
+      installManifestPath: "C:\\install.json",
+      dataDirectoryPath: "C:\\data"
+    }
+  });
 }
 
 describe("MCP progress tool handlers", () => {
@@ -245,6 +299,66 @@ describe("MCP progress tool handlers", () => {
     }, expectedLease());
     expect(statusResult.content[0]?.text).toContain('"status":"running"');
   });
+
+  it.each([
+    ["tracking_start", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingStart({ task_id: "task-1", title: "Deadline control" })],
+    ["tracking_pause", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingPause({})],
+    ["tracking_resume", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingResume({})],
+    ["tracking_stop", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingStop({})]
+  ] as const)(
+    "%s shares one 90ms deadline across status and a hanging submit",
+    async (_name, invoke) => {
+      const requestTimeouts: number[] = [];
+      let accepted = false;
+      const status = vi.fn(async (options) => {
+        requestTimeouts.push(options?.timeoutMs ?? Number.POSITIVE_INFINITY);
+        await new Promise((resolve_) => setTimeout(resolve_, 75));
+        return {
+          task: { id: "task-1", title: "Deadline control", status: "running" },
+          eta: null
+        };
+      });
+      const submit = vi.fn((_envelope, options) => new Promise<never>((_resolve, reject) => {
+        requestTimeouts.push(options?.timeoutMs ?? Number.POSITIVE_INFINITY);
+        const lateAcceptance = setTimeout(() => { accepted = true; }, 150);
+        const cancel = () => {
+          clearTimeout(lateAcceptance);
+          reject(new HudClientError("REQUEST_CANCELLED", "deadline cancelled submit"));
+        };
+        if (options?.signal?.aborted) cancel();
+        else options?.signal?.addEventListener("abort", cancel, { once: true });
+      }));
+      const handlers = createHandlers(
+        { submit, status },
+        createRunningDeadlineManager(90)
+      );
+      const startedAt = performance.now();
+
+      const result = await Promise.race([
+        invoke(handlers).then((value) => ({ kind: "resolved" as const, value })),
+        new Promise<{ kind: "watchdog" }>((resolve_) =>
+          setTimeout(() => resolve_({ kind: "watchdog" }), 300)
+        )
+      ]);
+      const elapsedMs = performance.now() - startedAt;
+      await new Promise((resolve_) => setTimeout(resolve_, 160));
+
+      expect(result).toMatchObject({
+        kind: "resolved",
+        value: {
+          isError: true,
+          structuredContent: { ok: false, code: "START_TIMEOUT" }
+        }
+      });
+      expect(elapsedMs).toBeLessThan(300);
+      expect(requestTimeouts).toHaveLength(2);
+      expect(requestTimeouts[0]).toBeLessThanOrEqual(90);
+      expect(requestTimeouts[1]).toBeLessThan(requestTimeouts[0]!);
+      expect(accepted).toBe(false);
+    },
+    2_000
+  );
 
   it("keeps trackingStatus receiver-independent when registered or destructured", async () => {
     const status = vi.fn(async () => ({ task: null, eta: null }));

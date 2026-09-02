@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ProgressEnvelope } from "../core/schema.js";
-import type { CompanionManager } from "../lifecycle/companion-manager.js";
+import type {
+  CompanionManager,
+  MakeHudRequestOptions
+} from "../lifecycle/companion-manager.js";
 import type {
   EnsureResult,
   HudErrorCode,
@@ -96,9 +99,9 @@ function noActiveTaskResult(): ToolResult {
 async function submitForCurrentTask(
   client: ProgressClient,
   event: ProgressEnvelope["event"],
-  options: HudRequestOptions
+  requestOptions: () => HudRequestOptions
 ): Promise<ToolResult> {
-  const current = await client.status(options);
+  const current = await client.status(requestOptions());
   if (
     current.task === null ||
     current.task.id === undefined ||
@@ -110,7 +113,7 @@ async function submitForCurrentTask(
     taskId: current.task.id,
     title: current.task.title,
     event
-  }, options);
+  }, requestOptions());
   return textResult(
     `Tracking ${event.type.replace("tracking_", "")}: ${snapshot.task?.status ?? "idle"}.`
   );
@@ -151,7 +154,7 @@ export function createToolHandlers({
   async function runWrite(
     reason: HudWriteReason,
     suppressedText: string,
-    operation: (options: HudRequestOptions & { generation: number; signal: AbortSignal }) => Promise<ToolResult>
+    operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<ToolResult>
   ): Promise<ToolResult> {
     try {
       const result = await companionManager.executeWrite(reason, operation);
@@ -220,12 +223,12 @@ export function createToolHandlers({
       return runWrite(
         "progress_report",
         "HUD is manually closed; progress was not displayed.",
-        async (options) => {
+        async (makeRequestOptions) => {
           const snapshot = await client.submit({
             taskId: value.task_id,
             title: value.title,
             event
-          }, options);
+          }, makeRequestOptions());
           return textResult(`Progress recorded: ${snapshot.task?.status ?? "idle"}.`);
         }
       );
@@ -238,7 +241,7 @@ export function createToolHandlers({
       return runWrite(
         "task_outcome",
         "HUD is manually closed; the outcome was not displayed.",
-        async (options) => {
+        async (makeRequestOptions) => {
           const snapshot = await client.submit({
             taskId: value.task_id,
             title: value.title,
@@ -248,7 +251,7 @@ export function createToolHandlers({
               verified: value.verified,
               ...(value.detail === undefined ? {} : { detail: value.detail })
             }
-          }, options);
+          }, makeRequestOptions());
           return textResult(`Outcome recorded: ${snapshot.task?.status ?? "idle"}.`);
         }
       );
@@ -262,15 +265,15 @@ export function createToolHandlers({
       return runWrite(
         "tracking_start",
         "HUD is manually closed; tracking was not started.",
-        async (options) => {
-          const current = await client.status(options);
+        async (makeRequestOptions) => {
+          const current = await client.status(makeRequestOptions());
           const taskId = parsed.data.task_id ?? current.task?.id ?? "current";
           const taskTitle = parsed.data.title ?? current.task?.title ?? "当前 Codex 任务";
           const snapshot = await client.submit({
             taskId,
             title: taskTitle,
             event: { type: "tracking_started" }
-          }, options);
+          }, makeRequestOptions());
           return textResult(`Tracking started: ${snapshot.task?.status ?? "idle"}.`);
         }
       );
@@ -280,7 +283,8 @@ export function createToolHandlers({
       return runWrite(
         "progress_report",
         "HUD is manually closed; tracking was not paused.",
-        (options) => submitForCurrentTask(client, { type: "tracking_paused" }, options)
+        (makeRequestOptions) =>
+          submitForCurrentTask(client, { type: "tracking_paused" }, makeRequestOptions)
       );
     },
 
@@ -288,7 +292,8 @@ export function createToolHandlers({
       return runWrite(
         "progress_report",
         "HUD is manually closed; tracking was not resumed.",
-        (options) => submitForCurrentTask(client, { type: "tracking_resumed" }, options)
+        (makeRequestOptions) =>
+          submitForCurrentTask(client, { type: "tracking_resumed" }, makeRequestOptions)
       );
     },
 
@@ -296,7 +301,8 @@ export function createToolHandlers({
       return runWrite(
         "progress_report",
         "HUD is manually closed; tracking was not stopped.",
-        (options) => submitForCurrentTask(client, { type: "tracking_stopped" }, options)
+        (makeRequestOptions) =>
+          submitForCurrentTask(client, { type: "tracking_stopped" }, makeRequestOptions)
       );
     },
 

@@ -24,6 +24,8 @@ Task 6 closes the final re-review's publication, complete state-operation bounda
 
 Task 7 closes the two Important findings from final re-review round 2. `hud_hide` now reads a current `desiredState: "on"` generation and sends it through the real authenticated HTTP client; a generation race returns the successor's current lifecycle snapshot and never invokes the stale hide callback. Close captures its target runtime after committing off and every manager cleanup point uses one state-store lock to validate the exact off generation, desired state, and full expected runtime identity before the existing inode-safe unlink. Deterministic initial-offline, graceful, and forced-termination races preserve a G+1 same-PID/same-nonce successor; timeout continues to retain runtime evidence and cannot record completion. The complete non-packaging gate passed. Independent re-review remains required, so this report does not authorize Windows packaging.
 
+Task 8 closes the remaining Important finding from final re-review round 3. `executeWrite()` now supplies the tool callback only a `makeRequestOptions()` function, which recomputes the remaining time to one absolute write deadline before every HTTP request. A manager-owned deadline race bounds the complete callback, including a callback that never settles, and records the first abort cause so deadline expiry maps to `START_TIMEOUT` while a close that wins still maps to `MANUALLY_DISABLED`. Only a first-attempt `OFFLINE` enters the existing one-shot same-generation recovery. Deterministic 90 ms / `<300 ms` tests cover tracking start, pause, resume, and stop after status consumes most of the budget; submit is aborted, no late event is accepted, and the second request receives a smaller timeout. The complete non-packaging gate passed. Independent re-review remains required, so this report does not authorize Windows packaging.
+
 ## Task 3 TDD evidence
 
 Production mutation caught by the new test: replacing exact calendar round-trip validation with shape plus finite `Date.parse` allows JavaScript date normalization to accept an impossible calendar date.
@@ -280,12 +282,50 @@ Command: `npm test -- --run tests/lifecycle/companion-manager.test.ts -t "sends 
 
 Task 7 changes no tool registration, public MCP payload schema, response-size limit, privacy behavior, PID/nonce termination ownership, packaging, installation, merge, push, or release behavior.
 
+## Task 8 shared tracking operation deadline
+
+### Root cause and RED evidence
+
+`executeWrite()` computed one absolute deadline but converted it to a numeric `timeoutMs` once before invoking a callback. `tracking_start`, `tracking_pause`, `tracking_resume`, and `tracking_stop` reused that number for status and submit, while each client request started a fresh timer. The manager also awaited the callback directly, so a non-cooperative callback could outlive the operation boundary.
+
+1. Tracking controls RED — `npm test -- --run tests/mcp/tools.test.ts -t "shares one 90ms deadline"`.
+   - Exit 1; 4 selected tests failed and 24 were skipped.
+   - All four controls reached the 300 ms watchdog instead of returning `START_TIMEOUT`; Vitest duration 2.40 s.
+2. Whole-callback RED — `npm test -- --run tests/lifecycle/companion-manager.test.ts -t "non-cooperative write callback"`.
+   - Exit 1; the selected test reached the 300 ms watchdog; 53 were skipped; Vitest duration 878 ms.
+
+### GREEN implementation and focused evidence
+
+- `CompanionManager.executeWrite()` exposes the minimal callback interface `makeRequestOptions()`. Every invocation returns the leased generation, the shared abort signal, and `Math.max(0, deadline - now())`.
+- `tools.ts` invokes that provider separately for status and submit. Single-request progress and outcome writes use it once; the four status-then-submit controls use it twice.
+- The manager races each callback attempt against one operation abort promise. The deadline scheduler verifies the injected manager clock before claiming expiry, and the first cause is immutable: `deadline` produces `START_TIMEOUT`; `close` produces `MANUALLY_DISABLED`.
+- A callback that settles after the absolute deadline is rejected as timed out. A callback that never settles cannot hold the tool call open. Its late rejection is observed by the race and cannot become an unhandled rejection.
+- `REQUEST_TIMEOUT` converges to `START_TIMEOUT`. `REQUEST_CANCELLED` is classified only from the manager's recorded abort cause. `GENERATION_REJECTED` retains the existing stale classifier. Only first-attempt `OFFLINE` retains the existing one-shot same-generation recovery; retry errors never broaden recovery.
+- Tracking controls GREEN: 4/4 selected tests passed; each retained the 90 ms / `<300 ms` contract, received a smaller submit budget after the delayed status, and accepted no late event.
+- Manager deadline/close contrast GREEN: the non-cooperative callback and existing close-owned cancellation tests both passed; deadline returned `START_TIMEOUT`, while close remained `MANUALLY_DISABLED`.
+- Focused tools/manager/client gate: exit 0; 3/3 files and 100/100 tests passed; final Vitest duration 7.53 s.
+
+### Complete Task 8 gate
+
+| Command | Exact result |
+|---|---|
+| `npm test -- --run` | Exit 0; 18/18 files and 326/326 tests passed; final Vitest duration 10.29 s. |
+| `npm run typecheck` | Exit 0; `tsc --noEmit` reported no errors. |
+| `npm run build` | Exit 0; TypeScript build and asset copy completed. |
+| `npm run smoke` | Exit 0; build completed; protocol health, authenticated event flow, and shutdown callback verified. |
+| `npm run diagnose:mcp` | Exit 0; 1/1 test passed; exact 13-tool catalog and protocol-only child stdout remained valid; final Vitest duration 441 ms. |
+| `npm run validate:plugin` | Exit 0; plugin manifest and MCP launch configuration valid. |
+| `git diff --check` | Exit 0; no output. |
+
+Task 8 changes no tool registration, public MCP payload schema, request/response-size limit, privacy behavior, OFFLINE recovery breadth, generation authority, close semantics, PID/nonce termination ownership, packaging, installation, merge, push, or release behavior.
+
 ## Review, limitations, and prohibited actions
 
 - Task 3 self-review found no scope expansion in the timestamp implementation or tests. Task 4 closes the diagnostics flaky concern with the deterministic evidence above.
 - The first staged `git diff --cached --check` failed on two Markdown hard-break trailing spaces in this report. The cause was report formatting; both spaces were removed before commit and the cached check was rerun. No production or test file was implicated.
 - Independent task review and whole-correction review remain required before any packaging decision.
 - Task 6 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
+- Task 8 implementation and self-verification are recorded above. A fresh independent whole-correction re-review has not yet occurred.
 - **No packaged Electron validation has occurred in this plan.**
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.
