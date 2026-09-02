@@ -24,6 +24,7 @@ import type {
   HudErrorCode,
   HudHealth,
   HudLifecycleSnapshot,
+  HudWriteReason,
   LifecycleStateStore,
   RuntimeIdentity
 } from "./types.js";
@@ -34,10 +35,10 @@ export interface CompanionManager {
   hide(): Promise<HudLifecycleSnapshot>;
   close(): Promise<HudLifecycleSnapshot>;
   ensureForWrite(
-    reason: "tracking_start" | "progress_report" | "task_outcome"
+    reason: HudWriteReason
   ): Promise<EnsureResult>;
   executeWrite<T>(
-    reason: "tracking_start" | "progress_report" | "task_outcome",
+    reason: HudWriteReason,
     operation: (options: HudRequestOptions & { generation: number; signal: AbortSignal }) => Promise<T>
   ): Promise<
     | { kind: "completed"; value: T }
@@ -324,7 +325,7 @@ export function createCompanionManager(
     generation: number,
     deadline: number
   ): Promise<SpawnedHud | typeof SPAWN_DEADLINE> {
-    const spawnPromise = dependencies.launcher.spawnHud(executablePath);
+    const spawnPromise = dependencies.launcher.spawnHud(executablePath, { generation });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadlinePromise = new Promise<typeof SPAWN_DEADLINE>((resolve_) => {
       timer = setTimeout(() => resolve_(SPAWN_DEADLINE), Math.max(1, deadline - now()));
@@ -512,7 +513,7 @@ export function createCompanionManager(
   }
 
   async function ensureForWrite(
-    reason: "tracking_start" | "progress_report" | "task_outcome"
+    reason: HudWriteReason
   ): Promise<EnsureResult> {
     const deadline = now() + startupTimeoutMs;
     let settings = await dependencies.store.readSettings();
@@ -523,15 +524,21 @@ export function createCompanionManager(
     return ensureRunningOnce(settings.generation, deadline);
   }
 
-  async function rejectedWriteResult(
-    reason: "tracking_start" | "progress_report" | "task_outcome"
+  async function staleWriteResult(
+    generation: number
   ): Promise<Exclude<EnsureResult, { kind: "ready" }>> {
-    const result = await ensureForWrite(reason);
-    if (result.kind !== "ready") return result;
+    const settings = await dependencies.store.readSettings();
+    if (settings.desiredState === "off") {
+      return { kind: "suppressed", code: "MANUALLY_DISABLED" };
+    }
     return {
       kind: "error",
       code: "INTERNAL_ERROR",
-      snapshot: { ...result.snapshot, code: "INTERNAL_ERROR" }
+      snapshot: {
+        ...(settings.desiredState === undefined ? {} : { desiredState: settings.desiredState }),
+        observedState: "stopped",
+        code: "INTERNAL_ERROR"
+      }
     };
   }
 
@@ -655,28 +662,38 @@ export function createCompanionManager(
       try {
         let ensured = await ensureForWrite(reason);
         if (ensured.kind !== "ready") return ensured;
-        if (controller.signal.aborted || !(await currentOnGeneration(ensured.generation))) {
-          return rejectedWriteResult(reason);
+        const writeGeneration = ensured.generation;
+        if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration))) {
+          return staleWriteResult(writeGeneration);
         }
         try {
           return {
             kind: "completed",
-            value: await operation({ generation: ensured.generation, signal: controller.signal })
+            value: await operation({ generation: writeGeneration, signal: controller.signal })
           };
         } catch (error) {
           if (
             !(error instanceof HudClientError) ||
             (error.code !== "OFFLINE" && error.code !== "GENERATION_REJECTED")
           ) throw error;
-          if (controller.signal.aborted) return rejectedWriteResult(reason);
-          ensured = await ensureForWrite(reason);
-          if (ensured.kind !== "ready") return ensured;
-          if (controller.signal.aborted || !(await currentOnGeneration(ensured.generation))) {
-            return rejectedWriteResult(reason);
+          if (error.code === "GENERATION_REJECTED" || controller.signal.aborted) {
+            return staleWriteResult(writeGeneration);
+          }
+          if (!(await currentOnGeneration(writeGeneration))) {
+            return staleWriteResult(writeGeneration);
+          }
+          ensured = await ensureRunningOnce(writeGeneration);
+          if (ensured.kind !== "ready") {
+            return ensured.code === "MANUALLY_DISABLED"
+              ? staleWriteResult(writeGeneration)
+              : ensured;
+          }
+          if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration))) {
+            return staleWriteResult(writeGeneration);
           }
           return {
             kind: "completed",
-            value: await operation({ generation: ensured.generation, signal: controller.signal })
+            value: await operation({ generation: writeGeneration, signal: controller.signal })
           };
         }
       } finally {

@@ -144,6 +144,20 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.stateStore.setDesiredState).toHaveBeenCalledWith("on");
   });
 
+  it("does not reinterpret a manager-launched second instance as explicit activation", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+
+    harness.listeners.get("second-instance")?.(
+      {},
+      ["app.exe", "--hud", "--manager-generation=7"]
+    );
+
+    await Promise.resolve();
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.windowController.show).not.toHaveBeenCalled();
+  });
+
   it("automatic login exits before runtime, server, or window publication when desired state is off", async () => {
     const harness = desktopHarness();
     vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
@@ -152,7 +166,7 @@ describe("desktop lifecycle", () => {
       generation: 4
     });
 
-    await runDesktop(harness.dependencies, "automatic-login");
+    await runDesktop(harness.dependencies, { kind: "automatic-login" });
 
     expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
     expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
@@ -163,7 +177,7 @@ describe("desktop lifecycle", () => {
   it("automatic login proceeds without changing an on intent", async () => {
     const harness = desktopHarness();
 
-    await runDesktop(harness.dependencies, "automatic-login");
+    await runDesktop(harness.dependencies, { kind: "automatic-login" });
 
     expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
     expect(harness.dependencies.createProgressServer).toHaveBeenCalledOnce();
@@ -177,13 +191,63 @@ describe("desktop lifecycle", () => {
       generation: 8
     });
 
-    await runDesktop(harness.dependencies, "explicit");
+    await runDesktop(harness.dependencies, { kind: "explicit" });
 
     expect(harness.dependencies.stateStore.setDesiredState).toHaveBeenCalledWith("on");
     expect(harness.dependencies.stateStore.writeRuntime).toHaveBeenCalledWith(
       expect.any(Object),
       1
     );
+  });
+
+  it("manager launch cannot reopen or publish after manual off wins", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
+      desiredState: "off",
+      startWithWindows: false,
+      generation: 8
+    });
+
+    await runDesktop(harness.dependencies, { kind: "manager", generation: 7 });
+
+    expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
+    expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
+  });
+
+  it("manager launch cannot publish under a superseded on generation", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
+      desiredState: "on",
+      startWithWindows: false,
+      generation: 8
+    });
+
+    await runDesktop(harness.dependencies, { kind: "manager", generation: 7 });
+
+    expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
+    expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
+  });
+
+  it("manager launch publishes runtime only under its matching on generation", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
+      desiredState: "on",
+      startWithWindows: false,
+      generation: 7
+    });
+
+    await runDesktop(harness.dependencies, { kind: "manager", generation: 7 });
+
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.dependencies.stateStore.writeRuntime).toHaveBeenCalledWith(
+      expect.any(Object),
+      7
+    );
+    expect(harness.dependencies.createProgressServer).toHaveBeenCalledOnce();
   });
 
   it("writes runtime identity on readiness and exposes it through server controls", async () => {

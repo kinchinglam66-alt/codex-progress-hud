@@ -2,7 +2,7 @@ import { randomUUID as nodeRandomUUID } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { DesktopLaunchReason } from "../main.js";
+import { selectEntryIntent, type DesktopLaunchReason } from "../main.js";
 import { createOperationalLogger, type OperationalLogEntry, type OperationalLogger } from "../diagnostics/logger.js";
 import { writeDiagnosticReport } from "../diagnostics/report.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
@@ -209,11 +209,11 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
 
 export async function runDesktop(
   dependencies?: DesktopDependencies,
-  launchReason: DesktopLaunchReason = "explicit"
+  launchReason: DesktopLaunchReason = { kind: "explicit" }
 ): Promise<void> {
   const resolved = dependencies ?? await defaultDesktopDependencies();
   if (!resolved.app.requestSingleInstanceLock()) {
-    if (launchReason === "explicit") await resolved.stateStore.setDesiredState("on");
+    if (launchReason.kind === "explicit") await resolved.stateStore.setDesiredState("on");
     resolved.app.quit();
     return;
   }
@@ -333,7 +333,20 @@ export async function runDesktop(
   try {
     assertStarting();
     windowController = resolved.createWindowController({ quitting: () => quitting });
-    resolved.app.on("second-instance", () => {
+    resolved.app.on("second-instance", (_event: unknown, commandLine?: unknown) => {
+      try {
+        const intent = Array.isArray(commandLine) &&
+          commandLine.every((argument) => typeof argument === "string")
+          ? selectEntryIntent(commandLine)
+          : undefined;
+        if (
+          intent?.mode === "hud" &&
+          intent.launchReason === "manager"
+        ) return;
+      } catch (error) {
+        reportError(error, "second-instance launch intent");
+        return;
+      }
       void resolved.stateStore.setDesiredState("on")
         .then(() => windowController?.show())
         .catch((error: unknown) => reportError(error, "second-instance activation"));
@@ -346,12 +359,20 @@ export async function runDesktop(
     });
 
     launchSettings = await resolved.stateStore.readSettings();
-    if (launchReason === "automatic-login" && launchSettings.desiredState !== "on") {
+    if (launchReason.kind === "automatic-login" && launchSettings.desiredState !== "on") {
       quitting = true;
       quit();
       return;
     }
-    if (launchReason === "explicit" && launchSettings.desiredState !== "on") {
+    if (
+      launchReason.kind === "manager" &&
+      (launchSettings.desiredState !== "on" || launchSettings.generation !== launchReason.generation)
+    ) {
+      quitting = true;
+      quit();
+      return;
+    }
+    if (launchReason.kind === "explicit" && launchSettings.desiredState !== "on") {
       launchSettings = await resolved.stateStore.setDesiredState("on");
     }
 

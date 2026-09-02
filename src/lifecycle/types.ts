@@ -35,6 +35,8 @@ export type HudErrorCode =
   | "VERSION_MISMATCH" | "START_TIMEOUT" | "AUTH_ERROR"
   | "SHUTDOWN_TIMEOUT" | "COMPANION_CRASHED" | "INTERNAL_ERROR";
 
+export type HudWriteReason = "tracking_start" | "progress_report" | "task_outcome";
+
 export interface HudLifecycleSnapshot {
   desiredState?: DesiredHudState;
   observedState: ObservedHudState;

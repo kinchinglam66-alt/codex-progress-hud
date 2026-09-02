@@ -6,6 +6,7 @@ import type {
   EnsureResult,
   HudErrorCode,
   HudLifecycleSnapshot,
+  HudWriteReason,
   ObservedHudState
 } from "../lifecycle/types.js";
 import type { HudRequestOptions, ProgressClient } from "./report-client.js";
@@ -148,7 +149,7 @@ export function createToolHandlers({
   }
 
   async function runWrite(
-    reason: Parameters<CompanionManager["ensureForWrite"]>[0],
+    reason: HudWriteReason,
     suppressedText: string,
     operation: (options: HudRequestOptions & { generation: number; signal: AbortSignal }) => Promise<ToolResult>
   ): Promise<ToolResult> {

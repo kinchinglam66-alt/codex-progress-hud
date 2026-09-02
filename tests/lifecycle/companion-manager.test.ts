@@ -406,6 +406,24 @@ describe("companion lifecycle manager", () => {
     expect(attempts).toBe(1);
   });
 
+  it("recovers an OFFLINE write once without changing its generation lease", async () => {
+    const { manager, launcher, setOnline } = await harness({ desiredState: "on", online: true });
+    const generations: number[] = [];
+
+    const result = await manager.executeWrite("tracking_start", async ({ generation }) => {
+      generations.push(generation);
+      if (generations.length === 1) {
+        setOnline(false);
+        throw new HudClientError("OFFLINE", "companion disappeared");
+      }
+      return "submitted";
+    });
+
+    expect(result).toEqual({ kind: "completed", value: "submitted" });
+    expect(generations).toEqual([1, 1]);
+    expect(launcher.spawnHud).toHaveBeenCalledWith(expect.any(String), { generation: 1 });
+  });
+
   it("keeps off authoritative when a second manager closes a first manager's deferred startup", async () => {
     const first = await harness({ spawnMakesOnline: false });
     let releaseSpawn!: () => void;
@@ -443,6 +461,36 @@ describe("companion lifecycle manager", () => {
     expect(first.client.shutdown).toHaveBeenCalledOnce();
     await expect(first.client.health()).rejects.toMatchObject({ code: "OFFLINE" });
     expect(first.terminate).not.toHaveBeenCalled();
+  });
+
+  it("does not reacquire an activation lease after another manager rejects stale tracking_start", async () => {
+    const first = await harness({ desiredState: "off" });
+    const second = createCompanionManager({
+      store: first.store,
+      client: first.client,
+      launcher: { spawnHud: vi.fn() },
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(first.directory, "diagnostics-second-tracking"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: first.paths.installManifestPath,
+        dataDirectoryPath: first.directory
+      }
+    });
+    let attempts = 0;
+
+    const result = await first.manager.executeWrite("tracking_start", async () => {
+      attempts += 1;
+      await second.close();
+      throw new HudClientError("GENERATION_REJECTED", "stale generation");
+    });
+
+    expect(result).toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
+    expect(attempts).toBe(1);
+    expect((await first.store.readSettings()).desiredState).toBe("off");
   });
 
   it.each([
@@ -692,9 +740,9 @@ describe("process launcher", () => {
     const spawn = vi.fn(() => child);
     const launcher = createProcessLauncher(spawn);
 
-    const spawned = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe");
+    const spawned = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
 
-    expect(spawn).toHaveBeenCalledWith("C:\\Program Files\\HUD\\hud.exe", ["--hud"], {
+    expect(spawn).toHaveBeenCalledWith("C:\\Program Files\\HUD\\hud.exe", ["--hud", "--manager-generation=7"], {
       detached: true,
       stdio: "ignore",
       shell: false

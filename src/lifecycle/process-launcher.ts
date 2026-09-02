@@ -6,7 +6,7 @@ export interface SpawnedHud {
 }
 
 export interface ProcessLauncher {
-  spawnHud(executablePath: string): Promise<SpawnedHud>;
+  spawnHud(executablePath: string, options: { generation: number }): Promise<SpawnedHud>;
 }
 
 type SpawnProcess = (
@@ -17,12 +17,16 @@ type SpawnProcess = (
 
 export function createProcessLauncher(spawnProcess: SpawnProcess = spawn): ProcessLauncher {
   return {
-    async spawnHud(executablePath: string): Promise<SpawnedHud> {
-      const child = spawnProcess(executablePath, ["--hud"], {
-        detached: true,
-        stdio: "ignore",
-        shell: false
-      });
+    async spawnHud(executablePath: string, options: { generation: number }): Promise<SpawnedHud> {
+      const child = spawnProcess(
+        executablePath,
+        ["--hud", `--manager-generation=${options.generation}`],
+        {
+          detached: true,
+          stdio: "ignore",
+          shell: false
+        }
+      );
       if (child.pid === undefined) throw new Error("HUD process did not provide a PID");
       child.unref();
       return {

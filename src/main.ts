@@ -1,13 +1,31 @@
 import { pathToFileURL } from "node:url";
 
 export type EntryMode = "hud" | "mcp-stdio";
-export type DesktopLaunchReason = "explicit" | "automatic-login";
+export type DesktopLaunchReason =
+  | { kind: "explicit" }
+  | { kind: "automatic-login" }
+  | { kind: "manager"; generation: number };
 
 export type EntryIntent =
   | { mode: "mcp-stdio" }
-  | { mode: "hud"; launchReason: DesktopLaunchReason };
+  | { mode: "hud"; launchReason: "explicit" | "automatic-login" }
+  | { mode: "hud"; launchReason: "manager"; generation: number };
+
+const MANAGER_GENERATION_PREFIX = "--manager-generation";
 
 export function selectEntryIntent(argv: string[]): EntryIntent {
+  const managerArguments = argv.filter(
+    (argument) =>
+      argument === MANAGER_GENERATION_PREFIX ||
+      argument.startsWith(`${MANAGER_GENERATION_PREFIX}=`)
+  );
+  if (managerArguments.length > 1) throw new Error("Invalid manager generation");
+  if (managerArguments.length === 1) {
+    const match = /^--manager-generation=(\d+)$/u.exec(managerArguments[0]!);
+    const generation = match === null ? Number.NaN : Number(match[1]);
+    if (!Number.isSafeInteger(generation)) throw new Error("Invalid manager generation");
+    return { mode: "hud", launchReason: "manager", generation };
+  }
   if (argv.includes("--mcp-stdio")) return { mode: "mcp-stdio" };
   return {
     mode: "hud",
@@ -28,7 +46,10 @@ async function runSelectedMode(argv: string[]): Promise<void> {
   }
 
   const { runDesktop } = await import("./desktop/main.js");
-  await runDesktop(undefined, intent.launchReason);
+  const launchReason: DesktopLaunchReason = intent.launchReason === "manager"
+    ? { kind: "manager", generation: intent.generation }
+    : { kind: intent.launchReason };
+  await runDesktop(undefined, launchReason);
 }
 
 function isExecutableEntry(): boolean {

@@ -25,4 +25,23 @@ describe("executable entry mode", () => {
     });
     expect(selectEntryIntent(["app.exe"])).toEqual({ mode: "hud", launchReason: "explicit" });
   });
+
+  it.each([0, 7])("classifies safe manager generation %i as a non-explicit HUD launch", (generation) => {
+    expect(selectEntryIntent(["app.exe", "--hud", `--manager-generation=${generation}`])).toEqual({
+      mode: "hud",
+      launchReason: "manager",
+      generation
+    });
+  });
+
+  it.each([
+    ["missing value", ["app.exe", "--manager-generation"]],
+    ["empty value", ["app.exe", "--manager-generation="]],
+    ["negative value", ["app.exe", "--manager-generation=-1"]],
+    ["fractional value", ["app.exe", "--manager-generation=1.5"]],
+    ["unsafe value", ["app.exe", "--manager-generation=9007199254740992"]],
+    ["duplicate value", ["app.exe", "--manager-generation=7", "--manager-generation=7"]]
+  ])("rejects a %s instead of treating it as explicit activation", (_name, argv) => {
+    expect(() => selectEntryIntent(argv)).toThrow("Invalid manager generation");
+  });
 });

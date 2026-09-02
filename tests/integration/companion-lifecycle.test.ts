@@ -1,6 +1,6 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
@@ -29,15 +29,11 @@ const execFileAsync = promisify(execFile);
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 beforeAll(async () => {
-  try {
-    await access(resolve(pluginRoot, "dist/main.js"));
-  } catch {
-    await execFileAsync(
-      process.execPath,
-      [resolve(pluginRoot, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.build.json"],
-      { cwd: pluginRoot }
-    );
-  }
+  await execFileAsync(
+    process.execPath,
+    [resolve(pluginRoot, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.build.json"],
+    { cwd: pluginRoot }
+  );
 });
 
 afterEach(async () => {
@@ -175,7 +171,7 @@ process.on("disconnect", () => {
 }
 
 describe("source-mode companion lifecycle", () => {
-  it("keeps close authoritative across two real MCP processes after ensure but before submit", async () => {
+  it("keeps close authoritative across two real MCP processes after tracking_start leases but before submit", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-two-mcp-race-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     const paths = {
@@ -221,11 +217,14 @@ describe("source-mode companion lifecycle", () => {
     const eventGate = new Promise<void>((resolve) => { releaseEvent = resolve; });
     let shutdownRelayed!: () => void;
     const shutdownRelay = new Promise<void>((resolve) => { shutdownRelayed = resolve; });
+    const acceptedEvents: unknown[] = [];
+    let eventRequests = 0;
     const proxy = createServer((request, response) => {
       void (async () => {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
         if (request.url === "/api/events" && request.method === "POST") {
+          eventRequests += 1;
           eventArrived();
           await eventGate;
         }
@@ -237,6 +236,9 @@ describe("source-mode companion lifecycle", () => {
         const body = Buffer.from(await upstream.arrayBuffer());
         response.writeHead(upstream.status, Object.fromEntries(upstream.headers.entries()));
         response.end(body);
+        if (request.url === "/api/events" && upstream.ok) {
+          acceptedEvents.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        }
         if (request.url === "/api/shutdown") shutdownRelayed();
       })().catch(() => response.destroy());
     });
@@ -276,14 +278,15 @@ describe("source-mode companion lifecycle", () => {
     try {
       await Promise.all([firstClient.connect(firstTransport), secondClient.connect(secondTransport)]);
       const reportPromise = firstClient.callTool({
-        name: "progress_report",
-        arguments: { task_id: "two-mcp", title: "Two MCP race", phase: "submit" }
+        name: "tracking_start",
+        arguments: { task_id: "two-mcp", title: "Two MCP race" }
       });
       await eventArrival;
       const closePromise = secondClient.callTool({ name: "hud_close", arguments: {} });
       await vi.waitFor(async () => {
         expect((await store.readSettings()).desiredState).toBe("off");
       });
+      const closedGeneration = (await store.readSettings()).generation;
       await shutdownRequest;
       releaseEvent();
       const report = await reportPromise;
@@ -304,6 +307,11 @@ describe("source-mode companion lifecycle", () => {
         observedState: "stopped"
       });
       expect((await store.readSettings()).desiredState).toBe("off");
+      expect((await store.readSettings()).generation).toBe(closedGeneration);
+      expect(eventRequests).toBe(1);
+      expect(acceptedEvents).not.toContainEqual(expect.objectContaining({
+        event: expect.objectContaining({ type: "tracking_started" })
+      }));
     } finally {
       await Promise.all([
         firstClient.close().catch(() => undefined),
