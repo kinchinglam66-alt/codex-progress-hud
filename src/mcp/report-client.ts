@@ -103,27 +103,21 @@ export class CompanionHttpClient implements ProgressClient {
     const timeoutMs = Math.max(0, Math.min(options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 60_000));
     let abortCause: "deadline" | "external" | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    if (timeoutMs === 0) {
-      abortCause = "deadline";
-      controller.abort();
-    } else {
-      timer = setTimeout(() => {
-        if (abortCause === undefined) {
-          abortCause = "deadline";
-          controller.abort();
-        }
-      }, timeoutMs);
-      timer.unref();
-    }
-    const externallyCancelled = options.signal?.aborted ?? false;
-    const abort = () => {
+    const claimAbortCause = (cause: "deadline" | "external") => {
       if (abortCause === undefined) {
-        abortCause = "external";
+        abortCause = cause;
         controller.abort();
       }
     };
-    if (externallyCancelled) abort();
+    const abort = () => claimAbortCause("external");
+    if (options.signal?.aborted) abort();
     else options.signal?.addEventListener("abort", abort, { once: true });
+    if (timeoutMs === 0) {
+      claimAbortCause("deadline");
+    } else {
+      timer = setTimeout(() => claimAbortCause("deadline"), timeoutMs);
+      timer.unref();
+    }
     try {
       const response = await fetch(`${this.serviceUrl}${path}`, {
         ...init,

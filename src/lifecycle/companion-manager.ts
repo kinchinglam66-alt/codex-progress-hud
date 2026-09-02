@@ -776,10 +776,12 @@ export function createCompanionManager(
             })
           };
         } catch (error) {
-          if (
-            !(error instanceof HudClientError) ||
-            (error.code !== "OFFLINE" && error.code !== "GENERATION_REJECTED")
-          ) throw error;
+          if (!(error instanceof HudClientError)) throw error;
+          if (error.code === "REQUEST_CANCELLED") {
+            if (controller.signal.aborted) return staleWriteResult(writeGeneration, deadline);
+            throw error;
+          }
+          if (error.code !== "OFFLINE" && error.code !== "GENERATION_REJECTED") throw error;
           if (error.code === "GENERATION_REJECTED" || controller.signal.aborted) {
             return staleWriteResult(writeGeneration, deadline);
           }

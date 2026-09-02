@@ -378,8 +378,8 @@ describe("companion lifecycle manager", () => {
     expect(terminate).not.toHaveBeenCalled();
   });
 
-  it("cancels a locally in-flight ensured write before submit after close", async () => {
-    const { manager } = await harness({ desiredState: "on", online: true });
+  it("suppresses a request-cancelled in-flight write after close without reactivating", async () => {
+    const { manager, store, launcher, client } = await harness({ desiredState: "on", online: true });
     let entered!: () => void;
     const operationEntered = new Promise<void>((resolve) => { entered = resolve; });
     let release!: () => void;
@@ -388,17 +388,22 @@ describe("companion lifecycle manager", () => {
     const writing = (manager as any).executeWrite("progress_report", async (options: { signal: AbortSignal }) => {
       entered();
       await operationGate;
-      if (options.signal.aborted) throw new HudClientError("OFFLINE", "cancelled");
+      if (options.signal.aborted) throw new HudClientError("REQUEST_CANCELLED", "cancelled");
       submitted = true;
       return "submitted";
     });
     await operationEntered;
+    launcher.spawnHud.mockClear();
+    client.show.mockClear();
 
     await manager.close();
     release();
 
     await expect(writing).resolves.toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
     expect(submitted).toBe(false);
+    expect(await store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
+    expect(launcher.spawnHud).not.toHaveBeenCalled();
+    expect(client.show).not.toHaveBeenCalled();
   });
 
   it("does not retry a locally in-flight write after close commits off", async () => {

@@ -146,3 +146,54 @@ Elapsed assertions remain strict: owned terminate, post-acquisition cancellation
 - The real listener and real separate-process lock tests are retained. The public 13-tool catalog, 64 KiB response limit, privacy-safe errors/logs, generation guards, and PID/nonce ownership behavior remain covered by the full suite.
 - Arbitrary `runIfGeneration` callbacks must cooperate with their required `AbortSignal`; this is an explicit API contract rather than an assumption that arbitrary work is cancellable. All first-party guarded callbacks check the signal before mutation.
 - No open Critical, Important, or Minor concern was found in the review-fix diff.
+
+---
+
+## Review fix round 2
+
+### Findings addressed
+
+1. `executeWrite` now consumes `REQUEST_CANCELLED` only when the manager-owned write controller was aborted. It returns the existing stale result, which becomes `MANUALLY_DISABLED` after close commits desired state off. It does not retry, spawn, show, or reactivate the HUD. A cancellation not caused by that controller is still rethrown rather than being mistaken for an offline recovery signal.
+2. `CompanionHttpClient` now records abort cause through one first-writer-wins function. An already-aborted external signal is claimed before the local deadline is armed, including when `timeoutMs` is zero. Later external aborts or deadline callbacks cannot overwrite the established cause.
+
+The resulting precedence is deterministic: pre-aborted external and external-first are `REQUEST_CANCELLED`; own-timer-first is `REQUEST_TIMEOUT`; connection refusal without abort remains `OFFLINE`.
+
+### RED evidence
+
+The manager cancellation and abort-precedence tests were changed before production code and run with:
+
+```text
+npm test -- --run tests/lifecycle/companion-manager.test.ts tests/mcp/report-client.test.ts -t "request-cancelled|pre-aborted|own deadline|external cancellation|network refusal"
+```
+
+Result: exit 1; 2 failed, 4 passed, and 49 skipped.
+
+- The in-flight write rejected with `HudClientError { code: "REQUEST_CANCELLED" }` instead of resolving `{ kind: "suppressed", code: "MANUALLY_DISABLED" }`.
+- A pre-aborted signal with `timeoutMs: 0` produced `REQUEST_TIMEOUT` instead of `REQUEST_CANCELLED`.
+
+### GREEN evidence
+
+- Cancellation/precedence target: exit 0; 2 files passed; 6/6 selected tests passed.
+- Focused Task 2: exit 0; 3 files passed; 83/83 tests passed.
+- Server/desktop/integration boundary: exit 0; 3 files passed; 64/64 tests passed.
+- Full regression: exit 0; 18 files passed; 290/290 tests passed.
+- `npm run typecheck`: exit 0.
+- `npm run build`: exit 0.
+- `git diff --check`: exit 0.
+
+The own-timer test arms an external cancellation substantially later than the 75ms client deadline and still requires `REQUEST_TIMEOUT`. The external-first real hanging-listener test retains its `<300ms` assertion. The refusal case has no abort source and remains `OFFLINE`.
+
+### Files changed in review fix round 2
+
+- `src/lifecycle/companion-manager.ts`
+- `src/mcp/report-client.ts`
+- `tests/lifecycle/companion-manager.test.ts`
+- `tests/mcp/report-client.test.ts`
+- `.superpowers/sdd/2026-09-02-lifecycle-residual-corrections/task-2-report.md`
+
+### Self-review and concerns
+
+- The manager cancellation branch is gated by its own controller's aborted state, so unrelated client cancellation cannot be swallowed or trigger recovery.
+- `errorCode`/`lifecycleCode` continue to classify `REQUEST_CANCELLED` as `INTERNAL_ERROR`; cancellation is not treated as `OFFLINE` and cannot become a code-free stopped result.
+- The in-flight close test verifies desired state remains off at generation 2, no submit occurs, and no spawn/show recovery follows cancellation.
+- The full run did not reproduce the independent re-review's diagnostics lock race. No open Task 2 concern remains in this fix-round diff.

@@ -195,14 +195,29 @@ describe("CompanionHttpClient", () => {
 
   it("categorizes its own deadline abort separately from an offline connection", async () => {
     const { baseUrl, tokenPath } = await fixture(() => undefined);
+    const controller = new AbortController();
     const startedAt = performance.now();
+    const externalAbort = setTimeout(() => controller.abort(), 250);
 
     const error = await new CompanionHttpClient(baseUrl, tokenPath)
-      .identity({ timeoutMs: 75 })
+      .identity({ timeoutMs: 75, signal: controller.signal })
       .catch((caught) => caught);
+    clearTimeout(externalAbort);
 
     expect(error).toMatchObject({ code: "REQUEST_TIMEOUT" });
     expect(performance.now() - startedAt).toBeLessThan(500);
+  });
+
+  it("gives a pre-aborted external signal precedence over a zero client budget", async () => {
+    const { baseUrl, tokenPath } = await fixture(() => undefined);
+    const controller = new AbortController();
+    controller.abort();
+
+    const error = await new CompanionHttpClient(baseUrl, tokenPath)
+      .identity({ timeoutMs: 0, signal: controller.signal })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "REQUEST_CANCELLED" });
   });
 
   it("categorizes external cancellation separately from its own deadline and offline", async () => {
