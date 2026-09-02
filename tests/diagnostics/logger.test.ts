@@ -8,9 +8,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createOperationalLogger,
+  createOperationalLoggerWithFileSystem,
   type OperationalLogEntry,
   type OperationalLogger
 } from "../../src/diagnostics/logger.js";
+import { nodeFileSystemOperations } from "../../src/diagnostics/safe-files.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -264,6 +266,44 @@ describe("operational logger", () => {
     const contents = await Promise.all(files.map((file) => readFile(join(directory, file), "utf8")));
     expect(contents.join("\n").match(/startup_requested/gu)).toHaveLength(2);
     expect(files).not.toContain("companion.log.lock");
+  });
+
+  it("retries when an observed lock disappears before its second path identity check", async () => {
+    const directory = await logDirectory();
+    const lockPath = join(directory, ".companion.log.lock");
+    const owner = await holdLogOwner();
+    await publishLock(directory, owner);
+    let lockPathStats = 0;
+    let disappearedAtSecondCheck = false;
+    const logger = createOperationalLoggerWithFileSystem({
+      logDirectory: directory,
+      maxBytes: 256 * 1024,
+      maxFiles: 3
+    }, {
+      ...nodeFileSystemOperations,
+      lstatBigInt: async (path) => {
+        if (String(path) === lockPath) {
+          lockPathStats += 1;
+          if (lockPathStats === 2) {
+            await rm(lockPath);
+            disappearedAtSecondCheck = true;
+          }
+        }
+        return nodeFileSystemOperations.lstatBigInt(path);
+      }
+    });
+
+    await expect(logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested"
+    })).resolves.toBeUndefined();
+
+    expect(disappearedAtSecondCheck).toBe(true);
+    await expect(readFile(join(directory, "companion.log"), "utf8")).resolves.toContain(
+      "startup_requested"
+    );
+    expect(await readdir(directory)).not.toContain(".companion.log.lock");
   });
 
   it("keeps suspended owner initialization invisible until atomic publication", async () => {

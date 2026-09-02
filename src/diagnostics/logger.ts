@@ -239,7 +239,13 @@ async function readLockRecord(
       throw new Error("operational log lock changed while being opened");
     }
     const text = await handle.readFile({ encoding: "utf8" });
-    const current = await fileSystem.lstatBigInt(lockPath);
+    let current;
+    try {
+      current = await fileSystem.lstatBigInt(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
     if (current.dev !== opened.dev || current.ino !== opened.ino) {
       throw new Error("operational log lock path changed while being read");
     }
