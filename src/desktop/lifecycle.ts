@@ -47,6 +47,7 @@ export function scheduleAfterReady(
 
 export interface DesktopAppLike {
   requestSingleInstanceLock(): boolean;
+  releaseSingleInstanceLock(): void;
   whenReady(): Promise<void>;
   on(event: string, callback: (...args: any[]) => unknown): unknown;
   quit(): void;
@@ -284,6 +285,14 @@ export async function runDesktop(
       }, shutdownAt);
     }
     let cleanupFailed = false;
+    try {
+      // Release process ownership before the listener can become unreachable so
+      // a manager replacement cannot spend its only launch on the retiring app.
+      resolved.app.releaseSingleInstanceLock();
+    } catch (error) {
+      cleanupFailed = true;
+      reportError(error, "desktop cleanup: singleton release");
+    }
     const steps: Array<[string, () => void | Promise<void>]> = [
       ["server close", () => progressServer?.close()],
       ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],

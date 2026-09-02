@@ -45,6 +45,7 @@ function desktopHarness(lockAcquired = true) {
   const dependencies: DesktopDependencies = {
     app: {
       requestSingleInstanceLock: vi.fn(() => lockAcquired),
+      releaseSingleInstanceLock: vi.fn(() => order.push("release-singleton")),
       whenReady: vi.fn(async () => undefined),
       on: vi.fn((event, callback) => listeners.set(event, callback)),
       quit: vi.fn(() => order.push("quit")),
@@ -179,6 +180,7 @@ describe("desktop lifecycle", () => {
     await Promise.resolve();
 
     expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.order[0]).toBe("release-singleton");
     expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
     expect(harness.windowController.show).not.toHaveBeenCalled();
 
