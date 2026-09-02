@@ -280,3 +280,13 @@ Manager-owned cancellation and generation rejection after either submit must not
 - [ ] **Verify and re-review**
 
 Add deterministic post-runtime off, lock setup/read/release stall, and expired-classifier tests. Run the complete final-HEAD gate, correct the acceptance report, and perform another fresh whole-correction review. Do not package/install/merge/push/release.
+
+---
+
+### Task 7: Close generation-aware hide and successor-safe runtime clear
+
+**Reason for amendment:** Final re-review round 2 found two Important production paths.
+
+- [ ] Send the current on generation with `hud_hide`; handle a raced generation rejection without exposing a generic internal failure.
+- [ ] Make close-time runtime clearing atomically conditional on both the close's off generation and the expected runtime identity. A superseding explicit open must preserve its runtime file even if the process identity is unchanged.
+- [ ] Add real server hide coverage and deterministic close-vs-reopen successor tests, then run the complete final gate and fresh whole-correction review.
