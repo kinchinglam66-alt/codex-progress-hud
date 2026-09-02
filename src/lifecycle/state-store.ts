@@ -25,7 +25,10 @@ const boundedText = z.string().trim().min(1).max(256);
 const absolutePath = z.string().trim().min(1).max(4096).refine(isAbsolute);
 const canonicalTimestamp = z.string()
   .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u)
-  .refine((value) => Number.isFinite(Date.parse(value)));
+  .refine((value) => {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === value;
+  });
 const settingsSchema = z.object({
   desiredState: z.enum(["on", "off"]).optional(),
   startWithWindows: z.boolean(),

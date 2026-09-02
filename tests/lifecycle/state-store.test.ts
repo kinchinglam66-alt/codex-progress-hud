@@ -223,6 +223,36 @@ describe("lifecycle state store", () => {
     expect(await store.readRuntime()).toEqual(identity);
   });
 
+  it("rejects a canonical timestamp shape with an impossible calendar date", async () => {
+    const paths = testPaths();
+    const identity = {
+      pid: 4312,
+      version: "0.1.0",
+      protocolVersion: 1,
+      instanceNonce: "nonce-123",
+      startedAt: "2026-02-31T01:02:03.000Z"
+    };
+    await writeFile(paths.runtimePath, `${JSON.stringify(identity)}\n`);
+
+    await expect(createLifecycleStateStore(paths).readRuntime()).rejects.toThrow(
+      `Invalid lifecycle JSON file: ${paths.runtimePath}`
+    );
+  });
+
+  it("accepts a canonical timestamp on a valid leap date unchanged", async () => {
+    const paths = testPaths();
+    const identity = {
+      pid: 4312,
+      version: "0.1.0",
+      protocolVersion: 1,
+      instanceNonce: "nonce-123",
+      startedAt: "2028-02-29T01:02:03.000Z"
+    };
+    await writeFile(paths.runtimePath, `${JSON.stringify(identity)}\n`);
+
+    expect(await createLifecycleStateStore(paths).readRuntime()).toEqual(identity);
+  });
+
   it("waits for queued same-path writes before reading", async () => {
     const store = createLifecycleStateStore(testPaths());
     const firstIdentity = {
