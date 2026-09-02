@@ -180,6 +180,22 @@ Task 4 deterministically reproduces that exact boundary and closes it by treatin
 
 Task 5 changed no tool registration, public payload, response-size, privacy, PID/nonce ownership, canonical timestamp, packaging, installation, merge, push, or release behavior.
 
+### Task 5 independent-verification correction
+
+An independent focused run after `cb00734` passed 100 tests and failed only the stale-spawn deadline test because `terminate()` was called zero times. Local reproduction in a fresh selected-test process produced the same failure in 119ms.
+
+The test fixture's real file-backed preconditions could exhaust the 90ms budget before the intended stale matching-PID retirement branch. Replacing those preconditions with immediate deterministic store/path seams then exposed the product-level issue: stale retirement bounded `terminate()` but ignored whether that deadline race timed out, making the final error depend on whether a subsequent state read honored the already-expired deadline.
+
+The corrected fixture now proves branch entry by asserting the rejected `writeRuntime` call with the expected health and generation before checking `terminate()` exactly once. After the 150ms observation window it also requires one initial on transition, one spawn, and no show. The manager propagates stale-retirement completion and directly returns `START_TIMEOUT` when matching-PID termination exceeds the original startup deadline. The 90ms budget, `<300ms` watchdog, terminate assertion, and no-late-publication checks are unchanged.
+
+Fresh correction evidence:
+
+- Selected stale-spawn test: 15/15 independent Vitest processes passed.
+- Final combined desktop/manager/client focused command: 5/5 consecutive processes passed 3/3 files and 101/101 tests. Durations were 5.65s, 6.98s, 7.22s, 7.40s, and 5.69s.
+- Final full suite: exit 0; 18/18 files and 301/301 tests passed; Vitest duration 11.10s.
+- Typecheck: exit 0.
+- No package, install, merge, push, or release action was performed.
+
 ## Review, limitations, and prohibited actions
 
 - Task 3 self-review found no scope expansion in the timestamp implementation or tests. Task 4 closes the diagnostics flaky concern with the deterministic evidence above.

@@ -680,12 +680,29 @@ describe("companion lifecycle manager", () => {
     });
     const store = {
       ...fixture.store,
+      readSettings: vi.fn(async () => ({
+        desiredState: "on" as const,
+        startWithWindows: false,
+        generation: 1
+      })),
+      setDesiredState: vi.fn(async () => ({
+        desiredState: "on" as const,
+        startWithWindows: false,
+        generation: 1
+      })),
+      readInstallManifest: vi.fn(async () => ({
+        executablePath: fixture.executablePath,
+        installDirectory: fixture.directory,
+        version: "0.2.0"
+      })),
+      readRuntime: vi.fn(async () => null),
       writeRuntime: vi.fn(async () => false)
     } satisfies LifecycleStateStore;
     const manager = createCompanionManager({
       store,
       client: fixture.client,
       launcher: fixture.launcher,
+      pathExists: vi.fn(async () => true),
       startupTimeoutMs: 90,
       logger: { write: async () => undefined },
       diagnostics: {
@@ -710,9 +727,14 @@ describe("companion lifecycle manager", () => {
     expect(result).toMatchObject({ desiredState: "on", code: "START_TIMEOUT" });
     expect(performance.now() - startedAt).toBeLessThan(300);
     expect(terminate).toHaveBeenCalledOnce();
+    expect(store.writeRuntime).toHaveBeenCalledWith(compatibleHealth, 1, expect.any(Object));
     await new Promise((resolve_) => setTimeout(resolve_, 150));
-    expect(await fixture.store.readRuntime()).toBeNull();
-    expect((await fixture.store.readSettings()).desiredState).toBe("on");
+    expect(store.writeRuntime).toHaveBeenCalledOnce();
+    expect(await store.readRuntime()).toBeNull();
+    expect((await store.readSettings()).desiredState).toBe("on");
+    expect(store.setDesiredState).toHaveBeenCalledOnce();
+    expect(store.setDesiredState).toHaveBeenCalledWith("on", expect.any(Object));
+    expect(fixture.launcher.spawnHud).toHaveBeenCalledOnce();
     expect(fixture.client.show).not.toHaveBeenCalled();
   }, 2_000);
 

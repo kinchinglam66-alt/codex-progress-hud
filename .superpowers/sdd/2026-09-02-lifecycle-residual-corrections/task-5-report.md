@@ -57,3 +57,33 @@ Implemented Task 5 on baseline `9adb99721af54b107a810ec316c5df6467a1bbdb`. The a
 
 - A fresh independent whole-correction re-review is still required before Windows packaging can be considered.
 - The deadline tests intentionally use real timers on Windows. Their product budgets are 90ms and watchdogs are 300ms; no threshold was relaxed during this task.
+
+---
+
+## Independent verification fix
+
+Independent verification after commit `cb00734` found one intermittent focused failure: the stale-spawn deadline test returned `START_TIMEOUT` in 119ms but had not called `terminate()`. The other 100 focused tests passed. A local repeated-process reproduction failed immediately with the same `terminate expected once but got 0` assertion.
+
+### Corrected root cause
+
+The original fixture still used the real file-backed state store and real executable access throughout the 90ms measured startup path. Under filesystem or lock delay, an earlier state operation could consume the budget before `writeRuntime(false)` reached stale retirement. The test therefore accepted a valid but irrelevant earlier `START_TIMEOUT` and only the terminate count exposed the missed branch.
+
+After replacing all pre-retirement store and `pathExists` operations with immediate deterministic seams, the test reached matching-PID retirement consistently and exposed a product error: `retireStaleSpawn()` raced `terminate()` against the deadline but discarded the returned timeout boolean. It then called `staleStartupResult()`. A real expired store usually converted that later read to `START_TIMEOUT`, while the deterministic immediate store returned `INTERNAL_ERROR`. The product result therefore depended on a secondary store timing accident.
+
+### Fix
+
+- The fixture now makes settings, manifest, runtime, runtime rejection, and executable existence deterministic before the target seam.
+- It asserts `writeRuntime(compatibleHealth, 1, ...)` exactly once before asserting matching-PID `terminate()` exactly once; after the 150ms observation window it also requires one initial on transition, one spawn, and no show.
+- `retireStaleSpawn()` now reports whether matching-PID termination settled before the absolute startup deadline.
+- Both synchronous stale-startup callers convert a false retirement result directly to `START_TIMEOUT`, without depending on a subsequent expired state read.
+- The 90ms budget, `<300ms` result assertion, terminate assertion, and 150ms no-late-publication observation were retained unchanged.
+
+### Verification
+
+- Corrected RED before the product fix: exit 1; selected test returned `INTERNAL_ERROR` instead of `START_TIMEOUT` after deterministically reaching stale retirement.
+- Isolated stale-spawn test: 15/15 fresh Vitest processes passed; every run passed 1 selected test with 43 skipped.
+- Final combined focused command after the strengthened no-late assertions: 5/5 consecutive fresh processes passed; each passed 3/3 files and 101/101 tests. Vitest durations: 5.65s, 6.98s, 7.22s, 7.40s, and 5.69s.
+- Final full suite: exit 0; 18/18 files and 301/301 tests passed; Vitest duration 11.10s.
+- `npm run typecheck`: exit 0.
+
+No budget or watchdog was relaxed, and no terminate or late-publication assertion was removed.

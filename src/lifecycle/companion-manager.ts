@@ -361,7 +361,7 @@ export function createCompanionManager(
     spawned: SpawnedHud,
     health: HudHealth | undefined,
     deadline: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     const current = await dependencies.store.readSettings(stateOptions(deadline));
     if (current.desiredState === "off") {
       await dependencies.client.shutdown(
@@ -376,8 +376,9 @@ export function createCompanionManager(
       confirmed !== undefined &&
       confirmed.pid === spawned.pid
     ) {
-      await settlesBeforeDeadline(spawned.terminate().catch(() => undefined), deadline);
+      return settlesBeforeDeadline(spawned.terminate().catch(() => undefined), deadline);
     }
+    return true;
   }
 
   async function staleStartupResult(generation: number, deadline: number): Promise<RunningResult> {
@@ -488,7 +489,18 @@ export function createCompanionManager(
     }
 
     if (!(await currentOnGeneration(generation, deadline))) {
-      await retireStaleSpawn(spawned, undefined, deadline);
+      if (!(await retireStaleSpawn(spawned, undefined, deadline))) {
+        remember("START_TIMEOUT");
+        recordStartupFailure("START_TIMEOUT", "stopped");
+        return {
+          kind: "error",
+          code: "START_TIMEOUT",
+          snapshot: withDesiredState(settings.desiredState, {
+            observedState: "stopped",
+            code: "START_TIMEOUT"
+          })
+        };
+      }
       return staleStartupResult(generation, deadline);
     }
 
@@ -526,7 +538,18 @@ export function createCompanionManager(
     }
     const health = readiness.health;
     if (!(await dependencies.store.writeRuntime(health, generation, stateOptions(deadline)))) {
-      await retireStaleSpawn(spawned, health, deadline);
+      if (!(await retireStaleSpawn(spawned, health, deadline))) {
+        remember("START_TIMEOUT");
+        recordStartupFailure("START_TIMEOUT", "stopped");
+        return {
+          kind: "error",
+          code: "START_TIMEOUT",
+          snapshot: withDesiredState(settings.desiredState, {
+            observedState: "stopped",
+            code: "START_TIMEOUT"
+          })
+        };
+      }
       return staleStartupResult(generation, deadline);
     }
     ownedHud = { process: spawned, instanceNonce: health.instanceNonce };
