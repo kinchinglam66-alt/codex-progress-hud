@@ -227,3 +227,34 @@ Run the focused logger suite repeatedly, the complete suite at least three fresh
 - [ ] **Step 4: Review and stop before packaging**
 
 Perform an independent Task 4 review and then a whole-correction review. Do not package, install, merge, push, or release until both report zero open Critical/Important findings.
+
+---
+
+### Task 5: Close whole-correction review gaps
+
+**Reason for amendment:** The first whole-correction review found three Important integration paths not covered by the task-level reviews.
+
+**Files:**
+- Modify: `src/desktop/lifecycle.ts`
+- Modify: `src/lifecycle/companion-manager.ts`
+- Modify: `src/mcp/report-client.ts`
+- Modify: `tests/desktop/lifecycle.test.ts`
+- Modify: `tests/lifecycle/companion-manager.test.ts`
+- Modify: `tests/mcp/report-client.test.ts`
+- Modify: `docs/superpowers/reports/2026-09-02-lifecycle-residual-corrections.md`
+
+- [ ] **Step 1: Preserve manual off for automatic-login second instances**
+
+Activate an existing primary instance only for parsed explicit launch intent. Ignore manager and automatic-login second-instance command lines.
+
+- [ ] **Step 2: Converge retry-submit rejection and cancellation**
+
+After the one allowed same-generation OFFLINE recovery, route retry `GENERATION_REJECTED` and manager-owned `REQUEST_CANCELLED` through stale/manual-off suppression. Never recover, spawn, show, or reactivate again.
+
+- [ ] **Step 3: Include token read, executable check, and stale-spawn termination in the absolute deadline**
+
+Make authenticated token loading abort/deadline aware with first-cause classification. Bound executable existence checks and stale-spawn termination with the existing absolute startup deadline; prevent late runtime/state publication.
+
+- [ ] **Step 4: Verify, report, and review**
+
+Add deterministic behavior tests with the existing 90 ms / `<300 ms` contract, run the focused and full release gates, update the acceptance report, and commit `fix: close final lifecycle review gaps`. Perform a fresh whole-correction re-review. Do not package/install/merge/push/release.
