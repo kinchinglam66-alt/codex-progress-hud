@@ -1,8 +1,11 @@
 # Companion Lifecycle Final Fix Report
 
-Date: 2026-09-02  
-Baseline: `c256ac3`  
-Scope: final whole-branch review, 1 Critical + 6 Important + 5 Minor  
+Date: 2026-09-02
+
+Baseline: `c256ac3`
+
+Scope: final whole-branch review, 1 Critical + 6 Important + 5 Minor
+
 Implementation mode: one agent, no delegated or derived agents
 
 ## Outcome
@@ -130,4 +133,3 @@ Seven-command gate:
 - Response bodies are never included in errors. Oversized/malformed bodies are categorized without content leakage.
 - Start-with-Windows is configured only from the tray action, with the dedicated automatic-login argument; no startup-default change was introduced.
 - Reviewed the full diff for Tasks 1–8 semantics, 13-tool registration, stdout cleanliness, log/body privacy, exact loopback auth scope, 8/5-second budgets, and unrelated changes. No unresolved finding or high-risk Minor conflict remains.
-
