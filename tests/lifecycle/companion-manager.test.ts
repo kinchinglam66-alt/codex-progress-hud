@@ -441,6 +441,34 @@ describe("companion lifecycle manager", () => {
     expect(launcher.spawnHud).toHaveBeenCalledWith(expect.any(String), { generation: 1 });
   });
 
+  it.each([
+    ["generation rejection", "GENERATION_REJECTED"],
+    ["manager-owned cancellation", "REQUEST_CANCELLED"]
+  ] as const)("suppresses second-submit %s after recovery when manual off wins", async (_name, code) => {
+    const { manager, launcher, client, setOnline, store } = await harness({
+      desiredState: "on",
+      online: true
+    });
+    let attempts = 0;
+
+    const result = await manager.executeWrite("tracking_start", async ({ signal }) => {
+      attempts += 1;
+      if (attempts === 1) {
+        setOnline(false);
+        throw new HudClientError("OFFLINE", "companion disappeared before recovery");
+      }
+      await manager.close();
+      if (code === "REQUEST_CANCELLED") expect(signal.aborted).toBe(true);
+      throw new HudClientError(code, "manual off won before retry submit");
+    });
+
+    expect(result).toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
+    expect(attempts).toBe(2);
+    expect(await store.readSettings()).toMatchObject({ desiredState: "off", generation: 2 });
+    expect(launcher.spawnHud).toHaveBeenCalledTimes(1);
+    expect(client.show).not.toHaveBeenCalled();
+  });
+
   it("keeps off authoritative when a second manager closes a first manager's deferred startup", async () => {
     const first = await harness({ spawnMakesOnline: false });
     let releaseSpawn!: () => void;
@@ -607,6 +635,85 @@ describe("companion lifecycle manager", () => {
 
     await expect(bounded.open()).resolves.toMatchObject({ code: "START_TIMEOUT" });
     expect(performance.now() - startedAt).toBeLessThan(700);
+  }, 2_000);
+
+  it("bounds an executable existence check that never settles without spawning or publishing runtime", async () => {
+    const fixture = await harness({ desiredState: "off" });
+    const manager = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      pathExists: () => new Promise<boolean>(() => undefined),
+      startupTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-path-exists-timeout"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const startedAt = performance.now();
+
+    const result = await Promise.race([
+      manager.open(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("pathExists exceeded the startup deadline")), 300)
+      )
+    ]);
+
+    expect(result).toMatchObject({ code: "START_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+    expect(await fixture.store.readRuntime()).toBeNull();
+  }, 2_000);
+
+  it("bounds stale-spawn termination by the startup deadline without late publication", async () => {
+    const fixture = await harness({ desiredState: "on", online: false, shutdownStops: false });
+    const terminate = vi.fn(() => new Promise<void>(() => undefined));
+    fixture.launcher.spawnHud.mockImplementation(async () => {
+      fixture.setOnline(true);
+      return { pid: compatibleHealth.pid, terminate };
+    });
+    const store = {
+      ...fixture.store,
+      writeRuntime: vi.fn(async () => false)
+    } satisfies LifecycleStateStore;
+    const manager = createCompanionManager({
+      store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      startupTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-stale-terminate-timeout"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const startedAt = performance.now();
+
+    const result = await Promise.race([
+      manager.open(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("stale terminate exceeded the startup deadline")), 300)
+      )
+    ]);
+
+    expect(result).toMatchObject({ desiredState: "on", code: "START_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect(terminate).toHaveBeenCalledOnce();
+    await new Promise((resolve_) => setTimeout(resolve_, 150));
+    expect(await fixture.store.readRuntime()).toBeNull();
+    expect((await fixture.store.readSettings()).desiredState).toBe("on");
+    expect(fixture.client.show).not.toHaveBeenCalled();
   }, 2_000);
 
   it("bounds complete open while another process holds the lifecycle lock without a late runtime publication", async () => {

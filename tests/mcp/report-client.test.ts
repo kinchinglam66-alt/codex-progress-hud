@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -233,6 +233,61 @@ describe("CompanionHttpClient", () => {
     const error = await request.catch((caught) => caught);
 
     expect(error).toMatchObject({ code: "REQUEST_CANCELLED" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+  });
+
+  it("bounds an authenticated token read that never settles with the request deadline", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) => json(response, 200, health));
+    let tokenSignal: AbortSignal | undefined;
+    const readToken = vi.fn((_path: string, options: { signal: AbortSignal }) => {
+      tokenSignal = options.signal;
+      return new Promise<string>(() => undefined);
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath, readToken);
+    const startedAt = performance.now();
+
+    const error = await Promise.race([
+      client.health({ timeoutMs: 90 }).catch((caught) => caught),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("token read exceeded the request deadline")), 300)
+      )
+    ]);
+
+    expect(error).toMatchObject({ code: "REQUEST_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(300);
+    expect(tokenSignal?.aborted).toBe(true);
+  });
+
+  it.each([
+    ["deadline", 90, undefined, "REQUEST_TIMEOUT"],
+    ["external cancellation", 500, 20, "REQUEST_CANCELLED"]
+  ] as const)("keeps %s as first cause when token loading fails late", async (
+    _name,
+    timeoutMs,
+    externalAbortMs,
+    code
+  ) => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) => json(response, 200, health));
+    let rejectToken!: (error: Error) => void;
+    const tokenRead = new Promise<string>((_resolve, reject) => { rejectToken = reject; });
+    void tokenRead.catch(() => undefined);
+    const controller = new AbortController();
+    const client = new CompanionHttpClient(baseUrl, tokenPath, () => tokenRead);
+    const startedAt = performance.now();
+    const request = client.health({ timeoutMs, signal: controller.signal });
+    if (externalAbortMs !== undefined) setTimeout(() => controller.abort(), externalAbortMs);
+
+    const error = await Promise.race([
+      request.catch((caught) => caught),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("token read exceeded the first-cause budget")), 300)
+      )
+    ]);
+    rejectToken(new Error("late private token failure"));
+    await Promise.resolve();
+
+    expect(error).toMatchObject({ code });
+    expect(String(error)).not.toContain("private token");
     expect(performance.now() - startedAt).toBeLessThan(300);
   });
 

@@ -222,23 +222,32 @@ export function createCompanionManager(
     return { timeoutMs: Math.max(0, deadline - now()) };
   }
 
-  async function settlesBeforeDeadline(operation: Promise<void>, deadline: number): Promise<boolean> {
+  const OPERATION_DEADLINE = Symbol("operation-deadline");
+
+  async function resultBeforeDeadline<T>(
+    operation: Promise<T>,
+    deadline: number
+  ): Promise<T | typeof OPERATION_DEADLINE> {
     const remainingMs = Math.max(0, deadline - now());
     if (remainingMs === 0) {
       void operation.catch(() => undefined);
-      return false;
+      return OPERATION_DEADLINE;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        operation.then(() => true),
-        new Promise<false>((resolve_) => {
-          timer = setTimeout(() => resolve_(false), remainingMs);
+        operation,
+        new Promise<typeof OPERATION_DEADLINE>((resolve_) => {
+          timer = setTimeout(() => resolve_(OPERATION_DEADLINE), remainingMs);
         })
       ]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  async function settlesBeforeDeadline(operation: Promise<void>, deadline: number): Promise<boolean> {
+    return await resultBeforeDeadline(operation, deadline) !== OPERATION_DEADLINE;
   }
 
   async function clearRuntimeBefore(deadline: number): Promise<boolean> {
@@ -367,7 +376,7 @@ export function createCompanionManager(
       confirmed !== undefined &&
       confirmed.pid === spawned.pid
     ) {
-      await spawned.terminate().catch(() => undefined);
+      await settlesBeforeDeadline(spawned.terminate().catch(() => undefined), deadline);
     }
   }
 
@@ -428,9 +437,26 @@ export function createCompanionManager(
     if (
       containment.length === 0 ||
       containment.startsWith("..") ||
-      isAbsolute(containment) ||
-      !(await pathExists(executablePath))
+      isAbsolute(containment)
     ) {
+      remember("COMPANION_NOT_INSTALLED");
+      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
+      return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
+    }
+    const executableExists = await resultBeforeDeadline(pathExists(executablePath), deadline);
+    if (executableExists === OPERATION_DEADLINE) {
+      remember("START_TIMEOUT");
+      recordStartupFailure("START_TIMEOUT", "stopped");
+      return {
+        kind: "error",
+        code: "START_TIMEOUT",
+        snapshot: withDesiredState(settings.desiredState, {
+          observedState: "stopped",
+          code: "START_TIMEOUT"
+        })
+      };
+    }
+    if (!executableExists) {
       remember("COMPANION_NOT_INSTALLED");
       recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
       return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
@@ -766,6 +792,14 @@ export function createCompanionManager(
         if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration, deadline))) {
           return staleWriteResult(writeGeneration, deadline);
         }
+        const classifyStaleAttempt = (error: unknown) => {
+          if (!(error instanceof HudClientError)) return undefined;
+          if (
+            error.code === "GENERATION_REJECTED" ||
+            (error.code === "REQUEST_CANCELLED" && controller.signal.aborted)
+          ) return staleWriteResult(writeGeneration, deadline);
+          return undefined;
+        };
         try {
           return {
             kind: "completed",
@@ -776,15 +810,11 @@ export function createCompanionManager(
             })
           };
         } catch (error) {
+          const staleAttempt = classifyStaleAttempt(error);
+          if (staleAttempt !== undefined) return staleAttempt;
           if (!(error instanceof HudClientError)) throw error;
-          if (error.code === "REQUEST_CANCELLED") {
-            if (controller.signal.aborted) return staleWriteResult(writeGeneration, deadline);
-            throw error;
-          }
-          if (error.code !== "OFFLINE" && error.code !== "GENERATION_REJECTED") throw error;
-          if (error.code === "GENERATION_REJECTED" || controller.signal.aborted) {
-            return staleWriteResult(writeGeneration, deadline);
-          }
+          if (error.code !== "OFFLINE") throw error;
+          if (controller.signal.aborted) return staleWriteResult(writeGeneration, deadline);
           if (!(await currentOnGeneration(writeGeneration, deadline))) {
             return staleWriteResult(writeGeneration, deadline);
           }
@@ -797,14 +827,20 @@ export function createCompanionManager(
           if (controller.signal.aborted || !(await currentOnGeneration(writeGeneration, deadline))) {
             return staleWriteResult(writeGeneration, deadline);
           }
-          return {
-            kind: "completed",
-            value: await operation({
-              generation: writeGeneration,
-              signal: controller.signal,
-              timeoutMs: Math.max(0, deadline - now())
-            })
-          };
+          try {
+            return {
+              kind: "completed",
+              value: await operation({
+                generation: writeGeneration,
+                signal: controller.signal,
+                timeoutMs: Math.max(0, deadline - now())
+              })
+            };
+          } catch (retryError) {
+            const staleRetry = classifyStaleAttempt(retryError);
+            if (staleRetry !== undefined) return staleRetry;
+            throw retryError;
+          }
         }
       } finally {
         activeWriteControllers.delete(controller);

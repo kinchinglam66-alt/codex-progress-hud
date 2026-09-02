@@ -134,11 +134,11 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
   });
 
-  it("shows the existing window when a second GUI instance starts", async () => {
+  it("shows the existing window when a second GUI instance has explicit intent", async () => {
     const harness = desktopHarness();
     await runDesktop(harness.dependencies);
 
-    harness.listeners.get("second-instance")?.();
+    harness.listeners.get("second-instance")?.({}, ["app.exe", "--hud"]);
 
     await vi.waitFor(() => expect(harness.windowController.show).toHaveBeenCalledOnce());
     expect(harness.dependencies.stateStore.setDesiredState).toHaveBeenCalledWith("on");
@@ -151,6 +151,23 @@ describe("desktop lifecycle", () => {
     harness.listeners.get("second-instance")?.(
       {},
       ["app.exe", "--hud", "--manager-generation=7"]
+    );
+
+    await Promise.resolve();
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.windowController.show).not.toHaveBeenCalled();
+  });
+
+  it("does not reinterpret an automatic-login second instance as explicit activation after manual off", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+    await harness.dependencies.stateStore.setDesiredState("off");
+    vi.mocked(harness.dependencies.stateStore.setDesiredState).mockClear();
+    harness.windowController.show.mockClear();
+
+    harness.listeners.get("second-instance")?.(
+      {},
+      ["app.exe", "--hud", "--automatic-login"]
     );
 
     await Promise.resolve();

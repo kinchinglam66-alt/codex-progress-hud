@@ -14,6 +14,8 @@ The targeted C1, I1, I3, and M2 lifecycle findings are closed by direct behavior
 
 Task 4 closes the diagnostics logger lock-disappearance race exposed by Task 3. A deterministic filesystem seam removes a valid lock after `readLockRecord()` opens and reads it but before the second path identity `lstat`; the observation now retries instead of leaking `ENOENT`. The focused logger suite passed in 10 fresh processes, three fresh complete suites passed, and every required non-packaging gate passed. Independent Task 4 and whole-correction reviews remain required, so this report does not authorize Windows packaging.
 
+Task 5 closes the three Important gaps from the first whole-correction review. Second-instance activation is now explicit-intent-only; retry-submit generation rejection and manager-owned cancellation converge through the same stale/manual-off classifier used by the first submit; and authenticated token reads, executable existence checks, and stale-spawn termination share their enclosing absolute deadline. Deterministic 90ms / `<300ms` tests cover all newly bounded paths and assert no late runtime/state/window publication. A fresh whole-correction re-review remains required, so this report still does not authorize Windows packaging.
+
 ## Task 3 TDD evidence
 
 Production mutation caught by the new test: replacing exact calendar round-trip validation with shape plus finite `Date.parse` allows JavaScript date normalization to accept an impossible calendar date.
@@ -132,11 +134,58 @@ Task 4 deterministically reproduces that exact boundary and closes it by treatin
 - The second lookup now maps only `ENOENT` to a missing observation. All non-`ENOENT` failures still propagate, and no stale handle metadata is returned after disappearance.
 - Ten fresh complete logger-file runs and three fresh complete-suite runs passed. Existing tests for symlink/regular-file rejection, bigint dev/inode identity, successor ownership, stale-owner recovery, rotation serialization, bounded acquisition, and category-only privacy also passed in those runs.
 
+## Task 5 final-review gap closure
+
+### RED evidence
+
+1. Automatic-login second instance:
+   - Command: `npm test -- --run tests/desktop/lifecycle.test.ts -t "second instance"`.
+   - Exit 1; 1 failed, 1 passed, 37 skipped.
+   - Expected failure: `--automatic-login` called `setDesiredState("on")` once while the primary had been manually set off.
+2. Retry-submit stale/cancel convergence:
+   - Command: `npm test -- --run tests/lifecycle/companion-manager.test.ts -t "suppresses second-submit"`.
+   - Exit 1; 2 failed, 40 skipped.
+   - Expected failures: retry `GENERATION_REJECTED` and manager-owned retry `REQUEST_CANCELLED` both escaped from `executeWrite()` at the second `operation()` call.
+3. Authenticated token read boundary:
+   - Command: `npm test -- --run tests/mcp/report-client.test.ts -t "token"`.
+   - Exit 1; 3 failed, 2 passed, 13 skipped.
+   - Expected failures: the injected token reader was ignored, so a never-settling read and both late-failure cases incorrectly reached successful authenticated health responses.
+4. Executable check and stale-spawn retirement boundaries:
+   - Command: `npm test -- --run tests/lifecycle/companion-manager.test.ts -t "existence check|stale-spawn termination"`.
+   - Exit 1; both selected tests failed by their 300ms watchdogs after reaching the intended never-settling seams.
+
+### GREEN implementation and focused evidence
+
+- `runDesktop()` now activates a primary instance only when the second command line parses as HUD mode with explicit launch reason. Manager, automatic-login, malformed, absent, and non-HUD intents cannot set on or show.
+- `executeWrite()` classifies both submits with the same stale-attempt helper. Either-attempt `GENERATION_REJECTED` and manager-owned `REQUEST_CANCELLED` call `staleWriteResult`; only first-attempt `OFFLINE` enters same-generation recovery.
+- `CompanionHttpClient` passes the request controller signal to token loading and races token settlement against that signal. The already-claimed abort cause is evaluated before token/auth errors, so deadline-first remains `REQUEST_TIMEOUT` and external-first remains `REQUEST_CANCELLED` even if token loading rejects later.
+- The manager's generic remaining-deadline race now bounds `pathExists` and matching-PID stale `terminate()`. Timeout becomes `START_TIMEOUT`; late promises cannot publish runtime, mutate desired state, show a window, or create another process.
+- Desktop second-instance target: exit 0; 2/2 selected tests passed, then the complete desktop file passed 39/39.
+- Retry-submit target: exit 0; 2/2 selected tests passed, then the complete manager file passed 42/42 at that stage.
+- Token target: exit 0; 5/5 selected tests passed; the never-settling and first-cause cases retain 90ms / `<300ms` assertions.
+- Manager deadline target: exit 0; 2/2 selected tests passed; both use a 90ms startup budget and `<300ms` watchdog, and stale retirement waits another 150ms before asserting no late runtime/state/window publication.
+- Combined focused gate: `npm test -- --run tests/desktop/lifecycle.test.ts tests/lifecycle/companion-manager.test.ts tests/mcp/report-client.test.ts` — exit 0; 3/3 files and 101/101 tests passed; Vitest duration 5.56s.
+
+### Task 5 complete gate
+
+| Command | Exact result |
+|---|---|
+| `npm test -- --run` | Exit 0; 18/18 files; 301/301 tests; Vitest duration 7.59s. |
+| `npm run typecheck` | Exit 0; `tsc --noEmit` reported no errors. |
+| `npm run build` | Exit 0; TypeScript build and asset copy completed. |
+| `npm run smoke` | Exit 0; build completed; protocol health, authenticated event flow, and shutdown callback verified. |
+| `npm run diagnose:mcp` | Exit 0; 1/1 file and 1/1 test passed; protocol-only stdout and the complete tool catalog remained valid; Vitest duration 468ms. |
+| `npm run validate:plugin` | Exit 0; plugin manifest and MCP launch configuration valid. |
+| `git diff --check` | Exit 0; no output. |
+
+Task 5 changed no tool registration, public payload, response-size, privacy, PID/nonce ownership, canonical timestamp, packaging, installation, merge, push, or release behavior.
+
 ## Review, limitations, and prohibited actions
 
 - Task 3 self-review found no scope expansion in the timestamp implementation or tests. Task 4 closes the diagnostics flaky concern with the deterministic evidence above.
 - The first staged `git diff --cached --check` failed on two Markdown hard-break trailing spaces in this report. The cause was report formatting; both spaces were removed before commit and the cached check was rerun. No production or test file was implicated.
 - Independent task review and whole-correction review remain required before any packaging decision.
+- Task 5 implementation is complete, but its requested fresh whole-correction re-review has not yet occurred.
 - **No packaged Electron validation has occurred in this plan.**
 - **No packaged Windows validation has occurred in this plan.**
 - No package, install, merge, push, or release action was performed.

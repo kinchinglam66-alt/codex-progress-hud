@@ -82,15 +82,36 @@ export interface HudIdentity {
   protocolVersion: typeof PROTOCOL_VERSION;
 }
 
+type TokenReader = (
+  path: string,
+  options: { encoding: "utf8"; signal: AbortSignal }
+) => Promise<string>;
+
 export class CompanionHttpClient implements ProgressClient {
   constructor(
     private readonly serviceUrl = defaultServiceUrl(),
-    private readonly tokenPath = defaultTokenPath()
+    private readonly tokenPath = defaultTokenPath(),
+    private readonly readToken: TokenReader = (path, options) => readFile(path, options)
   ) {}
 
-  async #token(): Promise<string> {
-    try { return (await readFile(this.tokenPath, "utf8")).trim(); }
-    catch { throw new HudClientError("AUTH_ERROR", "HUD authentication is unavailable"); }
+  async #token(signal: AbortSignal): Promise<string> {
+    let abort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason ?? new Error("HUD authentication was cancelled"));
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      return (await Promise.race([
+        this.readToken(this.tokenPath, { encoding: "utf8", signal }),
+        aborted
+      ])).trim();
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new HudClientError("AUTH_ERROR", "HUD authentication is unavailable");
+    } finally {
+      if (abort !== undefined) signal.removeEventListener("abort", abort);
+    }
   }
 
   async #request(
@@ -124,7 +145,7 @@ export class CompanionHttpClient implements ProgressClient {
         signal: controller.signal,
         headers: {
           ...init.headers,
-          ...(authenticated ? { authorization: `Bearer ${await this.#token()}` } : {}),
+          ...(authenticated ? { authorization: `Bearer ${await this.#token(controller.signal)}` } : {}),
           ...(options.generation === undefined
             ? {}
             : { "x-codex-progress-hud-generation": String(options.generation) })
@@ -132,13 +153,13 @@ export class CompanionHttpClient implements ProgressClient {
       });
       return { response, payload: await readBoundedJson(response, controller) };
     } catch (error) {
-      if (error instanceof HudClientError || error instanceof InvalidResponseError) throw error;
       if (abortCause === "deadline") {
         throw new HudClientError("REQUEST_TIMEOUT", "Progress HUD request timed out");
       }
       if (abortCause === "external") {
         throw new HudClientError("REQUEST_CANCELLED", "Progress HUD request was cancelled");
       }
+      if (error instanceof HudClientError || error instanceof InvalidResponseError) throw error;
       throw new HudClientError("OFFLINE", "Progress HUD is not reachable");
     } finally {
       if (timer !== undefined) clearTimeout(timer);
