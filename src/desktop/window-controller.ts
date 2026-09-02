@@ -24,6 +24,13 @@ export interface WindowCloseEventLike {
 
 export interface BrowserWindowLike {
   webContents: {
+    on(
+      event: "will-navigate",
+      listener: (event: { preventDefault(): void }, url: string) => void
+    ): void;
+    setWindowOpenHandler(
+      handler: (details: { url: string }) => { action: "deny" }
+    ): void;
     session: {
       webRequest: {
         onBeforeSendHeaders(
@@ -89,6 +96,22 @@ export class WindowController {
   async create(options: WindowCreateOptions): Promise<void> {
     if (this.window !== undefined && !this.window.isDestroyed()) return;
 
+    let initialUrl: URL;
+    try {
+      initialUrl = new URL(options.url);
+    } catch {
+      throw new Error("Progress HUD window requires an exact loopback origin");
+    }
+    const loopback = initialUrl.hostname === "127.0.0.1" || initialUrl.hostname === "[::1]";
+    if (
+      initialUrl.protocol !== "http:" ||
+      !loopback ||
+      options.url !== initialUrl.origin
+    ) {
+      throw new Error("Progress HUD window requires an exact loopback origin");
+    }
+    const allowedOrigin = initialUrl.origin;
+
     const window = this.dependencies.createWindow(WINDOW_OPTIONS);
     this.window = window;
     const webRequest = window.webContents.session.webRequest;
@@ -106,6 +129,15 @@ export class WindowController {
         }
       );
       this.authorizationRegistered = true;
+      window.webContents.on("will-navigate", (event, url) => {
+        try {
+          if (new URL(url).origin === allowedOrigin) return;
+        } catch {
+          // Invalid navigation targets are denied with external targets.
+        }
+        event.preventDefault();
+      });
+      window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
       window.on("close", (event) => {
         if (this.dependencies.quitting()) return;
         event.preventDefault();

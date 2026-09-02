@@ -18,6 +18,12 @@ class FakeWindow extends EventEmitter {
   readonly loadURL = vi.fn(async () => undefined);
   readonly setAlwaysOnTop = vi.fn();
   readonly webContents = {
+    on: vi.fn((event: string, listener: (...args: any[]) => void) => {
+      this.webContentsListeners.set(event, listener);
+    }),
+    setWindowOpenHandler: vi.fn((handler: (details: { url: string }) => { action: "deny" | "allow" }) => {
+      this.windowOpenHandler = handler;
+    }),
     session: {
       webRequest: {
         onBeforeSendHeaders: vi.fn()
@@ -26,6 +32,8 @@ class FakeWindow extends EventEmitter {
   };
   private visible = false;
   private destroyed = false;
+  readonly webContentsListeners = new Map<string, (...args: any[]) => void>();
+  windowOpenHandler: ((details: { url: string }) => { action: "deny" | "allow" }) | undefined;
 
   isVisible(): boolean {
     return this.visible;
@@ -50,11 +58,18 @@ describe("WindowController", () => {
 
     await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
 
-    expect(options).toMatchObject({
+    expect(options).toEqual({
+      width: 340,
+      height: 146,
+      minWidth: 300,
+      minHeight: 130,
       frame: false,
       transparent: true,
       alwaysOnTop: true,
+      resizable: false,
       skipTaskbar: true,
+      show: false,
+      backgroundColor: "#00000000",
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
@@ -62,6 +77,35 @@ describe("WindowController", () => {
         partition: "codex-progress-hud"
       }
     });
+  });
+
+  it("loads an exact loopback origin and denies external navigation and every popup", async () => {
+    const window = new FakeWindow();
+    const controller = new WindowController({ createWindow: () => window, quitting: () => false });
+
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    const localEvent = { preventDefault: vi.fn() };
+    const externalEvent = { preventDefault: vi.fn() };
+    window.webContentsListeners.get("will-navigate")?.(localEvent, "http://127.0.0.1:17837/styles.css");
+    window.webContentsListeners.get("will-navigate")?.(externalEvent, "https://example.com/private");
+
+    expect(window.loadURL).toHaveBeenCalledWith("http://127.0.0.1:17837");
+    expect(localEvent.preventDefault).not.toHaveBeenCalled();
+    expect(externalEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(window.windowOpenHandler?.({ url: "http://127.0.0.1:17837/popup" })).toEqual({ action: "deny" });
+    expect(window.windowOpenHandler?.({ url: "https://example.com" })).toEqual({ action: "deny" });
+  });
+
+  it.each([
+    "https://127.0.0.1:17837",
+    "http://localhost:17837",
+    "http://example.com:17837",
+    "http://127.0.0.1:17837/path",
+    "http://127.0.0.1:17837?query=1"
+  ])("rejects a non-exact loopback initial URL: %s", async (url) => {
+    const controller = new WindowController({ createWindow: () => new FakeWindow(), quitting: () => false });
+
+    await expect(controller.create({ url, token: "secret" })).rejects.toThrow("loopback origin");
   });
 
   it("hides rather than destroys on window close", async () => {

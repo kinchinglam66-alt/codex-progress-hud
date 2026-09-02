@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { ZodError } from "zod";
 import { parseProgressEnvelope } from "../core/schema.js";
 import { PROTOCOL_VERSION, type HudHealth } from "../lifecycle/types.js";
+import type { DesiredHudState } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
 import { TaskStore, type HudSnapshot } from "./task-store.js";
 
@@ -21,6 +22,11 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   port?: number;
   tokenPath: string;
   uiDirectory?: string;
+  runIfGeneration?(
+    generation: number,
+    desiredState: DesiredHudState,
+    operation: () => unknown | Promise<unknown>
+  ): Promise<{ accepted: false } | { accepted: true; value: unknown }>;
 }
 
 export interface ProgressServerAddress {
@@ -115,6 +121,28 @@ export function createProgressServer(options: ProgressServerOptions) {
   const tokenPromise = loadOrCreateToken(options.tokenPath);
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
+  let shuttingDown = false;
+
+  function requestGeneration(request: IncomingMessage): number | undefined {
+    const header = request.headers["x-codex-progress-hud-generation"];
+    if (typeof header !== "string" || !/^\d+$/u.test(header)) return undefined;
+    const generation = Number(header);
+    return Number.isSafeInteger(generation) ? generation : undefined;
+  }
+
+  async function runMutation(
+    request: IncomingMessage,
+    desiredState: DesiredHudState,
+    operation: () => unknown | Promise<unknown>
+  ): Promise<{ accepted: false } | { accepted: true; value: unknown }> {
+    if (shuttingDown) return { accepted: false };
+    if (options.runIfGeneration === undefined) {
+      return { accepted: true, value: await operation() };
+    }
+    const generation = requestGeneration(request);
+    if (generation === undefined) return { accepted: false };
+    return options.runIfGeneration(generation, desiredState, operation);
+  }
 
   async function handleSse(response: ServerResponse, token: string): Promise<void> {
     response.writeHead(200, {
@@ -181,7 +209,12 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         const envelope = parseProgressEnvelope(await readJson(request));
-        writeJson(response, 202, store.apply(envelope));
+        const result = await runMutation(request, "on", () => store.apply(envelope));
+        if (!result.accepted) {
+          writeJson(response, 409, { error: "lifecycle generation rejected" });
+          return;
+        }
+        writeJson(response, 202, result.value);
         return;
       }
       if (
@@ -202,7 +235,15 @@ export function createProgressServer(options: ProgressServerOptions) {
               ? options.hideWindow
               : options.requestShutdown;
         if (callback === undefined) throw new Error("control callback is unavailable");
-        await callback();
+        const desiredState = url.pathname === "/api/shutdown" ? "off" : "on";
+        const result = await runMutation(request, desiredState, async () => {
+          if (url.pathname === "/api/shutdown") shuttingDown = true;
+          await callback();
+        });
+        if (!result.accepted) {
+          writeJson(response, 409, { error: "lifecycle generation rejected" });
+          return;
+        }
         writeJson(response, 202, { accepted: true });
         return;
       }

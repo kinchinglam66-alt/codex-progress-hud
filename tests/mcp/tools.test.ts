@@ -4,7 +4,8 @@ import { HudClientError } from "../../src/mcp/report-client.js";
 import { createToolHandlers } from "../../src/mcp/tools.js";
 
 function createManager(overrides: Partial<CompanionManager> = {}): CompanionManager {
-  return {
+  const controller = new AbortController();
+  const manager = {
     status: vi.fn(async () => ({ observedState: "running" as const })),
     open: vi.fn(async () => ({
       desiredState: "on" as const,
@@ -20,12 +21,37 @@ function createManager(overrides: Partial<CompanionManager> = {}): CompanionMana
     })),
     ensureForWrite: vi.fn(async () => ({
       kind: "ready" as const,
+      generation: 7,
       snapshot: { desiredState: "on" as const, observedState: "running" as const }
     })),
     diagnose: vi.fn(async () => ({ path: "C:\\diagnostics\\hud.md" })),
     ...overrides
-  };
+  } as CompanionManager;
+  manager.executeWrite = overrides.executeWrite ?? vi.fn(async (reason, operation) => {
+    let ensured = await manager.ensureForWrite(reason);
+    if (ensured.kind !== "ready") return ensured;
+    try {
+      return {
+        kind: "completed" as const,
+        value: await operation({ generation: ensured.generation, signal: controller.signal })
+      };
+    } catch (error) {
+      if (!(error instanceof HudClientError) || error.code !== "OFFLINE") throw error;
+      ensured = await manager.ensureForWrite(reason);
+      if (ensured.kind !== "ready") return ensured;
+      return {
+        kind: "completed" as const,
+        value: await operation({ generation: ensured.generation, signal: controller.signal })
+      };
+    }
+  });
+  return manager;
 }
+
+const expectedLease = () => expect.objectContaining({
+  generation: 7,
+  signal: expect.any(AbortSignal)
+});
 
 function createHandlers(
   progressClient: Parameters<typeof createToolHandlers>[0]["progressClient"],
@@ -35,6 +61,26 @@ function createHandlers(
 }
 
 describe("MCP progress tool handlers", () => {
+  it("carries the manager generation lease through the actual event submit", async () => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const companionManager = createManager();
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    await handlers.progressReport({
+      task_id: "generation-7",
+      title: "Generation lease",
+      phase: "submitting"
+    });
+
+    expect(companionManager.executeWrite).toHaveBeenCalledWith(
+      "progress_report",
+      expect.any(Function)
+    );
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: "generation-7" }),
+      expect.objectContaining({ generation: 7, signal: expect.any(AbortSignal) })
+    );
+  });
   it("normalizes a progress report into a minimal model event", async () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
     const handlers = createHandlers({ submit, status: vi.fn() });
@@ -61,7 +107,7 @@ describe("MCP progress tool handlers", () => {
         confidence: 0.7,
         remainingSeconds: 300
       }
-    });
+    }, expectedLease());
     expect(result.isError).toBeUndefined();
   });
 
@@ -85,7 +131,7 @@ describe("MCP progress tool handlers", () => {
         reason: "approval",
         detail: "Allow npm install"
       }
-    });
+    }, expectedLease());
   });
 
   it("rejects progress and confidence outside the public 0..1 contract", async () => {
@@ -124,7 +170,7 @@ describe("MCP progress tool handlers", () => {
         verified: true,
         detail: "34 tests passed"
       }
-    });
+    }, expectedLease());
   });
 
   it("returns a sanitized internal error for an unclassified write failure", async () => {
@@ -162,7 +208,7 @@ describe("MCP progress tool handlers", () => {
       taskId: "task-1",
       title: "Implement controls",
       event: { type: "tracking_started" }
-    });
+    }, expectedLease());
     expect(result.content[0]?.text).toContain("Tracking started");
   });
 
@@ -186,18 +232,28 @@ describe("MCP progress tool handlers", () => {
       taskId: "task-1",
       title: "Implement controls",
       event: { type: "tracking_paused" }
-    });
+    }, expectedLease());
     expect(submit).toHaveBeenNthCalledWith(2, {
       taskId: "task-1",
       title: "Implement controls",
       event: { type: "tracking_resumed" }
-    });
+    }, expectedLease());
     expect(submit).toHaveBeenNthCalledWith(3, {
       taskId: "task-1",
       title: "Implement controls",
       event: { type: "tracking_stopped" }
-    });
+    }, expectedLease());
     expect(statusResult.content[0]?.text).toContain('"status":"running"');
+  });
+
+  it("keeps trackingStatus receiver-independent when registered or destructured", async () => {
+    const status = vi.fn(async () => ({ task: null, eta: null }));
+    const { trackingStatus } = createHandlers({ submit: vi.fn(), status });
+
+    const result = await trackingStatus();
+
+    expect(result.content[0]?.text).toContain('"task":null');
+    expect(status).toHaveBeenCalledOnce();
   });
 
   it("returns a clear error when a control needs a current task but none exists", async () => {

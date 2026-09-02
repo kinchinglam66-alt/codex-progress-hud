@@ -55,15 +55,20 @@ function desktopHarness(lockAcquired = true) {
       return progressServer;
     }),
     stateStore: {
-      readSettings: vi.fn(async () => ({ startWithWindows: false })),
+      readSettings: vi.fn(async () => ({ desiredState: "on" as const, startWithWindows: false, generation: 1 })),
       setDesiredState: vi.fn(async (state) => {
         order.push(`desired:${state}`);
-        return { desiredState: state, startWithWindows: false };
+        return { desiredState: state, startWithWindows: false, generation: 1 };
       }),
-      writeRuntime: vi.fn(async () => undefined),
+      setStartWithWindows: vi.fn(async (enabled) => ({ startWithWindows: enabled, generation: 0 })),
+      writeRuntime: vi.fn(async () => true),
       readRuntime: vi.fn(async () => null),
       clearRuntime: vi.fn(async () => undefined),
-      readInstallManifest: vi.fn(async () => null)
+      readInstallManifest: vi.fn(async () => null),
+      runIfGeneration: vi.fn(async (_generation, _state, operation) => ({
+        accepted: true as const,
+        value: await operation()
+      }))
     },
     readToken: vi.fn(async () => "secret"),
     randomUUID: vi.fn(() => "instance-nonce"),
@@ -135,7 +140,50 @@ describe("desktop lifecycle", () => {
 
     harness.listeners.get("second-instance")?.();
 
-    expect(harness.windowController.show).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(harness.windowController.show).toHaveBeenCalledOnce());
+    expect(harness.dependencies.stateStore.setDesiredState).toHaveBeenCalledWith("on");
+  });
+
+  it("automatic login exits before runtime, server, or window publication when desired state is off", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
+      desiredState: "off",
+      startWithWindows: true,
+      generation: 4
+    });
+
+    await runDesktop(harness.dependencies, "automatic-login");
+
+    expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
+    expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
+    expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
+    expect(harness.windowController.create).not.toHaveBeenCalled();
+  });
+
+  it("automatic login proceeds without changing an on intent", async () => {
+    const harness = desktopHarness();
+
+    await runDesktop(harness.dependencies, "automatic-login");
+
+    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
+    expect(harness.dependencies.createProgressServer).toHaveBeenCalledOnce();
+  });
+
+  it("explicit activation reopens persisted off before publishing runtime", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
+      desiredState: "off",
+      startWithWindows: false,
+      generation: 8
+    });
+
+    await runDesktop(harness.dependencies, "explicit");
+
+    expect(harness.dependencies.stateStore.setDesiredState).toHaveBeenCalledWith("on");
+    expect(harness.dependencies.stateStore.writeRuntime).toHaveBeenCalledWith(
+      expect.any(Object),
+      1
+    );
   });
 
   it("writes runtime identity on readiness and exposes it through server controls", async () => {
@@ -149,7 +197,7 @@ describe("desktop lifecycle", () => {
       protocolVersion: 1,
       instanceNonce: "instance-nonce",
       startedAt: "2026-09-02T00:00:00.000Z"
-    });
+    }, 1);
     expect(harness.serverOptions?.health?.()).toEqual({
       service: "codex-progress-hud",
       pid: 12_345,
@@ -299,8 +347,10 @@ describe("desktop lifecycle", () => {
     await harness.trayCallbacks?.onToggleLogin(true);
 
     expect(harness.dependencies.app.setLoginItemSettings).toHaveBeenCalledWith({
-      openAtLogin: true
+      openAtLogin: true,
+      args: ["--automatic-login"]
     });
+    expect(harness.dependencies.stateStore.setStartWithWindows).toHaveBeenCalledWith(true);
   });
 
   it("clears runtime identity during clean exit", async () => {

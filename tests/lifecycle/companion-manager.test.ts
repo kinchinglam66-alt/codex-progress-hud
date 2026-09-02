@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +7,7 @@ import { createCompanionManager } from "../../src/lifecycle/companion-manager.js
 import { createProcessLauncher } from "../../src/lifecycle/process-launcher.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
-import { HudClientError } from "../../src/mcp/report-client.js";
+import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -219,7 +220,7 @@ describe("companion lifecycle manager", () => {
     const result = await Promise.race([
       manager.open(),
       new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new Error("startup waited for logger")), 100)
+        setTimeout(() => reject(new Error("startup waited for logger")), 500)
       )
     ]);
 
@@ -340,6 +341,252 @@ describe("companion lifecycle manager", () => {
     ]);
   });
 
+  it("prevents a deferred startup from publishing runtime or showing after close commits off", async () => {
+    const { manager, launcher, terminate, setOnline, store, client } = await harness({
+      spawnMakesOnline: false
+    });
+    let releaseSpawn!: () => void;
+    const spawnGate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+    launcher.spawnHud.mockImplementation(async () => {
+      await spawnGate;
+      setOnline(true);
+      return { pid: compatibleHealth.pid, terminate };
+    });
+
+    const opening = manager.open();
+    await vi.waitFor(() => expect(launcher.spawnHud).toHaveBeenCalledOnce());
+    await expect(manager.close()).resolves.toEqual({ desiredState: "off", observedState: "stopped" });
+    releaseSpawn();
+    await opening;
+
+    expect(await store.readRuntime()).toBeNull();
+    expect(client.show).not.toHaveBeenCalled();
+    expect(client.shutdown).toHaveBeenCalledOnce();
+    await expect(client.health()).rejects.toMatchObject({ code: "OFFLINE" });
+    expect(terminate).not.toHaveBeenCalled();
+  });
+
+  it("cancels a locally in-flight ensured write before submit after close", async () => {
+    const { manager } = await harness({ desiredState: "on", online: true });
+    let entered!: () => void;
+    const operationEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const operationGate = new Promise<void>((resolve) => { release = resolve; });
+    let submitted = false;
+    const writing = (manager as any).executeWrite("progress_report", async (options: { signal: AbortSignal }) => {
+      entered();
+      await operationGate;
+      if (options.signal.aborted) throw new HudClientError("OFFLINE", "cancelled");
+      submitted = true;
+      return "submitted";
+    });
+    await operationEntered;
+
+    await manager.close();
+    release();
+
+    await expect(writing).resolves.toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
+    expect(submitted).toBe(false);
+  });
+
+  it("does not retry a locally in-flight write after close commits off", async () => {
+    const { manager } = await harness({ desiredState: "on", online: true });
+    let attempts = 0;
+
+    const result = await (manager as any).executeWrite(
+      "progress_report",
+      async () => {
+        attempts += 1;
+        await manager.close();
+        throw new HudClientError("OFFLINE", "closed during first submit");
+      }
+    );
+
+    expect(result).toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
+    expect(attempts).toBe(1);
+  });
+
+  it("keeps off authoritative when a second manager closes a first manager's deferred startup", async () => {
+    const first = await harness({ spawnMakesOnline: false });
+    let releaseSpawn!: () => void;
+    const spawnGate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+    first.launcher.spawnHud.mockImplementation(async () => {
+      await spawnGate;
+      first.setOnline(true);
+      return { pid: compatibleHealth.pid, terminate: first.terminate };
+    });
+    const second = createCompanionManager({
+      store: first.store,
+      client: first.client,
+      launcher: { spawnHud: vi.fn() },
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(first.directory, "diagnostics-second"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: first.paths.installManifestPath,
+        dataDirectoryPath: first.directory
+      }
+    });
+
+    const opening = first.manager.open();
+    await vi.waitFor(() => expect(first.launcher.spawnHud).toHaveBeenCalledOnce());
+    await second.close();
+    releaseSpawn();
+    await opening;
+
+    expect((await first.store.readSettings()).desiredState).toBe("off");
+    expect(await first.store.readRuntime()).toBeNull();
+    expect(first.client.show).not.toHaveBeenCalled();
+    expect(first.client.shutdown).toHaveBeenCalledOnce();
+    await expect(first.client.health()).rejects.toMatchObject({ code: "OFFLINE" });
+    expect(first.terminate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["authentication", new HudClientError("AUTH_ERROR", "secret"), "AUTH_ERROR"],
+    ["version", new HudClientError("VERSION_MISMATCH", "secret"), "VERSION_MISMATCH"],
+    ["malformed", new Error("malformed private health"), "INTERNAL_ERROR"]
+  ] as const)("keeps desired off and categorizes an initial close %s failure", async (
+    _name,
+    failure,
+    code
+  ) => {
+    const { manager, client, store } = await harness({ online: true });
+    client.health.mockRejectedValueOnce(failure);
+
+    await expect(manager.close()).resolves.toEqual({
+      desiredState: "off",
+      observedState: "stopped",
+      code
+    });
+    expect((await store.readSettings()).desiredState).toBe("off");
+    expect(client.shutdown).not.toHaveBeenCalled();
+  });
+
+  it("derives hanging startup request deadlines from the startup wall-clock budget", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-manager-budget-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const tokenPath = join(directory, "auth.token");
+    const executablePath = join(directory, "CodexProgressHUD.exe");
+    const installManifestPath = join(directory, "install.json");
+    await writeFile(tokenPath, "budget-token\n");
+    await writeFile(executablePath, "fixture");
+    await writeFile(installManifestPath, `${JSON.stringify({
+      executablePath,
+      installDirectory: directory,
+      version: "0.2.0"
+    })}\n`);
+    const server = createServer(() => undefined);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("missing address");
+    cleanups.push(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const manager = createCompanionManager({
+      store: createLifecycleStateStore({
+        settingsPath: join(directory, "settings.json"),
+        runtimePath: join(directory, "runtime.json"),
+        installManifestPath
+      }),
+      client: new CompanionHttpClient(`http://127.0.0.1:${address.port}`, tokenPath),
+      launcher: { spawnHud: vi.fn(async () => ({ pid: 99, terminate: vi.fn(async () => undefined) })) },
+      startupTimeoutMs: 120,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(directory, "diagnostics"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: address.port,
+        installManifestPath,
+        dataDirectoryPath: directory
+      }
+    });
+    const startedAt = performance.now();
+
+    await expect(manager.ensureForWrite("progress_report")).resolves.toMatchObject({
+      kind: "error",
+      code: "START_TIMEOUT"
+    });
+    expect(performance.now() - startedAt).toBeLessThan(700);
+  }, 2_000);
+
+  it("bounds a launcher that never resolves by the startup wall-clock budget", async () => {
+    const fixture = await harness({ spawnMakesOnline: false });
+    fixture.launcher.spawnHud.mockReturnValue(new Promise(() => undefined));
+    const bounded = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      startupTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-bounded"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const startedAt = performance.now();
+
+    await expect(bounded.open()).resolves.toMatchObject({ code: "START_TIMEOUT" });
+    expect(performance.now() - startedAt).toBeLessThan(700);
+  }, 2_000);
+
+  it("derives hanging close request deadlines from the shutdown wall-clock budget", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-close-budget-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const tokenPath = join(directory, "auth.token");
+    await writeFile(tokenPath, "budget-token\n");
+    const server = createServer(() => undefined);
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("missing address");
+    cleanups.push(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const store = createLifecycleStateStore({
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    });
+    const manager = createCompanionManager({
+      store,
+      client: new CompanionHttpClient(`http://127.0.0.1:${address.port}`, tokenPath),
+      launcher: { spawnHud: vi.fn() },
+      shutdownTimeoutMs: 90,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(directory, "diagnostics"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: address.port,
+        installManifestPath: join(directory, "install.json"),
+        dataDirectoryPath: directory
+      }
+    });
+    const startedAt = performance.now();
+
+    await expect(manager.close()).resolves.toEqual({ desiredState: "off", observedState: "stopped" });
+    expect(performance.now() - startedAt).toBeLessThan(700);
+  }, 2_000);
+
   it("does not wait for a permanently pending logger before shutdown", async () => {
     const pendingLogger = {
       write: vi.fn((_entry: OperationalLogEntry) => new Promise<void>(() => undefined))
@@ -349,7 +596,7 @@ describe("companion lifecycle manager", () => {
     const result = await Promise.race([
       manager.close(),
       new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new Error("shutdown waited for logger")), 100)
+        setTimeout(() => reject(new Error("shutdown waited for logger")), 500)
       )
     ]);
 

@@ -1,35 +1,13 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-
-class CapturingStdioClientTransport extends StdioClientTransport {
-  readonly stdoutChunks: Buffer[] = [];
-
-  override async start(): Promise<void> {
-    const readBuffer = (this as unknown as {
-      _readBuffer: { append(chunk: Buffer): void };
-    })._readBuffer;
-    const append = readBuffer.append.bind(readBuffer);
-    readBuffer.append = (chunk: Buffer): void => {
-      this.stdoutChunks.push(Buffer.from(chunk));
-      append(chunk);
-    };
-    await super.start();
-  }
-
-  stdout(): string {
-    return Buffer.concat(this.stdoutChunks).toString("utf8");
-  }
-}
 
 beforeAll(async () => {
   try {
@@ -43,73 +21,114 @@ beforeAll(async () => {
   }
 });
 
+interface JsonRpcResponse {
+  jsonrpc: "2.0";
+  id: number;
+  result?: unknown;
+  error?: unknown;
+}
+
 describe("plugin MCP stdio server", () => {
   it(
-    "initializes and exposes every tool when Codex starts it from another task directory",
+    "initializes and exposes every tool with protocol-only public child stdout",
     async () => {
       const taskDirectory = await mkdtemp(join(tmpdir(), "codex-progress-hud-task-"));
       const packageJson = JSON.parse(
         await readFile(resolve(pluginRoot, "package.json"), "utf8")
       ) as { main?: string };
-      const server = packageJson.main === undefined
-        ? undefined
-        : {
-            command: process.execPath,
-            args: [resolve(pluginRoot, packageJson.main), "--mcp-stdio"]
-          };
-
-      expect(server).toBeDefined();
-
-      const transport = new CapturingStdioClientTransport({
-        command: server!.command,
-        ...(server!.args ? { args: server!.args } : {}),
+      expect(packageJson.main).toBeDefined();
+      const child = spawn(process.execPath, [resolve(pluginRoot, packageJson.main!), "--mcp-stdio"], {
         cwd: taskDirectory,
-        stderr: "pipe"
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true
       });
+      const stdoutLines: string[] = [];
+      const pending = new Map<number, {
+        resolve(response: JsonRpcResponse): void;
+        reject(error: Error): void;
+      }>();
+      let stdoutBuffer = "";
       let stderr = "";
-      transport.stderr?.on("data", (chunk) => {
-        stderr += String(chunk);
+      child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+      child.stdout.on("data", (chunk) => {
+        stdoutBuffer += String(chunk);
+        for (;;) {
+          const newline = stdoutBuffer.indexOf("\n");
+          if (newline < 0) break;
+          const line = stdoutBuffer.slice(0, newline).replace(/\r$/u, "");
+          stdoutBuffer = stdoutBuffer.slice(newline + 1);
+          if (line.length === 0) continue;
+          stdoutLines.push(line);
+          try {
+            const message = JSON.parse(line) as JsonRpcResponse;
+            if (typeof message.id === "number") {
+              pending.get(message.id)?.resolve(message);
+              pending.delete(message.id);
+            }
+          } catch {
+            // The final protocol-only assertion reports the exact public stdout line.
+          }
+        }
       });
-      const client = new Client({ name: "plugin-integration-test", version: "1.0.0" });
+      const exit = new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+      child.once("exit", (code) => {
+        for (const waiter of pending.values()) {
+          waiter.reject(new Error(`MCP child exited ${code}: ${stderr.trim()}`));
+        }
+        pending.clear();
+      });
+      const request = (id: number, method: string, params?: unknown): Promise<JsonRpcResponse> => {
+        const response = new Promise<JsonRpcResponse>((resolveResponse, reject) => {
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error(`MCP request ${method} timed out: ${stderr.trim()}`));
+          }, 5_000);
+          pending.set(id, {
+            resolve(value) { clearTimeout(timer); resolveResponse(value); },
+            reject(error) { clearTimeout(timer); reject(error); }
+          });
+        });
+        child.stdin.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method,
+          ...(params === undefined ? {} : { params })
+        })}\n`);
+        return response;
+      };
 
       try {
-        await client.connect(transport);
-        const result = await client.listTools();
+        const initialized = await request(1, "initialize", {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "public-stdio-test", version: "1.0.0" }
+        });
+        expect(initialized.error).toBeUndefined();
+        child.stdin.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized",
+          params: {}
+        })}\n`);
+        const listed = await request(2, "tools/list", {});
+        expect(listed.error).toBeUndefined();
+        const tools = (listed.result as { tools: Array<{ name: string }> }).tools;
 
-        expect(result.tools.map((tool) => tool.name).sort()).toEqual(
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
           [
-            "hud_close",
-            "hud_diagnose",
-            "hud_hide",
-            "hud_open",
-            "hud_status",
-            "progress_report",
-            "task_outcome",
-            "task_status",
-            "tracking_pause",
-            "tracking_resume",
-            "tracking_start",
-            "tracking_status",
-            "tracking_stop"
+            "hud_close", "hud_diagnose", "hud_hide", "hud_open", "hud_status",
+            "progress_report", "task_outcome", "task_status", "tracking_pause",
+            "tracking_resume", "tracking_start", "tracking_status", "tracking_stop"
           ].sort()
         );
-        const stdoutLines = transport.stdout().split(/\r?\n/u).filter(Boolean);
         expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
         expect(stdoutLines.every((line) => {
-          try {
-            const message = JSON.parse(line) as { jsonrpc?: unknown };
-            return message.jsonrpc === "2.0";
-          } catch {
-            return false;
-          }
-        }), `non-protocol stdout: ${transport.stdout()}`).toBe(true);
-      } catch (error) {
-        throw new Error(
-          `MCP server failed when launched for a different task directory. ${stderr.trim()}`,
-          { cause: error }
-        );
+          try { return (JSON.parse(line) as { jsonrpc?: unknown }).jsonrpc === "2.0"; }
+          catch { return false; }
+        }), `non-protocol stdout: ${stdoutLines.join("\n")}`).toBe(true);
       } finally {
-        await client.close().catch(() => undefined);
+        child.stdin.end();
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+        await exit;
         await rm(taskDirectory, { recursive: true, force: true });
       }
     },

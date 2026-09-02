@@ -25,6 +25,7 @@ async function fixture(
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("missing fixture address");
   const close = async () => {
+    server.closeAllConnections();
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error === undefined ? resolve() : reject(error)))
     );
@@ -166,5 +167,58 @@ describe("CompanionHttpClient", () => {
     await expect(client.identity()).rejects.toMatchObject({ code: "PORT_CONFLICT" });
     incompatible = true;
     await expect(client.identity()).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
+  });
+
+  it.each([
+    ["404", 404, "application/json", JSON.stringify({ error: "missing-secret" })],
+    ["500", 500, "application/json", JSON.stringify({ error: "server-secret" })],
+    ["HTML", 200, "text/html", "<html>private foreign page</html>"],
+    ["empty", 200, "application/json", ""],
+    ["malformed JSON", 200, "application/json", "{private-malformed"]
+  ])("classifies an established non-identity %s response as a port conflict", async (
+    _name,
+    status,
+    contentType,
+    body
+  ) => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) => {
+      response.writeHead(status, { "content-type": contentType });
+      response.end(body);
+    });
+
+    const error = await new CompanionHttpClient(baseUrl, tokenPath).identity().catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "PORT_CONFLICT" });
+    expect(String(error)).not.toContain("secret");
+    expect(String(error)).not.toContain("private");
+  });
+
+  it("aborts a listener that accepts an identity request but never responds", async () => {
+    const { baseUrl, tokenPath } = await fixture(() => undefined);
+    const startedAt = performance.now();
+
+    const error = await new CompanionHttpClient(baseUrl, tokenPath)
+      .identity({ timeoutMs: 75 })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "OFFLINE" });
+    expect(performance.now() - startedAt).toBeLessThan(500);
+  });
+
+  it("bounds streamed JSON responses without exposing their content", async () => {
+    const secret = "oversized-private-content";
+    const { baseUrl, tokenPath } = await fixture((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write(`{"service":"codex-progress-hud","protocolVersion":1,"padding":"${secret}`);
+      response.write("x".repeat(70_000));
+    });
+
+    const error = await new CompanionHttpClient(baseUrl, tokenPath)
+      .identity({ timeoutMs: 500 })
+      .catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "PORT_CONFLICT" });
+    expect(String(error)).not.toContain(secret);
+    expect(String(error)).not.toContain("padding");
   });
 });

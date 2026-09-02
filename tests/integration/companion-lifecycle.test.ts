@@ -4,17 +4,19 @@ import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   getDefaultEnvironment,
   StdioClientTransport
 } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { ProcessLauncher, SpawnedHud } from "../../src/lifecycle/process-launcher.js";
 import { CompanionHttpClient } from "../../src/mcp/report-client.js";
+import { createProgressServer } from "../../src/server/http-server.js";
 
 interface TestOwnedCompanion extends SpawnedHud {
   serviceUrl: string;
@@ -173,6 +175,145 @@ process.on("disconnect", () => {
 }
 
 describe("source-mode companion lifecycle", () => {
+  it("keeps close authoritative across two real MCP processes after ensure but before submit", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-two-mcp-race-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const on = await store.setDesiredState("on");
+    const runtime = {
+      pid: process.pid,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: new Date().toISOString()
+    };
+    await store.writeRuntime(runtime, on.generation);
+    let shutdownRequested!: () => void;
+    const shutdownRequest = new Promise<void>((resolve) => { shutdownRequested = resolve; });
+    const target = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => ({
+        service: "codex-progress-hud",
+        ...runtime,
+        visibility: "visible"
+      }),
+      showWindow: () => undefined,
+      hideWindow: () => undefined,
+      requestShutdown: () => shutdownRequested(),
+      runIfGeneration: (generation, desiredState, operation) =>
+        store.runIfGeneration(generation, desiredState, operation)
+    });
+    await target.listen();
+    let targetClosed = false;
+    cleanups.push(async () => {
+      if (!targetClosed) await target.close();
+    });
+
+    let eventArrived!: () => void;
+    const eventArrival = new Promise<void>((resolve) => { eventArrived = resolve; });
+    let releaseEvent!: () => void;
+    const eventGate = new Promise<void>((resolve) => { releaseEvent = resolve; });
+    let shutdownRelayed!: () => void;
+    const shutdownRelay = new Promise<void>((resolve) => { shutdownRelayed = resolve; });
+    const proxy = createServer((request, response) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        if (request.url === "/api/events" && request.method === "POST") {
+          eventArrived();
+          await eventGate;
+        }
+        const upstream = await fetch(`${target.address().url}${request.url ?? "/"}`, {
+          ...(request.method === undefined ? {} : { method: request.method }),
+          headers: request.headers as Record<string, string>,
+          ...(chunks.length === 0 ? {} : { body: Buffer.concat(chunks) })
+        });
+        const body = Buffer.from(await upstream.arrayBuffer());
+        response.writeHead(upstream.status, Object.fromEntries(upstream.headers.entries()));
+        response.end(body);
+        if (request.url === "/api/shutdown") shutdownRelayed();
+      })().catch(() => response.destroy());
+    });
+    await new Promise<void>((resolve, reject) => {
+      proxy.once("error", reject);
+      proxy.listen(0, "127.0.0.1", resolve);
+    });
+    const proxyAddress = proxy.address();
+    if (proxyAddress === null || typeof proxyAddress === "string") throw new Error("proxy address unavailable");
+    let proxyClosed = false;
+    cleanups.push(async () => {
+      if (proxyClosed) return;
+      proxy.closeAllConnections();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    });
+    const environment = {
+      ...getDefaultEnvironment(),
+      CODEX_PROGRESS_HUD_DATA_DIR: directory,
+      CODEX_PROGRESS_HUD_TOKEN_PATH: join(directory, "auth.token"),
+      CODEX_PROGRESS_HUD_URL: `http://127.0.0.1:${proxyAddress.port}`
+    };
+    const firstTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve(pluginRoot, "dist/main.js"), "--mcp-stdio"],
+      env: environment,
+      stderr: "pipe"
+    });
+    const secondTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve(pluginRoot, "dist/main.js"), "--mcp-stdio"],
+      env: environment,
+      stderr: "pipe"
+    });
+    const firstClient = new Client({ name: "race-writer", version: "1.0.0" });
+    const secondClient = new Client({ name: "race-closer", version: "1.0.0" });
+
+    try {
+      await Promise.all([firstClient.connect(firstTransport), secondClient.connect(secondTransport)]);
+      const reportPromise = firstClient.callTool({
+        name: "progress_report",
+        arguments: { task_id: "two-mcp", title: "Two MCP race", phase: "submit" }
+      });
+      await eventArrival;
+      const closePromise = secondClient.callTool({ name: "hud_close", arguments: {} });
+      await vi.waitFor(async () => {
+        expect((await store.readSettings()).desiredState).toBe("off");
+      });
+      await shutdownRequest;
+      releaseEvent();
+      const report = await reportPromise;
+      await shutdownRelay;
+      proxy.closeAllConnections();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+      proxyClosed = true;
+      const closed = await closePromise;
+
+      expect(report.structuredContent).toMatchObject({
+        ok: true,
+        desiredState: "off",
+        code: "MANUALLY_DISABLED"
+      });
+      expect(closed.structuredContent).toMatchObject({
+        ok: true,
+        desiredState: "off",
+        observedState: "stopped"
+      });
+      expect((await store.readSettings()).desiredState).toBe("off");
+    } finally {
+      await Promise.all([
+        firstClient.close().catch(() => undefined),
+        secondClient.close().catch(() => undefined)
+      ]);
+      await target.close();
+      targetClosed = true;
+    }
+  }, 20_000);
+
   it("controls a test-owned companion and recovers it once after termination", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-lifecycle-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

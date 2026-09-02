@@ -11,7 +11,7 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
-async function startServer(options: { withUi?: boolean } = {}) {
+async function startServer(options: { withUi?: boolean; withGenerationGuard?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-"));
   const tokenPath = join(directory, "auth.token");
   const uiDirectory = options.withUi ? join(directory, "ui") : undefined;
@@ -34,6 +34,15 @@ async function startServer(options: { withUi?: boolean } = {}) {
   const showWindow = vi.fn();
   const hideWindow = vi.fn();
   const requestShutdown = vi.fn();
+  let generation = 1;
+  let desiredState: "on" | "off" = "on";
+  const runIfGeneration = vi.fn(async (
+    requestedGeneration: number,
+    requestedState: "on" | "off",
+    operation: () => unknown | Promise<unknown>
+  ) => requestedGeneration === generation && requestedState === desiredState
+    ? { accepted: true as const, value: await operation() }
+    : { accepted: false as const });
   const server = createProgressServer({
     port: 0,
     tokenPath,
@@ -41,6 +50,7 @@ async function startServer(options: { withUi?: boolean } = {}) {
     showWindow,
     hideWindow,
     requestShutdown,
+    ...(options.withGenerationGuard ? { runIfGeneration } : {}),
     ...(uiDirectory === undefined ? {} : { uiDirectory })
   });
   await server.listen();
@@ -57,6 +67,10 @@ async function startServer(options: { withUi?: boolean } = {}) {
     showWindow,
     hideWindow,
     requestShutdown
+    ,setLifecycle(nextGeneration: number, nextState: "on" | "off") {
+      generation = nextGeneration;
+      desiredState = nextState;
+    }
   };
 }
 
@@ -160,6 +174,28 @@ describe("local progress HTTP service", () => {
     expect(hideWindow).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["malformed JSON", "{not-json"],
+    ["null", "null"],
+    ["array", "[]"],
+    ["primitive", "7"],
+    ["non-empty object", '{"unexpected":true}']
+  ])("rejects a %s control payload without invoking its callback", async (_name, body) => {
+    const { baseUrl, token, showWindow } = await startServer();
+
+    const response = await fetch(`${baseUrl}/api/window/show`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json"
+      },
+      body
+    });
+
+    expect(response.status).toBe(400);
+    expect(showWindow).not.toHaveBeenCalled();
+  });
+
   it("accepts JSON parameters but rejects a prefix-spoofed control media type", async () => {
     const { baseUrl, token, hideWindow } = await startServer();
 
@@ -214,6 +250,54 @@ describe("local progress HTTP service", () => {
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ accepted: true });
     expect(requestShutdown).toHaveBeenCalledOnce();
+  });
+
+  it("rejects stale ensured writes and rejects every write after shutdown begins", async () => {
+    const fixture = await startServer({ withGenerationGuard: true });
+    const headers = {
+      authorization: `Bearer ${fixture.token}`,
+      "content-type": "application/json"
+    };
+    const event = JSON.stringify({
+      taskId: "generation-race",
+      title: "Generation race",
+      event: { type: "turn_started" }
+    });
+
+    const missing = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers,
+      body: event
+    });
+    const stale = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers: { ...headers, "x-codex-progress-hud-generation": "0" },
+      body: event
+    });
+    const current = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers: { ...headers, "x-codex-progress-hud-generation": "1" },
+      body: event
+    });
+
+    expect([missing.status, stale.status, current.status]).toEqual([409, 409, 202]);
+
+    fixture.setLifecycle(2, "off");
+    const shutdown = await fetch(`${fixture.baseUrl}/api/shutdown`, {
+      method: "POST",
+      headers: { ...headers, "x-codex-progress-hud-generation": "2" },
+      body: "{}"
+    });
+    fixture.setLifecycle(3, "on");
+    const afterShutdown = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers: { ...headers, "x-codex-progress-hud-generation": "3" },
+      body: event
+    });
+
+    expect(shutdown.status).toBe(202);
+    expect(afterShutdown.status).toBe(409);
+    expect(fixture.requestShutdown).toHaveBeenCalledOnce();
   });
 
   it("binds to loopback and exposes an authenticated empty snapshot", async () => {

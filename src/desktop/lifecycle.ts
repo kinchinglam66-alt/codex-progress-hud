@@ -2,6 +2,7 @@ import { randomUUID as nodeRandomUUID } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { DesktopLaunchReason } from "../main.js";
 import { createOperationalLogger, type OperationalLogEntry, type OperationalLogger } from "../diagnostics/logger.js";
 import { writeDiagnosticReport } from "../diagnostics/report.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
@@ -50,7 +51,7 @@ export interface DesktopAppLike {
   on(event: string, callback: (...args: any[]) => unknown): unknown;
   quit(): void;
   getLoginItemSettings(): { openAtLogin: boolean };
-  setLoginItemSettings(settings: { openAtLogin: boolean }): void;
+  setLoginItemSettings(settings: { openAtLogin: boolean; args: string[] }): void;
   getVersion(): string;
 }
 
@@ -206,9 +207,13 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
   };
 }
 
-export async function runDesktop(dependencies?: DesktopDependencies): Promise<void> {
+export async function runDesktop(
+  dependencies?: DesktopDependencies,
+  launchReason: DesktopLaunchReason = "explicit"
+): Promise<void> {
   const resolved = dependencies ?? await defaultDesktopDependencies();
   if (!resolved.app.requestSingleInstanceLock()) {
+    if (launchReason === "explicit") await resolved.stateStore.setDesiredState("on");
     resolved.app.quit();
     return;
   }
@@ -220,6 +225,8 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
   let progressServer: DesktopProgressServer | undefined;
   let windowController: DesktopWindowController | undefined;
   let startupAt: Date | undefined;
+  let runtimeIdentity: RuntimeIdentity | undefined;
+  let launchSettings: Awaited<ReturnType<LifecycleStateStore["readSettings"]>>;
   const recentErrors: DesktopDiagnosticSnapshot["errors"] = [];
 
   const rememberError = (error: unknown): void => {
@@ -282,7 +289,7 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       ["server close", () => progressServer?.close()],
       ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
       ["window dispose", () => windowController?.dispose()],
-      ["runtime clear", () => resolved.stateStore.clearRuntime()]
+      ["runtime clear", () => resolved.stateStore.clearRuntime(runtimeIdentity)]
     ];
     const attempts = steps.map(async ([name, step]) => {
       let operation: Promise<void>;
@@ -326,13 +333,27 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
   try {
     assertStarting();
     windowController = resolved.createWindowController({ quitting: () => quitting });
-    resolved.app.on("second-instance", () => windowController?.show());
+    resolved.app.on("second-instance", () => {
+      void resolved.stateStore.setDesiredState("on")
+        .then(() => windowController?.show())
+        .catch((error: unknown) => reportError(error, "second-instance activation"));
+    });
     resolved.app.on("before-quit", (event: { preventDefault(): void }) => {
       quitting = true;
       if (cleanupComplete) return;
       event.preventDefault();
       finishQuitAfterStartup();
     });
+
+    launchSettings = await resolved.stateStore.readSettings();
+    if (launchReason === "automatic-login" && launchSettings.desiredState !== "on") {
+      quitting = true;
+      quit();
+      return;
+    }
+    if (launchReason === "explicit" && launchSettings.desiredState !== "on") {
+      launchSettings = await resolved.stateStore.setDesiredState("on");
+    }
 
     await resolved.app.whenReady();
     assertStarting();
@@ -343,7 +364,7 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       lifecycleState: "starting",
       protocolVersion: PROTOCOL_VERSION
     }, startupAt);
-    const runtimeIdentity: RuntimeIdentity = {
+    runtimeIdentity = {
       pid: resolved.pid,
       version: resolved.app.getVersion(),
       protocolVersion: PROTOCOL_VERSION,
@@ -351,12 +372,14 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       startedAt: startupAt.toISOString()
     };
     assertStarting();
-    await resolved.stateStore.writeRuntime(runtimeIdentity);
+    if (!(await resolved.stateStore.writeRuntime(runtimeIdentity, launchSettings.generation))) {
+      throw new StartupCancelledError("desktop launch generation is no longer current");
+    }
     assertStarting();
 
     const health = (): HudHealth => ({
       service: "codex-progress-hud",
-      ...runtimeIdentity,
+      ...runtimeIdentity!,
       protocolVersion: PROTOCOL_VERSION,
       visibility: windowController?.visibility() ?? "hidden"
     });
@@ -371,7 +394,9 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       requestShutdown: () => {
         quitting = true;
         quit();
-      }
+      },
+      runIfGeneration: (generation, desiredState, operation) =>
+        resolved.stateStore.runIfGeneration(generation, desiredState, operation)
     });
 
     await progressServer.listen();
@@ -391,7 +416,13 @@ export async function runDesktop(dependencies?: DesktopDependencies): Promise<vo
       loginEnabled: resolved.app.getLoginItemSettings().openAtLogin,
       onShow: () => windowController?.show(),
       onHide: () => windowController?.hide(),
-      onToggleLogin: (enabled) => resolved.app.setLoginItemSettings({ openAtLogin: enabled }),
+      onToggleLogin: async (enabled) => {
+        resolved.app.setLoginItemSettings({
+          openAtLogin: enabled,
+          args: ["--automatic-login"]
+        });
+        await resolved.stateStore.setStartWithWindows(enabled);
+      },
       onDiagnose: () => resolved.diagnose({
         observedState: quitting
           ? "stopped"

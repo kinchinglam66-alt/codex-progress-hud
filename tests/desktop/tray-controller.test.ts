@@ -100,4 +100,42 @@ describe("createTrayController", () => {
 
     await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(failure, "Hide HUD"));
   });
+
+  it.each([
+    ["Show HUD", 0, "onShow", false],
+    ["Hide HUD", 1, "onHide", true],
+    ["Start with Windows", 3, "onToggleLogin", false],
+    ["Diagnose", 4, "onDiagnose", true],
+    ["Exit", 6, "onExit", false]
+  ] as const)("contains every %s action failure through the shared wrapper", async (
+    action,
+    index,
+    callbackName,
+    asynchronous
+  ) => {
+    const failure = new Error(`${action} failed`);
+    const onError = vi.fn();
+    let template: TrayMenuItem[] = [];
+    const callbacks = {
+      onShow: vi.fn(),
+      onHide: vi.fn(),
+      onToggleLogin: vi.fn(),
+      onDiagnose: vi.fn(),
+      onExit: vi.fn()
+    };
+    callbacks[callbackName].mockImplementation(() => {
+      if (asynchronous) return Promise.reject(failure);
+      throw failure;
+    });
+    createTrayController({
+      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
+      buildMenu: (received) => { template = received; return {}; },
+      loginEnabled: false,
+      ...callbacks,
+      onError
+    });
+
+    expect(() => template[index]?.click?.({ checked: true })).not.toThrow();
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(failure, action));
+  });
 });

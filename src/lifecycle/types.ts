@@ -7,6 +7,7 @@ export type ObservedHudState =
 export interface HudSettings {
   desiredState?: DesiredHudState;
   startWithWindows: boolean;
+  generation: number;
 }
 
 export interface RuntimeIdentity {
@@ -42,7 +43,7 @@ export interface HudLifecycleSnapshot {
 }
 
 export type EnsureResult =
-  | { kind: "ready"; snapshot: HudLifecycleSnapshot }
+  | { kind: "ready"; generation: number; snapshot: HudLifecycleSnapshot }
   | { kind: "suppressed"; code: "MANUALLY_DISABLED" }
   | { kind: "error"; code: HudErrorCode; snapshot: HudLifecycleSnapshot };
 
@@ -59,8 +60,10 @@ export interface LifecycleObservation {
 export interface LifecycleStateStore {
   readSettings(): Promise<HudSettings>;
   setDesiredState(state: DesiredHudState): Promise<HudSettings>;
-  writeRuntime(identity: RuntimeIdentity): Promise<void>;
+  setStartWithWindows(enabled: boolean): Promise<HudSettings>;
+  writeRuntime(identity: RuntimeIdentity, generation?: number): Promise<boolean>;
   readRuntime(): Promise<RuntimeIdentity | null>;
-  clearRuntime(): Promise<void>;
+  clearRuntime(expected?: RuntimeIdentity): Promise<void>;
   readInstallManifest(): Promise<InstallManifest | null>;
+  runIfGeneration<T>(generation: number, desiredState: DesiredHudState, operation: () => T | Promise<T>): Promise<{ accepted: false } | { accepted: true; value: T }>;
 }
