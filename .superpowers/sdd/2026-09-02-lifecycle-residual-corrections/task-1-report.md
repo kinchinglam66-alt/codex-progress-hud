@@ -72,3 +72,43 @@ The full suite includes the public stdio tool-catalog test, preserving all 13 to
 ## Concerns
 
 None for Task 1. The unrelated residual findings I1, I3, and M2 remain outside this task by design.
+
+## Review fix round 1
+
+### Findings addressed
+
+1. Entry parsing now accepts manager generation only as the complete, non-conflicting `--hud --manager-generation=<safe integer>` form. A manager generation combined with `--mcp-stdio` or `--automatic-login`, or provided without `--hud`, throws `Invalid manager launch arguments`; manager intent can no longer override MCP mode.
+2. The real two-MCP race now gates `/api/shutdown` at the proxy before it reaches the target. After observing persisted off, the test releases the stale event first, waits for its rejected tool result, and only then releases shutdown. A category-only guard-call record proves the stale on-generation request reached the real `LifecycleStateStore.runIfGeneration` while the target had not entered its shutdown mutation.
+
+### Root causes
+
+- `selectEntryIntent()` validated a manager-generation value and returned manager HUD intent before checking the surrounding mode/reason flags.
+- The original race waited for the target shutdown callback before releasing the event. That callback runs only after the server sets `shuttingDown`, so the event was rejected by the shutdown latch before the state-store generation guard could run.
+
+### RED / GREEN evidence
+
+- Parser RED: `tests/desktop/entry-mode.test.ts` failed all 3 new conflict rows while the prior 12 tests passed. GREEN: 15/15 passed after adding the complete/non-conflicting combination check.
+- Generation-guard mutation RED: with the target's `runIfGeneration` option removed, the stale event was accepted and the expected suppressed structured result was absent; integration result was 1 failed / 2 passed.
+- Generation-guard GREEN: restoring the real guard through a recording wrapper produced 3/3 integration passes and recorded the stale `{ generation: on.generation, desiredState: "on" }` call.
+
+### Verification
+
+- Focused Task 1: 4 files, 92/92 passed, exit 0.
+- Full suite: 18 files, 281/281 passed, exit 0.
+- `npm run typecheck`: exit 0.
+- `git diff --check`: exit 0.
+
+### Files changed in review fix round 1
+
+- `src/main.ts`
+- `tests/desktop/entry-mode.test.ts`
+- `tests/integration/companion-lifecycle.test.ts`
+- `.superpowers/sdd/2026-09-02-lifecycle-residual-corrections/task-1-report.md`
+
+### Review-round self-check and concerns
+
+- Removing the parser conflict gate fails all three new table rows.
+- Removing or bypassing the server generation guard makes the cross-process stale event test fail through consumer-visible acceptance, not source inspection.
+- Shutdown remains blocked outside the target until the stale tool result settles, so `shuttingDown` cannot mask the intended assertion window.
+- No production behavior outside entry-intent validation changed in this round. No new privacy payloads are captured; guard evidence records only generation and desired state.
+- Concerns: none.

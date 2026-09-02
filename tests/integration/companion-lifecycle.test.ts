@@ -181,6 +181,10 @@ describe("source-mode companion lifecycle", () => {
     };
     const store = createLifecycleStateStore(paths);
     const on = await store.setDesiredState("on");
+    const generationGuardCalls: Array<{
+      generation: number;
+      desiredState: "on" | "off";
+    }> = [];
     const runtime = {
       pid: process.pid,
       version: "0.2.0-test",
@@ -202,8 +206,10 @@ describe("source-mode companion lifecycle", () => {
       showWindow: () => undefined,
       hideWindow: () => undefined,
       requestShutdown: () => shutdownRequested(),
-      runIfGeneration: (generation, desiredState, operation) =>
-        store.runIfGeneration(generation, desiredState, operation)
+      runIfGeneration: (generation, desiredState, operation) => {
+        generationGuardCalls.push({ generation, desiredState });
+        return store.runIfGeneration(generation, desiredState, operation);
+      }
     });
     await target.listen();
     let targetClosed = false;
@@ -217,6 +223,10 @@ describe("source-mode companion lifecycle", () => {
     const eventGate = new Promise<void>((resolve) => { releaseEvent = resolve; });
     let shutdownRelayed!: () => void;
     const shutdownRelay = new Promise<void>((resolve) => { shutdownRelayed = resolve; });
+    let shutdownArrived!: () => void;
+    const shutdownArrival = new Promise<void>((resolve) => { shutdownArrived = resolve; });
+    let releaseShutdown!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => { releaseShutdown = resolve; });
     const acceptedEvents: unknown[] = [];
     let eventRequests = 0;
     const proxy = createServer((request, response) => {
@@ -227,6 +237,10 @@ describe("source-mode companion lifecycle", () => {
           eventRequests += 1;
           eventArrived();
           await eventGate;
+        }
+        if (request.url === "/api/shutdown" && request.method === "POST") {
+          shutdownArrived();
+          await shutdownGate;
         }
         const upstream = await fetch(`${target.address().url}${request.url ?? "/"}`, {
           ...(request.method === undefined ? {} : { method: request.method }),
@@ -287,9 +301,11 @@ describe("source-mode companion lifecycle", () => {
         expect((await store.readSettings()).desiredState).toBe("off");
       });
       const closedGeneration = (await store.readSettings()).generation;
-      await shutdownRequest;
+      await shutdownArrival;
       releaseEvent();
       const report = await reportPromise;
+      releaseShutdown();
+      await shutdownRequest;
       await shutdownRelay;
       proxy.closeAllConnections();
       await new Promise<void>((resolve) => proxy.close(() => resolve()));
@@ -308,6 +324,10 @@ describe("source-mode companion lifecycle", () => {
       });
       expect((await store.readSettings()).desiredState).toBe("off");
       expect((await store.readSettings()).generation).toBe(closedGeneration);
+      expect(generationGuardCalls).toContainEqual({
+        generation: on.generation,
+        desiredState: "on"
+      });
       expect(eventRequests).toBe(1);
       expect(acceptedEvents).not.toContainEqual(expect.objectContaining({
         event: expect.objectContaining({ type: "tracking_started" })

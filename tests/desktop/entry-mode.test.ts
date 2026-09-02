@@ -44,4 +44,12 @@ describe("executable entry mode", () => {
   ])("rejects a %s instead of treating it as explicit activation", (_name, argv) => {
     expect(() => selectEntryIntent(argv)).toThrow("Invalid manager generation");
   });
+
+  it.each([
+    ["MCP stdio", ["app.exe", "--mcp-stdio", "--hud", "--manager-generation=7"]],
+    ["automatic login", ["app.exe", "--automatic-login", "--hud", "--manager-generation=7"]],
+    ["missing HUD marker", ["app.exe", "--manager-generation=7"]]
+  ])("rejects manager generation combined with %s", (_name, argv) => {
+    expect(() => selectEntryIntent(argv)).toThrow("Invalid manager launch arguments");
+  });
 });

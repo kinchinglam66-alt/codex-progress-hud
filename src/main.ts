@@ -24,6 +24,13 @@ export function selectEntryIntent(argv: string[]): EntryIntent {
     const match = /^--manager-generation=(\d+)$/u.exec(managerArguments[0]!);
     const generation = match === null ? Number.NaN : Number(match[1]);
     if (!Number.isSafeInteger(generation)) throw new Error("Invalid manager generation");
+    if (
+      !argv.includes("--hud") ||
+      argv.includes("--mcp-stdio") ||
+      argv.includes("--automatic-login")
+    ) {
+      throw new Error("Invalid manager launch arguments");
+    }
     return { mode: "hud", launchReason: "manager", generation };
   }
   if (argv.includes("--mcp-stdio")) return { mode: "mcp-stdio" };
