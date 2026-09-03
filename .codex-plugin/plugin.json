@@ -19,7 +19,7 @@
     "category": "Productivity",
     "capabilities": ["Interactive"],
     "defaultPrompt": [
-      "Track this task in the Progress HUD.",
+      "Show this task's automatic Progress HUD status.",
       "Report this task's current phase and ETA.",
       "Show the latest Progress HUD status."
     ],

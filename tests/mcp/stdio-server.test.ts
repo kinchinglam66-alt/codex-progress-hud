@@ -117,9 +117,27 @@ describe("plugin MCP stdio server", () => {
           [
             "hud_close", "hud_diagnose", "hud_hide", "hud_open", "hud_status",
             "progress_report", "task_outcome", "task_status", "tracking_pause",
-            "tracking_resume", "tracking_start", "tracking_status", "tracking_stop"
+            "tracking_resume", "tracking_start", "tracking_status", "tracking_stop",
+            "validation_observed"
           ].sort()
         );
+        const toolByName = new Map(
+          (listed.result as { tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> }).tools
+            .map((tool) => [tool.name, tool] as const)
+        );
+        expect(toolByName.get("tracking_status")?.description).toContain("observational");
+        expect(toolByName.get("hud_open")?.description).toContain("Deprecated");
+        expect(toolByName.get("hud_close")?.description).toContain("Deprecated");
+        expect(toolByName.get("progress_report")?.inputSchema).toMatchObject({
+          required: expect.arrayContaining(["task_handle", "phase"])
+        });
+        expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("properties.task_id");
+        const noAssociation = await request(3, "tools/call", {
+          name: "tracking_pause",
+          arguments: {}
+        });
+        expect(noAssociation.error).toBeUndefined();
+        expect(JSON.stringify(noAssociation.result)).toContain("NO_SESSION_ASSOCIATION");
         expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
         expect(stdoutLines.every((line) => {
           try { return (JSON.parse(line) as { jsonrpc?: unknown }).jsonrpc === "2.0"; }

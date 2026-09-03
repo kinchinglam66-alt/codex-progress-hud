@@ -20,32 +20,31 @@ import {
   type ProgressClientSnapshot
 } from "./report-client.js";
 
-function selectedTask(
-  snapshot: ProgressClientSnapshot
-): { task: { id?: string; title?: string; status: string }; eta: unknown } | null {
-  if ("selected" in snapshot) return snapshot.selected;
-  return snapshot.task === null ? null : { task: snapshot.task, eta: snapshot.eta };
-}
-
-const id = z.string().trim().min(1).max(128);
+export const taskHandleSchema = z.string().regex(/^hud_[A-Za-z0-9_-]{20,96}$/u);
 const title = z.string().trim().min(1).max(160);
+const phase = z.string().trim().min(1).max(80);
+const step = z.string().trim().max(160);
+const boundedSeconds = z.number().finite().nonnegative().max(31_536_000);
 export const trackingStartSchema = z.object({
-  task_id: id.optional(),
+  task_handle: taskHandleSchema.optional(),
   title: title.optional()
-});
+}).strict();
+export const taskControlSchema = z.object({
+  task_handle: taskHandleSchema.optional()
+}).strict();
 
 export const progressReportSchema = z
   .object({
-    task_id: id,
-    title,
-    phase: z.string().trim().min(1).max(80),
-    current_step: z.string().trim().max(160).optional(),
+    task_handle: taskHandleSchema,
+    title: title.optional(),
+    phase,
+    current_step: step.optional(),
     progress: z.number().min(0).max(1).optional(),
     confidence: z.number().min(0).max(1).optional(),
-    eta_low_seconds: z.number().nonnegative().max(31_536_000).optional(),
-    eta_high_seconds: z.number().nonnegative().max(31_536_000).optional(),
+    eta_low_seconds: boundedSeconds.optional(),
+    eta_high_seconds: boundedSeconds.optional(),
     waiting_for: z.enum(["approval", "user"]).optional()
-  })
+  }).strict()
   .refine(
     (value) =>
       (value.eta_low_seconds === undefined) === (value.eta_high_seconds === undefined),
@@ -58,12 +57,17 @@ export const progressReportSchema = z
   );
 
 export const taskOutcomeSchema = z.object({
-  task_id: id,
-  title,
+  task_handle: taskHandleSchema,
+  title: title.optional(),
   outcome: z.enum(["completed", "blocked", "failed"]),
   verified: z.boolean().default(false),
   detail: z.string().trim().max(240).optional()
-});
+}).strict();
+
+export const validationObservedSchema = z.object({
+  task_handle: taskHandleSchema,
+  result: z.enum(["passed", "failed"])
+}).strict();
 
 export interface ToolResult extends CallToolResult {
   [key: string]: unknown;
@@ -77,7 +81,7 @@ export interface HudToolPayload {
   ok: boolean;
   desiredState?: "on" | "off";
   observedState?: ObservedHudState;
-  code?: HudErrorCode | HudClientErrorCode;
+  code?: HudErrorCode | HudClientErrorCode | "NO_SESSION_ASSOCIATION";
   reportPath?: string;
 }
 
@@ -113,31 +117,54 @@ function clientFailureText(code: HudClientErrorCode | HudErrorCode, prefix: stri
     : `${prefix} (${code}). Check HUD status or run diagnostics.`;
 }
 
-function noActiveTaskResult(): ToolResult {
-  return { content: [{ type: "text", text: "No active task to control." }], isError: true };
+function noSessionAssociationResult(): ToolResult {
+  return structuredResult(
+    "No Hook session association is available. Use the task_handle supplied by SessionStart or UserPromptSubmit.",
+    { ok: false, code: "NO_SESSION_ASSOCIATION" },
+    true
+  );
 }
 
-async function submitForCurrentTask(
+function controlHandle(input: unknown, kind: string): string | ToolResult {
+  const parsed = taskControlSchema.safeParse(input ?? {});
+  if (parsed.success && parsed.data.task_handle !== undefined) return parsed.data.task_handle;
+  if (parsed.success) return noSessionAssociationResult();
+  if (
+    input === undefined ||
+    input === null ||
+    (typeof input === "object" && input !== null && !Array.isArray(input) &&
+      !("task_handle" in input))
+  ) {
+    return noSessionAssociationResult();
+  }
+  return invalidResult(kind);
+}
+
+function submittedTaskStatus(snapshot: ProgressClientSnapshot, taskHandle: string): string {
+  if ("tasks" in snapshot) {
+    const task = snapshot.tasks.find((candidate) => candidate.id === taskHandle);
+    if (task !== undefined) return task.status;
+    if (snapshot.selected?.task.id === taskHandle) return snapshot.selected.task.status;
+    return "accepted";
+  }
+  return snapshot.task?.id === undefined || snapshot.task.id === taskHandle
+    ? snapshot.task?.status ?? "accepted"
+    : "accepted";
+}
+
+async function submitForTask(
   client: ProgressClient,
+  taskHandle: string,
   event: ProgressEnvelope["event"],
   requestOptions: () => HudRequestOptions
 ): Promise<ToolResult> {
-  const current = await client.status(requestOptions());
-  const currentTask = selectedTask(current)?.task;
-  if (
-    currentTask === undefined ||
-    currentTask.id === undefined ||
-    currentTask.title === undefined
-  ) {
-    return noActiveTaskResult();
-  }
   const snapshot = await client.submit({
-    taskId: currentTask.id,
-    title: currentTask.title,
+    taskId: taskHandle,
+    title: "Codex task",
     event
   }, requestOptions());
   return textResult(
-    `Tracking ${event.type.replace("tracking_", "")}: ${selectedTask(snapshot)?.task.status ?? "idle"}.`
+    `Tracking ${event.type.replace("tracking_", "")}: ${submittedTaskStatus(snapshot, taskHandle)}.`
   );
 }
 
@@ -247,11 +274,11 @@ export function createToolHandlers({
         "HUD is manually closed; progress was not displayed.",
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
-            taskId: value.task_id,
-            title: value.title,
+            taskId: value.task_handle,
+            title: value.title ?? "Codex task",
             event
           }, makeRequestOptions());
-          return textResult(`Progress recorded: ${selectedTask(snapshot)?.task.status ?? "idle"}.`);
+          return textResult(`Progress recorded: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
         }
       );
     },
@@ -265,8 +292,8 @@ export function createToolHandlers({
         "HUD is manually closed; the outcome was not displayed.",
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
-            taskId: value.task_id,
-            title: value.title,
+            taskId: value.task_handle,
+            title: value.title ?? "Codex task",
             event: {
               type: "model_outcome",
               outcome: value.outcome,
@@ -274,7 +301,25 @@ export function createToolHandlers({
               ...(value.detail === undefined ? {} : { detail: value.detail })
             }
           }, makeRequestOptions());
-          return textResult(`Outcome recorded: ${selectedTask(snapshot)?.task.status ?? "idle"}.`);
+          return textResult(`Outcome recorded: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
+        }
+      );
+    },
+
+    async validationObserved(input: unknown): Promise<ToolResult> {
+      const parsed = validationObservedSchema.safeParse(input);
+      if (!parsed.success) return invalidResult("validation observation");
+      const value = parsed.data;
+      return runWrite(
+        "task_outcome",
+        "HUD is manually closed; validation evidence was not displayed.",
+        async (makeRequestOptions) => {
+          const snapshot = await client.submit({
+            taskId: value.task_handle,
+            title: "Codex task",
+            event: { type: "validation_observed", result: value.result }
+          }, makeRequestOptions());
+          return textResult(`Validation ${value.result}: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
         }
       );
     },
@@ -283,49 +328,64 @@ export function createToolHandlers({
 
     async trackingStart(input: unknown): Promise<ToolResult> {
       const parsed = trackingStartSchema.safeParse(input ?? {});
-      if (!parsed.success) return invalidResult("tracking start");
+      if (!parsed.success) {
+        if (
+          input === undefined ||
+          input === null ||
+          (typeof input === "object" && input !== null && !Array.isArray(input) &&
+            !("task_handle" in input))
+        ) {
+          return noSessionAssociationResult();
+        }
+        return invalidResult("tracking start");
+      }
+      const taskHandle = parsed.data.task_handle;
+      if (taskHandle === undefined) return noSessionAssociationResult();
       return runWrite(
         "tracking_start",
         "HUD is manually closed; tracking was not started.",
         async (makeRequestOptions) => {
-          const current = await client.status(makeRequestOptions());
-          const currentTask = selectedTask(current)?.task;
-          const taskId = parsed.data.task_id ?? currentTask?.id ?? "current";
-          const taskTitle = parsed.data.title ?? currentTask?.title ?? "当前 Codex 任务";
+          const taskTitle = parsed.data.title ?? "Codex task";
           const snapshot = await client.submit({
-            taskId,
+            taskId: taskHandle,
             title: taskTitle,
             event: { type: "tracking_started" }
           }, makeRequestOptions());
-          return textResult(`Tracking started: ${selectedTask(snapshot)?.task.status ?? "idle"}.`);
+          return textResult(`Tracking started: ${submittedTaskStatus(snapshot, taskHandle)}.`);
         }
       );
     },
 
-    async trackingPause(_input?: unknown): Promise<ToolResult> {
+    async trackingPause(input?: unknown): Promise<ToolResult> {
+      const handle = controlHandle(input, "tracking pause");
+      if (typeof handle !== "string") return handle;
       return runWrite(
         "progress_report",
         "HUD is manually closed; tracking was not paused.",
         (makeRequestOptions) =>
-          submitForCurrentTask(client, { type: "tracking_paused" }, makeRequestOptions)
+          submitForTask(client, handle, { type: "tracking_paused" }, makeRequestOptions)
       );
     },
 
-    async trackingResume(_input?: unknown): Promise<ToolResult> {
+    async trackingResume(input?: unknown): Promise<ToolResult> {
+      const handle = controlHandle(input, "tracking resume");
+      if (typeof handle !== "string") return handle;
       return runWrite(
         "progress_report",
         "HUD is manually closed; tracking was not resumed.",
         (makeRequestOptions) =>
-          submitForCurrentTask(client, { type: "tracking_resumed" }, makeRequestOptions)
+          submitForTask(client, handle, { type: "tracking_resumed" }, makeRequestOptions)
       );
     },
 
-    async trackingStop(_input?: unknown): Promise<ToolResult> {
+    async trackingStop(input?: unknown): Promise<ToolResult> {
+      const handle = controlHandle(input, "tracking stop");
+      if (typeof handle !== "string") return handle;
       return runWrite(
         "progress_report",
         "HUD is manually closed; tracking was not stopped.",
         (makeRequestOptions) =>
-          submitForCurrentTask(client, { type: "tracking_stopped" }, makeRequestOptions)
+          submitForTask(client, handle, { type: "tracking_stopped" }, makeRequestOptions)
       );
     },
 

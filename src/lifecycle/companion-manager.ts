@@ -101,9 +101,13 @@ type ManagerErrorCode = HudErrorCode | HudClientErrorCode;
 
 function errorCode(error: unknown): ManagerErrorCode {
   if (!(error instanceof HudClientError)) return "INTERNAL_ERROR";
-  return error.code === "GENERATION_REJECTED" || error.code === "REQUEST_CANCELLED"
-    ? "INTERNAL_ERROR"
-    : error.code;
+  if (
+    error.code === "GENERATION_REJECTED" ||
+    error.code === "REQUEST_CANCELLED" ||
+    error.code === "STALE_REVISION" ||
+    error.code === "REVISION_REQUIRED"
+  ) return "INTERNAL_ERROR";
+  return error.code as Exclude<HudClientErrorCode, "STALE_REVISION" | "REVISION_REQUIRED">;
 }
 
 function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
@@ -112,7 +116,9 @@ function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
   if (
     code === "GENERATION_REJECTED" ||
     code === "REQUEST_CANCELLED" ||
-    code === "SHUTTING_DOWN"
+    code === "SHUTTING_DOWN" ||
+    code === "STALE_REVISION" ||
+    code === "REVISION_REQUIRED"
   ) return "INTERNAL_ERROR";
   return code;
 }

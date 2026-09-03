@@ -904,7 +904,7 @@ describe("source-mode companion lifecycle", () => {
       await Promise.all([firstClient.connect(firstTransport), secondClient.connect(secondTransport)]);
       const reportPromise = firstClient.callTool({
         name: "tracking_start",
-        arguments: { task_id: "two-mcp", title: "Two MCP race" }
+        arguments: { task_handle: "hud_aaaaaaaaaaaaaaaaaaaa", title: "Two MCP race" }
       });
       await eventArrival;
       const closePromise = secondClient.callTool({ name: "hud_close", arguments: {} });
@@ -1094,7 +1094,7 @@ describe("source-mode companion lifecycle", () => {
       const suppressed = await client.callTool({
         name: "progress_report",
         arguments: {
-          task_id: "stdio-lifecycle",
+          task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
           title: "Lifecycle integration",
           phase: "verification"
         }

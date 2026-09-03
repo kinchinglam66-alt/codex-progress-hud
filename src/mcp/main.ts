@@ -17,7 +17,9 @@ import {
   createToolHandlers,
   progressReportSchema,
   taskOutcomeSchema,
-  trackingStartSchema
+  trackingStartSchema,
+  taskControlSchema,
+  validationObservedSchema
 } from "./tools.js";
 
 export async function runMcpServer(): Promise<void> {
@@ -50,7 +52,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Report task progress",
       description:
-        "Report a concise task phase, optional measured progress, ETA range, or waiting state to the local Progress HUD. Never include secrets, prompts, source code, reasoning, or command output.",
+        "Report a concise task phase, optional measured progress, ETA range, or waiting state to the local Progress HUD using the opaque task_handle injected by Hooks. Never include secrets, prompts, source code, reasoning, or command output.",
       inputSchema: progressReportSchema
     },
     (input) => handlers.progressReport(input)
@@ -61,17 +63,28 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Report task outcome",
       description:
-        "Report a terminal semantic outcome. Set verified only when validation evidence actually ran and passed.",
+        "Report a terminal semantic outcome for the opaque task_handle injected by Hooks. A verified claim requires a prior validation_observed report that actually passed; runtime failure and interruption remain authoritative.",
       inputSchema: taskOutcomeSchema
     },
     (input) => handlers.taskOutcome(input)
   );
 
   server.registerTool(
+    "validation_observed",
+    {
+      title: "Report validation observation",
+      description:
+        "Report only whether bounded validation was observed to pass or fail for the opaque task_handle injected by Hooks. This is evidence, not a Codex execution control.",
+      inputSchema: validationObservedSchema
+    },
+    (input) => handlers.validationObserved(input)
+  );
+
+  server.registerTool(
     "task_status",
     {
       title: "Read HUD task status",
-      description: "Read the current local Progress HUD snapshot."
+      description: "Read the current local Progress HUD snapshot observationally; never launch or mutate the companion."
     },
     () => handlers.taskStatus()
   );
@@ -81,7 +94,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Start HUD tracking",
       description:
-        "Start or restart Progress HUD tracking for the current task. Use when the user explicitly asks to start tracking. Optional task_id and title identify a new current task.",
+        "Manually start or restart HUD tracking for the supplied opaque task_handle when the user explicitly requests it. This is not required for automatic Hook tracking and does not start or stop Codex execution.",
       inputSchema: trackingStartSchema
     },
     (input) => handlers.trackingStart(input)
@@ -92,18 +105,20 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Pause HUD tracking",
       description:
-        "Pause Progress HUD updates and active-work timing for the current tracked task. This does not stop the Codex task itself."
+        "Pause HUD updates and active-work timing for the supplied opaque task_handle. This is idempotent and does not pause Codex execution.",
+      inputSchema: taskControlSchema
     },
-    () => handlers.trackingPause()
+    (input) => handlers.trackingPause(input)
   );
 
   server.registerTool(
     "tracking_resume",
     {
       title: "Resume HUD tracking",
-      description: "Resume Progress HUD updates and active-work timing for the current tracked task."
+      description: "Resume HUD updates and active-work timing for the supplied opaque task_handle. This is idempotent and does not resume or control Codex execution.",
+      inputSchema: taskControlSchema
     },
-    () => handlers.trackingResume()
+    (input) => handlers.trackingResume(input)
   );
 
   server.registerTool(
@@ -111,23 +126,27 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Stop HUD tracking",
       description:
-        "Stop Progress HUD tracking for the current task and keep its final snapshot visible. This does not stop the Codex task itself."
+        "Stop HUD tracking for the supplied opaque task_handle and keep its final snapshot visible. This is idempotent and does not stop Codex execution.",
+      inputSchema: taskControlSchema
     },
-    () => handlers.trackingStop()
+    (input) => handlers.trackingStop(input)
   );
 
   server.registerTool(
     "tracking_status",
     {
       title: "Read HUD tracking status",
-      description: "Read the current Progress HUD snapshot without changing it."
+      description: "Read the current Progress HUD tracking snapshot observationally without launching the companion or changing task state."
     },
     () => handlers.trackingStatus()
   );
 
   server.registerTool(
     "hud_open",
-    { title: "Open Progress HUD" },
+    {
+      title: "Open Progress HUD (Deprecated)",
+      description: "Deprecated compatibility alias for one release: request the HUD window to open. Prefer the plugin page enable switch."
+    },
     () => handlers.hudOpen()
   );
 
@@ -139,7 +158,10 @@ export async function runMcpServer(): Promise<void> {
 
   server.registerTool(
     "hud_close",
-    { title: "Close Progress HUD" },
+    {
+      title: "Close Progress HUD (Deprecated)",
+      description: "Deprecated compatibility alias for one release: request the HUD window/companion to close. Prefer the plugin page enable switch."
+    },
     () => handlers.hudClose()
   );
 

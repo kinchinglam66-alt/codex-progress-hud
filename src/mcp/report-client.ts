@@ -31,7 +31,7 @@ export type ProgressClientSnapshot = HudSnapshot | LegacyProgressClientSnapshot;
 const HUD_CLIENT_ERROR_CODES = [
   "COMPANION_NOT_INSTALLED", "OFFLINE", "VERSION_MISMATCH", "GENERATION_REJECTED",
   "AUTH_ERROR", "START_TIMEOUT", "REQUEST_TIMEOUT", "REQUEST_CANCELLED",
-  "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR"
+  "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR", "STALE_REVISION", "REVISION_REQUIRED"
 ] as const;
 const clientErrorCodeSchema = z.enum(HUD_CLIENT_ERROR_CODES);
 const responseErrorCodeSchema = z.enum([

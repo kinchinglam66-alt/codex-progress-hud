@@ -5,7 +5,11 @@ import {
 } from "../../src/lifecycle/companion-manager.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { HudClientError } from "../../src/mcp/report-client.js";
-import { createToolHandlers } from "../../src/mcp/tools.js";
+import {
+  createToolHandlers,
+  progressReportSchema,
+  taskHandleSchema
+} from "../../src/mcp/tools.js";
 
 function createManager(overrides: Partial<CompanionManager> = {}): CompanionManager {
   const controller = new AbortController();
@@ -115,13 +119,122 @@ function createRunningDeadlineManager(startupTimeoutMs: number): CompanionManage
 }
 
 describe("MCP progress tool handlers", () => {
+  const taskHandleA = "hud_aaaaaaaaaaaaaaaaaaaa";
+  const taskHandleB = "hud_bbbbbbbbbbbbbbbbbbbb";
+
+  it("requires the opaque Hook task handle and rejects caller-invented task ids", () => {
+    expect(taskHandleSchema.safeParse(taskHandleA).success).toBe(true);
+    expect(taskHandleSchema.safeParse("task-1").success).toBe(false);
+    expect(progressReportSchema.safeParse({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    }).success).toBe(false);
+    expect(progressReportSchema.safeParse({
+      task_handle: taskHandleA,
+      title: "Fix login",
+      phase: "testing"
+    }).success).toBe(true);
+  });
+
+  it("does not guess the selected or most recently active task for a semantic write", async () => {
+    const submit = vi.fn(async () => ({
+      task: { status: "running" },
+      eta: null
+    }));
+    const status = vi.fn(async () => ({ task: null, eta: null }));
+    const handlers = createHandlers({ submit, status });
+
+    const result = await handlers.progressReport({
+      title: "No implicit target",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBe(true);
+    expect(submit).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it("submits each semantic report to exactly the supplied opaque handle", async () => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    await handlers.progressReport({ task_handle: taskHandleA, phase: "first" });
+    await handlers.progressReport({ task_handle: taskHandleB, phase: "second" });
+
+    expect(submit).toHaveBeenNthCalledWith(1, expect.objectContaining({ taskId: taskHandleA }), expect.anything());
+    expect(submit).toHaveBeenNthCalledWith(2, expect.objectContaining({ taskId: taskHandleB }), expect.anything());
+  });
+
+  it("exposes validation observation as a bounded report before outcome claims", async () => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    const result = await handlers.validationObserved({
+      task_handle: taskHandleA,
+      result: "passed"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(submit).toHaveBeenCalledWith({
+      taskId: taskHandleA,
+      title: "Codex task",
+      event: { type: "validation_observed", result: "passed" }
+    }, expectedLease());
+  });
+
+  it("keeps pause, resume, and stop controls per handle and never treats them as Codex execution controls", async () => {
+    const status = vi.fn();
+    const submit = vi.fn(async (envelope) => ({
+      task: { status: envelope.event.type === "tracking_stopped" ? "stopped" : "paused" },
+      eta: null
+    }));
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    await handlers.trackingPause({ task_handle: taskHandleA });
+    await handlers.trackingPause({ task_handle: taskHandleA });
+    await handlers.trackingResume({ task_handle: taskHandleA });
+    await handlers.trackingStop({ task_handle: taskHandleB });
+
+    expect(submit).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      taskId: taskHandleA,
+      event: { type: "tracking_paused" }
+    }), expect.anything());
+    expect(submit).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      taskId: taskHandleA,
+      event: { type: "tracking_paused" }
+    }), expect.anything());
+    expect(submit).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      taskId: taskHandleA,
+      event: { type: "tracking_resumed" }
+    }), expect.anything());
+    expect(submit).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      taskId: taskHandleB,
+      event: { type: "tracking_stopped" }
+    }), expect.anything());
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it("returns NO_SESSION_ASSOCIATION when a per-task control has no Hook handle", async () => {
+    const submit = vi.fn();
+    const status = vi.fn(async () => ({ task: { id: taskHandleA, title: "Guess me", status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status });
+
+    const result = await handlers.trackingPause({});
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "NO_SESSION_ASSOCIATION" });
+    expect(status).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it("carries the manager generation lease through the actual event submit", async () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
     const companionManager = createManager();
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
     await handlers.progressReport({
-      task_id: "generation-7",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Generation lease",
       phase: "submitting"
     });
@@ -131,7 +244,7 @@ describe("MCP progress tool handlers", () => {
       expect.any(Function)
     );
     expect(submit).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: "generation-7" }),
+      expect.objectContaining({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa" }),
       expect.objectContaining({ generation: 7, signal: expect.any(AbortSignal) })
     );
   });
@@ -140,7 +253,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() });
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing",
       current_step: "Run integration tests",
@@ -151,7 +264,7 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(submit).toHaveBeenCalledWith({
-      taskId: "task-1",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       event: {
         type: "model_progress",
@@ -170,7 +283,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() });
 
     await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "dependency_install",
       current_step: "Allow npm install",
@@ -178,7 +291,7 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(submit).toHaveBeenCalledWith({
-      taskId: "task-1",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       event: {
         type: "waiting",
@@ -192,7 +305,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() });
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing",
       progress: 130,
@@ -208,7 +321,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() });
 
     await handlers.taskOutcome({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       outcome: "completed",
       verified: true,
@@ -216,7 +329,7 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(submit).toHaveBeenCalledWith({
-      taskId: "task-1",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       event: {
         type: "model_outcome",
@@ -235,7 +348,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
@@ -256,7 +369,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
@@ -266,6 +379,23 @@ describe("MCP progress tool handlers", () => {
     expect(result.content[0]?.text).toContain("Update the plugin and companion");
     expect(result.content[0]?.text).toContain("quit Codex");
     expect(result.content[0]?.text).toContain("reopen it");
+  });
+
+  it("preserves a stale revision code from a semantic write", async () => {
+    const companionManager = createManager({
+      executeWrite: vi.fn(async () => {
+        throw new HudClientError("STALE_REVISION", "stale task revision");
+      })
+    });
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    const result = await handlers.progressReport({
+      task_handle: taskHandleA,
+      phase: "testing"
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "STALE_REVISION" });
   });
 
   it("preserves a structured lifecycle client error from control handlers", async () => {
@@ -312,13 +442,13 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status });
 
     const result = await handlers.trackingStart({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Implement controls"
     });
 
-    expect(status).toHaveBeenCalledOnce();
+    expect(status).not.toHaveBeenCalled();
     expect(submit).toHaveBeenCalledWith({
-      taskId: "task-1",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Implement controls",
       event: { type: "tracking_started" }
     }, expectedLease());
@@ -336,24 +466,24 @@ describe("MCP progress tool handlers", () => {
     }));
     const handlers = createHandlers({ submit, status });
 
-    await handlers.trackingPause({});
-    await handlers.trackingResume({});
-    await handlers.trackingStop({});
+    await handlers.trackingPause({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" });
+    await handlers.trackingResume({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" });
+    await handlers.trackingStop({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" });
     const statusResult = await handlers.trackingStatus();
 
     expect(submit).toHaveBeenNthCalledWith(1, {
-      taskId: "task-1",
-      title: "Implement controls",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
+      title: "Codex task",
       event: { type: "tracking_paused" }
     }, expectedLease());
     expect(submit).toHaveBeenNthCalledWith(2, {
-      taskId: "task-1",
-      title: "Implement controls",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
+      title: "Codex task",
       event: { type: "tracking_resumed" }
     }, expectedLease());
     expect(submit).toHaveBeenNthCalledWith(3, {
-      taskId: "task-1",
-      title: "Implement controls",
+      taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
+      title: "Codex task",
       event: { type: "tracking_stopped" }
     }, expectedLease());
     expect(statusResult.content[0]?.text).toContain('"status":"running"');
@@ -361,10 +491,10 @@ describe("MCP progress tool handlers", () => {
 
   it.each([
     ["tracking_start", (handlers: ReturnType<typeof createHandlers>) =>
-      handlers.trackingStart({ task_id: "task-1", title: "Deadline control" })],
-    ["tracking_pause", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingPause({})],
-    ["tracking_resume", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingResume({})],
-    ["tracking_stop", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingStop({})]
+      handlers.trackingStart({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa", title: "Deadline control" })],
+    ["tracking_pause", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingPause({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" })],
+    ["tracking_resume", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingResume({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" })],
+    ["tracking_stop", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingStop({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" })]
   ] as const)(
     "%s shares one 90ms deadline across status and a hanging submit",
     async (_name, invoke) => {
@@ -411,9 +541,8 @@ describe("MCP progress tool handlers", () => {
         }
       });
       expect(elapsedMs).toBeLessThan(300);
-      expect(requestTimeouts).toHaveLength(2);
+      expect(requestTimeouts).toHaveLength(1);
       expect(requestTimeouts[0]).toBeLessThanOrEqual(90);
-      expect(requestTimeouts[1]).toBeLessThan(requestTimeouts[0]!);
       expect(accepted).toBe(false);
     },
     2_000
@@ -438,7 +567,7 @@ describe("MCP progress tool handlers", () => {
     const result = await handlers.trackingPause({});
 
     expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toBe("No active task to control.");
+    expect(result.structuredContent).toEqual({ ok: false, code: "NO_SESSION_ASSOCIATION" });
   });
 
   it("maps lifecycle operations to exact structured HUD states", async () => {
@@ -531,7 +660,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers(progressClient, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
@@ -565,7 +694,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers(progressClient, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
@@ -586,12 +715,10 @@ describe("MCP progress tool handlers", () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
     const handlers = createHandlers({ submit, status }, companionManager);
 
-    await handlers.trackingStart({ task_id: "task-1", title: "Implement controls" });
+    await handlers.trackingStart({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa", title: "Implement controls" });
 
     expect(companionManager.ensureForWrite).toHaveBeenCalledWith("tracking_start");
-    expect(vi.mocked(companionManager.ensureForWrite).mock.invocationCallOrder[0]).toBeLessThan(
-      status.mock.invocationCallOrder[0]!
-    );
+    expect(status).not.toHaveBeenCalled();
   });
 
   it("tracking stop never closes the HUD", async () => {
@@ -607,7 +734,7 @@ describe("MCP progress tool handlers", () => {
       companionManager
     );
 
-    await handlers.trackingStop({});
+    await handlers.trackingStop({ task_handle: "hud_aaaaaaaaaaaaaaaaaaaa" });
 
     expect(companionManager.close).not.toHaveBeenCalled();
   });
@@ -621,7 +748,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
@@ -643,7 +770,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
@@ -680,7 +807,7 @@ describe("MCP progress tool handlers", () => {
     const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
 
     const result = await handlers.progressReport({
-      task_id: "task-1",
+      task_handle: "hud_aaaaaaaaaaaaaaaaaaaa",
       title: "Fix login",
       phase: "testing"
     });
