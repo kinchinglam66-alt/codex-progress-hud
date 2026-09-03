@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { createInitialTask, reduceTask } from "../../src/core/reducer.js";
+import { parseProgressEnvelope } from "../../src/core/schema.js";
+import type { ProgressEvent } from "../../src/core/types.js";
+
+function runtimeEvent(type: string, fields: Record<string, unknown> = {}): ProgressEvent {
+  return { type, ...fields } as ProgressEvent;
+}
 
 describe("task lifecycle reducer", () => {
   it("moves a task from idle to running when a turn starts", () => {
@@ -160,5 +166,116 @@ describe("task lifecycle reducer", () => {
 
     expect(pausedReport).toEqual(paused);
     expect(stoppedReport).toEqual(stopped);
+  });
+
+  it("moves a stopped turn to quiescent without treating it as completion", () => {
+    const running = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      runtimeEvent("turn_started", { turnId: "turn-1" }),
+      2_000
+    );
+    const next = reduceTask(running, runtimeEvent("turn_stopped"), 5_000);
+
+    expect(next.status).toBe("quiescent");
+    expect(next.completedAt).toBeUndefined();
+    expect(next.turnStoppedAt).toBe(5_000);
+    expect(next.activeElapsedMs).toBe(3_000);
+  });
+
+  it("marks a nonterminal task ended unknown when its session ends", () => {
+    const running = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      runtimeEvent("session_attached", { origin: "session_start" }),
+      2_000
+    );
+    const next = reduceTask(running, runtimeEvent("session_ended"), 7_000);
+
+    expect(next.status).toBe("ended_unknown");
+    expect(next.sessionEndedAt).toBe(7_000);
+    expect(next.activeElapsedMs).toBe(5_000);
+  });
+
+  it("lets authoritative runtime failure replace an unverified or verified semantic outcome", () => {
+    const initial = createInitialTask("task-1", "Fix login", 1_000);
+    const unverified = reduceTask(
+      initial,
+      { type: "model_outcome", outcome: "completed", verified: false },
+      2_000
+    );
+    const verified = reduceTask(
+      initial,
+      { type: "model_outcome", outcome: "completed", verified: true },
+      2_000
+    );
+
+    expect(reduceTask(unverified, runtimeEvent("runtime_failed", { message: "crash" }), 3_000).status)
+      .toBe("failed");
+    expect(reduceTask(verified, runtimeEvent("runtime_interrupted", { message: "cancelled" }), 3_000).status)
+      .toBe("interrupted");
+    expect(reduceTask(verified, { type: "model_outcome", outcome: "completed", verified: false }, 4_000))
+      .toEqual(verified);
+  });
+
+  it("recovers a disconnected task when fresh runtime activity is observed", () => {
+    const attached = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      runtimeEvent("session_attached", { origin: "late_attach" }),
+      2_000
+    );
+    const disconnected = reduceTask(attached, runtimeEvent("lease_lost"), 5_000);
+    const recovered = reduceTask(disconnected, runtimeEvent("activity_seen", { category: "hook" }), 20_000);
+
+    expect(attached.trackingOrigin).toBe("late_attach");
+    expect(attached.trackedFrom).toBe(2_000);
+    expect(disconnected.status).toBe("disconnected_suspected");
+    expect(disconnected.activeElapsedMs).toBe(3_000);
+    expect(recovered.status).toBe("running");
+    expect(recovered.activeElapsedMs).toBe(3_000);
+    expect(recovered.activeSince).toBe(20_000);
+  });
+
+  it("makes repeated pause, resume, and stop controls idempotent", () => {
+    const running = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      { type: "tracking_started" },
+      2_000
+    );
+    const paused = reduceTask(running, { type: "tracking_paused" }, 3_000);
+    const pausedAgain = reduceTask(paused, { type: "tracking_paused" }, 4_000);
+    const resumed = reduceTask(paused, { type: "tracking_resumed" }, 5_000);
+    const resumedAgain = reduceTask(resumed, { type: "tracking_resumed" }, 6_000);
+    const stopped = reduceTask(resumed, { type: "tracking_stopped" }, 7_000);
+    const stoppedAgain = reduceTask(stopped, { type: "tracking_stopped" }, 8_000);
+
+    expect(pausedAgain).toEqual(paused);
+    expect(resumedAgain).toEqual(resumed);
+    expect(stoppedAgain).toEqual(stopped);
+  });
+
+  it("does not add active time while quiescent, waiting, or disconnected", () => {
+    const running = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      runtimeEvent("session_attached", { origin: "session_start" }),
+      2_000
+    );
+    const quiescent = reduceTask(running, runtimeEvent("turn_stopped"), 4_000);
+    const waiting = reduceTask(quiescent, { type: "waiting", reason: "user" }, 6_000);
+    const disconnected = reduceTask(waiting, runtimeEvent("lease_lost"), 8_000);
+    const later = reduceTask(disconnected, runtimeEvent("activity_seen", { category: "tool" }), 30_000);
+
+    expect(quiescent.activeElapsedMs).toBe(2_000);
+    expect(waiting.activeElapsedMs).toBe(2_000);
+    expect(disconnected.activeElapsedMs).toBe(2_000);
+    expect(later.activeElapsedMs).toBe(2_000);
+  });
+
+  it("keeps a legacy progress envelope parseable alongside runtime evidence", () => {
+    expect(
+      parseProgressEnvelope({
+        taskId: "task-1",
+        title: "Fix login",
+        event: { type: "model_progress", phase: "testing", progress: 0.5 }
+      }).event
+    ).toEqual({ type: "model_progress", phase: "testing", progress: 0.5 });
   });
 });

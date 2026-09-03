@@ -31,7 +31,9 @@ describe("ETA estimator", () => {
     expect(estimate).toEqual({
       lowSeconds: 215,
       highSeconds: 420,
-      confidence: 0.6
+      confidence: 0.6,
+      confidenceClass: "medium",
+      signals: ["plan"]
     });
   });
 
@@ -44,7 +46,9 @@ describe("ETA estimator", () => {
     expect(estimate).toEqual({
       lowSeconds: 135,
       highSeconds: 200,
-      confidence: 0.78
+      confidence: 0.78,
+      confidenceClass: "high",
+      signals: ["plan", "model"]
     });
   });
 
@@ -62,7 +66,9 @@ describe("ETA estimator", () => {
     expect(estimate).toEqual({
       lowSeconds: 375,
       highSeconds: 960,
-      confidence: 0.4
+      confidence: 0.4,
+      confidenceClass: "low",
+      signals: ["model"]
     });
   });
 
@@ -75,7 +81,9 @@ describe("ETA estimator", () => {
     expect(estimate).toEqual({
       lowSeconds: 240,
       highSeconds: 580,
-      confidence: 0.45
+      confidence: 0.45,
+      confidenceClass: "low",
+      signals: ["plan"]
     });
   });
 
@@ -104,5 +112,71 @@ describe("ETA estimator", () => {
         300_000
       )
     ).toBeNull();
+  });
+
+  it("widens and lowers confidence for a late attachment", () => {
+    const estimate = estimateRemaining(
+      runningSnapshot({ trackingOrigin: "late_attach", estimateVolatility: 0 }),
+      300_000
+    );
+
+    expect(estimate).toEqual({
+      lowSeconds: 155,
+      highSeconds: 585,
+      confidence: 0.45,
+      confidenceClass: "low",
+      signals: ["plan"]
+    });
+  });
+
+  it("widens the interval after a plan rewrite or validation failure", () => {
+    const estimate = estimateRemaining(
+      runningSnapshot({ estimateVolatility: 0.5 }),
+      300_000
+    );
+
+    expect(estimate).toEqual({
+      lowSeconds: 165,
+      highSeconds: 540,
+      confidence: 0.6,
+      confidenceClass: "medium",
+      signals: ["plan"]
+    });
+  });
+
+  it("uses active work time only when the clock advances", () => {
+    const active = runningSnapshot({ activeElapsedMs: 0, activeSince: 240_000 });
+    const atFiveMinutes = estimateRemaining(active, 300_000);
+    const atPausedWallClock = estimateRemaining(
+      { ...active, status: "quiescent", activeElapsedMs: 120_000, activeSince: undefined },
+      3_600_000
+    );
+
+    expect(atFiveMinutes).toEqual({
+      lowSeconds: 45,
+      highSeconds: 85,
+      confidence: 0.6,
+      confidenceClass: "medium",
+      signals: ["plan"]
+    });
+    expect(atPausedWallClock).toBeNull();
+  });
+
+  it.each([
+    [0.2, "low"],
+    [0.8, "medium"],
+    [1, "high"]
+  ] as const)("classifies confidence %s as %s", (confidence, confidenceClass) => {
+    const estimate = estimateRemaining(
+      runningSnapshot({
+        progress: undefined,
+        activeElapsedMs: 0,
+        modelEstimateSeconds: 100,
+        modelConfidence: confidence
+      }),
+      300_000
+    );
+
+    expect(estimate?.confidenceClass).toBe(confidenceClass);
   });
 });

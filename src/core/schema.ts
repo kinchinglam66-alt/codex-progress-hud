@@ -8,7 +8,7 @@ const planStepSchema = z.object({
 });
 
 export const progressEventSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("turn_started") }),
+  z.object({ type: z.literal("turn_started"), turnId: z.string().trim().max(128).optional() }),
   z.object({ type: z.literal("tracking_started") }),
   z.object({ type: z.literal("tracking_paused") }),
   z.object({ type: z.literal("tracking_resumed") }),
@@ -45,7 +45,18 @@ export const progressEventSchema = z.discriminatedUnion("type", [
     type: z.literal("stale_detected"),
     message: z.string().trim().max(240).optional()
   }),
-  z.object({ type: z.literal("activity_resumed") })
+  z.object({ type: z.literal("activity_resumed") }),
+  z.object({
+    type: z.literal("session_attached"),
+    origin: z.enum(["session_start", "late_attach", "manual"])
+  }),
+  z.object({
+    type: z.literal("activity_seen"),
+    category: z.enum(["tool", "hook"])
+  }),
+  z.object({ type: z.literal("turn_stopped") }),
+  z.object({ type: z.literal("session_ended") }),
+  z.object({ type: z.literal("lease_lost") })
 ]);
 
 export const progressEnvelopeSchema = z.object({
