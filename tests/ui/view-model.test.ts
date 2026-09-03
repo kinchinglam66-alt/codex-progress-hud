@@ -97,6 +97,16 @@ describe("HUD view model", () => {
     expect(view.tone).toBe("warning");
   });
 
+  it.each([
+    ["quiescent", "本轮已停止，等待下一轮工作"],
+    ["disconnected_suspected", "任务连接疑似断开"],
+    ["ended_unknown", "任务已结束，结果未知"]
+  ] as const)("uses a truthful ETA label for %s", (status, label) => {
+    const view = buildHudView({ task: task({ status }), eta: null }, 100_000);
+
+    expect(view.etaLabel).toBe(label);
+  });
+
   it("distinguishes failure from verified completion", () => {
     const failed = buildHudView({ task: task({ status: "failed" }), eta: null }, 100_000);
     const completed = buildHudView(

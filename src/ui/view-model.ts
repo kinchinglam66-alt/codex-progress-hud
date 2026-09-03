@@ -40,8 +40,11 @@ function etaLabel(snapshot: HudSnapshot): string {
   const status = snapshot.task?.status;
   if (status === "paused") return "跟踪已暂停，工作计时已暂停";
   if (status === "stopped") return "跟踪已停止，任务仍可继续执行";
+  if (status === "quiescent") return "本轮已停止，等待下一轮工作";
   if (status === "waiting_approval" || status === "waiting_user") return "工作计时已暂停";
   if (status === "stalled_suspected") return "正在检查任务连接";
+  if (status === "disconnected_suspected") return "任务连接疑似断开";
+  if (status === "ended_unknown") return "任务已结束，结果未知";
   if (
     status === "completed_unverified" ||
     status === "succeeded_verified" ||

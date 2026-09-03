@@ -165,3 +165,53 @@ Tests  387 passed (387)
 - `tests/ui/view-model.test.ts`: supplied the required ETA metadata in the existing compatibility fixture.
 
 Final `git diff --check` was clean. No subagents, broad-scope refactor, settings/cache change, install, push, publish, merge, or unrelated behavior change was performed.
+
+## Fix Round 2
+
+### RED
+
+Fresh focused UI command:
+
+```text
+npx vitest run tests/ui/view-model.test.ts --reporter=verbose
+```
+
+Observed before restoring the status-specific labels:
+
+```text
+Test Files  1 failed (1)
+Tests  3 failed | 7 passed (10)
+```
+
+Each failure showed a new runtime status falling through to the generic `正在估算剩余时间` text.
+
+### GREEN
+
+Focused UI command:
+
+```text
+npx vitest run tests/ui/view-model.test.ts --reporter=verbose
+```
+
+Observed result:
+
+```text
+Test Files  1 passed (1)
+Tests  10 passed (10)
+```
+
+Typecheck command:
+
+```text
+npm run typecheck
+```
+
+Observed result: exit code `0`.
+
+### Fix and self-review
+
+- `tests/ui/view-model.test.ts`: added behavior tests for truthful ETA labels for `quiescent`, `disconnected_suspected`, and `ended_unknown`.
+- `src/ui/view-model.ts`: restored exactly three minimal `etaLabel` branches required for exhaustive-enum compatibility.
+- No task switcher, banner, layout, confidence UI, or other Task 9 presentation behavior was added.
+- No broad suite was rerun in this round, per scope; the Round 1 full-suite evidence remains `20` files and `387` tests passed.
+- Final `git diff --check` was clean before commit.
