@@ -36,7 +36,7 @@ export interface CompanionManager {
   status(): Promise<HudLifecycleSnapshot>;
   open(): Promise<HudLifecycleSnapshot>;
   hide(): Promise<HudLifecycleSnapshot>;
-  close(): Promise<HudLifecycleSnapshot>;
+  close(options?: { persistDesiredState?: boolean }): Promise<HudLifecycleSnapshot>;
   ensureForWrite(
     reason: HudWriteReason
   ): Promise<EnsureResult>;
@@ -123,7 +123,9 @@ function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
     code === "SHUTTING_DOWN" ||
     code === "STALE_REVISION" ||
     code === "REVISION_REQUIRED" ||
-    code === "TASK_NOT_FOUND"
+    code === "TASK_NOT_FOUND" ||
+    code === "LEASE_REQUIRED" ||
+    code === "LEASE_FORBIDDEN"
   ) return "INTERNAL_ERROR";
   return code;
 }
@@ -243,13 +245,15 @@ export function createCompanionManager(
   function requestOptions(
     deadline: number | undefined,
     generation?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    compatibilityClose = false
   ): HudRequestOptions | undefined {
     if (deadline === undefined && generation === undefined && signal === undefined) return undefined;
     return {
       ...(deadline === undefined ? {} : { timeoutMs: Math.max(0, deadline - now()) }),
       ...(generation === undefined ? {} : { generation }),
       ...(signal === undefined ? {} : { signal })
+      ,...(compatibilityClose ? { compatibilityClose: true } : {})
     };
   }
 
@@ -829,12 +833,15 @@ export function createCompanionManager(
       return observe(deadline);
     },
 
-    async close(): Promise<HudLifecycleSnapshot> {
+    async close(options: { persistDesiredState?: boolean } = {}): Promise<HudLifecycleSnapshot> {
       const shutdownStartedAt = now();
       const shutdownDeadline = shutdownStartedAt + shutdownTimeoutMs;
+      const persistDesiredState = options.persistDesiredState !== false;
       let offSettings;
       try {
-        offSettings = await dependencies.store.setDesiredState("off", stateOptions(shutdownDeadline));
+        offSettings = persistDesiredState
+          ? await dependencies.store.setDesiredState("off", stateOptions(shutdownDeadline))
+          : await dependencies.store.readSettings(stateOptions(shutdownDeadline));
       } catch (error) {
         if (!(error instanceof LifecycleStateTimeoutError)) throw error;
         return shutdownTimedOut(shutdownStartedAt);
@@ -880,7 +887,16 @@ export function createCompanionManager(
         return { desiredState: "off", observedState: "stopped", code: mapped };
       }
       try {
-        await dependencies.client.shutdown(requestOptions(shutdownDeadline, offSettings.generation));
+        await dependencies.client.shutdown(requestOptions(
+          shutdownDeadline,
+          offSettings.generation,
+          undefined,
+          !persistDesiredState
+        ));
+        if (!persistDesiredState) {
+          ownedHud = undefined;
+          return { ...(offSettings.desiredState === undefined ? {} : { desiredState: offSettings.desiredState }), observedState: "stopped" };
+        }
       } catch (error) {
         if (error instanceof HudClientError && error.code === "GENERATION_REJECTED") {
           try {

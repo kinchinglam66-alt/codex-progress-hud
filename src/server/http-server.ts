@@ -9,6 +9,7 @@ import { PROTOCOL_VERSION, type HudCapabilities, type HudHealth } from "../lifec
 import type { DesiredHudState } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
 import { TaskStore, type HudSnapshot } from "./task-store.js";
+import { LeaseStore } from "./lease-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
@@ -17,11 +18,28 @@ const REQUEST_REVISION_HEADER = "x-codex-progress-hud-revision";
 const REQUEST_GENERATION_HEADER = "x-codex-progress-hud-generation";
 const MAX_REQUEST_DEADLINE_AHEAD_MS = 60_000;
 const MAX_REMEMBERED_HOOK_IDS = 4_096;
+const LEASE_HEADER = "x-codex-progress-hud-lease";
+const OWNER_HEADER = "x-codex-progress-hud-owner";
+const MCP_CLIENT_HEADER = "x-codex-progress-hud-client";
+const COMPATIBILITY_CLOSE_HEADER = "x-codex-progress-hud-compat-close";
+const DEFAULT_LEASE_GRACE_MS = 45_000;
 
 const selectionRequestSchema = z.object({
   mode: z.enum(["pinned", "follow_activity"])
 }).strict();
 const visibilityRequestSchema = z.object({ hidden: z.boolean() }).strict();
+const leaseAcquireSchema = z.object({
+  ownerNonce: z.string().trim().min(1).max(256),
+  ttlMs: z.number().finite().nonnegative().optional()
+}).strict();
+const leaseMutationSchema = z.object({
+  id: z.string().regex(/^lease_[A-Za-z0-9_-]{8,256}$/u),
+  ownerNonce: z.string().trim().min(1).max(256),
+  ttlMs: z.number().finite().nonnegative().optional()
+}).strict();
+const leaseBindSchema = leaseMutationSchema.omit({ ttlMs: true }).extend({
+  taskHandle: z.string().regex(/^hud_[A-Za-z0-9_-]{20,96}$/u)
+}).strict();
 
 export interface ProgressServerControls {
   health(): HudHealth;
@@ -35,6 +53,11 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   port?: number;
   tokenPath: string;
   uiDirectory?: string;
+  leaseStore?: LeaseStore;
+  leaseGraceMs?: number;
+  now?: () => number;
+  scheduleTimer?: (callback: () => void, delayMs: number) => unknown;
+  cancelTimer?: (handle: unknown) => void;
   runIfGeneration?(
     generation: number,
     desiredState: DesiredHudState,
@@ -178,6 +201,18 @@ function hasJsonMediaType(request: IncomingMessage): boolean {
   return mediaType?.toLowerCase() === "application/json";
 }
 
+function isMcpRequest(request: IncomingMessage): boolean {
+  return request.headers[MCP_CLIENT_HEADER] === "mcp";
+}
+
+function leaseCredentials(request: IncomingMessage): { id: string; ownerNonce: string } | undefined {
+  const id = request.headers[LEASE_HEADER];
+  const ownerNonce = request.headers[OWNER_HEADER];
+  return typeof id === "string" && typeof ownerNonce === "string"
+    ? { id, ownerNonce }
+    : undefined;
+}
+
 function requestNonnegativeInteger(request: IncomingMessage, headerName: string): number | undefined {
   const header = request.headers[headerName];
   if (typeof header !== "string" || !/^(?:0|[1-9]\d*)$/u.test(header)) return undefined;
@@ -283,11 +318,21 @@ export function createProgressServer(options: ProgressServerOptions) {
     throw new Error("Codex Progress HUD only permits loopback listeners");
   }
 
-  const store = new TaskStore();
+  const now = options.now ?? Date.now;
+  const store = new TaskStore({ now });
+  const leaseStore = options.leaseStore ?? new LeaseStore({ now });
+  const leaseGraceMs = options.leaseGraceMs ?? DEFAULT_LEASE_GRACE_MS;
+  if (!Number.isSafeInteger(leaseGraceMs) || leaseGraceMs < 30_000 || leaseGraceMs > 60_000) {
+    throw new RangeError("leaseGraceMs must be an integer between 30000 and 60000");
+  }
   const tokenPromise = loadOrCreateToken(options.tokenPath);
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
+  let graceTimer: unknown;
+  let graceHandles = new Set<string>();
+  const leaseSweepTimer = setInterval(() => leaseStore.sweep(now()), 1_000);
+  leaseSweepTimer.unref();
   const hookEventIds = new Set<string>();
   const hookEventOrder: string[] = [];
   function capabilities(health: HudHealth): HudCapabilities {
@@ -304,6 +349,64 @@ export function createProgressServer(options: ProgressServerOptions) {
     return { ...snapshot, capabilities: capabilities(options.health()) };
   }
 
+  function mcpSnapshot(request: IncomingMessage, snapshot: HudSnapshot): HudSnapshot {
+    if (!isMcpRequest(request)) return snapshot;
+    const credentials = leaseCredentials(request);
+    const allowed = credentials === undefined
+      ? new Set<string>()
+      : new Set(leaseStore.boundHandles(credentials.id, credentials.ownerNonce));
+    const tasks = snapshot.tasks.filter((task) => allowed.has(task.id));
+    const selected = snapshot.selected !== null && allowed.has(snapshot.selected.task.id)
+      ? snapshot.selected
+      : null;
+    return {
+      ...snapshot,
+      tasks,
+      selectedTaskId: selected?.task.id ?? null,
+      selected
+    };
+  }
+
+  function cancelGrace(clearHandles = true): void {
+    if (graceTimer !== undefined) {
+      (options.cancelTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)))(graceTimer);
+    }
+    graceTimer = undefined;
+    if (clearHandles) graceHandles = new Set();
+  }
+
+  function scheduleGraceShutdown(event: { taskHandles: readonly string[] }): void {
+    for (const handle of event.taskHandles) graceHandles.add(handle);
+    if (leaseStore.active().length > 0) return;
+    if (graceTimer !== undefined) return;
+    graceTimer = (options.scheduleTimer ?? ((callback, delayMs) => {
+      const timer = setTimeout(callback, delayMs);
+      timer.unref();
+      return timer;
+    }))(() => {
+      graceTimer = undefined;
+      if (leaseStore.active().length > 0) {
+        graceHandles = new Set();
+        return;
+      }
+      const handles = [...graceHandles];
+      graceHandles = new Set();
+      for (const taskHandle of handles) {
+        if (store.has(taskHandle, now())) {
+          store.apply({ taskId: taskHandle, event: { type: "lease_lost" } }, now());
+        }
+      }
+      if (options.requestShutdown !== undefined) {
+        shuttingDown = true;
+        void Promise.resolve(options.requestShutdown()).catch(() => undefined);
+      }
+    }, leaseGraceMs);
+  }
+
+  leaseStore.on("acquired", () => cancelGrace(false));
+  leaseStore.on("released", scheduleGraceShutdown);
+  leaseStore.on("expired", scheduleGraceShutdown);
+
   function requestGeneration(request: IncomingMessage): number | undefined {
     return requestNonnegativeInteger(request, REQUEST_GENERATION_HEADER);
   }
@@ -315,13 +418,36 @@ export function createProgressServer(options: ProgressServerOptions) {
     return Number.isSafeInteger(protocol) ? protocol : undefined;
   }
 
+  function mcpLeaseAccepted(request: IncomingMessage): boolean {
+    if (!isMcpRequest(request)) return true;
+    const credentials = leaseCredentials(request);
+    return credentials !== undefined && leaseStore.has(credentials.id, credentials.ownerNonce);
+  }
+
+  function taskLeaseAccepted(request: IncomingMessage, taskHandle: string, allowBind = true): boolean {
+    if (!isMcpRequest(request)) return true;
+    const credentials = leaseCredentials(request);
+    if (credentials === undefined || !leaseStore.has(credentials.id, credentials.ownerNonce)) return false;
+    if (leaseStore.authorize(credentials.id, credentials.ownerNonce, taskHandle)) return true;
+    if (!allowBind) return false;
+    return leaseStore.bind(credentials.id, credentials.ownerNonce, taskHandle) &&
+      leaseStore.authorize(credentials.id, credentials.ownerNonce, taskHandle);
+  }
+
+  function leaseProtocolAccepted(request: IncomingMessage): boolean {
+    const protocol = requestProtocol(request);
+    if (protocol !== undefined && acceptsClientProtocol(protocol)) return true;
+    store.setIncompatibleClientSeen(true);
+    return false;
+  }
+
   async function runMutation(
     request: IncomingMessage,
     desiredState: DesiredHudState,
     signal: AbortSignal,
     operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ): Promise<
-    | { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" }
+    | { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" | "lease_forbidden" }
     | { accepted: true; value: unknown }
   > {
     const clientProtocol = requestProtocol(request);
@@ -329,6 +455,7 @@ export function createProgressServer(options: ProgressServerOptions) {
       store.setIncompatibleClientSeen(true);
       return { accepted: false, reason: "version_mismatch" };
     }
+    if (!mcpLeaseAccepted(request)) return { accepted: false, reason: "lease_forbidden" };
     if (shuttingDown) return { accepted: false, reason: "shutting_down" };
     if (options.runIfGeneration === undefined) {
       if (signal.aborted) throw signal.reason;
@@ -342,7 +469,7 @@ export function createProgressServer(options: ProgressServerOptions) {
 
   function writeMutationRejection(
     response: ServerResponse,
-    result: { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" }
+    result: { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" | "lease_forbidden" }
   ): void {
     if (result.reason === "version_mismatch") {
       writeJson(response, 426, {
@@ -353,6 +480,10 @@ export function createProgressServer(options: ProgressServerOptions) {
     }
     if (result.reason === "shutting_down") {
       writeJson(response, 423, { error: "shutdown in progress", code: "SHUTTING_DOWN" });
+      return;
+    }
+    if (result.reason === "lease_forbidden") {
+      writeJson(response, 403, { error: "MCP lease is not valid for this session", code: "LEASE_FORBIDDEN" });
       return;
     }
     writeJson(response, 409, {
@@ -442,6 +573,73 @@ export function createProgressServer(options: ProgressServerOptions) {
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/leases/acquire") {
+        if (!hasJsonMediaType(request)) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        const payload = leaseAcquireSchema.parse(await readJson(request));
+        if (!leaseProtocolAccepted(request)) {
+          writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
+          return;
+        }
+        const lease = leaseStore.acquire(payload.ownerNonce, payload.ttlMs);
+        writeJson(response, 200, lease);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/leases/renew") {
+        if (!hasJsonMediaType(request)) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        const payload = leaseMutationSchema.parse(await readJson(request));
+        if (!leaseProtocolAccepted(request)) {
+          writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
+          return;
+        }
+        const lease = leaseStore.renew(payload.id, payload.ownerNonce, payload.ttlMs);
+        if (lease === null) {
+          writeJson(response, 403, { error: "MCP lease owner is invalid or expired", code: "LEASE_FORBIDDEN" });
+          return;
+        }
+        writeJson(response, 200, lease);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/leases/release") {
+        if (!hasJsonMediaType(request)) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        const payload = leaseMutationSchema.parse(await readJson(request));
+        if (!leaseProtocolAccepted(request)) {
+          writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
+          return;
+        }
+        if (!leaseStore.release(payload.id, payload.ownerNonce)) {
+          writeJson(response, 403, { error: "MCP lease owner is invalid or expired", code: "LEASE_FORBIDDEN" });
+          return;
+        }
+        writeJson(response, 200, { released: true });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/leases/bind") {
+        if (!hasJsonMediaType(request)) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        const payload = leaseBindSchema.parse(await readJson(request));
+        if (!leaseProtocolAccepted(request)) {
+          writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
+          return;
+        }
+        if (!leaseStore.bind(payload.id, payload.ownerNonce, payload.taskHandle)) {
+          writeJson(response, 403, { error: "task handle is not available to this MCP lease", code: "LEASE_FORBIDDEN" });
+          return;
+        }
+        writeJson(response, 200, { bound: true });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/snapshot") {
         const requestedRevision = afterRevision(url);
         const snapshot = store.snapshot();
@@ -453,7 +651,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           });
           response.end();
         } else {
-          writeJson(response, 200, snapshotPayload(snapshot));
+          writeJson(response, 200, snapshotPayload(mcpSnapshot(request, snapshot)));
         }
         return;
       }
@@ -521,9 +719,12 @@ export function createProgressServer(options: ProgressServerOptions) {
           if (!store.snapshot().tasks.some((task) => task.id === route.taskId)) {
             return { kind: "task_not_found" as const };
           }
+          if (!taskLeaseAccepted(request, route.taskId, false)) {
+            return { kind: "lease_forbidden" as const };
+          }
           const snapshot = route.action === "select"
-            ? store.select(route.taskId, selectionMode!, Date.now())
-            : store.setHidden(route.taskId, visibilityHidden!, Date.now());
+            ? store.select(route.taskId, selectionMode!, now())
+            : store.setHidden(route.taskId, visibilityHidden!, now());
           return snapshot;
         });
         cancellation.complete();
@@ -545,6 +746,10 @@ export function createProgressServer(options: ProgressServerOptions) {
             writeJson(response, 404, { error: "task not found" });
             return;
           }
+          if (result.value.kind === "lease_forbidden") {
+            writeJson(response, 403, { error: "task handle is not available to this MCP lease", code: "LEASE_FORBIDDEN" });
+            return;
+          }
         }
         writeJson(response, 202, result.value);
         return;
@@ -557,6 +762,9 @@ export function createProgressServer(options: ProgressServerOptions) {
         const envelope = parseProgressEnvelope(await readJson(request));
         const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
+          if (!taskLeaseAccepted(request, envelope.taskId)) {
+            return { kind: "lease_forbidden" as const };
+          }
           if (
             (envelope.event.type === "tracking_paused" ||
               envelope.event.type === "tracking_resumed" ||
@@ -582,6 +790,13 @@ export function createProgressServer(options: ProgressServerOptions) {
           });
           return;
         }
+        if (
+          result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "lease_forbidden"
+        ) {
+          writeJson(response, 403, { error: "task handle is not available to this MCP lease", code: "LEASE_FORBIDDEN" });
+          return;
+        }
         writeJson(response, 202, result.value);
         return;
       }
@@ -603,7 +818,8 @@ export function createProgressServer(options: ProgressServerOptions) {
               ? options.hideWindow
               : options.requestShutdown;
         if (callback === undefined) throw new Error("control callback is unavailable");
-        const desiredState = url.pathname === "/api/shutdown" ? "off" : "on";
+        const desiredState = url.pathname === "/api/shutdown" &&
+          request.headers[COMPATIBILITY_CLOSE_HEADER] !== "true" ? "off" : "on";
         const result = await runMutation(request, desiredState, cancellation.signal, async (signal) => {
           if (signal.aborted) throw signal.reason;
           if (url.pathname === "/api/shutdown") {
@@ -639,6 +855,7 @@ export function createProgressServer(options: ProgressServerOptions) {
 
   return {
     store,
+    leaseStore,
     async listen(): Promise<void> {
       await tokenPromise;
       if (server !== undefined) return;
@@ -652,6 +869,8 @@ export function createProgressServer(options: ProgressServerOptions) {
       currentAddress = { host, port: bound.port, url: `http://${host}:${bound.port}` };
     },
     async close(): Promise<void> {
+      cancelGrace();
+      clearInterval(leaseSweepTimer);
       if (server === undefined) return;
       await new Promise<void>((resolve, reject) =>
         server?.close((error) => (error === undefined ? resolve() : reject(error)))

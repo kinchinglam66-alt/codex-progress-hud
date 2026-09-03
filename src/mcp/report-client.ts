@@ -5,6 +5,7 @@ import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabi
 import { hookEnvelopeSchema, type HookEnvelope } from "../hooks/schema.js";
 import { type HudCapabilities, PROTOCOL_VERSION, type HudHealth } from "../lifecycle/types.js";
 import type { HudSnapshot } from "../server/task-store.js";
+import type { SessionLease } from "../server/lease-store.js";
 import { defaultServiceUrl, defaultTokenPath } from "../server/paths.js";
 
 export interface HudRequestOptions {
@@ -14,6 +15,9 @@ export interface HudRequestOptions {
   afterRevision?: number;
   clientProtocol?: number;
   signal?: AbortSignal;
+  leaseId?: string;
+  ownerNonce?: string;
+  compatibilityClose?: boolean;
 }
 
 export interface ProgressClient {
@@ -32,7 +36,7 @@ const HUD_CLIENT_ERROR_CODES = [
   "COMPANION_NOT_INSTALLED", "OFFLINE", "VERSION_MISMATCH", "GENERATION_REJECTED",
   "AUTH_ERROR", "START_TIMEOUT", "REQUEST_TIMEOUT", "REQUEST_CANCELLED",
   "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR", "STALE_REVISION", "REVISION_REQUIRED",
-  "TASK_NOT_FOUND"
+  "TASK_NOT_FOUND", "LEASE_REQUIRED", "LEASE_FORBIDDEN"
 ] as const;
 const clientErrorCodeSchema = z.enum(HUD_CLIENT_ERROR_CODES);
 const responseErrorCodeSchema = z.enum([
@@ -177,12 +181,23 @@ export interface HudIdentity {
   protocolVersion: typeof PROTOCOL_VERSION;
 }
 
+export interface LeaseClient {
+  acquireLease(ownerNonce: string, ttlMs?: number): Promise<SessionLease>;
+  renewLease(lease: SessionLease, ttlMs?: number): Promise<SessionLease>;
+  releaseLease(lease: SessionLease): Promise<void>;
+  bindLease(taskHandle: string, lease?: SessionLease): Promise<void>;
+  setLease(lease: SessionLease | undefined): void;
+  setLeaseOwnerNonce(ownerNonce: string): void;
+}
+
 type TokenReader = (
   path: string,
   options: { encoding: "utf8"; signal: AbortSignal }
 ) => Promise<string>;
 
-export class CompanionHttpClient implements ProgressClient {
+export class CompanionHttpClient implements ProgressClient, LeaseClient {
+  #lease: SessionLease | undefined;
+  #ownerNonce: string | undefined;
   constructor(
     private readonly serviceUrl = defaultServiceUrl(),
     private readonly tokenPath = defaultTokenPath(),
@@ -266,7 +281,17 @@ export class CompanionHttpClient implements ProgressClient {
                   options.clientProtocol ?? RELEASE_CAPABILITIES.protocol.current
                 )
               }
-            : {})
+            : {}),
+          ...(options.leaseId === undefined || options.ownerNonce === undefined
+            ? {}
+            : {
+                "x-codex-progress-hud-lease": options.leaseId,
+                "x-codex-progress-hud-owner": options.ownerNonce
+              }),
+          ...(options.leaseId !== undefined || options.ownerNonce !== undefined
+            ? { "x-codex-progress-hud-client": "mcp" }
+            : {}),
+          ...(options.compatibilityClose ? { "x-codex-progress-hud-compat-close": "true" } : {})
         }
       });
       return { response, payload: await readBoundedJson(response, controller) };
@@ -316,6 +341,69 @@ export class CompanionHttpClient implements ProgressClient {
       throw new HudClientError("INTERNAL_ERROR", "HUD endpoint returned an unexpected error");
     }
     return result.payload;
+  }
+
+  #effectiveOptions(options: HudRequestOptions = {}): HudRequestOptions {
+    return {
+      ...options,
+      ...(options.leaseId === undefined && this.#ownerNonce !== undefined
+        ? { leaseId: this.#lease?.id ?? "", ownerNonce: this.#lease?.ownerNonce ?? this.#ownerNonce }
+        : {})
+    };
+  }
+
+  async #ensureLeaseForMutation(): Promise<void> {
+    if (this.#ownerNonce === undefined || this.#lease !== undefined) return;
+    try {
+      const lease = await this.acquireLease(this.#ownerNonce);
+      this.setLease(lease);
+    } catch {
+      // The guarded request below remains marked as MCP traffic and receives a
+      // structured LEASE_FORBIDDEN result instead of silently falling back.
+    }
+  }
+
+  async acquireLease(ownerNonce: string, ttlMs?: number): Promise<SessionLease> {
+    const payload = await this.#authenticatedJson("/api/leases/acquire", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ownerNonce, ...(ttlMs === undefined ? {} : { ttlMs }) })
+    });
+    return z.object({ id: z.string(), ownerNonce: z.string(), expiresAt: z.number().int() }).strict().parse(payload);
+  }
+
+  async renewLease(lease: SessionLease, ttlMs?: number): Promise<SessionLease> {
+    const payload = await this.#authenticatedJson("/api/leases/renew", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce, ...(ttlMs === undefined ? {} : { ttlMs }) })
+    }, leaseOptions(lease));
+    return z.object({ id: z.string(), ownerNonce: z.string(), expiresAt: z.number().int() }).strict().parse(payload);
+  }
+
+  async releaseLease(lease: SessionLease): Promise<void> {
+    await this.#authenticatedJson("/api/leases/release", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce })
+    }, leaseOptions(lease));
+  }
+
+  async bindLease(taskHandle: string, lease = this.#lease): Promise<void> {
+    if (lease === undefined) throw new HudClientError("LEASE_REQUIRED", "MCP lease is not acquired");
+    await this.#authenticatedJson("/api/leases/bind", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce, taskHandle })
+    }, leaseOptions(lease));
+  }
+
+  setLease(lease: SessionLease | undefined): void {
+    this.#lease = lease;
+  }
+
+  setLeaseOwnerNonce(ownerNonce: string): void {
+    this.#ownerNonce = ownerNonce;
   }
 
   async identity(options: HudRequestOptions = {}): Promise<HudIdentity> {
@@ -388,12 +476,23 @@ export class CompanionHttpClient implements ProgressClient {
     return this.#parseSnapshot(await this.#authenticatedJson(path, init, options));
   }
 
-  submit(envelope: ProgressEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
-    return this.#snapshot("/api/events", {
+  async submit(envelope: ProgressEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
+    await this.#ensureLeaseForMutation();
+    const request = () => this.#snapshot("/api/events", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope)
-    }, options);
+    }, this.#effectiveOptions(options));
+    try {
+      return await request();
+    } catch (error) {
+      if (!(error instanceof HudClientError) || error.code !== "LEASE_FORBIDDEN" || this.#ownerNonce === undefined) {
+        throw error;
+      }
+      this.#lease = undefined;
+      await this.#ensureLeaseForMutation();
+      return request();
+    }
   }
 
   submitHook(envelope: HookEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
@@ -402,7 +501,7 @@ export class CompanionHttpClient implements ProgressClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope)
-    }, options);
+    }, this.#effectiveOptions(options));
   }
 
   selectTask(
@@ -414,7 +513,7 @@ export class CompanionHttpClient implements ProgressClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ mode })
-    }, options);
+    }, this.#effectiveOptions(options));
   }
 
   setTaskVisibility(
@@ -426,16 +525,20 @@ export class CompanionHttpClient implements ProgressClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ hidden })
-    }, options);
+    }, this.#effectiveOptions(options));
   }
 
   status(options: HudRequestOptions & { afterRevision: number }): Promise<HudSnapshot | null>;
   status(options?: HudRequestOptions): Promise<HudSnapshot>;
   async status(options: HudRequestOptions = {}): Promise<HudSnapshot | null> {
-    const payload = await this.#authenticatedJson("/api/snapshot", {}, options);
+    const payload = await this.#authenticatedJson("/api/snapshot", {}, this.#effectiveOptions(options));
     if (payload === undefined && options.afterRevision !== undefined) return null;
     return this.#parseSnapshot(payload);
   }
+}
+
+function leaseOptions(lease: SessionLease): HudRequestOptions {
+  return { leaseId: lease.id, ownerNonce: lease.ownerNonce };
 }
 
 export { CompanionHttpClient as HttpProgressClient };

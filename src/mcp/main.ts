@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createCompanionManager } from "../lifecycle/companion-manager.js";
@@ -13,6 +14,7 @@ import {
   defaultSettingsPath
 } from "../server/paths.js";
 import { CompanionHttpClient } from "./report-client.js";
+import { createMcpLeaseLifecycle } from "./lease-lifecycle.js";
 import {
   createToolHandlers,
   progressReportSchema,
@@ -25,14 +27,17 @@ import {
 export async function runMcpServer(): Promise<void> {
   const version = "0.1.0";
   const server = new McpServer({ name: "codex-progress-hud", version });
+  const ownerNonce = randomUUID();
   const progressClient = new CompanionHttpClient();
+  progressClient.setLeaseOwnerNonce(ownerNonce);
   const serviceUrl = new URL(defaultServiceUrl());
+  const stateStore = createLifecycleStateStore({
+    settingsPath: defaultSettingsPath(),
+    runtimePath: defaultRuntimePath(),
+    installManifestPath: defaultInstallManifestPath()
+  });
   const companionManager = createCompanionManager({
-    store: createLifecycleStateStore({
-      settingsPath: defaultSettingsPath(),
-      runtimePath: defaultRuntimePath(),
-      installManifestPath: defaultInstallManifestPath()
-    }),
+    store: stateStore,
     client: progressClient,
     launcher: processLauncher,
     diagnostics: {
@@ -177,7 +182,29 @@ export async function runMcpServer(): Promise<void> {
     () => handlers.hudDiagnose()
   );
 
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  const leaseLifecycle = createMcpLeaseLifecycle({
+    client: progressClient,
+    ownerNonce,
+    ensureReady: (reason) => companionManager.ensureForWrite(reason),
+    schedule: (callback, delayMs) => {
+      const timer = setTimeout(callback, delayMs);
+      timer.unref();
+      return timer;
+    },
+    cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+  });
+  let released = false;
+  const releaseLease = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    await leaseLifecycle.stop();
+  };
+  transport.onclose = () => { void releaseLease(); };
+  await server.connect(transport);
+  const migrateLegacy = stateStore.migrateLegacyDesiredState?.();
+  if (migrateLegacy !== undefined) await migrateLegacy.catch(() => undefined);
+  await leaseLifecycle.start().catch(() => undefined);
 }
 
 const entryPath = process.argv[1];

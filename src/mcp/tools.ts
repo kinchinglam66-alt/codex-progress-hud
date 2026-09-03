@@ -417,7 +417,7 @@ export function createToolHandlers({
 
     async hudClose(): Promise<ToolResult> {
       try {
-        return lifecycleResult("closed", await companionManager.close());
+        return lifecycleResult("closed", await companionManager.close({ persistDesiredState: false }));
       } catch (error) {
         const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
         return structuredResult(

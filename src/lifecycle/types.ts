@@ -83,6 +83,7 @@ export interface LifecycleObservation {
 
 export interface LifecycleStateStore {
   readSettings(options?: StateOperationOptions): Promise<HudSettings>;
+  migrateLegacyDesiredState?(options?: StateOperationOptions): Promise<HudSettings>;
   setDesiredState(state: DesiredHudState, options?: StateOperationOptions): Promise<HudSettings>;
   setStartWithWindows(enabled: boolean, options?: StateOperationOptions): Promise<HudSettings>;
   writeRuntime(identity: RuntimeIdentity, generation?: number, options?: StateOperationOptions): Promise<boolean>;

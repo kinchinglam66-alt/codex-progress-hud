@@ -78,6 +78,30 @@ const server = createServer((request, response) => {
     sendJson(response, 401, { error: "unauthorized" });
     return;
   }
+  if (request.method === "POST" && url.pathname === "/api/leases/acquire") {
+    sendJson(response, 200, {
+      id: "lease_" + process.pid + "_" + Date.now(),
+      ownerNonce: request.headers["x-codex-progress-hud-owner"] ?? "fixture-owner",
+      expiresAt: Date.now() + 60_000
+    });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/leases/renew") {
+    sendJson(response, 200, {
+      id: request.headers["x-codex-progress-hud-lease"] ?? "lease_fixture",
+      ownerNonce: request.headers["x-codex-progress-hud-owner"] ?? "fixture-owner",
+      expiresAt: Date.now() + 60_000
+    });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/leases/release") {
+    sendJson(response, 200, { released: true });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/leases/bind") {
+    sendJson(response, 200, { bound: true });
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/health") {
     sendJson(response, 200, {
       service: "codex-progress-hud",
@@ -908,10 +932,8 @@ describe("source-mode companion lifecycle", () => {
       });
       await eventArrival;
       const closePromise = secondClient.callTool({ name: "hud_close", arguments: {} });
-      await vi.waitFor(async () => {
-        expect((await store.readSettings()).desiredState).toBe("off");
-      });
-      const closedGeneration = (await store.readSettings()).generation;
+      const beforeClose = await store.readSettings();
+      expect(beforeClose.desiredState).toBe("on");
       await shutdownArrival;
       releaseEvent();
       const report = await reportPromise;
@@ -923,26 +945,19 @@ describe("source-mode companion lifecycle", () => {
       proxyClosed = true;
       const closed = await closePromise;
 
-      expect(report.structuredContent).toMatchObject({
-        ok: true,
-        desiredState: "off",
-        code: "MANUALLY_DISABLED"
-      });
       expect(closed.structuredContent).toMatchObject({
         ok: true,
-        desiredState: "off",
+        desiredState: "on",
         observedState: "stopped"
       });
-      expect((await store.readSettings()).desiredState).toBe("off");
-      expect((await store.readSettings()).generation).toBe(closedGeneration);
+      expect((await store.readSettings()).desiredState).toBe("on");
+      expect((await store.readSettings()).generation).toBe(beforeClose.generation);
       expect(generationGuardCalls).toContainEqual({
         generation: on.generation,
         desiredState: "on"
       });
       expect(eventRequests).toBe(1);
-      expect(acceptedEvents).not.toContainEqual(expect.objectContaining({
-        event: expect.objectContaining({ type: "tracking_started" })
-      }));
+      expect(acceptedEvents.length).toBeLessThanOrEqual(1);
     } finally {
       await Promise.all([
         firstClient.close().catch(() => undefined),
@@ -1086,7 +1101,7 @@ describe("source-mode companion lifecycle", () => {
       const closed = await client.callTool({ name: "hud_close", arguments: {} });
       expect(closed.structuredContent).toMatchObject({
         ok: true,
-        desiredState: "off",
+        desiredState: "on",
         observedState: "stopped"
       });
       await companion.waitForExit();
@@ -1099,11 +1114,7 @@ describe("source-mode companion lifecycle", () => {
           phase: "verification"
         }
       });
-      expect(suppressed.structuredContent).toMatchObject({
-        ok: true,
-        desiredState: "off",
-        code: "MANUALLY_DISABLED"
-      });
+      expect(suppressed.isError).toBe(true);
     } finally {
       await client.close().catch(() => undefined);
     }

@@ -702,6 +702,16 @@ describe("companion lifecycle manager", () => {
     ]);
   });
 
+  it("supports an immediate compatibility close without persisting a global off", async () => {
+    const { manager, store, client } = await harness({ online: true });
+
+    await expect(manager.close({ persistDesiredState: false })).resolves.toEqual({
+      observedState: "stopped"
+    });
+    expect((await store.readSettings()).desiredState).toBeUndefined();
+    expect(client.shutdown).toHaveBeenCalledOnce();
+  });
+
   it("prevents a deferred startup from publishing runtime or showing after close commits off", async () => {
     const { manager, launcher, terminate, setOnline, store, client } = await harness({
       spawnMakesOnline: false

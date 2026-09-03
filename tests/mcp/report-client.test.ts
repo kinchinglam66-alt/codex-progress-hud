@@ -108,6 +108,37 @@ describe("CompanionHttpClient", () => {
     expect(JSON.parse(seen[2]!.body)).toEqual({ hidden: true });
   });
 
+  it("reacquires after a companion restart rejects the old lease", async () => {
+    let eventAttempts = 0;
+    let leaseAcquires = 0;
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        if (request.url === "/api/leases/acquire") {
+          leaseAcquires += 1;
+          json(response, 200, { id: `lease_new_${leaseAcquires}`, ownerNonce: "owner", expiresAt: 60_000 });
+          return;
+        }
+        if (request.url === "/api/events" && eventAttempts++ === 0) {
+          json(response, 403, { code: "LEASE_FORBIDDEN" });
+          return;
+        }
+        json(response, 202, aggregateSnapshot);
+      });
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+    client.setLeaseOwnerNonce("owner");
+    client.setLease({ id: "lease_old", ownerNonce: "owner", expiresAt: 1 });
+
+    await expect(client.submit({
+      taskId: aggregateSnapshot.selectedTaskId,
+      event: { type: "activity_resumed" }
+    })).resolves.toEqual(aggregateSnapshot);
+    expect(leaseAcquires).toBe(1);
+    expect(eventAttempts).toBe(2);
+  });
+
   it("accepts the optional authenticated capabilities on aggregate snapshots", async () => {
     const { baseUrl, tokenPath } = await fixture((_request, response) =>
       json(response, 200, {

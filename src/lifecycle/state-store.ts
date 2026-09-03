@@ -222,6 +222,16 @@ export function createLifecycleStateStore(
   );
   return {
     readSettings: (options) => locked(options, async () => readSettingsUnlocked()),
+    migrateLegacyDesiredState: (options) => locked(options, async (signal, enterMutation) => {
+      const current = await readSettingsUnlocked();
+      if (current.desiredState !== "off") return current;
+      const migrated: HudSettings = {
+        startWithWindows: current.startWithWindows,
+        generation: current.generation + 1
+      };
+      await writeJsonUnlocked(paths.settingsPath, migrated, signal, enterMutation, fileSystem);
+      return migrated;
+    }),
     setDesiredState: (state, options) => locked(options, async (signal, enterMutation) => {
       const current = await readSettingsUnlocked();
       if (current.desiredState === state) return current;

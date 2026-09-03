@@ -98,6 +98,21 @@ describe("lifecycle state store", () => {
     expect((await readdir(directory)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
+  it("migrates a legacy persistent off into an eligible generation without off", async () => {
+    const paths = testPaths();
+    await writeFile(paths.settingsPath, '{"desiredState":"off","startWithWindows":false,"generation":4}\n');
+    const store = createLifecycleStateStore(paths);
+
+    await expect(store.migrateLegacyDesiredState?.()).resolves.toEqual({
+      startWithWindows: false,
+      generation: 5
+    });
+    await expect(store.readSettings()).resolves.toEqual({
+      startWithWindows: false,
+      generation: 5
+    });
+  });
+
   it("preserves start-with-Windows when changing desired state", async () => {
     const paths = testPaths();
     await writeFile(paths.settingsPath, '{"desiredState":"on","startWithWindows":true}\n');

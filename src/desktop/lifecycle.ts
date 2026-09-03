@@ -95,6 +95,7 @@ export interface DesktopDependencies {
   reportError(error: unknown, context: string): void;
   cleanupTimeoutMs: number;
   withTimeout<T>(operation: Promise<T>, timeoutMs: number, name: string): Promise<T>;
+  leaseGraceMs?: number;
 }
 
 export interface DesktopDiagnosticSnapshot {
@@ -441,6 +442,7 @@ export async function runDesktop(
             quitting = true;
             quit();
           },
+          ...(resolved.leaseGraceMs === undefined ? {} : { leaseGraceMs: resolved.leaseGraceMs }),
           runIfGeneration: (generation, desiredState, operation, signal) =>
             resolved.stateStore.runIfGeneration(generation, desiredState, operation, { signal })
         });
