@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RELEASE_CAPABILITIES } from "../../src/generated/capabilities.js";
 import type { HudHealth } from "../../src/lifecycle/types.js";
 import { createProgressServer } from "../../src/server/http-server.js";
 
@@ -135,14 +136,81 @@ describe("local progress HTTP service", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual(health);
+    expect(await response.json()).toEqual({
+      ...health,
+      capabilities: {
+        service: "codex-progress-hud",
+        companionVersion: health.version,
+        protocol: RELEASE_CAPABILITIES.protocol,
+        incompatibleClientSeen: false
+      }
+    });
+  });
+
+  it("rejects missing and unsupported client protocols distinctly from stale generations", async () => {
+    const fixture = await startServer({ withGenerationGuard: true });
+    const headers = {
+      authorization: `Bearer ${fixture.token}`,
+      "content-type": "application/json"
+    };
+    const event = JSON.stringify({
+      taskId: "protocol-negotiation",
+      title: "Protocol negotiation",
+      event: { type: "turn_started" }
+    });
+
+    const missing = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers,
+      body: event
+    });
+    const unsupported = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "x-codex-progress-hud-protocol": "999",
+        "x-codex-progress-hud-generation": "1"
+      },
+      body: event
+    });
+    const stale = await fetch(`${fixture.baseUrl}/api/events`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current),
+        "x-codex-progress-hud-generation": "0"
+      },
+      body: event
+    });
+
+    expect(missing.status).toBe(426);
+    expect(await missing.json()).toEqual({
+      error: "client protocol is unsupported",
+      code: "VERSION_MISMATCH"
+    });
+    expect(unsupported.status).toBe(426);
+    expect(await unsupported.json()).toEqual({
+      error: "client protocol is unsupported",
+      code: "VERSION_MISMATCH"
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({
+      error: "lifecycle generation rejected",
+      code: "GENERATION_REJECTED"
+    });
+
+    const health = await fetch(`${fixture.baseUrl}/api/health`, {
+      headers: { authorization: `Bearer ${fixture.token}` }
+    });
+    expect((await health.json()).capabilities).toMatchObject({ incompatibleClientSeen: true });
   });
 
   it("accepts authenticated idempotent window controls", async () => {
     const { baseUrl, token, showWindow, hideWindow } = await startServer();
     const headers = {
       authorization: `Bearer ${token}`,
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
     };
 
     const showResponses = await Promise.all([
@@ -166,7 +234,10 @@ describe("local progress HTTP service", () => {
     const { baseUrl, token, hideWindow } = await startServer();
     const response = await fetch(`${baseUrl}/api/window/hide`, {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
+      },
       body: "{}"
     });
 
@@ -187,7 +258,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body
     });
@@ -203,7 +275,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json; charset=utf-8"
+        "content-type": "application/json; charset=utf-8",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: "{}"
     });
@@ -211,7 +284,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/jsonx"
+        "content-type": "application/jsonx",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: "{}"
     });
@@ -227,7 +301,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: JSON.stringify({ padding: "x".repeat(70_000) })
     });
@@ -242,7 +317,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: "{}"
     });
@@ -256,7 +332,8 @@ describe("local progress HTTP service", () => {
     const fixture = await startServer({ withGenerationGuard: true });
     const headers = {
       authorization: `Bearer ${fixture.token}`,
-      "content-type": "application/json"
+      "content-type": "application/json",
+      "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
     };
     const event = JSON.stringify({
       taskId: "generation-race",
@@ -312,7 +389,16 @@ describe("local progress HTTP service", () => {
 
     expect(server.address().host).toBe("127.0.0.1");
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ task: null, eta: null });
+    expect(await response.json()).toEqual({
+      task: null,
+      eta: null,
+      capabilities: {
+        service: "codex-progress-hud",
+        companionVersion: "0.1.0",
+        protocol: RELEASE_CAPABILITIES.protocol,
+        incompatibleClientSeen: false
+      }
+    });
   });
 
   it("rejects unauthenticated mutation", async () => {
@@ -342,7 +428,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: JSON.stringify({
         taskId: "task-1",
@@ -372,6 +459,7 @@ describe("local progress HTTP service", () => {
         headers: {
           authorization: `Bearer ${token}`,
           "content-type": "application/json",
+          "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current),
           "x-codex-progress-hud-deadline-ms": deadline
         },
         body: JSON.stringify({
@@ -392,7 +480,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: "{not-json"
     });
@@ -401,9 +490,10 @@ describe("local progress HTTP service", () => {
     const snapshotResponse = await fetch(`${baseUrl}/api/snapshot`, {
       headers: { authorization: `Bearer ${token}` }
     });
-    expect(await snapshotResponse.json()).toEqual({
+    expect(await snapshotResponse.json()).toMatchObject({
       task: null,
-      eta: null
+      eta: null,
+      capabilities: { incompatibleClientSeen: false }
     });
   });
 
@@ -413,7 +503,8 @@ describe("local progress HTTP service", () => {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current)
       },
       body: JSON.stringify({ padding: "x".repeat(70_000) })
     });
@@ -434,7 +525,7 @@ describe("local progress HTTP service", () => {
 
     expect(response.status).toBe(200);
     expect(new TextDecoder().decode(firstChunk?.value)).toContain(
-      'data: {"task":null,"eta":null}'
+      'data: {"task":null,"eta":null,"capabilities":'
     );
   });
 

@@ -12,7 +12,12 @@ import type {
   HudWriteReason,
   ObservedHudState
 } from "../lifecycle/types.js";
-import type { HudRequestOptions, ProgressClient } from "./report-client.js";
+import {
+  HudClientError,
+  type HudClientErrorCode,
+  type HudRequestOptions,
+  type ProgressClient
+} from "./report-client.js";
 
 const id = z.string().trim().min(1).max(128);
 const title = z.string().trim().min(1).max(160);
@@ -64,7 +69,7 @@ export interface HudToolPayload {
   ok: boolean;
   desiredState?: "on" | "off";
   observedState?: ObservedHudState;
-  code?: HudErrorCode;
+  code?: HudErrorCode | HudClientErrorCode;
   reportPath?: string;
 }
 
@@ -84,12 +89,20 @@ function invalidResult(kind: string): ToolResult {
   return { content: [{ type: "text", text: `Invalid ${kind}.` }], isError: true };
 }
 
-function clientFailureResult(): ToolResult {
+function clientFailureResult(error?: unknown): ToolResult {
+  const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
+  const text = clientFailureText(code, "Progress HUD request failed");
   return structuredResult(
-    "Progress HUD is unreachable or returned an invalid response. Check HUD status or run diagnostics.",
-    { ok: false, code: "INTERNAL_ERROR" },
+    text,
+    { ok: false, code },
     true
   );
+}
+
+function clientFailureText(code: HudClientErrorCode, prefix: string): string {
+  return code === "VERSION_MISMATCH"
+    ? `${prefix} (${code}). Progress HUD plugin and companion versions do not match. Update the plugin and companion, then fully quit Codex, reopen it, and begin or resume a Hook-enabled task.`
+    : `${prefix} (${code}). Check HUD status or run diagnostics.`;
 }
 
 function noActiveTaskResult(): ToolResult {
@@ -161,8 +174,8 @@ export function createToolHandlers({
       if (result.kind === "completed") return result.value;
       if (result.kind === "suppressed") return suppressedResult(suppressedText);
       return lifecycleErrorResult(result);
-    } catch {
-      return clientFailureResult();
+    } catch (error) {
+      return clientFailureResult(error);
     }
   }
 
@@ -189,8 +202,8 @@ export function createToolHandlers({
     try {
       const snapshot = await client.status();
       return textResult(JSON.stringify(snapshot));
-    } catch {
-      return clientFailureResult();
+    } catch (error) {
+      return clientFailureResult(error);
     }
   }
 
@@ -311,10 +324,11 @@ export function createToolHandlers({
     async hudOpen(): Promise<ToolResult> {
       try {
         return lifecycleResult("open", await companionManager.open());
-      } catch {
+      } catch (error) {
+        const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
         return structuredResult(
-          "Progress HUD could not be opened (INTERNAL_ERROR). Run HUD diagnostics.",
-          { ok: false, code: "INTERNAL_ERROR" },
+          clientFailureText(code, "Progress HUD could not be opened"),
+          { ok: false, code },
           true
         );
       }
@@ -323,10 +337,11 @@ export function createToolHandlers({
     async hudHide(): Promise<ToolResult> {
       try {
         return lifecycleResult("hidden", await companionManager.hide());
-      } catch {
+      } catch (error) {
+        const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
         return structuredResult(
-          "Progress HUD could not be hidden (INTERNAL_ERROR). Run HUD diagnostics.",
-          { ok: false, code: "INTERNAL_ERROR" },
+          clientFailureText(code, "Progress HUD could not be hidden"),
+          { ok: false, code },
           true
         );
       }
@@ -335,10 +350,11 @@ export function createToolHandlers({
     async hudClose(): Promise<ToolResult> {
       try {
         return lifecycleResult("closed", await companionManager.close());
-      } catch {
+      } catch (error) {
+        const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
         return structuredResult(
-          "Progress HUD could not be closed (INTERNAL_ERROR). Run HUD diagnostics.",
-          { ok: false, code: "INTERNAL_ERROR" },
+          clientFailureText(code, "Progress HUD could not be closed"),
+          { ok: false, code },
           true
         );
       }
@@ -347,10 +363,11 @@ export function createToolHandlers({
     async hudStatus(): Promise<ToolResult> {
       try {
         return lifecycleResult("open", await companionManager.status(), true);
-      } catch {
+      } catch (error) {
+        const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
         return structuredResult(
-          "Progress HUD status could not be read (INTERNAL_ERROR). Run HUD diagnostics.",
-          { ok: false, code: "INTERNAL_ERROR" },
+          clientFailureText(code, "Progress HUD status could not be read"),
+          { ok: false, code },
           true
         );
       }
@@ -363,10 +380,11 @@ export function createToolHandlers({
           ok: true,
           reportPath: report.path
         });
-      } catch {
+      } catch (error) {
+        const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
         return structuredResult(
-          "Progress HUD diagnostics failed (INTERNAL_ERROR).",
-          { ok: false, code: "INTERNAL_ERROR" },
+          clientFailureText(code, "Progress HUD diagnostics failed"),
+          { ok: false, code },
           true
         );
       }

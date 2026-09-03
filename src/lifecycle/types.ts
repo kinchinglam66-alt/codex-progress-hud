@@ -1,4 +1,6 @@
-export const PROTOCOL_VERSION = 1 as const;
+import { RELEASE_CAPABILITIES } from "../generated/capabilities.js";
+
+export const PROTOCOL_VERSION = RELEASE_CAPABILITIES.protocol.current;
 export type DesiredHudState = "on" | "off";
 export type ObservedHudState =
   | "starting" | "running" | "hidden" | "stopped"
@@ -29,6 +31,13 @@ export interface StateOperationOptions {
   signal?: AbortSignal;
 }
 
+export interface HudCapabilities {
+  service: "codex-progress-hud";
+  companionVersion: string;
+  protocol: { current: number; minimumClient: number; maximumClient: number };
+  incompatibleClientSeen: boolean;
+}
+
 /**
  * A guarded mutation must stop before starting any irreversible side effect
  * after `signal` aborts, then settle promptly. The state store waits for an
@@ -38,8 +47,9 @@ export type StateMutationOperation<T> = (signal: AbortSignal) => T | Promise<T>;
 
 export interface HudHealth extends RuntimeIdentity {
   service: "codex-progress-hud";
-  protocolVersion: 1;
+  protocolVersion: number;
   visibility: "visible" | "hidden";
+  capabilities?: HudCapabilities | undefined;
 }
 
 export type HudErrorCode =

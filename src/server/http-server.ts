@@ -3,13 +3,15 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ZodError } from "zod";
 import { parseProgressEnvelope } from "../core/schema.js";
-import { PROTOCOL_VERSION, type HudHealth } from "../lifecycle/types.js";
+import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
+import { PROTOCOL_VERSION, type HudCapabilities, type HudHealth } from "../lifecycle/types.js";
 import type { DesiredHudState } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
 import { TaskStore, type HudSnapshot } from "./task-store.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
+const REQUEST_PROTOCOL_HEADER = "x-codex-progress-hud-protocol";
 const MAX_REQUEST_DEADLINE_AHEAD_MS = 60_000;
 
 export interface ProgressServerControls {
@@ -179,6 +181,21 @@ export function createProgressServer(options: ProgressServerOptions) {
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
+  let incompatibleClientSeen = false;
+
+  function capabilities(health: HudHealth): HudCapabilities {
+    return {
+      service: "codex-progress-hud",
+      companionVersion: health.version,
+      protocol: RELEASE_CAPABILITIES.protocol,
+      incompatibleClientSeen
+    };
+  }
+
+  function snapshotPayload(snapshot = store.snapshot()): HudSnapshot & { capabilities?: HudCapabilities } {
+    if (options.health === undefined) return snapshot;
+    return { ...snapshot, capabilities: capabilities(options.health()) };
+  }
 
   function requestGeneration(request: IncomingMessage): number | undefined {
     const header = request.headers["x-codex-progress-hud-generation"];
@@ -187,15 +204,27 @@ export function createProgressServer(options: ProgressServerOptions) {
     return Number.isSafeInteger(generation) ? generation : undefined;
   }
 
+  function requestProtocol(request: IncomingMessage): number | undefined {
+    const header = request.headers[REQUEST_PROTOCOL_HEADER];
+    if (typeof header !== "string" || !/^\d+$/u.test(header)) return undefined;
+    const protocol = Number(header);
+    return Number.isSafeInteger(protocol) ? protocol : undefined;
+  }
+
   async function runMutation(
     request: IncomingMessage,
     desiredState: DesiredHudState,
     signal: AbortSignal,
     operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ): Promise<
-    | { accepted: false; reason: "generation_rejected" | "shutting_down" }
+    | { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" }
     | { accepted: true; value: unknown }
   > {
+    const clientProtocol = requestProtocol(request);
+    if (clientProtocol === undefined || !acceptsClientProtocol(clientProtocol)) {
+      incompatibleClientSeen = true;
+      return { accepted: false, reason: "version_mismatch" };
+    }
     if (shuttingDown) return { accepted: false, reason: "shutting_down" };
     if (options.runIfGeneration === undefined) {
       if (signal.aborted) throw signal.reason;
@@ -209,13 +238,23 @@ export function createProgressServer(options: ProgressServerOptions) {
 
   function writeMutationRejection(
     response: ServerResponse,
-    result: { accepted: false; reason: "generation_rejected" | "shutting_down" }
+    result: { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" }
   ): void {
+    if (result.reason === "version_mismatch") {
+      writeJson(response, 426, {
+        error: "client protocol is unsupported",
+        code: "VERSION_MISMATCH"
+      });
+      return;
+    }
     if (result.reason === "shutting_down") {
       writeJson(response, 423, { error: "shutdown in progress", code: "SHUTTING_DOWN" });
       return;
     }
-    writeJson(response, 409, { error: "lifecycle generation rejected" });
+    writeJson(response, 409, {
+      error: "lifecycle generation rejected",
+      code: "GENERATION_REJECTED"
+    });
   }
 
   async function handleSse(response: ServerResponse, token: string): Promise<void> {
@@ -225,8 +264,9 @@ export function createProgressServer(options: ProgressServerOptions) {
       connection: "keep-alive",
       "x-content-type-options": "nosniff"
     });
-    const send = (snapshot: HudSnapshot) => response.write(`data: ${JSON.stringify(snapshot)}\n\n`);
-    send(store.snapshot());
+    const send = (snapshot: HudSnapshot) =>
+      response.write(`data: ${JSON.stringify(snapshotPayload(snapshot))}\n\n`);
+    send(snapshotPayload());
     store.on("changed", send);
     const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
     response.once("close", () => {
@@ -243,7 +283,7 @@ export function createProgressServer(options: ProgressServerOptions) {
       if (request.method === "GET" && url.pathname === "/health") {
         writeJson(response, 200, {
           service: "codex-progress-hud",
-          protocolVersion: PROTOCOL_VERSION
+          protocolVersion: RELEASE_CAPABILITIES.protocol.current
         });
         return;
       }
@@ -266,12 +306,13 @@ export function createProgressServer(options: ProgressServerOptions) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/snapshot") {
-        writeJson(response, 200, store.snapshot());
+        writeJson(response, 200, snapshotPayload());
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/health") {
         if (options.health === undefined) throw new Error("health callback is unavailable");
-        writeJson(response, 200, options.health());
+        const health = options.health();
+        writeJson(response, 200, { ...health, capabilities: capabilities(health) });
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/events") {

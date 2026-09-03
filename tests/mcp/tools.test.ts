@@ -247,6 +247,41 @@ describe("MCP progress tool handlers", () => {
     expect(submit).toHaveBeenCalledOnce();
   });
 
+  it("preserves a protocol mismatch code and gives upgrade/restart guidance", async () => {
+    const companionManager = createManager({
+      executeWrite: vi.fn(async () => {
+        throw new HudClientError("VERSION_MISMATCH", "protocol rejected");
+      })
+    });
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    const result = await handlers.progressReport({
+      task_id: "task-1",
+      title: "Fix login",
+      phase: "testing"
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "VERSION_MISMATCH" });
+    expect(result.content[0]?.text).toContain("Update the plugin and companion");
+    expect(result.content[0]?.text).toContain("quit Codex");
+    expect(result.content[0]?.text).toContain("reopen it");
+  });
+
+  it("preserves a structured lifecycle client error from control handlers", async () => {
+    const companionManager = createManager({
+      open: vi.fn(async () => {
+        throw new HudClientError("GENERATION_REJECTED", "stale lifecycle generation");
+      })
+    });
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    const result = await handlers.hudOpen();
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "GENERATION_REJECTED" });
+  });
+
   it("starts tracking the supplied task without requiring a progress report", async () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
     const status = vi.fn(async () => ({ task: null, eta: null }));
@@ -590,7 +625,10 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      code: failure instanceof HudClientError ? failure.code : "INTERNAL_ERROR"
+    });
     expect(companionManager.ensureForWrite).toHaveBeenCalledOnce();
     expect(submit).toHaveBeenCalledOnce();
   });
@@ -606,7 +644,7 @@ describe("MCP progress tool handlers", () => {
     const result = await handlers.taskStatus();
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(result.structuredContent).toEqual({ ok: false, code: "OFFLINE" });
     expect(result.structuredContent).not.toHaveProperty("observedState");
   });
 
@@ -624,7 +662,7 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(result.structuredContent).toEqual({ ok: false, code: "OFFLINE" });
     expect(result.structuredContent).not.toHaveProperty("observedState");
     expect(companionManager.ensureForWrite).toHaveBeenCalledTimes(2);
     expect(submit).toHaveBeenCalledTimes(2);

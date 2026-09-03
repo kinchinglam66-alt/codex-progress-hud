@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RELEASE_CAPABILITIES } from "../../src/generated/capabilities.js";
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -89,6 +90,7 @@ describe("CompanionHttpClient", () => {
       method: string | undefined;
       path: string | undefined;
       authorization: string | undefined;
+      protocol: string | string[] | undefined;
       body: string;
     }> = [];
     const { baseUrl, tokenPath } = await fixture((request, response) => {
@@ -99,6 +101,7 @@ describe("CompanionHttpClient", () => {
           method: request.method,
           path: request.url,
           authorization: request.headers.authorization,
+          protocol: request.headers["x-codex-progress-hud-protocol"],
           body: Buffer.concat(chunks).toString("utf8")
         });
         if (request.url === "/api/health") json(response, 200, health);
@@ -123,6 +126,11 @@ describe("CompanionHttpClient", () => {
       ["POST", "/api/events"]
     ]);
     expect(seen.every(({ authorization }) => authorization === "Bearer test-token")).toBe(true);
+    expect(seen.slice(0, 3).map(({ protocol }) => protocol)).toEqual([
+      String(RELEASE_CAPABILITIES.protocol.current),
+      String(RELEASE_CAPABILITIES.protocol.current),
+      String(RELEASE_CAPABILITIES.protocol.current)
+    ]);
     expect(seen.slice(0, 3).map(({ body }) => body)).toEqual(["{}", "{}", "{}"]);
     expect(JSON.parse(seen[4]!.body)).toEqual({
       taskId: "task-1",
@@ -176,6 +184,38 @@ describe("CompanionHttpClient", () => {
     await expect(client.identity()).rejects.toMatchObject({ code: "PORT_CONFLICT" });
     incompatible = true;
     await expect(client.identity()).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
+  });
+
+  it("maps authenticated health with incompatible capabilities to VERSION_MISMATCH", async () => {
+    const capabilities = {
+      service: "codex-progress-hud" as const,
+      companionVersion: "0.1.0",
+      protocol: { current: 2, minimumClient: 2, maximumClient: 2 },
+      incompatibleClientSeen: true
+    };
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 200, { ...health, capabilities })
+    );
+
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).health()).rejects.toMatchObject({
+      code: "VERSION_MISMATCH",
+      message: "Progress HUD protocol is incompatible"
+    });
+  });
+
+  it("preserves a structured protocol rejection code from an HTTP error body", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 409, {
+        error: "client protocol is unsupported",
+        code: "VERSION_MISMATCH"
+      })
+    );
+
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).submit({
+      taskId: "task-1",
+      title: "Protocol rejection",
+      event: { type: "turn_started" }
+    })).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
   });
 
   it.each([
