@@ -9,6 +9,10 @@ const planStepSchema = z.object({
 
 export const progressEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("turn_started"), turnId: z.string().trim().max(128).optional() }),
+  z.object({
+    type: z.literal("validation_observed"),
+    result: z.enum(["passed", "failed"])
+  }).strict(),
   z.object({ type: z.literal("tracking_started") }),
   z.object({ type: z.literal("tracking_paused") }),
   z.object({ type: z.literal("tracking_resumed") }),

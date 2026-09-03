@@ -73,6 +73,10 @@ function isAuthoritativeEvent(event: ProgressEvent): boolean {
   return event.type === "runtime_failed" || event.type === "runtime_interrupted";
 }
 
+function isSessionBoundaryEvent(event: ProgressEvent): boolean {
+  return event.type === "session_ended" || event.type === "lease_lost";
+}
+
 function isRecoveryEvent(event: ProgressEvent): boolean {
   return (
     event.type === "session_attached" ||
@@ -125,7 +129,8 @@ export function reduceTask(
   if (
     MANUAL_INACTIVE.has(state.status) &&
     !CONTROL_EVENTS.has(event.type) &&
-    !isAuthoritativeEvent(event)
+    !isAuthoritativeEvent(event) &&
+    !isSessionBoundaryEvent(event)
   ) {
     return state;
   }
@@ -213,16 +218,12 @@ export function reduceTask(
       runtimePatch.lastRuntimeEvidenceAt = nowMs;
       break;
     case "session_ended":
-      nextStatus =
-        state.status === "paused" || state.status === "stopped" ? state.status : "ended_unknown";
+      nextStatus = "ended_unknown";
       patch = { sessionEndedAt: nowMs };
       runtimePatch.lastRuntimeEvidenceAt = nowMs;
       break;
     case "lease_lost":
-      nextStatus =
-        state.status === "paused" || state.status === "stopped"
-          ? state.status
-          : "disconnected_suspected";
+      nextStatus = "disconnected_suspected";
       patch = { leaseLostAt: nowMs };
       runtimePatch.lastRuntimeEvidenceAt = nowMs;
       break;
@@ -242,6 +243,14 @@ export function reduceTask(
     case "waiting":
       nextStatus = event.reason === "approval" ? "waiting_approval" : "waiting_user";
       patch = { statusDetail: event.detail, currentStep: event.detail };
+      break;
+    case "validation_observed":
+      patch = {
+        verificationEvidence: {
+          kind: event.result === "passed" ? "validation_passed" : "validation_failed",
+          observedAt: nowMs
+        }
+      };
       break;
     case "model_progress": {
       nextStatus = SEMANTIC_TERMINAL.has(state.status) ? state.status : "running";
@@ -264,14 +273,12 @@ export function reduceTask(
     }
     case "model_outcome":
       if (event.outcome === "completed") {
-        nextStatus = event.verified ? "succeeded_verified" : "completed_unverified";
+        const validationPassed = state.verificationEvidence?.kind === "validation_passed";
+        nextStatus = event.verified && validationPassed ? "succeeded_verified" : "completed_unverified";
         patch = {
           progress: 1,
           completedAt: nowMs,
           statusDetail: event.detail,
-          ...(event.verified
-            ? { verificationEvidence: { kind: "validation_passed" as const, observedAt: nowMs } }
-            : {})
         };
       } else if (event.outcome === "failed") {
         nextStatus = "failed";

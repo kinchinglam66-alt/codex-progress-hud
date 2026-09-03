@@ -24,7 +24,8 @@ const NO_ACTIVE_ETA = new Set<TaskSnapshot["status"]>([
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 const roundFive = (value: number): number => Math.max(0, Math.round(value / 5) * 5);
-const roundConfidence = (value: number): number => Math.round(clamp01(value) * 100) / 100;
+const roundConfidence = (value: number): number =>
+  Math.round((clamp01(value) + Number.EPSILON) * 100) / 100;
 
 function activeSeconds(snapshot: TaskSnapshot, nowMs: number): number {
   const running =
@@ -58,7 +59,11 @@ export function estimateRemaining(
       ? snapshot.modelEstimateSeconds
       : undefined;
   const calibrationEstimate =
-    calibration !== undefined && calibration.highSeconds >= calibration.lowSeconds
+    calibration !== undefined &&
+    Number.isFinite(calibration.lowSeconds) &&
+    Number.isFinite(calibration.highSeconds) &&
+    calibration.lowSeconds >= 0 &&
+    calibration.highSeconds >= calibration.lowSeconds
       ? (calibration.lowSeconds + calibration.highSeconds) / 2
       : undefined;
 
@@ -85,16 +90,6 @@ export function estimateRemaining(
     confidence = clamp01(calibration?.confidence ?? 0.35) * 0.8;
   }
 
-  if (calibrationEstimate !== undefined && planEstimate !== undefined && modelEstimate === undefined) {
-    const calibrationWeight = clamp01(calibration?.confidence ?? 0);
-    center = planEstimate * (1 - calibrationWeight) + calibrationEstimate * calibrationWeight;
-    confidence = Math.min(0.9, 0.6 + calibrationWeight * 0.2);
-  } else if (calibrationEstimate !== undefined && (planEstimate !== undefined || modelEstimate !== undefined)) {
-    const calibrationWeight = clamp01(calibration?.confidence ?? 0) * 0.5;
-    center = center * (1 - calibrationWeight) + calibrationEstimate * calibrationWeight;
-    confidence = Math.min(0.9, confidence * (1 - calibrationWeight) + (calibration?.confidence ?? 0) * calibrationWeight);
-  }
-
   if (snapshot.phase?.toLowerCase().includes("explor")) {
     center *= 1.25;
     confidence = Math.max(0.15, confidence - 0.15);
@@ -104,10 +99,29 @@ export function estimateRemaining(
   const lateAttachmentUncertainty = snapshot.trackingOrigin === "late_attach" ? 0.4 : 0;
   confidence = roundConfidence(confidence - lateAttachmentUncertainty * 0.375);
   const rangeFactor = 1 + (1 - confidence) + volatility * 0.8 + lateAttachmentUncertainty;
+  let lowSeconds = center / rangeFactor;
+  let highSeconds = center * rangeFactor;
+
+  if (calibrationEstimate !== undefined && calibration !== undefined) {
+    if (planEstimate === undefined && modelEstimate === undefined) {
+      lowSeconds = calibration.lowSeconds;
+      highSeconds = calibration.highSeconds;
+      confidence = roundConfidence(clamp01(calibration.confidence));
+    } else {
+      const calibrationWeight = clamp01(calibration.confidence) * 0.5;
+      lowSeconds = lowSeconds * (1 - calibrationWeight) + calibration.lowSeconds * calibrationWeight;
+      highSeconds = highSeconds * (1 - calibrationWeight) + calibration.highSeconds * calibrationWeight;
+      confidence = roundConfidence(
+        confidence * (1 - calibrationWeight) + clamp01(calibration.confidence) * calibrationWeight
+      );
+    }
+  }
+  lowSeconds = Math.max(0, Math.min(lowSeconds, highSeconds));
+  highSeconds = Math.max(lowSeconds, highSeconds);
 
   return {
-    lowSeconds: roundFive(center / rangeFactor),
-    highSeconds: roundFive(center * rangeFactor),
+    lowSeconds: roundFive(lowSeconds),
+    highSeconds: roundFive(highSeconds),
     confidence,
     confidenceClass: confidenceClass(confidence),
     signals

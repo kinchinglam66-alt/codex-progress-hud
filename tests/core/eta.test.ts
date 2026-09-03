@@ -90,9 +90,12 @@ describe("ETA estimator", () => {
   it.each([
     "waiting_approval",
     "waiting_user",
+    "quiescent",
     "paused",
     "stopped",
     "stalled_suspected",
+    "disconnected_suspected",
+    "ended_unknown",
     "completed_unverified",
     "succeeded_verified",
     "failed",
@@ -160,6 +163,23 @@ describe("ETA estimator", () => {
       signals: ["plan"]
     });
     expect(atPausedWallClock).toBeNull();
+  });
+
+  it("blends calibration lower and upper bounds instead of only its midpoint", () => {
+    const estimate = estimateRemaining(
+      runningSnapshot({ estimateVolatility: 0 }),
+      300_000,
+      { lowSeconds: 50, highSeconds: 250, confidence: 0.5 }
+    );
+
+    expect(estimate).toEqual({
+      lowSeconds: 175,
+      highSeconds: 380,
+      confidence: 0.58,
+      confidenceClass: "medium",
+      signals: ["plan", "calibration"]
+    });
+    expect(estimate!.lowSeconds).toBeLessThanOrEqual(estimate!.highSeconds);
   });
 
   it.each([

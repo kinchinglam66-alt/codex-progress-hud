@@ -29,7 +29,13 @@ describe("HUD view model", () => {
   it("formats determinate progress and an ETA range without false precision", () => {
     const snapshot: HudSnapshot = {
       task: task(),
-      eta: { lowSeconds: 360, highSeconds: 600, confidence: 0.72 }
+      eta: {
+        lowSeconds: 360,
+        highSeconds: 600,
+        confidence: 0.72,
+        confidenceClass: "medium",
+        signals: ["plan"]
+      }
     };
 
     expect(buildHudView(snapshot, 100_000)).toMatchObject({

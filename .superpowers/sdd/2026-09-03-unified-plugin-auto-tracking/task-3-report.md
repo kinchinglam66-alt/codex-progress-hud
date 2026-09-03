@@ -99,3 +99,69 @@ Created:
 ## Concerns
 
 None known after focused tests, typecheck, full suite, and diff-check verification. Calibration persistence and later task/store wiring remain intentionally out of scope for Task 3.
+
+## Fix Round 1
+
+### RED
+
+Fresh regression command:
+
+```text
+npx vitest run tests/core/reducer.test.ts tests/core/eta.test.ts tests/core/calibration.test.ts --reporter=verbose
+```
+
+Observed before the fixes:
+
+```text
+Test Files  2 failed | 1 passed (3)
+Tests  8 failed | 40 passed (48)
+```
+
+The failures reproduced legacy verified-only success, failed validation being treated as proof, paused/stopped suppression of SessionEnd and lease loss, missing validation-event parsing, and midpoint-only calibration blending.
+
+### GREEN
+
+Focused regression command:
+
+```text
+npx vitest run tests/core/reducer.test.ts tests/core/eta.test.ts tests/core/calibration.test.ts --reporter=verbose
+```
+
+Observed result after the fixes:
+
+```text
+Test Files  3 passed (3)
+Tests  48 passed (48)
+```
+
+Typecheck command:
+
+```text
+npm run typecheck
+```
+
+The first post-fix typecheck identified the expected existing UI fixture gap for required ETA fields; after adding only those fields to `tests/ui/view-model.test.ts`, the final observed result was exit code `0`.
+
+Because the core public type changed, the required full suite was run once:
+
+```text
+npm test -- --run
+```
+
+Observed result:
+
+```text
+Test Files  20 passed (20)
+Tests  387 passed (387)
+```
+
+### Fixes and files
+
+- `src/core/schema.ts` and `src/core/types.ts`: added bounded `validation_observed` with `result: "passed" | "failed"`; made ETA confidence class/signals required; retained legacy `verified` parsing.
+- `src/core/reducer.ts`: requires prior observed passing validation plus `verified: true` for `succeeded_verified`; legacy verified-only and failed-validation completions are `completed_unverified` without fabricated pass evidence; SessionEnd and lease loss classify every nonterminal state, including paused/stopped.
+- `src/core/eta.ts`: blends calibration lower and upper bounds using a deterministic confidence weight, clamps the resulting finite nonnegative interval, and retains required metadata.
+- `src/ui/view-model.ts`: removed the three round-0 ETA label branches; only the exhaustive entries for the new `TaskStatus` values remain for later UI presentation work.
+- `tests/core/reducer.test.ts`, `tests/core/eta.test.ts`: added regression coverage for proof gating, runtime precedence, asymmetric interval blending, and no-ETA statuses.
+- `tests/ui/view-model.test.ts`: supplied the required ETA metadata in the existing compatibility fixture.
+
+Final `git diff --check` was clean. No subagents, broad-scope refactor, settings/cache change, install, push, publish, merge, or unrelated behavior change was performed.

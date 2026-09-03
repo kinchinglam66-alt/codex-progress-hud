@@ -17,7 +17,7 @@ export type TaskStatus =
 export type TrackingOrigin = "session_start" | "late_attach" | "manual";
 
 export interface VerificationEvidence {
-  kind: "validation_passed";
+  kind: "validation_passed" | "validation_failed";
   observedAt: number;
 }
 
@@ -62,13 +62,14 @@ export interface EtaEstimate {
   lowSeconds: number;
   highSeconds: number;
   confidence: number;
-  confidenceClass?: "low" | "medium" | "high";
-  signals?: readonly ("plan" | "model" | "calibration")[];
+  confidenceClass: "low" | "medium" | "high";
+  signals: readonly ("plan" | "model" | "calibration")[];
 }
 
 export type RuntimeEvidence =
   | { type: "session_attached"; origin: TrackingOrigin }
   | { type: "turn_started"; turnId?: string }
+  | { type: "validation_observed"; result: "passed" | "failed" }
   | { type: "activity_seen"; category: "tool" | "hook" }
   | { type: "turn_stopped" }
   | { type: "session_ended" }

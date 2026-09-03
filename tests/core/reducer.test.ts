@@ -98,14 +98,49 @@ describe("task lifecycle reducer", () => {
       { type: "model_outcome", outcome: "completed", verified: false },
       2_000
     );
-    const verified = reduceTask(
+    const legacyVerifiedOnly = reduceTask(
       initial,
+      { type: "model_outcome", outcome: "completed", verified: true },
+      2_000
+    );
+    const validationObserved = reduceTask(
+      initial,
+      runtimeEvent("validation_observed", { result: "passed" }),
+      1_500
+    );
+    const verified = reduceTask(
+      validationObserved,
       { type: "model_outcome", outcome: "completed", verified: true },
       2_000
     );
 
     expect(unverified.status).toBe("completed_unverified");
+    expect(legacyVerifiedOnly.status).toBe("completed_unverified");
+    expect(legacyVerifiedOnly.verificationEvidence).toBeUndefined();
     expect(verified.status).toBe("succeeded_verified");
+    expect(verified.verificationEvidence).toEqual({
+      kind: "validation_passed",
+      observedAt: 1_500
+    });
+  });
+
+  it("does not treat a failed validation observation as proof of success", () => {
+    const validationFailed = reduceTask(
+      createInitialTask("task-1", "Fix login", 1_000),
+      runtimeEvent("validation_observed", { result: "failed" }),
+      1_500
+    );
+    const outcome = reduceTask(
+      validationFailed,
+      { type: "model_outcome", outcome: "completed", verified: true },
+      2_000
+    );
+
+    expect(outcome.status).toBe("completed_unverified");
+    expect(outcome.verificationEvidence).toEqual({
+      kind: "validation_failed",
+      observedAt: 1_500
+    });
   });
 
   it("keeps an explicit interruption terminal", () => {
@@ -195,6 +230,44 @@ describe("task lifecycle reducer", () => {
     expect(next.activeElapsedMs).toBe(5_000);
   });
 
+  it.each(["paused", "stopped"] as const)(
+    "classifies SessionEnd as ended unknown even when tracking is %s",
+    (status) => {
+      const started = reduceTask(
+        createInitialTask("task-1", "Fix login", 1_000),
+        { type: "tracking_started" },
+        2_000
+      );
+      const inactive =
+        status === "paused"
+          ? reduceTask(started, { type: "tracking_paused" }, 3_000)
+          : reduceTask(started, { type: "tracking_stopped" }, 3_000);
+
+      expect(reduceTask(inactive, runtimeEvent("session_ended"), 4_000).status).toBe(
+        "ended_unknown"
+      );
+    }
+  );
+
+  it.each(["paused", "stopped"] as const)(
+    "classifies lease loss as disconnected even when tracking is %s",
+    (status) => {
+      const started = reduceTask(
+        createInitialTask("task-1", "Fix login", 1_000),
+        { type: "tracking_started" },
+        2_000
+      );
+      const inactive =
+        status === "paused"
+          ? reduceTask(started, { type: "tracking_paused" }, 3_000)
+          : reduceTask(started, { type: "tracking_stopped" }, 3_000);
+
+      expect(reduceTask(inactive, runtimeEvent("lease_lost"), 4_000).status).toBe(
+        "disconnected_suspected"
+      );
+    }
+  );
+
   it("lets authoritative runtime failure replace an unverified or verified semantic outcome", () => {
     const initial = createInitialTask("task-1", "Fix login", 1_000);
     const unverified = reduceTask(
@@ -277,5 +350,12 @@ describe("task lifecycle reducer", () => {
         event: { type: "model_progress", phase: "testing", progress: 0.5 }
       }).event
     ).toEqual({ type: "model_progress", phase: "testing", progress: 0.5 });
+    expect(
+      parseProgressEnvelope({
+        taskId: "task-1",
+        title: "Fix login",
+        event: { type: "validation_observed", result: "passed" }
+      }).event
+    ).toEqual({ type: "validation_observed", result: "passed" });
   });
 });
