@@ -99,7 +99,7 @@ function clientFailureResult(error?: unknown): ToolResult {
   );
 }
 
-function clientFailureText(code: HudClientErrorCode, prefix: string): string {
+function clientFailureText(code: HudClientErrorCode | HudErrorCode, prefix: string): string {
   return code === "VERSION_MISMATCH"
     ? `${prefix} (${code}). Progress HUD plugin and companion versions do not match. Update the plugin and companion, then fully quit Codex, reopen it, and begin or resume a Hook-enabled task.`
     : `${prefix} (${code}). Check HUD status or run diagnostics.`;
@@ -143,7 +143,7 @@ export function createToolHandlers({
 }: ToolHandlerDependencies) {
   function lifecycleErrorResult(result: Extract<EnsureResult, { kind: "error" }>): ToolResult {
     return structuredResult(
-      `Progress HUD lifecycle failed (${result.code}). Check HUD status or run diagnostics.`,
+      clientFailureText(result.code, "Progress HUD lifecycle failed"),
       {
         ok: false,
         ...(result.snapshot.desiredState === undefined
@@ -192,9 +192,9 @@ export function createToolHandlers({
     };
     const text = observational
       ? `Progress HUD is ${snapshot.observedState}.`
-      : snapshot.code === undefined
-        ? `Progress HUD is ${action}.`
-        : `Progress HUD lifecycle failed (${snapshot.code}). Check HUD status or run diagnostics.`;
+        : snapshot.code === undefined
+          ? `Progress HUD is ${action}.`
+          : clientFailureText(snapshot.code, "Progress HUD lifecycle failed");
     return structuredResult(text, payload, !observational && snapshot.code !== undefined);
   }
 

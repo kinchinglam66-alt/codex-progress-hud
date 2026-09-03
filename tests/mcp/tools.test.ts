@@ -282,6 +282,30 @@ describe("MCP progress tool handlers", () => {
     expect(result.structuredContent).toEqual({ ok: false, code: "GENERATION_REJECTED" });
   });
 
+  it("gives upgrade/restart guidance for a lifecycle-returned protocol mismatch", async () => {
+    const companionManager = createManager({
+      open: vi.fn(async () => ({
+        desiredState: "on" as const,
+        observedState: "incompatible" as const,
+        code: "VERSION_MISMATCH" as const
+      }))
+    });
+    const handlers = createHandlers({ submit: vi.fn(), status: vi.fn() }, companionManager);
+
+    const result = await handlers.hudOpen();
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      desiredState: "on",
+      observedState: "incompatible",
+      code: "VERSION_MISMATCH"
+    });
+    expect(result.content[0]?.text).toContain("Update the plugin and companion");
+    expect(result.content[0]?.text).toContain("quit Codex");
+    expect(result.content[0]?.text).toContain("reopen it");
+  });
+
   it("starts tracking the supplied task without requiring a progress report", async () => {
     const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
     const status = vi.fn(async () => ({ task: null, eta: null }));

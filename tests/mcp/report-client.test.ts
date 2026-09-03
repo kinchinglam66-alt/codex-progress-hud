@@ -186,11 +186,11 @@ describe("CompanionHttpClient", () => {
     await expect(client.identity()).rejects.toMatchObject({ code: "VERSION_MISMATCH" });
   });
 
-  it("maps authenticated health with incompatible capabilities to VERSION_MISMATCH", async () => {
+  it("maps authenticated health with a range that excludes this client to VERSION_MISMATCH", async () => {
     const capabilities = {
       service: "codex-progress-hud" as const,
       companionVersion: "0.1.0",
-      protocol: { current: 2, minimumClient: 2, maximumClient: 2 },
+      protocol: { current: 1, minimumClient: 2, maximumClient: 2 },
       incompatibleClientSeen: true
     };
     const { baseUrl, tokenPath } = await fixture((_request, response) =>
@@ -201,6 +201,18 @@ describe("CompanionHttpClient", () => {
       code: "VERSION_MISMATCH",
       message: "Progress HUD protocol is incompatible"
     });
+  });
+
+  it("maps an unknown authenticated HTTP failure to INTERNAL_ERROR", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 500, { error: "server failure" })
+    );
+
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).submit({
+      taskId: "task-1",
+      title: "Server failure",
+      event: { type: "turn_started" }
+    })).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
   });
 
   it("preserves a structured protocol rejection code from an HTTP error body", async () => {

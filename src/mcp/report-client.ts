@@ -23,18 +23,13 @@ export interface ProgressClientSnapshot {
   eta: unknown;
 }
 
-export type HudClientErrorCode =
-  | "COMPANION_NOT_INSTALLED"
-  | "OFFLINE"
-  | "REQUEST_TIMEOUT"
-  | "REQUEST_CANCELLED"
-  | "AUTH_ERROR"
-  | "START_TIMEOUT"
-  | "PORT_CONFLICT"
-  | "VERSION_MISMATCH"
-  | "SHUTTING_DOWN"
-  | "GENERATION_REJECTED"
-  | "INTERNAL_ERROR";
+const HUD_CLIENT_ERROR_CODES = [
+  "COMPANION_NOT_INSTALLED", "OFFLINE", "VERSION_MISMATCH", "GENERATION_REJECTED",
+  "AUTH_ERROR", "START_TIMEOUT", "REQUEST_TIMEOUT", "REQUEST_CANCELLED",
+  "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR"
+] as const;
+const clientErrorCodeSchema = z.enum(HUD_CLIENT_ERROR_CODES);
+export type HudClientErrorCode = z.infer<typeof clientErrorCodeSchema>;
 
 export class HudClientError extends Error {
   constructor(readonly code: HudClientErrorCode, message: string) {
@@ -209,13 +204,9 @@ export class CompanionHttpClient implements ProgressClient {
     options: HudRequestOptions = {}
   ): Promise<unknown> {
     const result = await this.#request(path, init, true, options);
-    const structuredCode = z.object({
-      code: z.enum([
-        "COMPANION_NOT_INSTALLED", "OFFLINE", "VERSION_MISMATCH", "GENERATION_REJECTED",
-        "AUTH_ERROR", "START_TIMEOUT", "REQUEST_TIMEOUT", "REQUEST_CANCELLED",
-        "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR"
-      ])
-    }).passthrough().safeParse(result.payload);
+    const structuredCode = z.object({ code: clientErrorCodeSchema })
+      .passthrough()
+      .safeParse(result.payload);
     if (structuredCode.success) {
       throw new HudClientError(structuredCode.data.code, "Progress HUD request was rejected");
     }
@@ -232,7 +223,7 @@ export class CompanionHttpClient implements ProgressClient {
       throw new HudClientError("REQUEST_TIMEOUT", "Progress HUD request timed out");
     }
     if (!result.response.ok) {
-      throw new HudClientError("VERSION_MISMATCH", "HUD endpoint response is incompatible");
+      throw new HudClientError("INTERNAL_ERROR", "HUD endpoint returned an unexpected error");
     }
     return result.payload;
   }
@@ -263,10 +254,10 @@ export class CompanionHttpClient implements ProgressClient {
     try {
       const health = healthSchema.parse(await this.#authenticatedJson("/api/health", {}, options));
       const capabilities = health.capabilities as HudCapabilities | undefined;
-      if (
-        capabilities !== undefined &&
-        !acceptsClientProtocol(capabilities.protocol.current)
-      ) {
+      if (capabilities !== undefined && (
+        RELEASE_CAPABILITIES.protocol.current < capabilities.protocol.minimumClient ||
+        RELEASE_CAPABILITIES.protocol.current > capabilities.protocol.maximumClient
+      )) {
         throw new HudClientError("VERSION_MISMATCH", "Progress HUD protocol is incompatible");
       }
       const { capabilities: _capabilities, ...runtimeHealth } = health;
