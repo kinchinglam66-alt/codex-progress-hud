@@ -1,17 +1,20 @@
 param(
-  [Parameter(Mandatory = $true)]
-  [ValidateSet("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd")]
   [string] $HookName
 )
 
 $ErrorActionPreference = "Stop"
 
-function Stop-Launcher([string] $category) {
-  [Console]::Error.WriteLine("Codex Progress HUD Hook launcher failed: $category")
-  exit 1
+function Stop-Launcher {
+  [Console]::Out.WriteLine('{"continue":true}')
+  [Console]::Error.WriteLine("Codex Progress HUD Hook launcher skipped: unavailable")
+  exit 0
 }
 
 try {
+  $supportedHooks = @("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd")
+  if ([string]::IsNullOrWhiteSpace($HookName) -or -not $supportedHooks.Contains($HookName)) {
+    throw "unsupported Hook event"
+  }
   if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
     throw "missing app data directory"
   }
@@ -69,5 +72,5 @@ try {
   exit 0
 }
 catch {
-  Stop-Launcher "invalid installed executable"
+  Stop-Launcher
 }

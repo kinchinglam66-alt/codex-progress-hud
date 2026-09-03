@@ -13,6 +13,7 @@ const hookNames = [
   "Interrupt",
   "SessionEnd"
 ] as const;
+const hmacKey = "protected-token-for-schema-tests-0123456789";
 
 describe("privacy-bounded Hook schema", () => {
   it.each(hookNames)("normalizes representative %s input without retaining content", (hook) => {
@@ -27,7 +28,7 @@ describe("privacy-bounded Hook schema", () => {
       tool_output: "private tool output",
       cwd: "C:\\Users\\person\\private-repository",
       arbitrary: "must not cross the boundary"
-    }, 1_700_000_000_123);
+    }, 1_700_000_000_123, hmacKey);
 
     expect(normalized.envelope).toMatchObject({
       schemaVersion: 1,
@@ -62,8 +63,8 @@ describe("privacy-bounded Hook schema", () => {
 
   it("keeps normalized identifiers deterministic while changing receipt time", () => {
     const input = { session_id: "session-1", turn_id: "turn-1", hook_event_name: "Stop" };
-    const first = normalizeHookInput("Stop", input, 100);
-    const second = normalizeHookInput("Stop", input, 200);
+    const first = normalizeHookInput("Stop", input, 100, hmacKey);
+    const second = normalizeHookInput("Stop", input, 200, hmacKey);
 
     expect(second.envelope.taskHandle).toBe(first.envelope.taskHandle);
     expect(second.envelope.eventId).toBe(first.envelope.eventId);
@@ -78,19 +79,19 @@ describe("privacy-bounded Hook schema", () => {
       turn_id: "turn-1",
       tool_use_id: "tool-use-1",
       hook_event_name: "PostToolUse"
-    }, 100);
+    }, 100, hmacKey);
     const repeated = normalizeHookInput("PostToolUse", {
       session_id: "session-1",
       turn_id: "turn-1",
       tool_use_id: "tool-use-1",
       hook_event_name: "PostToolUse"
-    }, 200);
+    }, 200, hmacKey);
     const second = normalizeHookInput("PostToolUse", {
       session_id: "session-1",
       turn_id: "turn-1",
       tool_use_id: "tool-use-2",
       hook_event_name: "PostToolUse"
-    }, 100);
+    }, 100, hmacKey);
 
     expect(repeated.envelope.eventId).toBe(first.envelope.eventId);
     expect(second.envelope.eventId).not.toBe(first.envelope.eventId);

@@ -10,7 +10,10 @@ export const MAX_HOOK_TIMEOUT_MS = 3_000;
 const DEFAULT_HOOK_TIMEOUT_MS = 2_500;
 
 type HookInputSource = AsyncIterable<Uint8Array | string> & { destroy?: () => void };
-type HookPost = (envelope: HookEnvelope, options: { signal: AbortSignal }) => Promise<void>;
+type HookPost = (
+  envelope: HookEnvelope,
+  options: { signal: AbortSignal; timeoutMs: number }
+) => Promise<void>;
 
 export interface HookRuntimeDependencies {
   stdin?: HookInputSource;
@@ -114,8 +117,11 @@ async function executeHookEvent(
   const normalized = normalizeHookInput(hookName, input, (dependencies.now ?? Date.now)(), hmacKey);
   try {
     await withDeadline(
-      (dependencies.postHook ?? ((envelope, options) => client.post(envelope, options.signal)))
-        (normalized.envelope, { signal: controller.signal }),
+      (dependencies.postHook ?? ((envelope, options) => client.post(envelope, options)))
+        (normalized.envelope, {
+          signal: controller.signal,
+          timeoutMs: Math.max(0, deadlineMs - Date.now())
+        }),
       deadlineMs,
       controller.signal,
       controller

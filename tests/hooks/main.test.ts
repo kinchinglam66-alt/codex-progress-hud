@@ -1,9 +1,16 @@
-import { Readable } from "node:stream";
-import { readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { afterEach, describe, expect, it } from "vitest";
 import { createHookClient } from "../../src/hooks/client.js";
 import { runHookEvent } from "../../src/hooks/main.js";
+import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
+import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
+import { PROTOCOL_VERSION } from "../../src/lifecycle/types.js";
+import { CompanionHttpClient } from "../../src/mcp/report-client.js";
 import type { HookEnvelope } from "../../src/hooks/schema.js";
 
 const secret = "protected-token-for-runtime-tests-0123456789";
@@ -13,6 +20,63 @@ const input = {
   hook_event_name: "SessionStart",
   source: "startup"
 };
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  while (cleanups.length > 0) await cleanups.pop()?.();
+});
+
+interface ProcessResult { code: number | null; stdout: string; stderr: string; }
+
+function runProcess(
+  command: string,
+  arguments_: string[],
+  environment: NodeJS.ProcessEnv
+): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, arguments_, {
+      env: environment,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({
+      code,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8")
+    }));
+  });
+}
+
+function json(response: ServerResponse, status: number, value: unknown): void {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(value));
+}
+
+async function listen(
+  handler: (request: IncomingMessage, response: ServerResponse) => void
+): Promise<{ url: string; close(): Promise<void> }> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("missing test address");
+  const close = async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => error === undefined ? resolve() : reject(error))
+    );
+  };
+  cleanups.push(close);
+  return { url: `http://127.0.0.1:${address.port}`, close };
+}
 
 function runtime(overrides: Record<string, unknown> = {}) {
   const stdout: string[] = [];
@@ -145,6 +209,192 @@ describe("Hook client", () => {
     await hookClient.post(envelope);
 
     expect(revisions).toEqual([1, 2]);
+  });
+
+  it("cancels the real manager and HTTP status request at the Hook deadline", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-hook-cancel-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const tokenPath = join(directory, "auth.token");
+    await writeFile(tokenPath, `${secret}\n`);
+    let statusEnteredResolve!: () => void;
+    let statusClosedResolve!: () => void;
+    const statusEntered = new Promise<void>((resolve) => { statusEnteredResolve = resolve; });
+    const statusClosed = new Promise<void>((resolve) => { statusClosedResolve = resolve; });
+    let hookRequests = 0;
+    const fixture = await listen((request, response) => {
+      if (request.url === "/health") {
+        json(response, 200, { service: "codex-progress-hud", protocolVersion: PROTOCOL_VERSION });
+        return;
+      }
+      if (request.url === "/api/health") {
+        json(response, 200, {
+          service: "codex-progress-hud",
+          pid: 4312,
+          version: "0.1.0",
+          protocolVersion: PROTOCOL_VERSION,
+          instanceNonce: "hook-cancellation-fixture",
+          startedAt: "2026-09-03T01:02:03.000Z",
+          visibility: "visible"
+        });
+        return;
+      }
+      if (request.url === "/api/snapshot") {
+        statusEnteredResolve();
+        response.once("close", statusClosedResolve);
+        return;
+      }
+      if (request.url === "/api/hooks/events") {
+        hookRequests += 1;
+        json(response, 200, {
+          revision: 1,
+          selectedTaskId: null,
+          selectionMode: "follow_activity",
+          tasks: [],
+          selected: null,
+          compatibility: { incompatibleClientSeen: false }
+        });
+        return;
+      }
+      json(response, 404, { error: "not found" });
+    });
+    const store = createLifecycleStateStore({
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    });
+    await store.setDesiredState("on");
+    const progressClient = new CompanionHttpClient(fixture.url, tokenPath);
+    const manager = createCompanionManager({
+      store,
+      client: progressClient,
+      launcher: { spawnHud: async () => { throw new Error("unexpected launch"); } },
+      startupTimeoutMs: 1_500,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory,
+        pluginVersion: "0.1.0",
+        mcpVersion: "0.1.0",
+        host: "127.0.0.1",
+        port: Number(new URL(fixture.url).port),
+        installManifestPath: join(directory, "install.json"),
+        dataDirectoryPath: directory
+      }
+    });
+    const hookClient = createHookClient({ progressClient, companionManager: manager });
+    const stdout: string[] = [];
+    const running = runHookEvent("Stop", {
+      stdin: Readable.from([JSON.stringify({
+        session_id: "session-1",
+        hook_event_name: "Stop"
+      })]),
+      hmacKey: secret,
+      timeoutMs: 300,
+      postHook: (envelope, options) => hookClient.post(envelope, options),
+      writeStdout: (value) => stdout.push(value),
+      writeStderr: () => undefined
+    });
+    await Promise.race([
+      statusEntered,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("status request was not reached")), 1_000)
+      )
+    ]);
+
+    await running;
+    const requestClosedAtDeadline = await Promise.race([
+      statusClosed.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 150))
+    ]);
+
+    expect(requestClosedAtDeadline).toBe(true);
+    expect(hookRequests).toBe(0);
+    expect(stdout).toEqual(['{"continue":true}\n']);
+  });
+});
+
+describe.runIf(process.platform === "win32")("PowerShell Hook launcher", () => {
+  const root = join(import.meta.dirname, "..", "..");
+  const launcher = join(root, "scripts", "launch-hook.ps1");
+  const probeBuilder = join(import.meta.dirname, "launcher-probe.ps1");
+  const powershell = "powershell.exe";
+
+  async function runLauncher(appData: string, extraEnvironment: NodeJS.ProcessEnv = {}) {
+    return runProcess(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", launcher, "-HookName", "Stop"],
+      { ...process.env, APPDATA: appData, ...extraEnvironment }
+    );
+  }
+
+  it("fails open with one bounded JSON value when validation cannot reach a child", async () => {
+    const appData = await mkdtemp(join(tmpdir(), "hud-hook-launcher-missing-"));
+    cleanups.push(() => rm(appData, { recursive: true, force: true }));
+
+    const result = await runLauncher(appData);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout.replaceAll("\r\n", "\n")).toBe('{"continue":true}\n');
+    expect(result.stderr.length).toBeGreaterThan(0);
+    expect(result.stderr.length).toBeLessThanOrEqual(512);
+    expect(result.stderr).not.toContain(appData);
+  });
+
+  it("fails open when a validated executable path cannot be started", async () => {
+    const appData = await mkdtemp(join(tmpdir(), "hud-hook-launcher-invalid-"));
+    cleanups.push(() => rm(appData, { recursive: true, force: true }));
+    const installDirectory = join(appData, "installed");
+    const executablePath = join(installDirectory, "Codex Progress HUD.exe");
+    const manifestDirectory = join(appData, "codex-progress-hud");
+    await Promise.all([
+      mkdir(installDirectory, { recursive: true }),
+      mkdir(manifestDirectory, { recursive: true })
+    ]);
+    await writeFile(executablePath, "not a Windows executable");
+    await writeFile(join(manifestDirectory, "install.json"), JSON.stringify({
+      executablePath,
+      installDirectory,
+      version: "0.1.0"
+    }));
+
+    const result = await runLauncher(appData);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout.replaceAll("\r\n", "\n")).toBe('{"continue":true}\n');
+    expect(result.stderr.length).toBeGreaterThan(0);
+    expect(result.stderr.length).toBeLessThanOrEqual(512);
+  });
+
+  it("passes through child stdout and preserves an intentional child exit", async () => {
+    const appData = await mkdtemp(join(tmpdir(), "hud-hook-launcher-probe-"));
+    cleanups.push(() => rm(appData, { recursive: true, force: true }));
+    const installDirectory = join(appData, "installed");
+    const executablePath = join(installDirectory, "Codex Progress HUD.exe");
+    const manifestDirectory = join(appData, "codex-progress-hud");
+    await Promise.all([
+      mkdir(installDirectory, { recursive: true }),
+      mkdir(manifestDirectory, { recursive: true })
+    ]);
+    const built = await runProcess(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", probeBuilder, "-OutputPath", executablePath],
+      process.env
+    );
+    expect(built.code).toBe(0);
+    await writeFile(join(manifestDirectory, "install.json"), JSON.stringify({
+      executablePath,
+      installDirectory,
+      version: "0.1.0"
+    }));
+
+    const success = await runLauncher(appData);
+    const intentionalExit = await runLauncher(appData, { CODEX_HOOK_PROBE_EXIT: "7" });
+
+    expect(success.code).toBe(0);
+    expect(success.stdout.replaceAll("\r\n", "\n")).toBe('{"continue":true,"probe":"Stop"}\n');
+    expect(success.stderr).toBe("");
+    expect(intentionalExit.code).toBe(7);
+    expect(intentionalExit.stdout.replaceAll("\r\n", "\n")).toBe('{"continue":true,"probe":"Stop"}\n');
+    expect(intentionalExit.stderr).toBe("");
   });
 });
 

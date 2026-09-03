@@ -13,6 +13,19 @@ const hookNames = [
 const secret = "protected-token-for-hook-tests-0123456789";
 
 describe("privacy-bounded Hook adapter", () => {
+  it("rejects normalization without an explicit secure HMAC key", () => {
+    const callWithoutKey = normalizeHookInput as unknown as (
+      hook: "Stop",
+      input: unknown,
+      nowMs: number
+    ) => unknown;
+
+    expect(() => callWithoutKey("Stop", {
+      session_id: "session-1",
+      hook_event_name: "Stop"
+    }, 100)).toThrow("Hook HMAC key is required");
+  });
+
   it.each(hookNames)("normalizes %s using only opaque identity data", (hook) => {
     const normalized = normalizeHookInput(hook, {
       session_id: "raw-session-id",

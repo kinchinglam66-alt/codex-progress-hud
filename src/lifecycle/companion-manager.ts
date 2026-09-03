@@ -42,7 +42,8 @@ export interface CompanionManager {
   ): Promise<EnsureResult>;
   executeWrite<T>(
     reason: HudWriteReason,
-    operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<T>
+    operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<T>,
+    options?: StateOperationOptions
   ): Promise<
     | { kind: "completed"; value: T }
     | Exclude<EnsureResult, { kind: "ready" }>
@@ -960,8 +961,12 @@ export function createCompanionManager(
 
     ensureForWrite,
 
-    async executeWrite(reason, operation) {
-      const deadline = now() + startupTimeoutMs;
+    async executeWrite(reason, operation, options = {}) {
+      const requestedTimeoutMs = options.timeoutMs ?? startupTimeoutMs;
+      const boundedTimeoutMs = Number.isFinite(requestedTimeoutMs)
+        ? Math.max(0, Math.min(startupTimeoutMs, Math.floor(requestedTimeoutMs)))
+        : 0;
+      const deadline = now() + boundedTimeoutMs;
       const controller = new AbortController();
       let abortCause: WriteAbortCause | undefined;
       let notifyAbort!: (cause: WriteAbortCause) => void;
@@ -973,6 +978,7 @@ export function createCompanionManager(
         notifyAbort(cause);
       };
       const cancelForClose = () => claimAbortCause("close");
+      const cancelForCaller = () => claimAbortCause("deadline");
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const scheduleDeadline = () => {
         const remainingMs = Math.max(0, deadline - now());
@@ -987,6 +993,8 @@ export function createCompanionManager(
         deadlineTimer.unref();
       };
       scheduleDeadline();
+      if (options.signal?.aborted) cancelForCaller();
+      else options.signal?.addEventListener("abort", cancelForCaller, { once: true });
       activeWriteCancellations.add(cancelForClose);
       let writeSnapshot: HudLifecycleSnapshot = { observedState: "stopped" };
       try {
@@ -1084,6 +1092,7 @@ export function createCompanionManager(
         };
       } finally {
         if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        options.signal?.removeEventListener("abort", cancelForCaller);
         activeWriteCancellations.delete(cancelForClose);
       }
     },

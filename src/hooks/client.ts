@@ -11,7 +11,7 @@ export interface HookProgressClient {
 }
 
 export interface HookEventClient {
-  post(envelope: HookEnvelope, signal?: AbortSignal): Promise<void>;
+  post(envelope: HookEnvelope, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
 }
 
 export interface HookClientDependencies {
@@ -27,12 +27,12 @@ function errorCode(error: unknown): string | undefined {
 
 export function createHookClient(dependencies: HookClientDependencies): HookEventClient {
   return {
-    async post(envelope, signal): Promise<void> {
+    async post(envelope, options = {}): Promise<void> {
       await dependencies.companionManager.executeWrite("progress_report", async (makeRequestOptions) => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const requestOptions = makeRequestOptions();
-          if (signal?.aborted) throw signal.reason;
           const current = await dependencies.progressClient.status(requestOptions);
+          if (requestOptions.signal.aborted) throw requestOptions.signal.reason;
           try {
             await dependencies.progressClient.submitHook(envelope, {
               ...requestOptions,
@@ -44,7 +44,7 @@ export function createHookClient(dependencies: HookClientDependencies): HookEven
             throw error;
           }
         }
-      });
+      }, options);
     }
   };
 }

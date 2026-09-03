@@ -1,7 +1,5 @@
 import { createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { z } from "zod";
-import { defaultTokenPath } from "../server/paths.js";
 
 export const hookNames = [
   "SessionStart",
@@ -59,19 +57,6 @@ export const hookInputSchema = z.object({
   source: z.enum(["startup", "resume", "clear", "compact"]).optional()
 }).passthrough();
 
-const FALLBACK_HMAC_KEY = "codex-progress-hud-hook-fallback-key";
-
-export function defaultHookHmacKey(): string {
-  try {
-    const token = readFileSync(defaultTokenPath(), "utf8").trim();
-    if (token.length >= 32) return token;
-  } catch {
-    // The executable Hook entry loads the token before normalization. This
-    // fallback keeps the pure compatibility helper deterministic in isolation.
-  }
-  return FALLBACK_HMAC_KEY;
-}
-
 function opaqueKey(prefix: string, key: string, value: string): string {
   return `${prefix}${createHmac("sha256", key).update(value).digest("base64url")}`;
 }
@@ -80,8 +65,11 @@ export function createHookEnvelope(
   hook: HookName,
   input: unknown,
   nowMs: number,
-  hmacKey = defaultHookHmacKey()
+  hmacKey: string
 ): HookEnvelope {
+  if (typeof hmacKey !== "string" || hmacKey.length < 32) {
+    throw new Error("Hook HMAC key is required");
+  }
   const parsed = hookInputSchema.parse(input);
   if (parsed.hook_event_name !== undefined && parsed.hook_event_name !== hook) {
     throw new z.ZodError([{
@@ -136,9 +124,10 @@ export function hookResult(hook: HookName, taskHandle: string): HookResult {
 export function normalizeHookInput(
   hook: HookName,
   input: unknown,
-  nowMs: number
+  nowMs: number,
+  hmacKey: string
 ): { envelope: HookEnvelope; result: HookResult } {
-  const envelope = createHookEnvelope(hook, input, nowMs);
+  const envelope = createHookEnvelope(hook, input, nowMs, hmacKey);
   return { envelope, result: hookResult(hook, envelope.taskHandle) };
 }
 
