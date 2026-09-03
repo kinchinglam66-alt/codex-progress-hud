@@ -19,8 +19,9 @@
   },
   "scripts": {
     "test": "vitest --passWithNoTests",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "generate:capabilities": "node scripts/generate-capabilities.mjs",
+    "typecheck": "npm run generate:capabilities && tsc --noEmit",
+    "build": "npm run generate:capabilities && tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "start": "npm run start:hud",
     "start:hud": "npm run build && electron . --hud",
     "start:mcp": "npm run build && node dist/main.js --mcp-stdio",

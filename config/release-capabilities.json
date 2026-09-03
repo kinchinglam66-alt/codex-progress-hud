@@ -1,0 +1,13 @@
+{
+  "product": "codex-progress-hud",
+  "protocol": {
+    "current": 1,
+    "minimumClient": 1,
+    "maximumClient": 1
+  },
+  "features": [
+    "progress-reporting",
+    "tracking",
+    "companion-lifecycle"
+  ]
+}
