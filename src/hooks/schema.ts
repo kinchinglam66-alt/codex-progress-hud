@@ -49,6 +49,7 @@ export interface HookResult {
 const hookInputSchema = z.object({
   session_id: z.string().trim().min(1).max(256),
   turn_id: z.string().trim().min(1).max(256).optional(),
+  tool_use_id: z.string().trim().min(1).max(256).optional(),
   hook_event_name: z.string().trim().min(1).max(64).optional(),
   source: z.enum(["startup", "resume", "clear", "compact"]).optional()
 }).passthrough();
@@ -81,7 +82,13 @@ export function normalizeHookInput(
   const taskHandle = opaqueKey("hud_", parsed.session_id);
   const eventId = opaqueKey(
     "evt_",
-    [parsed.session_id, parsed.turn_id ?? "", hook, parsed.source ?? ""].join("\u0000")
+    [
+      parsed.session_id,
+      parsed.turn_id ?? "",
+      hook,
+      parsed.source ?? "",
+      parsed.tool_use_id ?? ""
+    ].join("\u0000")
   );
   const envelope = hookEnvelopeSchema.parse({
     schemaVersion: 1,

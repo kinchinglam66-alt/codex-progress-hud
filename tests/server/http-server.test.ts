@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -250,6 +251,26 @@ describe("local progress HTTP service", () => {
       headers: { authorization: `Bearer ${fixture.token}` }
     });
     expect((await health.json()).capabilities).toMatchObject({ incompatibleClientSeen: true });
+  });
+
+  it("records protocol incompatibility only in diagnostics, not task data", async () => {
+    const fixture = await startServer();
+    const response = await fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${fixture.token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"))
+    });
+
+    expect(response.status).toBe(426);
+    expect(fixture.server.store.snapshot()).toMatchObject({
+      revision: 1,
+      tasks: [],
+      selectedTaskId: null,
+      compatibility: { incompatibleClientSeen: true }
+    });
   });
 
   it("accepts authenticated idempotent window controls", async () => {
@@ -613,6 +634,47 @@ describe("local progress HTTP service", () => {
     expect(fixture.server.store.snapshot().tasks).toHaveLength(1);
   });
 
+  it("does not let duplicate Hook IDs bypass missing or stale revision guards", async () => {
+    const fixture = await startServer();
+    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const post = (revision: number | undefined) => fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${fixture.token}`,
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current),
+        ...(revision === undefined ? {} : { "x-codex-progress-hud-revision": String(revision) })
+      },
+      body: JSON.stringify(envelope)
+    });
+
+    expect((await post(0)).status).toBe(202);
+    expect((await post(undefined)).status).toBe(428);
+    const stale = await post(0);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ code: "STALE_REVISION", revision: 1 });
+    expect(fixture.server.store.snapshot().revision).toBe(1);
+  });
+
+  it("applies concurrent deliveries of one Hook ID at most once", async () => {
+    const fixture = await startServer();
+    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const post = () => fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${fixture.token}`,
+        "content-type": "application/json",
+        "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current),
+        "x-codex-progress-hud-revision": "0"
+      },
+      body: JSON.stringify(envelope)
+    });
+
+    const responses = await Promise.all([post(), post()]);
+    expect(responses.map((response) => response.status).sort()).toEqual([202, 409]);
+    expect(fixture.server.store.snapshot()).toMatchObject({ revision: 1, tasks: [{ id: taskA }] });
+  });
+
   it("guards Hook ingestion with authentication, protocol, generation, and bounded bodies", async () => {
     const fixture = await startServer({ withGenerationGuard: true });
     const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
@@ -683,6 +745,40 @@ describe("local progress HTTP service", () => {
     expect((await stale.json()).revision).toBe(4);
     expect(traversal.status).toBe(404);
     expect(fixture.server.store.snapshot()).toMatchObject({ revision: 4, selectedTaskId: taskA });
+  });
+
+  it("rejects raw and encoded task dot-segments or separators before URL normalization", async () => {
+    const fixture = await startServer();
+    const seed = hookEnvelope(taskB, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    await fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, 0),
+      body: JSON.stringify(seed)
+    });
+    const requests = [
+      `/api/tasks/${taskA}/../${taskB}/select`,
+      `/api/tasks/${taskA}/%2e%2e/${taskB}/select`,
+      `/api/tasks/${taskA}%2F..%2F${taskB}/select`
+    ];
+
+    const responses = await Promise.all(requests.map((path) => new Promise<number>((resolve, reject) => {
+      const address = new URL(fixture.baseUrl);
+      const request = httpRequest({
+        hostname: address.hostname,
+        port: Number(address.port),
+        path,
+        method: "POST",
+        headers: mutationHeaders(fixture.token, 1)
+      }, (response) => {
+        response.resume();
+        response.once("end", () => resolve(response.statusCode ?? 500));
+      });
+      request.once("error", reject);
+      request.end(JSON.stringify({ mode: "pinned" }));
+    })));
+
+    expect(responses).toEqual([404, 404, 404]);
+    expect(fixture.server.store.snapshot()).toMatchObject({ revision: 1, selectedTaskId: taskB });
   });
 
   it("supports snapshot reconnects and complete aggregate SSE after a revision gap", async () => {

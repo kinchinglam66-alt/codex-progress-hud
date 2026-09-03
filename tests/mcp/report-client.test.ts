@@ -127,6 +127,21 @@ describe("CompanionHttpClient", () => {
     });
   });
 
+  it("returns null for an unchanged revisioned snapshot and keeps ordinary status non-null", async () => {
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      if (request.url === "/api/snapshot?afterRevision=3") {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      json(response, 200, aggregateSnapshot);
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+
+    await expect(client.status({ afterRevision: 3 })).resolves.toBeNull();
+    await expect(client.status()).resolves.toEqual(aggregateSnapshot);
+  });
+
   it("reads only minimal identity without sending the bearer token", async () => {
     let authorization: string | undefined;
     let deadline: string | string[] | undefined;

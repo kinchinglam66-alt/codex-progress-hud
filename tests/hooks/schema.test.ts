@@ -72,6 +72,32 @@ describe("privacy-bounded Hook schema", () => {
     expect(second.envelope.receivedAt).toBe(200);
   });
 
+  it("distinguishes repeated PostToolUse deliveries by opaque tool-use sequence", () => {
+    const first = normalizeHookInput("PostToolUse", {
+      session_id: "session-1",
+      turn_id: "turn-1",
+      tool_use_id: "tool-use-1",
+      hook_event_name: "PostToolUse"
+    }, 100);
+    const repeated = normalizeHookInput("PostToolUse", {
+      session_id: "session-1",
+      turn_id: "turn-1",
+      tool_use_id: "tool-use-1",
+      hook_event_name: "PostToolUse"
+    }, 200);
+    const second = normalizeHookInput("PostToolUse", {
+      session_id: "session-1",
+      turn_id: "turn-1",
+      tool_use_id: "tool-use-2",
+      hook_event_name: "PostToolUse"
+    }, 100);
+
+    expect(repeated.envelope.eventId).toBe(first.envelope.eventId);
+    expect(second.envelope.eventId).not.toBe(first.envelope.eventId);
+    expect(JSON.stringify(first.envelope)).not.toContain("tool-use-1");
+    expect(JSON.stringify(second.envelope)).not.toContain("tool-use-2");
+  });
+
   it("parses only the strict wire envelope", () => {
     const envelope = {
       schemaVersion: 1,

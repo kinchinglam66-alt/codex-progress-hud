@@ -202,6 +202,23 @@ function taskRoute(pathname: string): { taskId: string; action: "select" | "visi
   return { taskId, action: match[2] as "select" | "visibility" };
 }
 
+function unsafeTaskRequestTarget(rawUrl: string): boolean {
+  const rawPath = rawUrl.split("?", 1)[0] ?? rawUrl;
+  if (!rawPath.startsWith("/api/tasks/")) return false;
+  for (const segment of rawPath.split("/").slice(3)) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return true;
+    }
+    if (decoded === "." || decoded === ".." || decoded.includes("/") || decoded.includes("\\")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function afterRevision(url: URL): number | undefined {
   const value = url.searchParams.get("afterRevision");
   if (value === null) return undefined;
@@ -394,6 +411,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const cancellation = requestCancellation(request, response);
     try {
+      const unsafeTaskTarget = unsafeTaskRequestTarget(request.url ?? "/");
       const url = new URL(request.url ?? "/", `http://${host}`);
       if (request.method === "GET" && url.pathname === "/health") {
         writeJson(response, 200, {
@@ -417,6 +435,10 @@ export function createProgressServer(options: ProgressServerOptions) {
       const expectedToken = await tokenPromise;
       if (!tokensEqual(expectedToken, bearerToken(request))) {
         writeJson(response, 401, { error: "unauthorized" });
+        return;
+      }
+      if (unsafeTaskTarget) {
+        writeJson(response, 404, { error: "not found" });
         return;
       }
 
@@ -451,13 +473,12 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         const envelope = parseHookEnvelope(await readJson(request));
-        const duplicate = hookEventIds.has(envelope.eventId);
         const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
-          if (duplicate) return store.snapshot();
           const revision = requestRevision(request);
           if (revision === undefined) return { kind: "revision_required" as const };
           if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
+          if (hookEventIds.has(envelope.eventId)) return store.snapshot();
           const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
           rememberHookEvent(envelope.eventId);
           return snapshot;

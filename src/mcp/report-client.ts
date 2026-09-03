@@ -375,13 +375,16 @@ export class CompanionHttpClient implements ProgressClient {
   hide(options?: HudRequestOptions): Promise<void> { return this.#control("/api/window/hide", options); }
   shutdown(options?: HudRequestOptions): Promise<void> { return this.#control("/api/shutdown", options); }
 
-  async #snapshot(path: string, init: RequestInit = {}, options: HudRequestOptions = {}): Promise<HudSnapshot> {
-    const payload = await this.#authenticatedJson(path, init, options);
+  #parseSnapshot(payload: unknown): HudSnapshot {
     const aggregate = aggregateSnapshotSchema.safeParse(payload);
     if (aggregate.success) return aggregate.data as HudSnapshot;
     const legacy = legacySnapshotSchema.safeParse(payload);
     if (legacy.success) return legacy.data as unknown as HudSnapshot;
     throw new HudClientError("VERSION_MISMATCH", "HUD snapshot response is incompatible");
+  }
+
+  async #snapshot(path: string, init: RequestInit = {}, options: HudRequestOptions = {}): Promise<HudSnapshot> {
+    return this.#parseSnapshot(await this.#authenticatedJson(path, init, options));
   }
 
   submit(envelope: ProgressEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
@@ -425,8 +428,12 @@ export class CompanionHttpClient implements ProgressClient {
     }, options);
   }
 
-  status(options?: HudRequestOptions): Promise<HudSnapshot> {
-    return this.#snapshot("/api/snapshot", {}, options);
+  status(options: HudRequestOptions & { afterRevision: number }): Promise<HudSnapshot | null>;
+  status(options?: HudRequestOptions): Promise<HudSnapshot>;
+  async status(options: HudRequestOptions = {}): Promise<HudSnapshot | null> {
+    const payload = await this.#authenticatedJson("/api/snapshot", {}, options);
+    if (payload === undefined && options.afterRevision !== undefined) return null;
+    return this.#parseSnapshot(payload);
   }
 }
 
