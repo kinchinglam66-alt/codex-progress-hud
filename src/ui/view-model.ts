@@ -37,7 +37,7 @@ function minuteLabel(seconds: number): number {
 }
 
 function etaLabel(snapshot: HudSnapshot): string {
-  const status = snapshot.task?.status;
+  const status = snapshot.selected?.task.status;
   if (status === "paused") return "跟踪已暂停，工作计时已暂停";
   if (status === "stopped") return "跟踪已停止，任务仍可继续执行";
   if (status === "quiescent") return "本轮已停止，等待下一轮工作";
@@ -53,9 +53,9 @@ function etaLabel(snapshot: HudSnapshot): string {
   ) {
     return "任务已停止计时";
   }
-  if (snapshot.eta === null) return "正在估算剩余时间";
-  return `预计还需 ${minuteLabel(snapshot.eta.lowSeconds)}–${minuteLabel(
-    snapshot.eta.highSeconds
+  if (snapshot.selected?.eta === null || snapshot.selected === null) return "正在估算剩余时间";
+  return `预计还需 ${minuteLabel(snapshot.selected.eta.lowSeconds)}–${minuteLabel(
+    snapshot.selected.eta.highSeconds
   )} 分钟`;
 }
 
@@ -68,7 +68,7 @@ function progressMode(status: TaskStatus, progress: number | undefined): Progres
 }
 
 export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView {
-  if (snapshot.task === null) {
+  if (snapshot.selected === null) {
     return {
       title: "暂无活动任务",
       statusLabel: "空闲",
@@ -81,7 +81,7 @@ export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView
     };
   }
 
-  const task = snapshot.task;
+  const task = snapshot.selected.task;
   const presentation = statusPresentation[task.status];
   const mode = progressMode(task.status, task.progress);
   const progressPercent =

@@ -390,8 +390,12 @@ describe("local progress HTTP service", () => {
     expect(server.address().host).toBe("127.0.0.1");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      task: null,
-      eta: null,
+      revision: 0,
+      selectedTaskId: null,
+      selectionMode: "follow_activity",
+      tasks: [],
+      selected: null,
+      compatibility: { incompatibleClientSeen: false },
       capabilities: {
         service: "codex-progress-hud",
         companionVersion: "0.1.0",
@@ -441,11 +445,11 @@ describe("local progress HTTP service", () => {
       headers: { authorization: `Bearer ${token}` }
     });
     const snapshot = (await snapshotResponse.json()) as {
-      task: { id: string; status: string };
+      selected: { task: { id: string; status: string } } | null;
     };
 
     expect(response.status).toBe(202);
-    expect(snapshot.task).toMatchObject({ id: "task-1", status: "running" });
+    expect(snapshot.selected?.task).toMatchObject({ id: "task-1", status: "running" });
   });
 
   it.each(["not-a-deadline", "0001", "9007199254740992", "9007199254740991"])(
@@ -491,8 +495,7 @@ describe("local progress HTTP service", () => {
       headers: { authorization: `Bearer ${token}` }
     });
     expect(await snapshotResponse.json()).toMatchObject({
-      task: null,
-      eta: null,
+      selected: null,
       capabilities: { incompatibleClientSeen: false }
     });
   });
@@ -525,7 +528,7 @@ describe("local progress HTTP service", () => {
 
     expect(response.status).toBe(200);
     expect(new TextDecoder().decode(firstChunk?.value)).toContain(
-      'data: {"task":null,"eta":null,"capabilities":'
+      'data: {"revision":0,"selectedTaskId":null,"selectionMode":"follow_activity","tasks":[],"selected":null,"compatibility":{"incompatibleClientSeen":false},"capabilities":'
     );
   });
 

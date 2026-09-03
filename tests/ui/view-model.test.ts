@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildHudView } from "../../src/ui/view-model.js";
 import type { HudSnapshot } from "../../src/server/task-store.js";
-import type { TaskSnapshot } from "../../src/core/types.js";
+import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 
 function task(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   return {
@@ -25,20 +25,34 @@ function task(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   };
 }
 
+function snapshot(taskValue: TaskSnapshot | null, eta: EtaEstimate | null): HudSnapshot {
+  return {
+    revision: 0,
+    selectedTaskId: taskValue?.id ?? null,
+    selectionMode: "follow_activity",
+    tasks: taskValue === null ? [] : [{
+      id: taskValue.id,
+      title: taskValue.title,
+      status: taskValue.status,
+      lastActivityAt: taskValue.lastActivityAt,
+      hiddenForTask: false
+    }],
+    selected: taskValue === null ? null : { task: taskValue, eta },
+    compatibility: { incompatibleClientSeen: false }
+  };
+}
+
 describe("HUD view model", () => {
   it("formats determinate progress and an ETA range without false precision", () => {
-    const snapshot: HudSnapshot = {
-      task: task(),
-      eta: {
+    const hudSnapshot = snapshot(task(), {
         lowSeconds: 360,
         highSeconds: 600,
         confidence: 0.72,
         confidenceClass: "medium",
         signals: ["plan"]
-      }
-    };
+      });
 
-    expect(buildHudView(snapshot, 100_000)).toMatchObject({
+    expect(buildHudView(hudSnapshot, 100_000)).toMatchObject({
       title: "修复登录流程",
       statusLabel: "执行中",
       tone: "active",
@@ -51,7 +65,7 @@ describe("HUD view model", () => {
   });
 
   it("uses an indeterminate presentation when progress is unknown", () => {
-    const view = buildHudView({ task: task({ progress: undefined }), eta: null }, 100_000);
+    const view = buildHudView(snapshot(task({ progress: undefined }), null), 100_000);
 
     expect(view.progressMode).toBe("indeterminate");
     expect(view.progressPercent).toBeNull();
@@ -60,10 +74,7 @@ describe("HUD view model", () => {
 
   it("pauses active ETA while waiting for approval", () => {
     const view = buildHudView(
-      {
-        task: task({ status: "waiting_approval", statusDetail: "允许安装依赖" }),
-        eta: null
-      },
+      snapshot(task({ status: "waiting_approval", statusDetail: "允许安装依赖" }), null),
       100_000
     );
 
@@ -77,8 +88,8 @@ describe("HUD view model", () => {
   });
 
   it("shows explicit tracking pause and stop states distinctly", () => {
-    const paused = buildHudView({ task: task({ status: "paused" }), eta: null });
-    const stopped = buildHudView({ task: task({ status: "stopped" }), eta: null });
+    const paused = buildHudView(snapshot(task({ status: "paused" }), null));
+    const stopped = buildHudView(snapshot(task({ status: "stopped" }), null));
 
     expect(paused.statusLabel).toBe("跟踪已暂停");
     expect(paused.progressMode).toBe("paused");
@@ -88,10 +99,7 @@ describe("HUD view model", () => {
   });
 
   it("shows suspected interruption as a warning rather than a failure", () => {
-    const view = buildHudView(
-      { task: task({ status: "stalled_suspected" }), eta: null },
-      100_000
-    );
+    const view = buildHudView(snapshot(task({ status: "stalled_suspected" }), null), 100_000);
 
     expect(view.statusLabel).toBe("疑似中断");
     expect(view.tone).toBe("warning");
@@ -102,15 +110,15 @@ describe("HUD view model", () => {
     ["disconnected_suspected", "任务连接疑似断开"],
     ["ended_unknown", "任务已结束，结果未知"]
   ] as const)("uses a truthful ETA label for %s", (status, label) => {
-    const view = buildHudView({ task: task({ status }), eta: null }, 100_000);
+    const view = buildHudView(snapshot(task({ status }), null), 100_000);
 
     expect(view.etaLabel).toBe(label);
   });
 
   it("distinguishes failure from verified completion", () => {
-    const failed = buildHudView({ task: task({ status: "failed" }), eta: null }, 100_000);
+    const failed = buildHudView(snapshot(task({ status: "failed" }), null), 100_000);
     const completed = buildHudView(
-      { task: task({ status: "succeeded_verified", progress: 1 }), eta: null },
+      snapshot(task({ status: "succeeded_verified", progress: 1 }), null),
       100_000
     );
 
@@ -124,7 +132,7 @@ describe("HUD view model", () => {
   });
 
   it("shows a quiet idle state when no task exists", () => {
-    expect(buildHudView({ task: null, eta: null }, 100_000)).toMatchObject({
+    expect(buildHudView(snapshot(null, null), 100_000)).toMatchObject({
       title: "暂无活动任务",
       statusLabel: "空闲",
       tone: "idle",

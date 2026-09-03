@@ -16,8 +16,16 @@ import {
   HudClientError,
   type HudClientErrorCode,
   type HudRequestOptions,
-  type ProgressClient
+  type ProgressClient,
+  type ProgressClientSnapshot
 } from "./report-client.js";
+
+function selectedTask(
+  snapshot: ProgressClientSnapshot
+): { task: { id?: string; title?: string; status: string }; eta: unknown } | null {
+  if ("selected" in snapshot) return snapshot.selected;
+  return snapshot.task === null ? null : { task: snapshot.task, eta: snapshot.eta };
+}
 
 const id = z.string().trim().min(1).max(128);
 const title = z.string().trim().min(1).max(160);
@@ -115,20 +123,21 @@ async function submitForCurrentTask(
   requestOptions: () => HudRequestOptions
 ): Promise<ToolResult> {
   const current = await client.status(requestOptions());
+  const currentTask = selectedTask(current)?.task;
   if (
-    current.task === null ||
-    current.task.id === undefined ||
-    current.task.title === undefined
+    currentTask === undefined ||
+    currentTask.id === undefined ||
+    currentTask.title === undefined
   ) {
     return noActiveTaskResult();
   }
   const snapshot = await client.submit({
-    taskId: current.task.id,
-    title: current.task.title,
+    taskId: currentTask.id,
+    title: currentTask.title,
     event
   }, requestOptions());
   return textResult(
-    `Tracking ${event.type.replace("tracking_", "")}: ${snapshot.task?.status ?? "idle"}.`
+    `Tracking ${event.type.replace("tracking_", "")}: ${selectedTask(snapshot)?.task.status ?? "idle"}.`
   );
 }
 
@@ -242,7 +251,7 @@ export function createToolHandlers({
             title: value.title,
             event
           }, makeRequestOptions());
-          return textResult(`Progress recorded: ${snapshot.task?.status ?? "idle"}.`);
+          return textResult(`Progress recorded: ${selectedTask(snapshot)?.task.status ?? "idle"}.`);
         }
       );
     },
@@ -265,7 +274,7 @@ export function createToolHandlers({
               ...(value.detail === undefined ? {} : { detail: value.detail })
             }
           }, makeRequestOptions());
-          return textResult(`Outcome recorded: ${snapshot.task?.status ?? "idle"}.`);
+          return textResult(`Outcome recorded: ${selectedTask(snapshot)?.task.status ?? "idle"}.`);
         }
       );
     },
@@ -280,14 +289,15 @@ export function createToolHandlers({
         "HUD is manually closed; tracking was not started.",
         async (makeRequestOptions) => {
           const current = await client.status(makeRequestOptions());
-          const taskId = parsed.data.task_id ?? current.task?.id ?? "current";
-          const taskTitle = parsed.data.title ?? current.task?.title ?? "当前 Codex 任务";
+          const currentTask = selectedTask(current)?.task;
+          const taskId = parsed.data.task_id ?? currentTask?.id ?? "current";
+          const taskTitle = parsed.data.title ?? currentTask?.title ?? "当前 Codex 任务";
           const snapshot = await client.submit({
             taskId,
             title: taskTitle,
             event: { type: "tracking_started" }
           }, makeRequestOptions());
-          return textResult(`Tracking started: ${snapshot.task?.status ?? "idle"}.`);
+          return textResult(`Tracking started: ${selectedTask(snapshot)?.task.status ?? "idle"}.`);
         }
       );
     },

@@ -18,10 +18,12 @@ export interface ProgressClient {
   status(options?: HudRequestOptions): Promise<ProgressClientSnapshot>;
 }
 
-export interface ProgressClientSnapshot {
+interface LegacyProgressClientSnapshot {
   task: { id?: string; title?: string; status: string } | null;
   eta: unknown;
 }
+
+export type ProgressClientSnapshot = HudSnapshot | LegacyProgressClientSnapshot;
 
 const HUD_CLIENT_ERROR_CODES = [
   "COMPANION_NOT_INSTALLED", "OFFLINE", "VERSION_MISMATCH", "GENERATION_REJECTED",

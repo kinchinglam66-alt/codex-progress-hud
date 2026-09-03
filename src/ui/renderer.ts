@@ -30,6 +30,15 @@ function render(snapshot: HudSnapshot): void {
   if (elements.updated) elements.updated.textContent = view.updatedLabel;
 }
 
+const EMPTY_SNAPSHOT: HudSnapshot = {
+  revision: 0,
+  selectedTaskId: null,
+  selectionMode: "follow_activity",
+  tasks: [],
+  selected: null,
+  compatibility: { incompatibleClientSeen: false }
+};
+
 function consumeEventBlock(block: string): void {
   const data = block
     .split("\n")
@@ -62,7 +71,7 @@ async function connect(): Promise<void> {
         }
       }
     } catch {
-      render({ task: null, eta: null });
+      render(EMPTY_SNAPSHOT);
     }
     await new Promise((resolve) => setTimeout(resolve, retryMs));
     retryMs = Math.min(10_000, retryMs * 2);
@@ -70,4 +79,3 @@ async function connect(): Promise<void> {
 }
 
 void connect();
-

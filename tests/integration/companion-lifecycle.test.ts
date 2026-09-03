@@ -616,7 +616,7 @@ describe("source-mode companion lifecycle", () => {
       expect(hideWindow).not.toHaveBeenCalled();
       expect(requestShutdown).not.toHaveBeenCalled();
       if (mutation === "event") {
-        expect((await client.status({ timeoutMs: 300 })).task?.id).not.toBe("late-deadline-task");
+        expect((await client.status({ timeoutMs: 300 })).selected?.task.id).not.toBe("late-deadline-task");
       }
       if (mutation === "shutdown") {
         const reopened = await store.setDesiredState("on");
@@ -625,7 +625,7 @@ describe("source-mode companion lifecycle", () => {
           title: "Server remains writable",
           event: { type: "tracking_started" }
         }, { generation: reopened.generation, timeoutMs: 300 });
-        expect(snapshot.task?.id).toBe("after-expired-shutdown");
+        expect(snapshot.selected?.task.id).toBe("after-expired-shutdown");
       }
     },
     5_000
@@ -701,7 +701,7 @@ describe("source-mode companion lifecycle", () => {
     await guardSettlement;
     const snapshot = await client.status({ timeoutMs: 90 });
 
-    expect(snapshot.task?.id).not.toBe("late-task");
+    expect(snapshot.selected?.task.id).not.toBe("late-task");
   }, 5_000);
 
   it.each([
@@ -776,7 +776,7 @@ describe("source-mode companion lifecycle", () => {
           title: "Server remains writable",
           event: { type: "tracking_started" }
         }, { generation: reopened.generation, timeoutMs: 90 });
-        expect(snapshot.task?.id).toBe("after-cancelled-shutdown");
+        expect(snapshot.selected?.task.id).toBe("after-cancelled-shutdown");
       }
     },
     5_000
