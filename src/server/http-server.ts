@@ -557,11 +557,29 @@ export function createProgressServer(options: ProgressServerOptions) {
         const envelope = parseProgressEnvelope(await readJson(request));
         const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
+          if (
+            (envelope.event.type === "tracking_paused" ||
+              envelope.event.type === "tracking_resumed" ||
+              envelope.event.type === "tracking_stopped") &&
+            !store.has(envelope.taskId)
+          ) {
+            return { kind: "task_not_found" as const };
+          }
           return store.apply(envelope);
         });
         cancellation.complete();
         if (!result.accepted) {
           writeMutationRejection(response, result);
+          return;
+        }
+        if (
+          result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "task_not_found"
+        ) {
+          writeJson(response, 404, {
+            error: "task handle is not associated with a tracked task",
+            code: "TASK_NOT_FOUND"
+          });
           return;
         }
         writeJson(response, 202, result.value);

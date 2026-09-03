@@ -520,6 +520,79 @@ describe("local progress HTTP service", () => {
     expect(snapshot.selected?.task).toMatchObject({ id: "task-1", status: "running" });
   });
 
+  it("rejects unknown per-task controls without creating, revising, or selecting a task", async () => {
+    const { baseUrl, token } = await startServer({ withGenerationGuard: true });
+    const started = await fetch(`${baseUrl}/api/events`, {
+      method: "POST",
+      headers: mutationHeaders(token, 0),
+      body: JSON.stringify({
+        taskId: taskA,
+        title: "Established task",
+        event: { type: "tracking_started" }
+      })
+    });
+    expect(started.status).toBe(202);
+    const before = await (await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${token}` }
+    })).json();
+
+    for (const type of ["tracking_paused", "tracking_resumed", "tracking_stopped"] as const) {
+      const response = await fetch(`${baseUrl}/api/events`, {
+        method: "POST",
+        headers: mutationHeaders(token, 1),
+        body: JSON.stringify({ taskId: taskB, event: { type } })
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        error: "task handle is not associated with a tracked task",
+        code: "TASK_NOT_FOUND"
+      });
+      const after = await (await fetch(`${baseUrl}/api/snapshot`, {
+        headers: { authorization: `Bearer ${token}` }
+      })).json();
+      expect(after).toEqual(before);
+    }
+  });
+
+  it("preserves established titles unless a semantic report supplies a bounded replacement", async () => {
+    const { baseUrl, token } = await startServer({ withGenerationGuard: true });
+    const post = (revision: number, body: unknown) => fetch(`${baseUrl}/api/events`, {
+      method: "POST",
+      headers: mutationHeaders(token, revision),
+      body: JSON.stringify(body)
+    });
+
+    expect((await post(0, {
+      taskId: taskA,
+      title: "Established title",
+      event: { type: "tracking_started" }
+    })).status).toBe(202);
+    expect((await post(1, {
+      taskId: taskA,
+      event: { type: "tracking_paused" }
+    })).status).toBe(202);
+    expect((await post(2, {
+      taskId: taskA,
+      event: { type: "model_progress", phase: "testing" }
+    })).status).toBe(202);
+
+    let snapshot = await (await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${token}` }
+    })).json() as { revision: number; selected: { task: { title: string } } };
+    expect(snapshot.selected.task.title).toBe("Established title");
+
+    expect((await post(snapshot.revision, {
+      taskId: taskA,
+      title: "Supplied replacement",
+      event: { type: "model_progress", phase: "verification" }
+    })).status).toBe(202);
+    snapshot = await (await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${token}` }
+    })).json() as { revision: number; selected: { task: { title: string } } };
+    expect(snapshot.selected.task.title).toBe("Supplied replacement");
+  });
+
   it.each(["not-a-deadline", "0001", "9007199254740992", "9007199254740991"])(
     "treats malformed request deadline %s as absent for compatibility",
     async (deadline) => {

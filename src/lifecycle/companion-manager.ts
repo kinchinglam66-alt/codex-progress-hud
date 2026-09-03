@@ -105,9 +105,13 @@ function errorCode(error: unknown): ManagerErrorCode {
     error.code === "GENERATION_REJECTED" ||
     error.code === "REQUEST_CANCELLED" ||
     error.code === "STALE_REVISION" ||
-    error.code === "REVISION_REQUIRED"
+    error.code === "REVISION_REQUIRED" ||
+    error.code === "TASK_NOT_FOUND"
   ) return "INTERNAL_ERROR";
-  return error.code as Exclude<HudClientErrorCode, "STALE_REVISION" | "REVISION_REQUIRED">;
+  return error.code as Exclude<
+    HudClientErrorCode,
+    "STALE_REVISION" | "REVISION_REQUIRED" | "TASK_NOT_FOUND"
+  >;
 }
 
 function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
@@ -118,7 +122,8 @@ function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
     code === "REQUEST_CANCELLED" ||
     code === "SHUTTING_DOWN" ||
     code === "STALE_REVISION" ||
-    code === "REVISION_REQUIRED"
+    code === "REVISION_REQUIRED" ||
+    code === "TASK_NOT_FOUND"
   ) return "INTERNAL_ERROR";
   return code;
 }

@@ -65,13 +65,13 @@ export const progressEventSchema = z.discriminatedUnion("type", [
 
 export const progressEnvelopeSchema = z.object({
   taskId: z.string().trim().min(1).max(128),
-  title: z.string().trim().min(1).max(160),
+  title: z.string().trim().min(1).max(160).optional(),
   event: progressEventSchema
 });
 
 export interface ProgressEnvelope {
   taskId: string;
-  title: string;
+  title?: string;
   event: ProgressEvent;
 }
 

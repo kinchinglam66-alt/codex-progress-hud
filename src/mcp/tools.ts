@@ -160,7 +160,6 @@ async function submitForTask(
 ): Promise<ToolResult> {
   const snapshot = await client.submit({
     taskId: taskHandle,
-    title: "Codex task",
     event
   }, requestOptions());
   return textResult(
@@ -275,7 +274,7 @@ export function createToolHandlers({
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
             taskId: value.task_handle,
-            title: value.title ?? "Codex task",
+            ...(value.title === undefined ? {} : { title: value.title }),
             event
           }, makeRequestOptions());
           return textResult(`Progress recorded: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
@@ -293,7 +292,7 @@ export function createToolHandlers({
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
             taskId: value.task_handle,
-            title: value.title ?? "Codex task",
+            ...(value.title === undefined ? {} : { title: value.title }),
             event: {
               type: "model_outcome",
               outcome: value.outcome,
@@ -316,7 +315,6 @@ export function createToolHandlers({
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
             taskId: value.task_handle,
-            title: "Codex task",
             event: { type: "validation_observed", result: value.result }
           }, makeRequestOptions());
           return textResult(`Validation ${value.result}: ${submittedTaskStatus(snapshot, value.task_handle)}.`);

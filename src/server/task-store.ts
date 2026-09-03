@@ -85,9 +85,10 @@ export class TaskStore extends EventEmitter {
   apply(envelope: ProgressEnvelope, nowMs = this.#now()): HudAggregateSnapshot {
     let mutated = this.#prune(nowMs);
     const existing = this.#tasks.get(envelope.taskId);
+    const title = envelope.title ?? existing?.task.title ?? "Codex task";
     const current =
-      existing?.task ?? createInitialTask(envelope.taskId, envelope.title, nowMs);
-    const titled = current.title === envelope.title ? current : { ...current, title: envelope.title };
+      existing?.task ?? createInitialTask(envelope.taskId, title, nowMs);
+    const titled = current.title === title ? current : { ...current, title };
     const nextTask = reduceTask(titled, envelope.event, nowMs);
 
     if (existing === undefined) {
@@ -122,6 +123,14 @@ export class TaskStore extends EventEmitter {
     if (this.#enforceBound()) mutated = true;
     if (this.#reconcileSelection()) mutated = true;
     return this.#finishMutation(mutated, nowMs);
+  }
+
+  has(taskId: string, nowMs = this.#now()): boolean {
+    const record = this.#tasks.get(taskId);
+    return record !== undefined && !(
+      record.terminalSince !== undefined &&
+      nowMs - record.terminalSince >= this.#terminalRetentionMs
+    );
   }
 
   select(

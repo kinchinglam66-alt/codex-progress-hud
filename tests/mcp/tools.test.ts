@@ -178,9 +178,50 @@ describe("MCP progress tool handlers", () => {
     expect(result.isError).toBeUndefined();
     expect(submit).toHaveBeenCalledWith({
       taskId: taskHandleA,
-      title: "Codex task",
       event: { type: "validation_observed", result: "passed" }
     }, expectedLease());
+  });
+
+  it("omits titles from controls and semantic reports unless the caller supplies one", async () => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    await handlers.trackingPause({ task_handle: taskHandleA });
+    await handlers.progressReport({ task_handle: taskHandleA, phase: "testing" });
+    await handlers.taskOutcome({
+      task_handle: taskHandleA,
+      outcome: "blocked",
+      verified: false
+    });
+    await handlers.progressReport({
+      task_handle: taskHandleA,
+      title: "Explicit replacement",
+      phase: "verification"
+    });
+
+    expect(submit).toHaveBeenNthCalledWith(1, {
+      taskId: taskHandleA,
+      event: { type: "tracking_paused" }
+    }, expectedLease());
+    expect(submit).toHaveBeenNthCalledWith(2, expect.not.objectContaining({ title: expect.anything() }), expectedLease());
+    expect(submit).toHaveBeenNthCalledWith(3, expect.not.objectContaining({ title: expect.anything() }), expectedLease());
+    expect(submit).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      title: "Explicit replacement"
+    }), expectedLease());
+  });
+
+  it("returns a structured TASK_NOT_FOUND result for a stale control handle", async () => {
+    const handlers = createHandlers({
+      submit: vi.fn(async () => {
+        throw new HudClientError("TASK_NOT_FOUND", "unknown task handle");
+      }),
+      status: vi.fn()
+    });
+
+    const result = await handlers.trackingStop({ task_handle: taskHandleB });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual({ ok: false, code: "TASK_NOT_FOUND" });
   });
 
   it("keeps pause, resume, and stop controls per handle and never treats them as Codex execution controls", async () => {
@@ -473,17 +514,14 @@ describe("MCP progress tool handlers", () => {
 
     expect(submit).toHaveBeenNthCalledWith(1, {
       taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
-      title: "Codex task",
       event: { type: "tracking_paused" }
     }, expectedLease());
     expect(submit).toHaveBeenNthCalledWith(2, {
       taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
-      title: "Codex task",
       event: { type: "tracking_resumed" }
     }, expectedLease());
     expect(submit).toHaveBeenNthCalledWith(3, {
       taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
-      title: "Codex task",
       event: { type: "tracking_stopped" }
     }, expectedLease());
     expect(statusResult.content[0]?.text).toContain('"status":"running"');
