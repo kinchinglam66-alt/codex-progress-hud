@@ -6,6 +6,16 @@ describe("executable entry mode", () => {
     expect(selectEntryMode(["app.exe", "--mcp-stdio"])).toBe("mcp-stdio");
   });
 
+  it.each([
+    "SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Interrupt", "SessionEnd"
+  ] as const)("selects Hook event mode for %s", (hookName) => {
+    expect(selectEntryMode(["app.exe", `--hook-event=${hookName}`])).toBe("hook-event");
+    expect(selectEntryIntent(["app.exe", `--hook-event=${hookName}`])).toEqual({
+      mode: "hook-event",
+      hookName
+    });
+  });
+
   it("selects HUD mode for the explicit HUD flag", () => {
     expect(selectEntryMode(["app.exe", "--hud"])).toBe("hud");
   });
@@ -17,20 +27,22 @@ describe("executable entry mode", () => {
   it("distinguishes automatic login from explicit HUD activation", () => {
     expect(selectEntryIntent(["app.exe", "--automatic-login"])).toEqual({
       mode: "hud",
-      launchReason: "automatic-login"
+      launchReason: { kind: "automatic-login" }
     });
     expect(selectEntryIntent(["app.exe", "--hud"])).toEqual({
       mode: "hud",
-      launchReason: "explicit"
+      launchReason: { kind: "explicit" }
     });
-    expect(selectEntryIntent(["app.exe"])).toEqual({ mode: "hud", launchReason: "explicit" });
+    expect(selectEntryIntent(["app.exe"])).toEqual({
+      mode: "hud",
+      launchReason: { kind: "explicit" }
+    });
   });
 
   it.each([0, 7])("classifies safe manager generation %i as a non-explicit HUD launch", (generation) => {
     expect(selectEntryIntent(["app.exe", "--hud", `--manager-generation=${generation}`])).toEqual({
       mode: "hud",
-      launchReason: "manager",
-      generation
+      launchReason: { kind: "manager", generation }
     });
   });
 
@@ -51,5 +63,16 @@ describe("executable entry mode", () => {
     ["missing HUD marker", ["app.exe", "--manager-generation=7"]]
   ])("rejects manager generation combined with %s", (_name, argv) => {
     expect(() => selectEntryIntent(argv)).toThrow("Invalid manager launch arguments");
+  });
+
+  it.each([
+    ["missing value", ["app.exe", "--hook-event"]],
+    ["empty value", ["app.exe", "--hook-event="]],
+    ["unknown event", ["app.exe", "--hook-event=Unknown"]],
+    ["duplicate event", ["app.exe", "--hook-event=Stop", "--hook-event=Stop"]],
+    ["mixed MCP mode", ["app.exe", "--hook-event=Stop", "--mcp-stdio"]],
+    ["mixed HUD mode", ["app.exe", "--hook-event=Stop", "--hud"]]
+  ])("rejects %s", (_name, argv) => {
+    expect(() => selectEntryIntent(argv)).toThrow("Invalid hook event arguments");
   });
 });

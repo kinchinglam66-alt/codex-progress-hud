@@ -353,7 +353,7 @@ export async function runDesktop(
           commandLine.every((argument) => typeof argument === "string")
           ? selectEntryIntent(commandLine)
           : undefined;
-        if (intent?.mode !== "hud" || intent.launchReason !== "explicit") return;
+        if (intent?.mode !== "hud" || intent.launchReason.kind !== "explicit") return;
       } catch (error) {
         reportError(error, "second-instance launch intent");
         return;

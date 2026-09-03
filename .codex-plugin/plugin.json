@@ -9,6 +9,7 @@
   "license": "Apache-2.0",
   "keywords": ["codex", "progress", "eta", "overlay", "mcp"],
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Progress HUD",

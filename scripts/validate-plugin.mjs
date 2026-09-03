@@ -46,6 +46,9 @@ if (
 if (manifest.mcpServers !== "./.mcp.json") {
   throw new Error("plugin.json must reference ./.mcp.json");
 }
+if (manifest.hooks !== "./hooks/hooks.json") {
+  throw new Error("plugin.json must reference ./hooks/hooks.json");
+}
 
 const mcpConfigPath = resolve(pluginRoot, manifest.mcpServers);
 const mcpConfig = JSON.parse(await readFile(mcpConfigPath, "utf8"));
@@ -64,4 +67,60 @@ if (!Array.isArray(mcpServer.args) || typeof mcpServer.args[0] !== "string") {
 
 await access(resolve(pluginRoot, mcpServer.cwd, mcpServer.args[0]));
 await access(resolve(pluginRoot, "skills/progress-reporting/SKILL.md"));
+const hooksConfigPath = resolve(pluginRoot, manifest.hooks);
+const hooksConfig = JSON.parse(await readFile(hooksConfigPath, "utf8"));
+const supportedHookNames = [
+  "SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"
+];
+const registeredHookNames = Object.keys(hooksConfig.hooks ?? {});
+if (registeredHookNames.includes("Interrupt")) {
+  throw new Error("hooks.json must not register Interrupt");
+}
+if (registeredHookNames.sort().join("|") !== supportedHookNames.slice().sort().join("|")) {
+  throw new Error("hooks.json must register exactly the supported Hook events");
+}
+for (const hookName of supportedHookNames) {
+  const groups = hooksConfig.hooks[hookName];
+  if (!Array.isArray(groups) || groups.length === 0) {
+    throw new Error(`hooks.json must define a matcher for ${hookName}`);
+  }
+  for (const group of groups) {
+    if (typeof group.matcher !== "string" || group.matcher.trim() === "") {
+      throw new Error(`hooks.json matcher is invalid for ${hookName}`);
+    }
+    if (!Array.isArray(group.hooks) || group.hooks.length !== 1) {
+      throw new Error(`hooks.json must define one command for ${hookName}`);
+    }
+    const command = group.hooks[0];
+    if (
+      command?.type !== "command" ||
+      typeof command.command !== "string" ||
+      !command.command.includes("${PLUGIN_ROOT}") ||
+      !command.command.includes("scripts/launch-hook.ps1") ||
+      !command.command.includes(`-HookName ${hookName}`) ||
+      !Number.isSafeInteger(command.timeout) ||
+      command.timeout < 1 ||
+      command.timeout > 3 ||
+      command.async !== undefined
+    ) {
+      throw new Error(`hooks.json command is invalid for ${hookName}`);
+    }
+  }
+}
+if (hooksConfig.hooks.SessionStart[0].matcher !== "startup|resume|clear|compact") {
+  throw new Error("SessionStart matcher must include all supported startup sources");
+}
+const hookLauncher = await readFile(resolve(pluginRoot, "scripts/launch-hook.ps1"), "utf8");
+const launcherParameterBlock = hookLauncher.match(/param\s*\(([\s\S]*?)\)/iu)?.[1] ?? "";
+if (
+  /\b(?:node|npm)\b/iu.test(hookLauncher) ||
+  /executablepath/iu.test(launcherParameterBlock) ||
+  /-ExecutablePath\b/iu.test(hookLauncher) ||
+  !hookLauncher.includes("install.json") ||
+  !hookLauncher.includes("executablePath") ||
+  !hookLauncher.includes("Test-Path -LiteralPath") ||
+  !hookLauncher.includes("--hook-event=")
+) {
+  throw new Error("Hook launcher must validate install.json and invoke the installed executable directly");
+}
 process.stdout.write("Plugin manifest and MCP launch configuration are valid.\n");

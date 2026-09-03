@@ -1,5 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
+import { defaultTokenPath } from "../server/paths.js";
 
 export const hookNames = [
   "SessionStart",
@@ -43,10 +45,13 @@ export interface HookEnvelope {
 
 export interface HookResult {
   continue: true;
-  additionalContext?: string;
+  hookSpecificOutput?: {
+    hookEventName: "SessionStart" | "UserPromptSubmit";
+    additionalContext: string;
+  };
 }
 
-const hookInputSchema = z.object({
+export const hookInputSchema = z.object({
   session_id: z.string().trim().min(1).max(256),
   turn_id: z.string().trim().min(1).max(256).optional(),
   tool_use_id: z.string().trim().min(1).max(256).optional(),
@@ -54,15 +59,29 @@ const hookInputSchema = z.object({
   source: z.enum(["startup", "resume", "clear", "compact"]).optional()
 }).passthrough();
 
-function opaqueKey(prefix: string, value: string): string {
-  return `${prefix}${createHash("sha256").update(value).digest("base64url")}`;
+const FALLBACK_HMAC_KEY = "codex-progress-hud-hook-fallback-key";
+
+export function defaultHookHmacKey(): string {
+  try {
+    const token = readFileSync(defaultTokenPath(), "utf8").trim();
+    if (token.length >= 32) return token;
+  } catch {
+    // The executable Hook entry loads the token before normalization. This
+    // fallback keeps the pure compatibility helper deterministic in isolation.
+  }
+  return FALLBACK_HMAC_KEY;
 }
 
-export function normalizeHookInput(
+function opaqueKey(prefix: string, key: string, value: string): string {
+  return `${prefix}${createHmac("sha256", key).update(value).digest("base64url")}`;
+}
+
+export function createHookEnvelope(
   hook: HookName,
   input: unknown,
-  nowMs: number
-): { envelope: HookEnvelope; result: HookResult } {
+  nowMs: number,
+  hmacKey = defaultHookHmacKey()
+): HookEnvelope {
   const parsed = hookInputSchema.parse(input);
   if (parsed.hook_event_name !== undefined && parsed.hook_event_name !== hook) {
     throw new z.ZodError([{
@@ -75,13 +94,14 @@ export function normalizeHookInput(
     throw new RangeError("Hook receipt time must be a nonnegative safe integer");
   }
 
-  const sessionKey = opaqueKey("session_", parsed.session_id);
+  const sessionKey = opaqueKey("session_", hmacKey, parsed.session_id);
   const turnKey = parsed.turn_id === undefined
     ? undefined
-    : opaqueKey("turn_", `${parsed.session_id}\u0000${parsed.turn_id}`);
-  const taskHandle = opaqueKey("hud_", parsed.session_id);
+    : opaqueKey("turn_", hmacKey, `${parsed.session_id}\u0000${parsed.turn_id}`);
+  const taskHandle = opaqueKey("hud_", hmacKey, parsed.session_id);
   const eventId = opaqueKey(
     "evt_",
+    hmacKey,
     [
       parsed.session_id,
       parsed.turn_id ?? "",
@@ -90,7 +110,7 @@ export function normalizeHookInput(
       parsed.tool_use_id ?? ""
     ].join("\u0000")
   );
-  const envelope = hookEnvelopeSchema.parse({
+  return hookEnvelopeSchema.parse({
     schemaVersion: 1,
     taskHandle,
     eventId,
@@ -100,11 +120,26 @@ export function normalizeHookInput(
     ...(parsed.source === undefined ? {} : { source: parsed.source }),
     receivedAt: nowMs
   }) as HookEnvelope;
+}
+
+export function hookResult(hook: HookName, taskHandle: string): HookResult {
   const result: HookResult = { continue: true };
   if (hook === "SessionStart" || hook === "UserPromptSubmit") {
-    result.additionalContext = `Use HUD task handle ${taskHandle} for this session's progress tools.`;
+    result.hookSpecificOutput = {
+      hookEventName: hook,
+      additionalContext: `Use HUD task handle ${taskHandle} with Progress HUD tools for this session.`
+    };
   }
-  return { envelope, result };
+  return result;
+}
+
+export function normalizeHookInput(
+  hook: HookName,
+  input: unknown,
+  nowMs: number
+): { envelope: HookEnvelope; result: HookResult } {
+  const envelope = createHookEnvelope(hook, input, nowMs);
+  return { envelope, result: hookResult(hook, envelope.taskHandle) };
 }
 
 export function parseHookEnvelope(value: unknown): HookEnvelope {

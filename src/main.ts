@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
+import { hookNames, type HookName } from "./hooks/schema.js";
 
-export type EntryMode = "hud" | "mcp-stdio";
+export type EntryMode = "hud" | "mcp-stdio" | "hook-event";
 export type DesktopLaunchReason =
   | { kind: "explicit" }
   | { kind: "automatic-login" }
@@ -8,12 +9,28 @@ export type DesktopLaunchReason =
 
 export type EntryIntent =
   | { mode: "mcp-stdio" }
-  | { mode: "hud"; launchReason: "explicit" | "automatic-login" }
-  | { mode: "hud"; launchReason: "manager"; generation: number };
+  | { mode: "hud"; launchReason: DesktopLaunchReason }
+  | { mode: "hook-event"; hookName: HookName };
 
 const MANAGER_GENERATION_PREFIX = "--manager-generation";
 
 export function selectEntryIntent(argv: string[]): EntryIntent {
+  const hookArguments = argv.filter((argument) => argument.startsWith("--hook-event"));
+  if (hookArguments.length > 0) {
+    if (
+      hookArguments.length !== 1 ||
+      !/^--hook-event=(?:SessionStart|UserPromptSubmit|PostToolUse|Stop|Interrupt|SessionEnd)$/u.test(hookArguments[0]!) ||
+      argv.includes("--mcp-stdio") ||
+      argv.includes("--hud") ||
+      argv.includes("--automatic-login") ||
+      argv.some((argument) => argument.startsWith(`${MANAGER_GENERATION_PREFIX}`))
+    ) {
+      throw new Error("Invalid hook event arguments");
+    }
+    const hookName = hookArguments[0]!.slice("--hook-event=".length) as HookName;
+    if (!hookNames.includes(hookName)) throw new Error("Invalid hook event arguments");
+    return { mode: "hook-event", hookName };
+  }
   const managerArguments = argv.filter(
     (argument) =>
       argument === MANAGER_GENERATION_PREFIX ||
@@ -31,12 +48,12 @@ export function selectEntryIntent(argv: string[]): EntryIntent {
     ) {
       throw new Error("Invalid manager launch arguments");
     }
-    return { mode: "hud", launchReason: "manager", generation };
+    return { mode: "hud", launchReason: { kind: "manager", generation } };
   }
   if (argv.includes("--mcp-stdio")) return { mode: "mcp-stdio" };
   return {
     mode: "hud",
-    launchReason: argv.includes("--automatic-login") ? "automatic-login" : "explicit"
+    launchReason: { kind: argv.includes("--automatic-login") ? "automatic-login" : "explicit" }
   };
 }
 
@@ -46,6 +63,11 @@ export function selectEntryMode(argv: string[]): EntryMode {
 
 async function runSelectedMode(argv: string[]): Promise<void> {
   const intent = selectEntryIntent(argv);
+  if (intent.mode === "hook-event") {
+    const { runHookEvent } = await import("./hooks/main.js");
+    await runHookEvent(intent.hookName);
+    return;
+  }
   if (intent.mode === "mcp-stdio") {
     const { runMcpServer } = await import("./mcp/main.js");
     await runMcpServer();
@@ -53,10 +75,7 @@ async function runSelectedMode(argv: string[]): Promise<void> {
   }
 
   const { runDesktop } = await import("./desktop/main.js");
-  const launchReason: DesktopLaunchReason = intent.launchReason === "manager"
-    ? { kind: "manager", generation: intent.generation }
-    : { kind: intent.launchReason };
-  await runDesktop(undefined, launchReason);
+  await runDesktop(undefined, intent.launchReason);
 }
 
 function isExecutableEntry(): boolean {
