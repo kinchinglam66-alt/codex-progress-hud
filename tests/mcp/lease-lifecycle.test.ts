@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { EnsureResult, HudWriteReason } from "../../src/lifecycle/types.js";
 import type { LeaseClient } from "../../src/mcp/report-client.js";
 import { createMcpLeaseLifecycle } from "../../src/mcp/lease-lifecycle.js";
@@ -60,5 +60,152 @@ describe("MCP lease lifecycle", () => {
 
     await expect(lifecycle.start()).rejects.toThrow("START_TIMEOUT");
     expect(acquireCalls).toBe(0);
+  });
+
+  it("never acquires after stop wins while readiness is pending", async () => {
+    let resolveReady!: (value: EnsureResult) => void;
+    const ready = new Promise<EnsureResult>((resolve) => { resolveReady = resolve; });
+    const acquireLease = vi.fn(async () => ({ id: "lease_late", ownerNonce: "owner-a", expiresAt: 60_000 }));
+    const setLease = vi.fn();
+    const lifecycle = createMcpLeaseLifecycle({
+      client: {
+        acquireLease,
+        renewLease: async (lease) => lease,
+        releaseLease: async () => undefined,
+        bindLease: async () => undefined,
+        setLease,
+        setLeaseOwnerNonce: () => undefined
+      },
+      ownerNonce: "owner-a",
+      ensureReady: async () => ready,
+      schedule: () => 1,
+      cancel: () => undefined
+    });
+
+    const starting = lifecycle.start();
+    await Promise.resolve();
+    await lifecycle.stop();
+    resolveReady({ kind: "ready", generation: 1, snapshot: { observedState: "running" } });
+
+    await expect(starting).rejects.toThrow(/stopped|cancelled/iu);
+    expect(acquireLease).not.toHaveBeenCalled();
+    expect(setLease).not.toHaveBeenCalledWith(expect.objectContaining({ id: "lease_late" }));
+    expect(lifecycle.current()).toBeUndefined();
+  });
+
+  it("releases an acquisition that settles after stop and never schedules renewal", async () => {
+    let resolveAcquire!: (value: { id: string; ownerNonce: string; expiresAt: number }) => void;
+    const acquisition = new Promise<{ id: string; ownerNonce: string; expiresAt: number }>((resolve) => {
+      resolveAcquire = resolve;
+    });
+    const releaseLease = vi.fn(async () => undefined);
+    const schedule = vi.fn(() => 1);
+    const setLease = vi.fn();
+    const lifecycle = createMcpLeaseLifecycle({
+      client: {
+        acquireLease: async () => acquisition,
+        renewLease: async (lease) => lease,
+        releaseLease,
+        bindLease: async () => undefined,
+        setLease,
+        setLeaseOwnerNonce: () => undefined
+      },
+      ownerNonce: "owner-a",
+      ensureReady: async () => ({ kind: "ready", generation: 1, snapshot: { observedState: "running" } }),
+      schedule,
+      cancel: () => undefined
+    });
+
+    const starting = lifecycle.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    await lifecycle.stop();
+    const lateLease = { id: "lease_late", ownerNonce: "owner-a", expiresAt: 60_000 };
+    resolveAcquire(lateLease);
+
+    await expect(starting).rejects.toThrow(/stopped|cancelled/iu);
+    expect(releaseLease).toHaveBeenCalledWith(lateLease);
+    expect(schedule).not.toHaveBeenCalled();
+    expect(setLease).not.toHaveBeenCalledWith(lateLease);
+    expect(lifecycle.current()).toBeUndefined();
+  });
+
+  it("single-flights concurrent starts and cancels renewal work on stop", async () => {
+    let resolveAcquire!: (value: { id: string; ownerNonce: string; expiresAt: number }) => void;
+    const acquisition = new Promise<{ id: string; ownerNonce: string; expiresAt: number }>((resolve) => {
+      resolveAcquire = resolve;
+    });
+    const acquireLease = vi.fn(async () => acquisition);
+    let renewal!: () => void;
+    const renewLease = vi.fn(async (lease) => lease);
+    const cancel = vi.fn();
+    const lifecycle = createMcpLeaseLifecycle({
+      client: {
+        acquireLease,
+        renewLease,
+        releaseLease: async () => undefined,
+        bindLease: async () => undefined,
+        setLease: () => undefined,
+        setLeaseOwnerNonce: () => undefined
+      },
+      ownerNonce: "owner-a",
+      ensureReady: async () => ({ kind: "ready", generation: 1, snapshot: { observedState: "running" } }),
+      schedule: (callback) => { renewal = callback; return "timer"; },
+      cancel
+    });
+
+    const first = lifecycle.start();
+    const second = lifecycle.start();
+    await Promise.resolve();
+    const lease = { id: "lease_one", ownerNonce: "owner-a", expiresAt: 60_000 };
+    resolveAcquire(lease);
+    await expect(Promise.all([first, second])).resolves.toEqual([lease, lease]);
+    expect(acquireLease).toHaveBeenCalledOnce();
+
+    await lifecycle.stop();
+    renewal();
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(renewLease).not.toHaveBeenCalled();
+    await expect(lifecycle.start()).rejects.toThrow(/stopped|closed/iu);
+    expect(acquireLease).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a stale start generation before a replacement acquisition is installed", async () => {
+    let resolveFirst!: (value: { id: string; ownerNonce: string; expiresAt: number }) => void;
+    const firstAcquisition = new Promise<{ id: string; ownerNonce: string; expiresAt: number }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const replacement = { id: "lease_new", ownerNonce: "owner-a", expiresAt: 90_000 };
+    const releaseLease = vi.fn(async () => undefined);
+    const acquireLease = vi.fn()
+      .mockImplementationOnce(async () => firstAcquisition)
+      .mockResolvedValueOnce(replacement);
+    const lifecycle = createMcpLeaseLifecycle({
+      client: {
+        acquireLease,
+        renewLease: async (lease) => lease,
+        releaseLease,
+        bindLease: async () => undefined,
+        setLease: () => undefined,
+        setLeaseOwnerNonce: () => undefined
+      },
+      ownerNonce: "owner-a",
+      ensureReady: async () => ({ kind: "ready", generation: 1, snapshot: { observedState: "running" } }),
+      schedule: () => 1,
+      cancel: () => undefined
+    });
+
+    const stale = lifecycle.start();
+    await Promise.resolve();
+    lifecycle.invalidate();
+    const current = lifecycle.start();
+    await expect(current).resolves.toEqual(replacement);
+    const staleLease = { id: "lease_old", ownerNonce: "owner-a", expiresAt: 60_000 };
+    resolveFirst(staleLease);
+
+    await expect(stale).rejects.toThrow(/cancelled/iu);
+    expect(releaseLease).toHaveBeenCalledWith(staleLease);
+    expect(lifecycle.current()).toEqual(replacement);
   });
 });

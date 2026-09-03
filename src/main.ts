@@ -4,7 +4,6 @@ import { hookNames, type HookName } from "./hooks/schema.js";
 export type EntryMode = "hud" | "mcp-stdio" | "hook-event";
 export type DesktopLaunchReason =
   | { kind: "explicit" }
-  | { kind: "automatic-login" }
   | { kind: "manager"; generation: number };
 
 export type EntryIntent =
@@ -31,6 +30,9 @@ export function selectEntryIntent(argv: string[]): EntryIntent {
     if (!hookNames.includes(hookName)) throw new Error("Invalid hook event arguments");
     return { mode: "hook-event", hookName };
   }
+  if (argv.includes("--automatic-login")) {
+    throw new Error("Automatic login is disabled");
+  }
   const managerArguments = argv.filter(
     (argument) =>
       argument === MANAGER_GENERATION_PREFIX ||
@@ -43,8 +45,7 @@ export function selectEntryIntent(argv: string[]): EntryIntent {
     if (!Number.isSafeInteger(generation)) throw new Error("Invalid manager generation");
     if (
       !argv.includes("--hud") ||
-      argv.includes("--mcp-stdio") ||
-      argv.includes("--automatic-login")
+      argv.includes("--mcp-stdio")
     ) {
       throw new Error("Invalid manager launch arguments");
     }
@@ -53,7 +54,7 @@ export function selectEntryIntent(argv: string[]): EntryIntent {
   if (argv.includes("--mcp-stdio")) return { mode: "mcp-stdio" };
   return {
     mode: "hud",
-    launchReason: { kind: argv.includes("--automatic-login") ? "automatic-login" : "explicit" }
+    launchReason: { kind: "explicit" }
   };
 }
 

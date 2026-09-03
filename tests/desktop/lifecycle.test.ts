@@ -49,8 +49,6 @@ function desktopHarness(lockAcquired = true) {
       whenReady: vi.fn(async () => undefined),
       on: vi.fn((event, callback) => listeners.set(event, callback)),
       quit: vi.fn(() => order.push("quit")),
-      getLoginItemSettings: vi.fn(() => ({ openAtLogin: false })),
-      setLoginItemSettings: vi.fn(),
       getVersion: vi.fn(() => "0.1.0")
     },
     createWindowController: vi.fn((options) => {
@@ -319,48 +317,6 @@ describe("desktop lifecycle", () => {
     await Promise.resolve();
     expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
     expect(harness.windowController.show).not.toHaveBeenCalled();
-  });
-
-  it("does not reinterpret an automatic-login second instance as explicit activation after manual off", async () => {
-    const harness = desktopHarness();
-    await runDesktop(harness.dependencies);
-    await harness.dependencies.stateStore.setDesiredState("off");
-    vi.mocked(harness.dependencies.stateStore.setDesiredState).mockClear();
-    harness.windowController.show.mockClear();
-
-    harness.listeners.get("second-instance")?.(
-      {},
-      ["app.exe", "--hud", "--automatic-login"]
-    );
-
-    await Promise.resolve();
-    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
-    expect(harness.windowController.show).not.toHaveBeenCalled();
-  });
-
-  it("automatic login exits before runtime, server, or window publication when desired state is off", async () => {
-    const harness = desktopHarness();
-    vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({
-      desiredState: "off",
-      startWithWindows: true,
-      generation: 4
-    });
-
-    await runDesktop(harness.dependencies, { kind: "automatic-login" });
-
-    expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
-    expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
-    expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
-    expect(harness.windowController.create).not.toHaveBeenCalled();
-  });
-
-  it("automatic login proceeds without changing an on intent", async () => {
-    const harness = desktopHarness();
-
-    await runDesktop(harness.dependencies, { kind: "automatic-login" });
-
-    expect(harness.dependencies.stateStore.setDesiredState).not.toHaveBeenCalled();
-    expect(harness.dependencies.createProgressServer).toHaveBeenCalledOnce();
   });
 
   it("explicit activation reopens persisted off before publishing runtime", async () => {
@@ -728,20 +684,6 @@ describe("desktop lifecycle", () => {
     expect(JSON.stringify(vi.mocked(harness.dependencies.diagnose).mock.calls)).not.toContain(
       "Bearer secret"
     );
-  });
-
-  it("updates the per-user login item only after an explicit tray click", async () => {
-    const harness = desktopHarness();
-    await runDesktop(harness.dependencies);
-
-    expect(harness.dependencies.app.setLoginItemSettings).not.toHaveBeenCalled();
-    await harness.trayCallbacks?.onToggleLogin(true);
-
-    expect(harness.dependencies.app.setLoginItemSettings).toHaveBeenCalledWith({
-      openAtLogin: true,
-      args: ["--automatic-login"]
-    });
-    expect(harness.dependencies.stateStore.setStartWithWindows).toHaveBeenCalledWith(true);
   });
 
   it("clears runtime identity during clean exit", async () => {

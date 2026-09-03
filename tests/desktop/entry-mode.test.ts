@@ -24,11 +24,9 @@ describe("executable entry mode", () => {
     expect(selectEntryMode(["app.exe"])).toBe("hud");
   });
 
-  it("distinguishes automatic login from explicit HUD activation", () => {
-    expect(selectEntryIntent(["app.exe", "--automatic-login"])).toEqual({
-      mode: "hud",
-      launchReason: { kind: "automatic-login" }
-    });
+  it("rejects the removed automatic-login entry instead of starting the HUD", () => {
+    expect(() => selectEntryIntent(["app.exe", "--automatic-login"]))
+      .toThrow("Automatic login is disabled");
     expect(selectEntryIntent(["app.exe", "--hud"])).toEqual({
       mode: "hud",
       launchReason: { kind: "explicit" }
@@ -59,7 +57,6 @@ describe("executable entry mode", () => {
 
   it.each([
     ["MCP stdio", ["app.exe", "--mcp-stdio", "--hud", "--manager-generation=7"]],
-    ["automatic login", ["app.exe", "--automatic-login", "--hud", "--manager-generation=7"]],
     ["missing HUD marker", ["app.exe", "--manager-generation=7"]]
   ])("rejects manager generation combined with %s", (_name, argv) => {
     expect(() => selectEntryIntent(argv)).toThrow("Invalid manager launch arguments");

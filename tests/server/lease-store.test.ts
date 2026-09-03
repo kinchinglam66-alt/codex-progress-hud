@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LeaseStore } from "../../src/server/lease-store.js";
 
 describe("LeaseStore", () => {
@@ -46,6 +46,41 @@ describe("LeaseStore", () => {
     expect(store.sweep()).toBe(1);
     expect(store.active()).toEqual([]);
     expect(store.release(lease.id, "owner")).toBe(false);
+  });
+
+  it("routes release at the expiry deadline through the expiry transition", () => {
+    let now = 0;
+    const store = new LeaseStore({ now: () => now, minTtlMs: 1, maxTtlMs: 100, defaultTtlMs: 10 });
+    const expired = vi.fn();
+    const released = vi.fn();
+    store.on("expired", expired);
+    store.on("released", released);
+    const lease = store.acquire("owner", 10);
+    store.bind(lease.id, "owner", "hud_aaaaaaaaaaaaaaaaaaaa");
+
+    now = 10;
+
+    expect(store.release(lease.id, "owner")).toBe(false);
+    expect(expired).toHaveBeenCalledWith({
+      lease,
+      taskHandles: ["hud_aaaaaaaaaaaaaaaaaaaa"]
+    });
+    expect(released).not.toHaveBeenCalled();
+    expect(store.active()).toEqual([]);
+  });
+
+  it("never moves lease time backwards when the injected clock rolls back", () => {
+    let now = 100;
+    const store = new LeaseStore({ now: () => now, minTtlMs: 10, maxTtlMs: 10, defaultTtlMs: 10 });
+    const lease = store.acquire("owner");
+
+    now = 40;
+    expect(store.renew(lease.id, "owner")).toEqual(lease);
+    expect(store.sweep()).toBe(0);
+
+    now = 110;
+    expect(store.sweep()).toBe(1);
+    expect(store.active()).toEqual([]);
   });
 
   it("checks owner capabilities and preserves task binding isolation", () => {

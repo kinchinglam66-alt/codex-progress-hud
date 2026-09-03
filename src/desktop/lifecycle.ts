@@ -51,8 +51,6 @@ export interface DesktopAppLike {
   whenReady(): Promise<void>;
   on(event: string, callback: (...args: any[]) => unknown): unknown;
   quit(): void;
-  getLoginItemSettings(): { openAtLogin: boolean };
-  setLoginItemSettings(settings: { openAtLogin: boolean; args: string[] }): void;
   getVersion(): string;
 }
 
@@ -379,11 +377,6 @@ export async function runDesktop(
     });
 
     launchSettings = await resolved.stateStore.readSettings();
-    if (launchReason.kind === "automatic-login" && launchSettings.desiredState !== "on") {
-      quitting = true;
-      quit();
-      return;
-    }
     if (
       launchReason.kind === "manager" &&
       (launchSettings.desiredState !== "on" || launchSettings.generation !== launchReason.generation)
@@ -461,16 +454,8 @@ export async function runDesktop(
         trayController = resolved.createTrayController({
           tray,
           buildMenu: resolved.buildMenu,
-          loginEnabled: resolved.app.getLoginItemSettings().openAtLogin,
           onShow: () => publishingWindowController.show(),
           onHide: () => publishingWindowController.hide(),
-          onToggleLogin: async (enabled) => {
-            resolved.app.setLoginItemSettings({
-              openAtLogin: enabled,
-              args: ["--automatic-login"]
-            });
-            await resolved.stateStore.setStartWithWindows(enabled);
-          },
           onDiagnose: () => resolved.diagnose({
             observedState: quitting
               ? "stopped"

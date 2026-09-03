@@ -139,6 +139,129 @@ describe("CompanionHttpClient", () => {
     expect(eventAttempts).toBe(2);
   });
 
+  it("keeps status observational and starts the lease only for the first mutation", async () => {
+    const seen: string[] = [];
+    const lease = { id: "lease_lazy", ownerNonce: "owner", expiresAt: 60_000 };
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      seen.push(request.url ?? "");
+      json(response, request.url === "/api/events" ? 202 : 200, aggregateSnapshot);
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+    client.setLeaseOwnerNonce("owner");
+    const start = vi.fn(async () => lease);
+    const invalidate = vi.fn();
+    client.setLeaseCoordinator({ start, invalidate });
+
+    await client.status();
+    expect(start).not.toHaveBeenCalled();
+    await client.submit({
+      taskId: aggregateSnapshot.selectedTaskId,
+      event: { type: "activity_resumed" }
+    });
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(seen).toEqual(["/api/snapshot", "/api/events"]);
+  });
+
+  it("single-flights concurrent initial lease acquisition", async () => {
+    let releaseAcquire!: () => void;
+    const acquireGate = new Promise<void>((resolve) => { releaseAcquire = resolve; });
+    let leaseAcquires = 0;
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        if (request.url === "/api/leases/acquire") {
+          leaseAcquires += 1;
+          void acquireGate.then(() => json(response, 200, {
+            id: "lease_shared", ownerNonce: "owner", expiresAt: 60_000
+          }));
+          return;
+        }
+        json(response, 202, aggregateSnapshot);
+      });
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+    client.setLeaseOwnerNonce("owner");
+
+    const submissions = [
+      client.submit({ taskId: aggregateSnapshot.selectedTaskId, event: { type: "activity_resumed" } }),
+      client.submit({ taskId: aggregateSnapshot.selectedTaskId, event: { type: "activity_resumed" } })
+    ];
+    await vi.waitFor(() => expect(leaseAcquires).toBeGreaterThanOrEqual(1));
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseAcquire();
+
+    await expect(Promise.all(submissions)).resolves.toHaveLength(2);
+    expect(leaseAcquires).toBe(1);
+  });
+
+  it("single-flights concurrent reacquisition and never lets a stale rejection clear the replacement", async () => {
+    const pendingOldResponses: ServerResponse[] = [];
+    let leaseAcquires = 0;
+    let replacementEvents = 0;
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        if (request.url === "/api/leases/acquire") {
+          leaseAcquires += 1;
+          json(response, 200, { id: "lease_new", ownerNonce: "owner", expiresAt: 60_000 });
+          return;
+        }
+        if (request.url === "/api/events" && request.headers["x-codex-progress-hud-lease"] === "lease_old") {
+          pendingOldResponses.push(response);
+          if (pendingOldResponses.length === 2) {
+            for (const oldResponse of pendingOldResponses) {
+              json(oldResponse, 403, { code: "LEASE_FORBIDDEN" });
+            }
+          }
+          return;
+        }
+        replacementEvents += 1;
+        json(response, 202, aggregateSnapshot);
+      });
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+    client.setLeaseOwnerNonce("owner");
+    client.setLease({ id: "lease_old", ownerNonce: "owner", expiresAt: 1 });
+
+    await expect(Promise.all([
+      client.submit({ taskId: aggregateSnapshot.selectedTaskId, event: { type: "activity_resumed" } }),
+      client.submit({ taskId: aggregateSnapshot.selectedTaskId, event: { type: "activity_resumed" } })
+    ])).resolves.toHaveLength(2);
+
+    expect(leaseAcquires).toBe(1);
+    expect(replacementEvents).toBe(2);
+  });
+
+  it("does not reacquire or retry a rejected explicit lease option", async () => {
+    let leaseAcquires = 0;
+    let eventAttempts = 0;
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        if (request.url === "/api/leases/acquire") {
+          leaseAcquires += 1;
+          json(response, 200, { id: "lease_new", ownerNonce: "owner", expiresAt: 60_000 });
+          return;
+        }
+        eventAttempts += 1;
+        json(response, 403, { code: "LEASE_FORBIDDEN" });
+      });
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+    client.setLeaseOwnerNonce("owner");
+    client.setLease({ id: "lease_internal", ownerNonce: "owner", expiresAt: 60_000 });
+
+    await expect(client.submit({
+      taskId: aggregateSnapshot.selectedTaskId,
+      event: { type: "activity_resumed" }
+    }, { leaseId: "lease_explicit_stale", ownerNonce: "owner" })).rejects.toMatchObject({
+      code: "LEASE_FORBIDDEN"
+    });
+    expect(eventAttempts).toBe(1);
+    expect(leaseAcquires).toBe(0);
+  });
+
   it("accepts the optional authenticated capabilities on aggregate snapshots", async () => {
     const { baseUrl, tokenPath } = await fixture((_request, response) =>
       json(response, 200, {

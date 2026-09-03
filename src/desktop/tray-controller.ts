@@ -13,10 +13,8 @@ export interface TrayLike {
 export interface TrayControllerOptions {
   tray: TrayLike;
   buildMenu(template: TrayMenuItem[]): unknown;
-  loginEnabled: boolean;
   onShow(): void | Promise<void>;
   onHide(): void | Promise<void>;
-  onToggleLogin(enabled: boolean): void | Promise<void>;
   onDiagnose(): void | Promise<void>;
   onExit(): void | Promise<void>;
   onError(error: unknown, action: string): void;
@@ -42,15 +40,6 @@ export function createTrayController(options: TrayControllerOptions): TrayContro
     { label: "Show HUD", click: () => invoke("Show HUD", options.onShow) },
     { label: "Hide HUD", click: () => invoke("Hide HUD", options.onHide) },
     { type: "separator" },
-    {
-      label: "Start with Windows",
-      type: "checkbox",
-      checked: options.loginEnabled,
-      click: (item) => invoke(
-        "Start with Windows",
-        () => options.onToggleLogin(item.checked)
-      )
-    },
     { label: "Diagnose", click: () => invoke("Diagnose", options.onDiagnose) },
     { type: "separator" },
     { label: "Exit", click: () => invoke("Exit", options.onExit) }

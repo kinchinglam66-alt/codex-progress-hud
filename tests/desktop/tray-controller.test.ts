@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTrayController, type TrayMenuItem } from "../../src/desktop/tray-controller.js";
 
 describe("createTrayController", () => {
-  it("builds the exact tray command order and reflects login state", () => {
+  it("builds the tray without an automatic-login control", () => {
     const tray = { setContextMenu: vi.fn(), destroy: vi.fn() };
     let template: TrayMenuItem[] = [];
 
@@ -12,10 +12,8 @@ describe("createTrayController", () => {
         template = received;
         return { kind: "menu" };
       },
-      loginEnabled: false,
       onShow: vi.fn(),
       onHide: vi.fn(),
-      onToggleLogin: vi.fn(),
       onDiagnose: vi.fn(),
       onExit: vi.fn(),
       onError: vi.fn()
@@ -24,34 +22,10 @@ describe("createTrayController", () => {
     expect(
       template.map((item) => item.type === "separator" ? "separator" : item.label)
     ).toEqual([
-      "Show HUD", "Hide HUD", "separator", "Start with Windows",
-      "Diagnose", "separator", "Exit"
+      "Show HUD", "Hide HUD", "separator", "Diagnose", "separator", "Exit"
     ]);
-    expect(template[3]).toMatchObject({ type: "checkbox", checked: false });
+    expect(template.some((item) => item.label === "Start with Windows")).toBe(false);
     expect(tray.setContextMenu).toHaveBeenCalledWith({ kind: "menu" });
-  });
-
-  it("forwards an explicit login checkbox selection", async () => {
-    const onToggleLogin = vi.fn();
-    let template: TrayMenuItem[] = [];
-    createTrayController({
-      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
-      buildMenu: (received) => {
-        template = received;
-        return {};
-      },
-      loginEnabled: false,
-      onShow: vi.fn(),
-      onHide: vi.fn(),
-      onToggleLogin,
-      onDiagnose: vi.fn(),
-      onExit: vi.fn(),
-      onError: vi.fn()
-    });
-
-    template[3]?.click?.({ checked: true });
-
-    await vi.waitFor(() => expect(onToggleLogin).toHaveBeenCalledWith(true));
   });
 
   it("reports a synchronous tray callback throw without throwing from click", async () => {
@@ -64,10 +38,8 @@ describe("createTrayController", () => {
         template = received;
         return {};
       },
-      loginEnabled: false,
       onShow: () => { throw failure; },
       onHide: vi.fn(),
-      onToggleLogin: vi.fn(),
       onDiagnose: vi.fn(),
       onExit: vi.fn(),
       onError
@@ -87,10 +59,8 @@ describe("createTrayController", () => {
         template = received;
         return {};
       },
-      loginEnabled: false,
       onShow: vi.fn(),
       onHide: async () => { throw failure; },
-      onToggleLogin: vi.fn(),
       onDiagnose: vi.fn(),
       onExit: vi.fn(),
       onError
@@ -104,9 +74,8 @@ describe("createTrayController", () => {
   it.each([
     ["Show HUD", 0, "onShow", false],
     ["Hide HUD", 1, "onHide", true],
-    ["Start with Windows", 3, "onToggleLogin", false],
-    ["Diagnose", 4, "onDiagnose", true],
-    ["Exit", 6, "onExit", false]
+    ["Diagnose", 3, "onDiagnose", true],
+    ["Exit", 5, "onExit", false]
   ] as const)("contains every %s action failure through the shared wrapper", async (
     action,
     index,
@@ -119,7 +88,6 @@ describe("createTrayController", () => {
     const callbacks = {
       onShow: vi.fn(),
       onHide: vi.fn(),
-      onToggleLogin: vi.fn(),
       onDiagnose: vi.fn(),
       onExit: vi.fn()
     };
@@ -130,7 +98,6 @@ describe("createTrayController", () => {
     createTrayController({
       tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
       buildMenu: (received) => { template = received; return {}; },
-      loginEnabled: false,
       ...callbacks,
       onError
     });

@@ -187,6 +187,7 @@ export async function runMcpServer(): Promise<void> {
     client: progressClient,
     ownerNonce,
     ensureReady: (reason) => companionManager.ensureForWrite(reason),
+    migrateLegacy: () => stateStore.migrateLegacyDesiredState?.() ?? Promise.resolve(undefined),
     schedule: (callback, delayMs) => {
       const timer = setTimeout(callback, delayMs);
       timer.unref();
@@ -194,6 +195,7 @@ export async function runMcpServer(): Promise<void> {
     },
     cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   });
+  progressClient.setLeaseCoordinator(leaseLifecycle);
   let released = false;
   const releaseLease = async (): Promise<void> => {
     if (released) return;
@@ -202,9 +204,6 @@ export async function runMcpServer(): Promise<void> {
   };
   transport.onclose = () => { void releaseLease(); };
   await server.connect(transport);
-  const migrateLegacy = stateStore.migrateLegacyDesiredState?.();
-  if (migrateLegacy !== undefined) await migrateLegacy.catch(() => undefined);
-  await leaseLifecycle.start().catch(() => undefined);
 }
 
 const entryPath = process.argv[1];

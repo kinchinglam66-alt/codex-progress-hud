@@ -7,6 +7,7 @@ export interface McpLeaseLifecycleDependencies {
   ownerNonce: string;
   ttlMs?: number;
   ensureReady(reason: HudWriteReason): Promise<EnsureResult>;
+  migrateLegacy?(): Promise<unknown>;
   schedule(callback: () => void, delayMs: number): unknown;
   cancel(handle: unknown): void;
 }
@@ -14,6 +15,7 @@ export interface McpLeaseLifecycleDependencies {
 export interface McpLeaseLifecycle {
   start(): Promise<SessionLease>;
   stop(): Promise<void>;
+  invalidate(expectedLeaseId?: string): void;
   current(): SessionLease | undefined;
 }
 
@@ -27,19 +29,37 @@ export function createMcpLeaseLifecycle(
   const ttlMs = dependencies.ttlMs ?? 60_000;
   let lease: SessionLease | undefined;
   let timer: unknown;
-  let stopping = false;
+  let closed = false;
+  let generation = 0;
+  let startFlight: { generation: number; promise: Promise<SessionLease> } | undefined;
 
-  const scheduleRenewal = (): void => {
-    if (lease === undefined || stopping) return;
-    timer = dependencies.schedule(() => { void renew(); }, Math.max(1, Math.floor(ttlMs / 3)));
+  const cancelled = (): Error => new Error(closed
+    ? "MCP lease lifecycle stopped"
+    : "MCP lease acquisition cancelled");
+
+  const cancelRenewal = (): void => {
+    if (timer === undefined) return;
+    dependencies.cancel(timer);
+    timer = undefined;
   };
 
-  const renew = async (): Promise<void> => {
+  const scheduleRenewal = (): void => {
+    if (lease === undefined || closed) return;
+    const renewalGeneration = generation;
+    const leaseId = lease.id;
+    timer = dependencies.schedule(
+      () => { void renew(renewalGeneration, leaseId); },
+      Math.max(1, Math.floor(ttlMs / 3))
+    );
+  };
+
+  const renew = async (renewalGeneration: number, leaseId: string): Promise<void> => {
     const current = lease;
-    if (current === undefined || stopping) return;
+    timer = undefined;
+    if (current === undefined || closed || generation !== renewalGeneration || current.id !== leaseId) return;
     try {
       const next = await dependencies.client.renewLease(current, ttlMs);
-      if (lease?.id !== current.id || stopping) return;
+      if (lease?.id !== current.id || closed || generation !== renewalGeneration) return;
       lease = next;
       dependencies.client.setLease(next);
       scheduleRenewal();
@@ -52,27 +72,57 @@ export function createMcpLeaseLifecycle(
 
   return {
     async start(): Promise<SessionLease> {
+      if (closed) throw cancelled();
       if (lease !== undefined) return lease;
-      const ready = await dependencies.ensureReady("tracking_start");
-      if (ready.kind !== "ready") throw failure(ready);
-      const acquired = await dependencies.client.acquireLease(dependencies.ownerNonce, ttlMs);
-      lease = acquired;
-      stopping = false;
-      dependencies.client.setLease(acquired);
-      scheduleRenewal();
-      return acquired;
+      if (startFlight !== undefined) return startFlight.promise;
+      const startGeneration = generation;
+      const promise = (async (): Promise<SessionLease> => {
+        if (dependencies.migrateLegacy !== undefined) {
+          await dependencies.migrateLegacy().catch(() => undefined);
+        }
+        if (closed || generation !== startGeneration) throw cancelled();
+        const ready = await dependencies.ensureReady("tracking_start");
+        if (closed || generation !== startGeneration) throw cancelled();
+        if (ready.kind !== "ready") throw failure(ready);
+        const acquired = await dependencies.client.acquireLease(dependencies.ownerNonce, ttlMs);
+        if (closed || generation !== startGeneration) {
+          await dependencies.client.releaseLease(acquired).catch(() => undefined);
+          throw cancelled();
+        }
+        lease = acquired;
+        dependencies.client.setLease(acquired);
+        scheduleRenewal();
+        return acquired;
+      })();
+      const flight = { generation: startGeneration, promise };
+      startFlight = flight;
+      void promise.then(
+        () => { if (startFlight === flight) startFlight = undefined; },
+        () => { if (startFlight === flight) startFlight = undefined; }
+      );
+      return promise;
     },
 
     async stop(): Promise<void> {
-      stopping = true;
-      if (timer !== undefined) {
-        dependencies.cancel(timer);
-        timer = undefined;
-      }
+      if (closed) return;
+      closed = true;
+      generation += 1;
+      startFlight = undefined;
+      cancelRenewal();
       const current = lease;
       lease = undefined;
       dependencies.client.setLease(undefined);
       if (current !== undefined) await dependencies.client.releaseLease(current);
+    },
+
+    invalidate(expectedLeaseId?: string): void {
+      if (closed) return;
+      if (expectedLeaseId !== undefined && lease !== undefined && lease.id !== expectedLeaseId) return;
+      generation += 1;
+      startFlight = undefined;
+      cancelRenewal();
+      lease = undefined;
+      dependencies.client.setLease(undefined);
     },
 
     current(): SessionLease | undefined {

@@ -53,6 +53,7 @@ export class LeaseStore extends EventEmitter {
   readonly #minTtlMs: number;
   readonly #maxTtlMs: number;
   readonly #defaultTtlMs: number;
+  #lastNow = 0;
 
   constructor(options: LeaseStoreOptions = {}) {
     super();
@@ -94,13 +95,15 @@ export class LeaseStore extends EventEmitter {
 
   release(id: string, ownerNonce: string): boolean {
     checkedOwner(ownerNonce);
+    const now = this.#safeNow();
+    this.sweep(now);
     const current = this.#leases.get(id);
     if (current === undefined || current.ownerNonce !== ownerNonce) return false;
     this.#leases.delete(id);
     const taskHandles = [...(this.#bindings.get(id) ?? [])];
     this.#bindings.delete(id);
     this.emit("released", { lease: { ...current }, taskHandles } satisfies LeaseExpiredEvent);
-    this.emit("changed", this.active());
+    this.emit("changed", this.active(now));
     return true;
   }
 
@@ -110,10 +113,10 @@ export class LeaseStore extends EventEmitter {
   }
 
   sweep(nowMs = this.#safeNow()): number {
-    if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new RangeError("nowMs must be a nonnegative safe integer");
+    const now = this.#monotonic(nowMs, "nowMs");
     const expired: LeaseExpiredEvent[] = [];
     for (const [id, lease] of this.#leases) {
-      if (lease.expiresAt > nowMs) continue;
+      if (lease.expiresAt > now) continue;
       this.#leases.delete(id);
       const taskHandles = [...(this.#bindings.get(id) ?? [])];
       this.#bindings.delete(id);
@@ -127,8 +130,9 @@ export class LeaseStore extends EventEmitter {
   bind(id: string, ownerNonce: string, taskHandle: string): boolean {
     checkedOwner(ownerNonce);
     checkedHandle(taskHandle);
+    this.sweep();
     const lease = this.#leases.get(id);
-    if (lease === undefined || lease.ownerNonce !== ownerNonce || lease.expiresAt <= this.#safeNow()) return false;
+    if (lease === undefined || lease.ownerNonce !== ownerNonce) return false;
     for (const [otherId, handles] of this.#bindings) {
       if (otherId !== id && handles.has(taskHandle)) return false;
     }
@@ -147,8 +151,9 @@ export class LeaseStore extends EventEmitter {
 
   boundHandles(id: string, ownerNonce: string): readonly string[] {
     checkedOwner(ownerNonce);
+    this.sweep();
     const lease = this.#leases.get(id);
-    if (lease === undefined || lease.ownerNonce !== ownerNonce || lease.expiresAt <= this.#safeNow()) return [];
+    if (lease === undefined || lease.ownerNonce !== ownerNonce) return [];
     return [...(this.#bindings.get(id) ?? [])];
   }
 
@@ -167,8 +172,14 @@ export class LeaseStore extends EventEmitter {
   }
 
   #safeNow(): number {
-    const now = this.#now();
-    if (!Number.isSafeInteger(now) || now < 0) throw new RangeError("clock must return a nonnegative safe integer");
-    return now;
+    return this.#monotonic(this.#now(), "clock");
+  }
+
+  #monotonic(value: number, name: string): number {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new RangeError(`${name} must return a nonnegative safe integer`);
+    }
+    this.#lastNow = Math.max(this.#lastNow, value);
+    return this.#lastNow;
   }
 }

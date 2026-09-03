@@ -190,6 +190,11 @@ export interface LeaseClient {
   setLeaseOwnerNonce(ownerNonce: string): void;
 }
 
+export interface MutationLeaseCoordinator {
+  start(): Promise<SessionLease>;
+  invalidate(expectedLeaseId?: string): void;
+}
+
 type TokenReader = (
   path: string,
   options: { encoding: "utf8"; signal: AbortSignal }
@@ -198,6 +203,8 @@ type TokenReader = (
 export class CompanionHttpClient implements ProgressClient, LeaseClient {
   #lease: SessionLease | undefined;
   #ownerNonce: string | undefined;
+  #leaseCoordinator: MutationLeaseCoordinator | undefined;
+  #leaseAcquireFlight: Promise<SessionLease> | undefined;
   constructor(
     private readonly serviceUrl = defaultServiceUrl(),
     private readonly tokenPath = defaultTokenPath(),
@@ -354,13 +361,24 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
 
   async #ensureLeaseForMutation(): Promise<void> {
     if (this.#ownerNonce === undefined || this.#lease !== undefined) return;
-    try {
-      const lease = await this.acquireLease(this.#ownerNonce);
-      this.setLease(lease);
-    } catch {
-      // The guarded request below remains marked as MCP traffic and receives a
-      // structured LEASE_FORBIDDEN result instead of silently falling back.
+    if (this.#leaseAcquireFlight !== undefined) {
+      await this.#leaseAcquireFlight;
+      return;
     }
+    const flight = this.#leaseCoordinator?.start() ?? this.acquireLease(this.#ownerNonce);
+    this.#leaseAcquireFlight = flight;
+    try {
+      const acquired = await flight;
+      if (this.#lease === undefined) this.setLease(acquired);
+    } finally {
+      if (this.#leaseAcquireFlight === flight) this.#leaseAcquireFlight = undefined;
+    }
+  }
+
+  #invalidateLease(expectedLeaseId: string | undefined): void {
+    if (expectedLeaseId !== undefined && this.#lease?.id !== expectedLeaseId) return;
+    this.#lease = undefined;
+    this.#leaseCoordinator?.invalidate(expectedLeaseId);
   }
 
   async acquireLease(ownerNonce: string, ttlMs?: number): Promise<SessionLease> {
@@ -404,6 +422,10 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
 
   setLeaseOwnerNonce(ownerNonce: string): void {
     this.#ownerNonce = ownerNonce;
+  }
+
+  setLeaseCoordinator(coordinator: MutationLeaseCoordinator): void {
+    this.#leaseCoordinator = coordinator;
   }
 
   async identity(options: HudRequestOptions = {}): Promise<HudIdentity> {
@@ -477,21 +499,26 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
   }
 
   async submit(envelope: ProgressEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
-    await this.#ensureLeaseForMutation();
-    const request = () => this.#snapshot("/api/events", {
+    const explicitLease = options?.leaseId !== undefined || options?.ownerNonce !== undefined;
+    if (!explicitLease) await this.#ensureLeaseForMutation();
+    const request = (requestOptions: HudRequestOptions) => this.#snapshot("/api/events", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope)
-    }, this.#effectiveOptions(options));
+    }, requestOptions);
+    const firstOptions = this.#effectiveOptions(options);
     try {
-      return await request();
+      return await request(firstOptions);
     } catch (error) {
-      if (!(error instanceof HudClientError) || error.code !== "LEASE_FORBIDDEN" || this.#ownerNonce === undefined) {
+      if (
+        !(error instanceof HudClientError) || error.code !== "LEASE_FORBIDDEN" ||
+        this.#ownerNonce === undefined || explicitLease
+      ) {
         throw error;
       }
-      this.#lease = undefined;
+      this.#invalidateLease(firstOptions.leaseId);
       await this.#ensureLeaseForMutation();
-      return request();
+      return request(this.#effectiveOptions());
     }
   }
 

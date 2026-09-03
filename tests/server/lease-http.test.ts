@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RELEASE_CAPABILITIES } from "../../src/generated/capabilities.js";
 import { createProgressServer } from "../../src/server/http-server.js";
+import { LeaseStore } from "../../src/server/lease-store.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -15,6 +16,7 @@ afterEach(async () => {
 async function fixture(options: {
   scheduleTimer?: (callback: () => void, delayMs: number) => unknown;
   cancelTimer?: (handle: unknown) => void;
+  leaseStore?: LeaseStore;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-lease-http-"));
   const tokenPath = join(directory, "auth.token");
@@ -53,10 +55,16 @@ describe("MCP lease HTTP boundary", () => {
     const lease = await acquiredResponse.json() as { id: string; ownerNonce: string; expiresAt: number };
     expect(lease.ownerNonce).toBe("owner-a");
 
+    const taskHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    await fetch(`${server.address().url}/api/events`, {
+      method: "POST",
+      headers: headers(token, lease.id, lease.ownerNonce),
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "turn_started" } })
+    });
     const bindResponse = await fetch(`${server.address().url}/api/leases/bind`, {
       method: "POST",
       headers: headers(token, lease.id, lease.ownerNonce),
-      body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce, taskHandle: "hud_aaaaaaaaaaaaaaaaaaaa" })
+      body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce, taskHandle })
     });
     expect(bindResponse.status).toBe(200);
 
@@ -74,6 +82,163 @@ describe("MCP lease HTTP boundary", () => {
       body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce })
     });
     expect(releaseResponse.status).toBe(200);
+  });
+
+  it("lease-scopes every MCP aggregate mutation response", async () => {
+    const { server, token } = await fixture();
+    const acquire = async (ownerNonce: string) => {
+      const response = await fetch(`${server.address().url}/api/leases/acquire`, {
+        method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce })
+      });
+      return await response.json() as { id: string; ownerNonce: string };
+    };
+    const first = await acquire("owner-a");
+    const second = await acquire("owner-b");
+    const firstHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    const secondHandle = "hud_bbbbbbbbbbbbbbbbbbbb";
+    await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, first.id, first.ownerNonce),
+      body: JSON.stringify({ taskId: firstHandle, event: { type: "turn_started" } })
+    });
+    await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, second.id, second.ownerNonce),
+      body: JSON.stringify({ taskId: secondHandle, event: { type: "turn_started" } })
+    });
+
+    const eventResponse = await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, first.id, first.ownerNonce),
+      body: JSON.stringify({ taskId: firstHandle, event: { type: "activity_seen", category: "tool" } })
+    });
+    const eventSnapshot = await eventResponse.json() as { revision: number; tasks: Array<{ id: string }> };
+    expect(eventSnapshot.tasks.map(({ id }) => id)).toEqual([firstHandle]);
+
+    const selectionResponse = await fetch(`${server.address().url}/api/tasks/${firstHandle}/select`, {
+      method: "POST",
+      headers: { ...headers(token, first.id, first.ownerNonce), "x-codex-progress-hud-revision": String(eventSnapshot.revision) },
+      body: JSON.stringify({ mode: "pinned" })
+    });
+    const selectionSnapshot = await selectionResponse.json() as { revision: number; tasks: Array<{ id: string }> };
+    expect(selectionSnapshot.tasks.map(({ id }) => id)).toEqual([firstHandle]);
+
+    const hookResponse = await fetch(`${server.address().url}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...headers(token, first.id, first.ownerNonce), "x-codex-progress-hud-revision": String(selectionSnapshot.revision) },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        taskHandle: "hud_cccccccccccccccccccc",
+        eventId: "evt_abcdefghijklmnopqrstuvwxyz0123456789",
+        sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
+        hook: "Stop",
+        receivedAt: 100
+      })
+    });
+    const hookSnapshot = await hookResponse.json() as { tasks: Array<{ id: string }> };
+    expect(hookSnapshot.tasks.map(({ id }) => id)).toEqual([firstHandle]);
+    expect(JSON.stringify(hookSnapshot)).not.toContain(secondHandle);
+  });
+
+  it("does not preclaim an unknown control handle before TASK_NOT_FOUND", async () => {
+    const { server, token } = await fixture();
+    const acquire = async (ownerNonce: string) => {
+      const response = await fetch(`${server.address().url}/api/leases/acquire`, {
+        method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce })
+      });
+      return await response.json() as { id: string; ownerNonce: string };
+    };
+    const first = await acquire("owner-a");
+    const second = await acquire("owner-b");
+    const taskHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+
+    const missing = await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, first.id, first.ownerNonce),
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "tracking_paused" } })
+    });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(server.leaseStore.boundHandles(first.id, first.ownerNonce)).toEqual([]);
+
+    const legitimate = await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, second.id, second.ownerNonce),
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "turn_started" } })
+    });
+    expect(legitimate.status).toBe(202);
+    expect(server.leaseStore.boundHandles(second.id, second.ownerNonce)).toEqual([taskHandle]);
+  });
+
+  it("returns TASK_NOT_FOUND before any lease expiry transition for an unknown control", async () => {
+    let now = 0;
+    const leaseStore = new LeaseStore({
+      now: () => now,
+      minTtlMs: 1,
+      maxTtlMs: 100,
+      defaultTtlMs: 100
+    });
+    const expired = vi.fn();
+    leaseStore.on("expired", expired);
+    const { server, token } = await fixture({ leaseStore });
+    const active = await (await fetch(`${server.address().url}/api/leases/acquire`, {
+      method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce: "owner-active", ttlMs: 100 })
+    })).json() as { id: string; ownerNonce: string };
+    await fetch(`${server.address().url}/api/leases/acquire`, {
+      method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce: "owner-expiring", ttlMs: 1 })
+    });
+    expired.mockClear();
+    now = 1;
+
+    const missing = await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, active.id, active.ownerNonce),
+      body: JSON.stringify({
+        taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
+        event: { type: "tracking_stopped" }
+      })
+    });
+
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(expired).not.toHaveBeenCalled();
+  });
+
+  it("rejects explicit binding of a nonexistent task without changing lease state", async () => {
+    const { server, token } = await fixture();
+    const lease = await (await fetch(`${server.address().url}/api/leases/acquire`, {
+      method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce: "owner-a" })
+    })).json() as { id: string; ownerNonce: string };
+
+    const response = await fetch(`${server.address().url}/api/leases/bind`, {
+      method: "POST", headers: headers(token, lease.id, lease.ownerNonce),
+      body: JSON.stringify({ id: lease.id, ownerNonce: lease.ownerNonce, taskHandle: "hud_aaaaaaaaaaaaaaaaaaaa" })
+    });
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(server.leaseStore.boundHandles(lease.id, lease.ownerNonce)).toEqual([]);
+  });
+
+  it("removes lease listeners and stops sweeping when the server closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-lease-cleanup-"));
+      const leaseStore = new LeaseStore();
+      const sweep = vi.spyOn(leaseStore, "sweep");
+      const server = createProgressServer({ port: 0, tokenPath: join(directory, "auth.token"), leaseStore });
+      await server.listen();
+      expect(leaseStore.listenerCount("acquired")).toBe(1);
+      expect(leaseStore.listenerCount("released")).toBe(1);
+      expect(leaseStore.listenerCount("expired")).toBe(1);
+      vi.advanceTimersByTime(1_000);
+      const beforeClose = sweep.mock.calls.length;
+
+      await server.close();
+      vi.advanceTimersByTime(5_000);
+
+      expect(sweep).toHaveBeenCalledTimes(beforeClose);
+      expect(leaseStore.listenerCount("acquired")).toBe(0);
+      expect(leaseStore.listenerCount("released")).toBe(0);
+      expect(leaseStore.listenerCount("expired")).toBe(0);
+      await rm(directory, { recursive: true, force: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects a second MCP session's cross-handle write without mutation", async () => {

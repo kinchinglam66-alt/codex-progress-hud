@@ -33,12 +33,14 @@ describe("plugin MCP stdio server", () => {
     "initializes and exposes every tool with protocol-only public child stdout",
     async () => {
       const taskDirectory = await mkdtemp(join(tmpdir(), "codex-progress-hud-task-"));
+      const dataDirectory = join(taskDirectory, "isolated-hud-data");
       const packageJson = JSON.parse(
         await readFile(resolve(pluginRoot, "package.json"), "utf8")
       ) as { main?: string };
       expect(packageJson.main).toBeDefined();
       const child = spawn(process.execPath, [resolve(pluginRoot, packageJson.main!), "--mcp-stdio"], {
         cwd: taskDirectory,
+        env: { ...process.env, CODEX_PROGRESS_HUD_DATA_DIR: dataDirectory },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true
       });
@@ -132,7 +134,13 @@ describe("plugin MCP stdio server", () => {
           required: expect.arrayContaining(["task_handle", "phase"])
         });
         expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("properties.task_id");
-        const noAssociation = await request(3, "tools/call", {
+        const observational = await request(3, "tools/call", {
+          name: "tracking_status",
+          arguments: {}
+        });
+        expect(observational.error).toBeUndefined();
+        await expect(access(dataDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+        const noAssociation = await request(4, "tools/call", {
           name: "tracking_pause",
           arguments: {}
         });

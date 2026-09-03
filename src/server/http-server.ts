@@ -403,9 +403,20 @@ export function createProgressServer(options: ProgressServerOptions) {
     }, leaseGraceMs);
   }
 
-  leaseStore.on("acquired", () => cancelGrace(false));
+  const handleLeaseAcquired = (): void => cancelGrace(false);
+  leaseStore.on("acquired", handleLeaseAcquired);
   leaseStore.on("released", scheduleGraceShutdown);
   leaseStore.on("expired", scheduleGraceShutdown);
+  let leaseResourcesDisposed = false;
+
+  function disposeLeaseResources(): void {
+    if (leaseResourcesDisposed) return;
+    leaseResourcesDisposed = true;
+    clearInterval(leaseSweepTimer);
+    leaseStore.removeListener("acquired", handleLeaseAcquired);
+    leaseStore.removeListener("released", scheduleGraceShutdown);
+    leaseStore.removeListener("expired", scheduleGraceShutdown);
+  }
 
   function requestGeneration(request: IncomingMessage): number | undefined {
     return requestNonnegativeInteger(request, REQUEST_GENERATION_HEADER);
@@ -632,6 +643,13 @@ export function createProgressServer(options: ProgressServerOptions) {
           writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
           return;
         }
+        if (!store.has(payload.taskHandle)) {
+          writeJson(response, 404, {
+            error: "task handle is not associated with a tracked task",
+            code: "TASK_NOT_FOUND"
+          });
+          return;
+        }
         if (!leaseStore.bind(payload.id, payload.ownerNonce, payload.taskHandle)) {
           writeJson(response, 403, { error: "task handle is not available to this MCP lease", code: "LEASE_FORBIDDEN" });
           return;
@@ -696,7 +714,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           writeStaleRevision(response);
           return;
         }
-        writeJson(response, 202, result.value);
+        writeJson(response, 202, mcpSnapshot(request, result.value as HudSnapshot));
         return;
       }
       const route = request.method === "POST" ? taskRoute(url.pathname) : undefined;
@@ -751,7 +769,7 @@ export function createProgressServer(options: ProgressServerOptions) {
             return;
           }
         }
-        writeJson(response, 202, result.value);
+        writeJson(response, 202, mcpSnapshot(request, result.value as HudSnapshot));
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/events") {
@@ -760,18 +778,23 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         const envelope = parseProgressEnvelope(await readJson(request));
+        if (
+          (envelope.event.type === "tracking_paused" ||
+            envelope.event.type === "tracking_resumed" ||
+            envelope.event.type === "tracking_stopped") &&
+          !store.has(envelope.taskId)
+        ) {
+          cancellation.complete();
+          writeJson(response, 404, {
+            error: "task handle is not associated with a tracked task",
+            code: "TASK_NOT_FOUND"
+          });
+          return;
+        }
         const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
           if (!taskLeaseAccepted(request, envelope.taskId)) {
             return { kind: "lease_forbidden" as const };
-          }
-          if (
-            (envelope.event.type === "tracking_paused" ||
-              envelope.event.type === "tracking_resumed" ||
-              envelope.event.type === "tracking_stopped") &&
-            !store.has(envelope.taskId)
-          ) {
-            return { kind: "task_not_found" as const };
           }
           return store.apply(envelope);
         });
@@ -797,7 +820,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           writeJson(response, 403, { error: "task handle is not available to this MCP lease", code: "LEASE_FORBIDDEN" });
           return;
         }
-        writeJson(response, 202, result.value);
+        writeJson(response, 202, mcpSnapshot(request, result.value as HudSnapshot));
         return;
       }
       if (
@@ -870,7 +893,7 @@ export function createProgressServer(options: ProgressServerOptions) {
     },
     async close(): Promise<void> {
       cancelGrace();
-      clearInterval(leaseSweepTimer);
+      disposeLeaseResources();
       if (server === undefined) return;
       await new Promise<void>((resolve, reject) =>
         server?.close((error) => (error === undefined ? resolve() : reject(error)))
