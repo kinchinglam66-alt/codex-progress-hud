@@ -181,14 +181,12 @@ export function createProgressServer(options: ProgressServerOptions) {
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
-  let incompatibleClientSeen = false;
-
   function capabilities(health: HudHealth): HudCapabilities {
     return {
       service: "codex-progress-hud",
       companionVersion: health.version,
       protocol: RELEASE_CAPABILITIES.protocol,
-      incompatibleClientSeen
+      incompatibleClientSeen: store.snapshot().compatibility.incompatibleClientSeen
     };
   }
 
@@ -222,7 +220,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   > {
     const clientProtocol = requestProtocol(request);
     if (clientProtocol === undefined || !acceptsClientProtocol(clientProtocol)) {
-      incompatibleClientSeen = true;
+      store.setIncompatibleClientSeen(true);
       return { accepted: false, reason: "version_mismatch" };
     }
     if (shuttingDown) return { accepted: false, reason: "shutting_down" };

@@ -110,6 +110,61 @@ describe("bounded multi-task store", () => {
     expect(changed).toHaveBeenCalledTimes(1);
   });
 
+  it("records incompatible clients once and keeps repeated true updates idempotent", () => {
+    const store = new TaskStore();
+    const changed = vi.fn();
+    store.on("changed", changed);
+
+    const first = store.setIncompatibleClientSeen(true, 100);
+    expect(first.compatibility.incompatibleClientSeen).toBe(true);
+    expect(first.revision).toBe(1);
+    expect(changed).toHaveBeenCalledTimes(1);
+
+    const repeated = store.setIncompatibleClientSeen(true, 200);
+    expect(repeated.compatibility.incompatibleClientSeen).toBe(true);
+    expect(repeated.revision).toBe(1);
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores the requested task in follow mode and chooses the newest active task", () => {
+    const store = new TaskStore();
+    store.apply(start("task-a", "Alpha"), 100);
+    store.apply(start("task-b", "Beta"), 200);
+
+    const followed = store.select("task-a", "follow_activity", 250);
+    expect(followed.selectedTaskId).toBe("task-b");
+    expect(followed.selectionMode).toBe("follow_activity");
+
+    store.apply(fail("task-b", "Beta"), 300);
+    const terminalTarget = store.select("task-b", "follow_activity", 350);
+    expect(terminalTarget.selectedTaskId).toBe("task-a");
+    expect(terminalTarget.selected?.task.id).toBe("task-a");
+  });
+
+  it("reconciles a selected task evicted during select pruning", () => {
+    const store = new TaskStore({ terminalRetentionMs: 100 });
+    store.apply(fail("task-a", "Alpha"), 100);
+    store.apply(start("task-b", "Beta"), 150);
+    store.select("task-a", "pinned", 150);
+
+    const snapshot = store.select("task-a", "pinned", 200);
+    expect(snapshot.tasks.map((task) => task.id)).toEqual(["task-b"]);
+    expect(snapshot.selectedTaskId).toBe("task-b");
+    expect(snapshot.selected?.task.id).toBe("task-b");
+  });
+
+  it("reconciles a selected task evicted during hide-state pruning", () => {
+    const store = new TaskStore({ terminalRetentionMs: 100 });
+    store.apply(fail("task-a", "Alpha"), 100);
+    store.apply(start("task-b", "Beta"), 150);
+    store.select("task-a", "pinned", 150);
+
+    const snapshot = store.setHidden("task-b", true, 200);
+    expect(snapshot.tasks.map((task) => task.id)).toEqual(["task-b"]);
+    expect(snapshot.selectedTaskId).toBe("task-b");
+    expect(snapshot.selected?.task.id).toBe("task-b");
+  });
+
   it("retains terminal tasks only through the configured retention window", () => {
     const store = new TaskStore({ maxTasks: 4, terminalRetentionMs: 1_000 });
     store.apply(fail("task-a", "Alpha"), 100);

@@ -158,6 +158,13 @@ describe("local progress HTTP service", () => {
       title: "Protocol negotiation",
       event: { type: "turn_started" }
     });
+    const sseController = new AbortController();
+    const sseResponse = await fetch(`${fixture.baseUrl}/api/events`, {
+      headers: { authorization: `Bearer ${fixture.token}` },
+      signal: sseController.signal
+    });
+    const sseReader = sseResponse.body!.getReader();
+    await sseReader.read();
 
     const missing = await fetch(`${fixture.baseUrl}/api/events`, {
       method: "POST",
@@ -198,6 +205,16 @@ describe("local progress HTTP service", () => {
       error: "lifecycle generation rejected",
       code: "GENERATION_REJECTED"
     });
+    const changed = await sseReader.read();
+    sseController.abort();
+    expect(new TextDecoder().decode(changed.value)).toContain(
+      '"compatibility":{"incompatibleClientSeen":true}'
+    );
+
+    const snapshot = await fetch(`${fixture.baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${fixture.token}` }
+    });
+    expect((await snapshot.json()).compatibility).toEqual({ incompatibleClientSeen: true });
 
     const health = await fetch(`${fixture.baseUrl}/api/health`, {
       headers: { authorization: `Bearer ${fixture.token}` }

@@ -118,19 +118,9 @@ export class TaskStore extends EventEmitter {
       mutated = true;
     }
 
-    if (this.#selectionMode === "follow_activity") {
-      const nextSelected = this.#followSelection();
-      if (nextSelected !== this.#selectedTaskId) {
-        this.#selectedTaskId = nextSelected;
-        mutated = true;
-      }
-    }
+    if (this.#reconcileSelection()) mutated = true;
     if (this.#enforceBound()) mutated = true;
-    if (this.#selectedTaskId !== null && !this.#tasks.has(this.#selectedTaskId)) {
-      this.#selectedTaskId = this.#selectionMode === "pinned" ? null : this.#followSelection();
-      if (this.#selectionMode === "pinned") this.#selectionMode = "follow_activity";
-      mutated = true;
-    }
+    if (this.#reconcileSelection()) mutated = true;
     return this.#finishMutation(mutated, nowMs);
   }
 
@@ -139,13 +129,25 @@ export class TaskStore extends EventEmitter {
     mode: "pinned" | "follow_activity",
     nowMs = this.#now()
   ): HudAggregateSnapshot {
-    const record = this.#tasks.get(taskId);
     let mutated = this.#prune(nowMs);
-    if (record !== undefined && this.#tasks.has(taskId)) {
-      if (mode === "pinned" && isTerminal(record.task.status)) mode = "follow_activity";
-      if (this.#selectionMode !== mode || this.#selectedTaskId !== taskId) mutated = true;
-      this.#selectionMode = mode;
-      this.#selectedTaskId = taskId;
+    if (this.#reconcileSelection()) mutated = true;
+    if (mode === "follow_activity") {
+      if (this.#selectionMode !== mode) {
+        this.#selectionMode = mode;
+        mutated = true;
+      }
+      const nextSelected = this.#followSelection();
+      if (nextSelected !== this.#selectedTaskId) {
+        this.#selectedTaskId = nextSelected;
+        mutated = true;
+      }
+    } else {
+      const record = this.#tasks.get(taskId);
+      if (record !== undefined && !isTerminal(record.task.status)) {
+        if (this.#selectionMode !== mode || this.#selectedTaskId !== taskId) mutated = true;
+        this.#selectionMode = mode;
+        this.#selectedTaskId = taskId;
+      }
     }
     return this.#finishMutation(mutated, nowMs);
   }
@@ -153,6 +155,7 @@ export class TaskStore extends EventEmitter {
   setHidden(taskId: string, hidden: boolean, nowMs = this.#now()): HudAggregateSnapshot {
     const record = this.#tasks.get(taskId);
     let mutated = this.#prune(nowMs);
+    if (this.#reconcileSelection()) mutated = true;
     if (record !== undefined && record.hiddenForTask !== hidden && this.#tasks.has(taskId)) {
       record.hiddenForTask = hidden;
       mutated = true;
@@ -160,17 +163,19 @@ export class TaskStore extends EventEmitter {
     return this.#finishMutation(mutated, nowMs);
   }
 
+  setIncompatibleClientSeen(seen: boolean, nowMs = this.#now()): HudAggregateSnapshot {
+    if (this.#incompatibleClientSeen === seen) return this.#finishMutation(false, nowMs);
+    this.#incompatibleClientSeen = seen;
+    return this.#finishMutation(true, nowMs);
+  }
+
   snapshot(nowMs = this.#now()): HudAggregateSnapshot {
     return this.#buildSnapshot(nowMs);
   }
 
   sweep(nowMs = this.#now()): HudAggregateSnapshot {
-    const mutated = this.#prune(nowMs) || this.#enforceBound();
-    if (this.#selectedTaskId !== null && !this.#tasks.has(this.#selectedTaskId)) {
-      this.#selectedTaskId = this.#followSelection();
-      if (this.#selectionMode === "pinned") this.#selectionMode = "follow_activity";
-      return this.#finishMutation(true, nowMs);
-    }
+    let mutated = this.#prune(nowMs) || this.#enforceBound();
+    if (this.#reconcileSelection()) mutated = true;
     return this.#finishMutation(mutated, nowMs);
   }
 
@@ -247,5 +252,24 @@ export class TaskStore extends EventEmitter {
     if (nonterminal !== undefined) return nonterminal.task.id;
     const latest = [...this.#tasks.values()].sort((left, right) => compareRecords(right, left))[0];
     return latest?.task.id ?? null;
+  }
+
+  #reconcileSelection(): boolean {
+    let mutated = false;
+    if (this.#selectionMode === "pinned" && this.#selectedTaskId !== null) {
+      const selected = this.#tasks.get(this.#selectedTaskId);
+      if (selected === undefined) {
+        this.#selectionMode = "follow_activity";
+        this.#selectedTaskId = this.#followSelection();
+        mutated = true;
+      }
+    } else if (this.#selectionMode === "follow_activity") {
+      const nextSelected = this.#followSelection();
+      if (nextSelected !== this.#selectedTaskId) {
+        this.#selectedTaskId = nextSelected;
+        mutated = true;
+      }
+    }
+    return mutated;
   }
 }
