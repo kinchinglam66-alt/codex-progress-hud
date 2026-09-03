@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { ProgressEnvelope } from "../core/schema.js";
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
+import { hookEnvelopeSchema, type HookEnvelope } from "../hooks/schema.js";
 import { type HudCapabilities, PROTOCOL_VERSION, type HudHealth } from "../lifecycle/types.js";
 import type { HudSnapshot } from "../server/task-store.js";
 import { defaultServiceUrl, defaultTokenPath } from "../server/paths.js";
@@ -9,6 +10,8 @@ import { defaultServiceUrl, defaultTokenPath } from "../server/paths.js";
 export interface HudRequestOptions {
   timeoutMs?: number;
   generation?: number;
+  revision?: number;
+  afterRevision?: number;
   clientProtocol?: number;
   signal?: AbortSignal;
 }
@@ -31,6 +34,11 @@ const HUD_CLIENT_ERROR_CODES = [
   "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR"
 ] as const;
 const clientErrorCodeSchema = z.enum(HUD_CLIENT_ERROR_CODES);
+const responseErrorCodeSchema = z.enum([
+  ...HUD_CLIENT_ERROR_CODES,
+  "STALE_REVISION",
+  "REVISION_REQUIRED"
+] as const);
 export type HudClientErrorCode = z.infer<typeof clientErrorCodeSchema>;
 
 export class HudClientError extends Error {
@@ -63,6 +71,75 @@ const healthSchema = z.object({
 }).strict();
 const controlSchema = z.object({ accepted: z.literal(true) }).strict();
 
+const taskStatusSchema = z.enum([
+  "idle", "running", "quiescent", "paused", "stopped", "waiting_approval", "waiting_user",
+  "stalled_suspected", "disconnected_suspected", "ended_unknown", "completed_unverified",
+  "succeeded_verified", "failed", "interrupted"
+]);
+const planStepSchema = z.object({
+  title: z.string(),
+  status: z.enum(["pending", "in_progress", "completed"]),
+  weight: z.number().optional()
+}).strict();
+const taskSnapshotSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  status: taskStatusSchema,
+  statusDetail: z.string().optional(),
+  phase: z.string().optional(),
+  currentStep: z.string().optional(),
+  progress: z.number().optional(),
+  plan: z.array(planStepSchema),
+  createdAt: z.number(),
+  startedAt: z.number().optional(),
+  lastActivityAt: z.number(),
+  completedAt: z.number().optional(),
+  activeElapsedMs: z.number(),
+  activeSince: z.number().optional(),
+  modelEstimateSeconds: z.number().optional(),
+  modelConfidence: z.number().optional(),
+  trackingOrigin: z.enum(["session_start", "late_attach", "manual"]).optional(),
+  trackedFrom: z.number().optional(),
+  sessionAttachedAt: z.number().optional(),
+  turnStartedAt: z.number().optional(),
+  turnStoppedAt: z.number().optional(),
+  sessionEndedAt: z.number().optional(),
+  leaseLostAt: z.number().optional(),
+  lastRuntimeEvidenceAt: z.number().optional(),
+  estimateVolatility: z.number().optional(),
+  verificationEvidence: z.object({
+    kind: z.enum(["validation_passed", "validation_failed"]),
+    observedAt: z.number()
+  }).strict().optional()
+}).strict();
+const taskSummarySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  status: taskStatusSchema,
+  lastActivityAt: z.number(),
+  hiddenForTask: z.boolean()
+}).strict();
+const etaSchema = z.object({
+  lowSeconds: z.number(),
+  highSeconds: z.number(),
+  confidence: z.number(),
+  confidenceClass: z.enum(["low", "medium", "high"]),
+  signals: z.array(z.enum(["plan", "model", "calibration"]))
+}).strict();
+const aggregateSnapshotSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  selectedTaskId: z.string().nullable(),
+  selectionMode: z.enum(["follow_activity", "pinned"]),
+  tasks: z.array(taskSummarySchema),
+  selected: z.object({ task: taskSnapshotSchema, eta: etaSchema.nullable() }).strict().nullable(),
+  compatibility: z.object({ incompatibleClientSeen: z.boolean() }).strict(),
+  capabilities: capabilitiesSchema.optional()
+}).strict();
+const legacySnapshotSchema = z.object({
+  task: z.object({ id: z.string().optional(), title: z.string().optional(), status: z.string() }).nullable(),
+  eta: z.unknown()
+}).strict();
+
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
@@ -70,6 +147,7 @@ const REQUEST_PROTOCOL_HEADER = "x-codex-progress-hud-protocol";
 class InvalidResponseError extends Error {}
 
 async function readBoundedJson(response: Response, controller: AbortController): Promise<unknown> {
+  if (response.status === 204 || response.status === 304) return undefined;
   const reader = response.body?.getReader();
   if (reader === undefined) throw new InvalidResponseError("HUD response body is unavailable");
   const chunks: Uint8Array[] = [];
@@ -161,7 +239,10 @@ export class CompanionHttpClient implements ProgressClient {
       timer.unref();
     }
     try {
-      const response = await fetch(`${this.serviceUrl}${path}`, {
+      const query = options.afterRevision === undefined
+        ? ""
+        : `${path.includes("?") ? "&" : "?"}afterRevision=${encodeURIComponent(String(options.afterRevision))}`;
+      const response = await fetch(`${this.serviceUrl}${path}${query}`, {
         ...init,
         signal: controller.signal,
         headers: {
@@ -175,6 +256,9 @@ export class CompanionHttpClient implements ProgressClient {
           ...(options.generation === undefined
             ? {}
             : { "x-codex-progress-hud-generation": String(options.generation) }),
+          ...(options.revision === undefined
+            ? {}
+            : { "x-codex-progress-hud-revision": String(options.revision) }),
           ...(init.method?.toUpperCase() === "POST"
             ? {
                 [REQUEST_PROTOCOL_HEADER]: String(
@@ -206,11 +290,14 @@ export class CompanionHttpClient implements ProgressClient {
     options: HudRequestOptions = {}
   ): Promise<unknown> {
     const result = await this.#request(path, init, true, options);
-    const structuredCode = z.object({ code: clientErrorCodeSchema })
+    const structuredCode = z.object({ code: responseErrorCodeSchema })
       .passthrough()
       .safeParse(result.payload);
     if (structuredCode.success) {
-      throw new HudClientError(structuredCode.data.code, "Progress HUD request was rejected");
+      throw new HudClientError(
+        structuredCode.data.code as HudClientErrorCode,
+        "Progress HUD request was rejected"
+      );
     }
     if (result.response.status === 401) {
       throw new HudClientError("AUTH_ERROR", "HUD authentication was rejected");
@@ -289,7 +376,12 @@ export class CompanionHttpClient implements ProgressClient {
   shutdown(options?: HudRequestOptions): Promise<void> { return this.#control("/api/shutdown", options); }
 
   async #snapshot(path: string, init: RequestInit = {}, options: HudRequestOptions = {}): Promise<HudSnapshot> {
-    return await this.#authenticatedJson(path, init, options) as HudSnapshot;
+    const payload = await this.#authenticatedJson(path, init, options);
+    const aggregate = aggregateSnapshotSchema.safeParse(payload);
+    if (aggregate.success) return aggregate.data as HudSnapshot;
+    const legacy = legacySnapshotSchema.safeParse(payload);
+    if (legacy.success) return legacy.data as unknown as HudSnapshot;
+    throw new HudClientError("VERSION_MISMATCH", "HUD snapshot response is incompatible");
   }
 
   submit(envelope: ProgressEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
@@ -297,6 +389,39 @@ export class CompanionHttpClient implements ProgressClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope)
+    }, options);
+  }
+
+  submitHook(envelope: HookEnvelope, options?: HudRequestOptions): Promise<HudSnapshot> {
+    hookEnvelopeSchema.parse(envelope);
+    return this.#snapshot("/api/hooks/events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(envelope)
+    }, options);
+  }
+
+  selectTask(
+    taskId: string,
+    mode: "pinned" | "follow_activity",
+    options?: HudRequestOptions
+  ): Promise<HudSnapshot> {
+    return this.#snapshot(`/api/tasks/${encodeURIComponent(taskId)}/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode })
+    }, options);
+  }
+
+  setTaskVisibility(
+    taskId: string,
+    hidden: boolean,
+    options?: HudRequestOptions
+  ): Promise<HudSnapshot> {
+    return this.#snapshot(`/api/tasks/${encodeURIComponent(taskId)}/visibility`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hidden })
     }, options);
   }
 

@@ -52,6 +52,81 @@ const health = {
 };
 
 describe("CompanionHttpClient", () => {
+  const aggregateSnapshot = {
+    revision: 3,
+    selectedTaskId: "hud_abcdefghijklmnopqrstuvwxyz0123456789",
+    selectionMode: "pinned" as const,
+    tasks: [{
+      id: "hud_abcdefghijklmnopqrstuvwxyz0123456789",
+      title: "Codex task",
+      status: "running" as const,
+      lastActivityAt: 100,
+      hiddenForTask: false
+    }],
+    selected: null,
+    compatibility: { incompatibleClientSeen: false }
+  };
+
+  it("parses aggregate snapshots and sends explicit revisioned per-task calls", async () => {
+    const seen: Array<{ method: string | undefined; path: string | undefined; body: string; revision: string | undefined }> = [];
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        seen.push({
+          method: request.method,
+          path: request.url,
+          body: Buffer.concat(chunks).toString("utf8"),
+          revision: request.headers["x-codex-progress-hud-revision"] as string | undefined
+        });
+        json(response, 202, aggregateSnapshot);
+      });
+    });
+    const client = new CompanionHttpClient(baseUrl, tokenPath);
+    const options = { revision: 3, generation: 7 };
+
+    await expect(client.status()).resolves.toEqual(aggregateSnapshot);
+    await expect(client.selectTask(aggregateSnapshot.selectedTaskId, "pinned", options)).resolves.toEqual(aggregateSnapshot);
+    await expect(client.setTaskVisibility(aggregateSnapshot.selectedTaskId, true, options)).resolves.toEqual(aggregateSnapshot);
+    await expect(client.submitHook({
+      schemaVersion: 1,
+      taskHandle: aggregateSnapshot.selectedTaskId,
+      eventId: "evt_abcdefghijklmnopqrstuvwxyz0123456789",
+      sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
+      hook: "Stop",
+      receivedAt: 100
+    }, options)).resolves.toEqual(aggregateSnapshot);
+
+    expect(seen.map(({ method, path }) => [method, path])).toEqual([
+      ["GET", "/api/snapshot"],
+      ["POST", `/api/tasks/${encodeURIComponent(aggregateSnapshot.selectedTaskId)}/select`],
+      ["POST", `/api/tasks/${encodeURIComponent(aggregateSnapshot.selectedTaskId)}/visibility`],
+      ["POST", "/api/hooks/events"]
+    ]);
+    expect(seen.slice(1).map(({ revision }) => revision)).toEqual(["3", "3", "3"]);
+    expect(JSON.parse(seen[1]!.body)).toEqual({ mode: "pinned" });
+    expect(JSON.parse(seen[2]!.body)).toEqual({ hidden: true });
+  });
+
+  it("accepts the optional authenticated capabilities on aggregate snapshots", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) =>
+      json(response, 200, {
+        ...aggregateSnapshot,
+        capabilities: {
+          service: "codex-progress-hud",
+          companionVersion: "0.1.0",
+          protocol: { current: 1, minimumClient: 1, maximumClient: 1 },
+          incompatibleClientSeen: false
+        }
+      })
+    );
+
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).status()).resolves.toMatchObject({
+      revision: aggregateSnapshot.revision,
+      selectedTaskId: aggregateSnapshot.selectedTaskId
+    });
+  });
+
   it("reads only minimal identity without sending the bearer token", async () => {
     let authorization: string | undefined;
     let deadline: string | string[] | undefined;

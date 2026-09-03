@@ -1,9 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ZodError } from "zod";
-import { parseProgressEnvelope } from "../core/schema.js";
+import { z, ZodError } from "zod";
+import { parseProgressEnvelope, type ProgressEnvelope } from "../core/schema.js";
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
+import { parseHookEnvelope, type HookEnvelope } from "../hooks/schema.js";
 import { PROTOCOL_VERSION, type HudCapabilities, type HudHealth } from "../lifecycle/types.js";
 import type { DesiredHudState } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
@@ -12,7 +13,15 @@ import { TaskStore, type HudSnapshot } from "./task-store.js";
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
 const REQUEST_PROTOCOL_HEADER = "x-codex-progress-hud-protocol";
+const REQUEST_REVISION_HEADER = "x-codex-progress-hud-revision";
+const REQUEST_GENERATION_HEADER = "x-codex-progress-hud-generation";
 const MAX_REQUEST_DEADLINE_AHEAD_MS = 60_000;
+const MAX_REMEMBERED_HOOK_IDS = 4_096;
+
+const selectionRequestSchema = z.object({
+  mode: z.enum(["pinned", "follow_activity"])
+}).strict();
+const visibilityRequestSchema = z.object({ hidden: z.boolean() }).strict();
 
 export interface ProgressServerControls {
   health(): HudHealth;
@@ -169,6 +178,87 @@ function hasJsonMediaType(request: IncomingMessage): boolean {
   return mediaType?.toLowerCase() === "application/json";
 }
 
+function requestNonnegativeInteger(request: IncomingMessage, headerName: string): number | undefined {
+  const header = request.headers[headerName];
+  if (typeof header !== "string" || !/^(?:0|[1-9]\d*)$/u.test(header)) return undefined;
+  const value = Number(header);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+function requestRevision(request: IncomingMessage): number | undefined {
+  return requestNonnegativeInteger(request, REQUEST_REVISION_HEADER);
+}
+
+function taskRoute(pathname: string): { taskId: string; action: "select" | "visibility" } | undefined {
+  const match = /^\/api\/tasks\/([^/]+)\/(select|visibility)$/u.exec(pathname);
+  if (match === null) return undefined;
+  let taskId: string;
+  try {
+    taskId = decodeURIComponent(match[1]!);
+  } catch {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(taskId)) return undefined;
+  return { taskId, action: match[2] as "select" | "visibility" };
+}
+
+function afterRevision(url: URL): number | undefined {
+  const value = url.searchParams.get("afterRevision");
+  if (value === null) return undefined;
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) throw new SyntaxError("invalid afterRevision");
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision)) throw new SyntaxError("invalid afterRevision");
+  return revision;
+}
+
+function hookProgressEnvelope(envelope: HookEnvelope): ProgressEnvelope {
+  switch (envelope.hook) {
+    case "SessionStart":
+      return {
+        taskId: envelope.taskHandle,
+        title: "Codex task",
+        event: {
+          type: "session_attached" as const,
+          origin: envelope.source === undefined || envelope.source === "startup"
+            ? "session_start" as const
+            : "late_attach" as const
+        }
+      };
+    case "UserPromptSubmit":
+      return {
+        taskId: envelope.taskHandle,
+        title: "Codex task",
+        event: envelope.turnKey === undefined
+          ? { type: "turn_started" as const }
+          : { type: "turn_started" as const, turnId: envelope.turnKey }
+      };
+    case "PostToolUse":
+      return {
+        taskId: envelope.taskHandle,
+        title: "Codex task",
+        event: { type: "activity_seen" as const, category: "hook" as const }
+      };
+    case "Stop":
+      return {
+        taskId: envelope.taskHandle,
+        title: "Codex task",
+        event: { type: "turn_stopped" as const }
+      };
+    case "Interrupt":
+      return {
+        taskId: envelope.taskHandle,
+        title: "Codex task",
+        event: { type: "runtime_interrupted" as const }
+      };
+    case "SessionEnd":
+      return {
+        taskId: envelope.taskHandle,
+        title: "Codex task",
+        event: { type: "session_ended" as const }
+      };
+  }
+}
+
 export function createProgressServer(options: ProgressServerOptions) {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 17_837;
@@ -181,6 +271,8 @@ export function createProgressServer(options: ProgressServerOptions) {
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
+  const hookEventIds = new Set<string>();
+  const hookEventOrder: string[] = [];
   function capabilities(health: HudHealth): HudCapabilities {
     return {
       service: "codex-progress-hud",
@@ -196,10 +288,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   }
 
   function requestGeneration(request: IncomingMessage): number | undefined {
-    const header = request.headers["x-codex-progress-hud-generation"];
-    if (typeof header !== "string" || !/^\d+$/u.test(header)) return undefined;
-    const generation = Number(header);
-    return Number.isSafeInteger(generation) ? generation : undefined;
+    return requestNonnegativeInteger(request, REQUEST_GENERATION_HEADER);
   }
 
   function requestProtocol(request: IncomingMessage): number | undefined {
@@ -255,23 +344,51 @@ export function createProgressServer(options: ProgressServerOptions) {
     });
   }
 
-  async function handleSse(response: ServerResponse, token: string): Promise<void> {
+  function rememberHookEvent(eventId: string): void {
+    hookEventIds.add(eventId);
+    hookEventOrder.push(eventId);
+    while (hookEventOrder.length > MAX_REMEMBERED_HOOK_IDS) {
+      const oldest = hookEventOrder.shift();
+      if (oldest !== undefined) hookEventIds.delete(oldest);
+    }
+  }
+
+  function writeStaleRevision(response: ServerResponse): void {
+    const revision = store.snapshot().revision;
+    writeJson(response, 409, {
+      error: "task revision is stale",
+      code: "STALE_REVISION",
+      revision
+    });
+  }
+
+  function writeRevisionRequired(response: ServerResponse): void {
+    writeJson(response, 428, {
+      error: "task revision is required",
+      code: "REVISION_REQUIRED",
+      revision: store.snapshot().revision
+    });
+  }
+
+  async function handleSse(response: ServerResponse, requestedRevision: number | undefined): Promise<void> {
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store",
       connection: "keep-alive",
       "x-content-type-options": "nosniff"
     });
-    const send = (snapshot: HudSnapshot) =>
-      response.write(`data: ${JSON.stringify(snapshotPayload(snapshot))}\n\n`);
-    send(snapshotPayload());
+    const send = (snapshot: HudSnapshot) => {
+      return response.write(`data: ${JSON.stringify(snapshotPayload(snapshot))}\n\n`);
+    };
+    response.flushHeaders();
     store.on("changed", send);
+    const current = store.snapshot();
+    if (requestedRevision === undefined || requestedRevision !== current.revision) send(current);
     const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
     response.once("close", () => {
       clearInterval(heartbeat);
       store.off("changed", send);
     });
-    void token;
   }
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -304,7 +421,18 @@ export function createProgressServer(options: ProgressServerOptions) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/snapshot") {
-        writeJson(response, 200, snapshotPayload());
+        const requestedRevision = afterRevision(url);
+        const snapshot = store.snapshot();
+        if (requestedRevision === snapshot.revision) {
+          response.writeHead(204, {
+            "cache-control": "no-store",
+            "x-codex-progress-hud-revision": String(snapshot.revision),
+            "x-content-type-options": "nosniff"
+          });
+          response.end();
+        } else {
+          writeJson(response, 200, snapshotPayload(snapshot));
+        }
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/health") {
@@ -314,7 +442,90 @@ export function createProgressServer(options: ProgressServerOptions) {
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/events") {
-        await handleSse(response, expectedToken);
+        await handleSse(response, afterRevision(url));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/hooks/events") {
+        if (!hasJsonMediaType(request)) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        const envelope = parseHookEnvelope(await readJson(request));
+        const duplicate = hookEventIds.has(envelope.eventId);
+        const result = await runMutation(request, "on", cancellation.signal, (signal) => {
+          if (signal.aborted) throw signal.reason;
+          if (duplicate) return store.snapshot();
+          const revision = requestRevision(request);
+          if (revision === undefined) return { kind: "revision_required" as const };
+          if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
+          const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
+          rememberHookEvent(envelope.eventId);
+          return snapshot;
+        });
+        cancellation.complete();
+        if (!result.accepted) {
+          writeMutationRejection(response, result);
+          return;
+        }
+        if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "revision_required") {
+          writeRevisionRequired(response);
+          return;
+        }
+        if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "stale_revision") {
+          writeStaleRevision(response);
+          return;
+        }
+        writeJson(response, 202, result.value);
+        return;
+      }
+      const route = request.method === "POST" ? taskRoute(url.pathname) : undefined;
+      if (route !== undefined) {
+        if (!hasJsonMediaType(request)) {
+          writeJson(response, 415, { error: "content-type must be application/json" });
+          return;
+        }
+        const selectionMode = route.action === "select"
+          ? selectionRequestSchema.parse(await readJson(request)).mode
+          : undefined;
+        const visibilityHidden = route.action === "visibility"
+          ? visibilityRequestSchema.parse(await readJson(request)).hidden
+          : undefined;
+        const result = await runMutation(request, "on", cancellation.signal, (signal) => {
+          if (signal.aborted) throw signal.reason;
+          const revision = requestRevision(request);
+          if (revision === undefined) return { kind: "revision_required" as const };
+          if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
+          if (!store.snapshot().tasks.some((task) => task.id === route.taskId)) {
+            return { kind: "task_not_found" as const };
+          }
+          const snapshot = route.action === "select"
+            ? store.select(route.taskId, selectionMode!, Date.now())
+            : store.setHidden(route.taskId, visibilityHidden!, Date.now());
+          return snapshot;
+        });
+        cancellation.complete();
+        if (!result.accepted) {
+          writeMutationRejection(response, result);
+          return;
+        }
+        if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value) {
+          if (result.value.kind === "revision_required") {
+            writeRevisionRequired(response);
+            return;
+          }
+          if (result.value.kind === "stale_revision") {
+            writeStaleRevision(response);
+            return;
+          }
+          if (result.value.kind === "task_not_found") {
+            writeJson(response, 404, { error: "task not found" });
+            return;
+          }
+        }
+        writeJson(response, 202, result.value);
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/events") {

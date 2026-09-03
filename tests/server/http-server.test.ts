@@ -76,6 +76,36 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
 }
 
 describe("local progress HTTP service", () => {
+  const taskA = "hud_abcdefghijklmnopqrstuvwxyz0123456789";
+  const taskB = "hud_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+  function hookEnvelope(
+    taskHandle: string,
+    eventId: string,
+    hook: "SessionStart" | "UserPromptSubmit" | "PostToolUse" | "Stop" | "Interrupt" | "SessionEnd",
+    receivedAt = 100
+  ) {
+    return {
+      schemaVersion: 1 as const,
+      taskHandle,
+      eventId,
+      sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
+      turnKey: "turn_abcdefghijklmnopqrstuvwxyz0123456789",
+      hook,
+      source: "startup" as const,
+      receivedAt
+    };
+  }
+
+  function mutationHeaders(token: string, revision: number, generation = 1) {
+    return {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-codex-progress-hud-protocol": String(RELEASE_CAPABILITIES.protocol.current),
+      "x-codex-progress-hud-generation": String(generation),
+      "x-codex-progress-hud-revision": String(revision)
+    };
+  }
   it("exposes only minimal unauthenticated identity", async () => {
     const { baseUrl } = await startServer();
     const response = await fetch(`${baseUrl}/health`);
@@ -556,5 +586,143 @@ describe("local progress HTTP service", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("<h1>HUD</h1>");
     expect(response.headers.get("content-security-policy")).toContain("default-src 'self'");
+  });
+
+  it("ingests authenticated Hooks, deduplicates event IDs, and rejects stale revisions", async () => {
+    const fixture = await startServer({ withGenerationGuard: true });
+    const postHook = (envelope: unknown, revision: number) => fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, revision),
+      body: JSON.stringify(envelope)
+    });
+
+    const first = await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"), 0);
+    const duplicate = await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"), 1);
+    const stale = await postHook(hookEnvelope(taskB, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "SessionStart"), 0);
+
+    expect(first.status).toBe(202);
+    expect((await first.json()).revision).toBe(1);
+    expect(duplicate.status).toBe(202);
+    expect((await duplicate.json()).revision).toBe(1);
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({
+      error: "task revision is stale",
+      code: "STALE_REVISION",
+      revision: 1
+    });
+    expect(fixture.server.store.snapshot().tasks).toHaveLength(1);
+  });
+
+  it("guards Hook ingestion with authentication, protocol, generation, and bounded bodies", async () => {
+    const fixture = await startServer({ withGenerationGuard: true });
+    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const unauthenticated = await fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(envelope)
+    });
+    const noProtocol = await fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...mutationHeaders(fixture.token, 0), "x-codex-progress-hud-protocol": "" },
+      body: JSON.stringify(envelope)
+    });
+    const staleGeneration = await fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...mutationHeaders(fixture.token, 0), "x-codex-progress-hud-generation": "0" },
+      body: JSON.stringify(envelope)
+    });
+    const oversized = await fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, 0),
+      body: JSON.stringify({ ...envelope, arbitrary: "x".repeat(70_000) })
+    });
+
+    expect(unauthenticated.status).toBe(401);
+    expect(noProtocol.status).toBe(426);
+    expect(staleGeneration.status).toBe(409);
+    expect(oversized.status).toBe(413);
+    expect(fixture.server.store.snapshot().revision).toBe(1);
+  });
+
+  it("selects and hides URL-safe tasks with revision checks", async () => {
+    const fixture = await startServer({ withGenerationGuard: true });
+    const postHook = (envelope: unknown, revision: number) => fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, revision),
+      body: JSON.stringify(envelope)
+    });
+    await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart", 100), 0);
+    await postHook(hookEnvelope(taskB, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "SessionStart", 200), 1);
+
+    const selected = await fetch(`${fixture.baseUrl}/api/tasks/${encodeURIComponent(taskA)}/select`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, 2),
+      body: JSON.stringify({ mode: "pinned" })
+    });
+    const hidden = await fetch(`${fixture.baseUrl}/api/tasks/${encodeURIComponent(taskA)}/visibility`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, 3),
+      body: JSON.stringify({ hidden: true })
+    });
+    const stale = await fetch(`${fixture.baseUrl}/api/tasks/${encodeURIComponent(taskB)}/select`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, 3),
+      body: JSON.stringify({ mode: "pinned" })
+    });
+    const traversal = await fetch(`${fixture.baseUrl}/api/tasks/${encodeURIComponent(`${taskA}/../${taskB}`)}/select`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, 4),
+      body: JSON.stringify({ mode: "pinned" })
+    });
+
+    expect(selected.status).toBe(202);
+    expect((await selected.json()).selectedTaskId).toBe(taskA);
+    expect(hidden.status).toBe(202);
+    expect((await hidden.json()).tasks.find((task: { id: string }) => task.id === taskA).hiddenForTask).toBe(true);
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).revision).toBe(4);
+    expect(traversal.status).toBe(404);
+    expect(fixture.server.store.snapshot()).toMatchObject({ revision: 4, selectedTaskId: taskA });
+  });
+
+  it("supports snapshot reconnects and complete aggregate SSE after a revision gap", async () => {
+    const fixture = await startServer({ withGenerationGuard: true });
+    const postHook = (envelope: unknown, revision: number) => fetch(`${fixture.baseUrl}/api/hooks/events`, {
+      method: "POST",
+      headers: mutationHeaders(fixture.token, revision),
+      body: JSON.stringify(envelope)
+    });
+    await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"), 0);
+
+    const unchanged = await fetch(`${fixture.baseUrl}/api/snapshot?afterRevision=1`, {
+      headers: { authorization: `Bearer ${fixture.token}` }
+    });
+    const gap = await fetch(`${fixture.baseUrl}/api/snapshot?afterRevision=0`, {
+      headers: { authorization: `Bearer ${fixture.token}` }
+    });
+    expect(unchanged.status).toBe(204);
+    expect(gap.status).toBe(200);
+    expect(await gap.json()).toMatchObject({ revision: 1, tasks: [{ id: taskA }] });
+
+    const controller = new AbortController();
+    const stream = await fetch(`${fixture.baseUrl}/api/events?afterRevision=1`, {
+      headers: { authorization: `Bearer ${fixture.token}` },
+      signal: controller.signal
+    });
+    const reader = stream.body!.getReader();
+    const pending = reader.read();
+    await postHook(hookEnvelope(taskA, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "PostToolUse", 200), 1);
+    const changed = await pending;
+    controller.abort();
+
+    expect(stream.status).toBe(200);
+    const data = new TextDecoder().decode(changed.value);
+    expect(data).toContain("data: ");
+    expect(JSON.parse(data.split("data: ")[1]!.split("\n", 1)[0]!)).toMatchObject({
+      revision: 2,
+      selectedTaskId: taskA,
+      tasks: [{ id: taskA, title: "Codex task", hiddenForTask: false }],
+      selected: { task: { id: taskA, status: "running" } }
+    });
   });
 });
