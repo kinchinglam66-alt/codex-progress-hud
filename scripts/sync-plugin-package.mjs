@@ -39,7 +39,7 @@ const copies = new Map([
 ]);
 
 for (const [target, source] of copies) {
-  generated.set(target, await readFile(resolve(root, source), "utf8"));
+  generated.set(target, (await readFile(resolve(root, source), "utf8")).replace(/(?:\r?\n)*$/u, "\n"));
 }
 
 const drift = [];
