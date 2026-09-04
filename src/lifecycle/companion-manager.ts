@@ -31,6 +31,7 @@ import type {
   RuntimeIdentity
 } from "./types.js";
 import type { StateOperationOptions } from "./types.js";
+import type { HudSnapshot } from "../server/task-store.js";
 
 export interface CompanionManager {
   status(): Promise<HudLifecycleSnapshot>;
@@ -62,6 +63,8 @@ interface CompanionControlClient {
   show(options?: HudRequestOptions): Promise<void>;
   hide(options?: HudRequestOptions): Promise<void>;
   shutdown(options?: HudRequestOptions): Promise<void>;
+  currentLease?(): { id: string; ownerNonce: string; expiresAt: number } | undefined;
+  status?(options?: HudRequestOptions): Promise<HudSnapshot>;
 }
 
 export interface CompanionManagerDependencies {
@@ -186,6 +189,7 @@ export function createCompanionManager(
   let ownedHud: OwnedHud | undefined;
   let lastRecoveryAt = Number.NEGATIVE_INFINITY;
   const recentErrors: DiagnosticReportInput["errors"] = [];
+  const recentOperationalEvents: NonNullable<DiagnosticReportInput["operationalEvents"]> = [];
   const activeWriteCancellations = new Set<() => void>();
   let legacyMigrationComplete = false;
   let legacyMigrationClosed = false;
@@ -193,7 +197,10 @@ export function createCompanionManager(
 
   function record(entry: Omit<OperationalLogEntry, "at">): void {
     try {
-      void logger.write({ at: new Date(now()).toISOString(), ...entry }).catch(() => undefined);
+      const at = new Date(now()).toISOString();
+      recentOperationalEvents.push({ code: entry.event, at });
+      if (recentOperationalEvents.length > 20) recentOperationalEvents.shift();
+      void logger.write({ at, ...entry }).catch(() => undefined);
     } catch {
       // Operational logging is best effort and must not alter lifecycle behavior.
     }
@@ -1162,6 +1169,20 @@ export function createCompanionManager(
       const deadline = now() + startupTimeoutMs;
       const snapshot = await observe(deadline);
       const runtime: RuntimeIdentity | null = await dependencies.store.readRuntime(stateOptions(deadline));
+      let taskSnapshot: HudSnapshot | undefined;
+      if (dependencies.client.status !== undefined) {
+        try {
+          taskSnapshot = await dependencies.client.status(requestOptions(deadline));
+        } catch {
+          // Diagnostics remain useful when a compatible task snapshot is unavailable.
+        }
+      }
+      const selectedTask = taskSnapshot?.selected?.task;
+      const activitySeen = selectedTask?.lastRuntimeEvidenceAt !== undefined;
+      const currentLease = dependencies.client.currentLease?.();
+      const incompatibleClientSeen = snapshot.health?.capabilities?.incompatibleClientSeen
+        ?? taskSnapshot?.compatibility.incompatibleClientSeen
+        ?? snapshot.observedState === "incompatible";
       return reportWriter({
         directory: dependencies.diagnostics.directory,
         generatedAt: new Date(now()).toISOString(),
@@ -1186,7 +1207,26 @@ export function createCompanionManager(
         ...(runtime === null
           ? {}
           : { runtimeAgeMs: Math.max(0, now() - Date.parse(runtime.startedAt)) }),
-        errors: [...recentErrors]
+        errors: [...recentErrors],
+        hooks: {
+          expected: true,
+          trusted: activitySeen,
+          activitySeen,
+          ...(selectedTask?.lastRuntimeEvidenceAt === undefined
+            ? {}
+            : { lastEventAt: selectedTask.lastRuntimeEvidenceAt })
+        },
+        lease: { active: currentLease !== undefined, count: currentLease === undefined ? 0 : 1 },
+        compatibility: {
+          compatible: snapshot.observedState !== "incompatible",
+          incompatibleClientSeen
+        },
+        tracking: {
+          taskCount: taskSnapshot?.tasks.length ?? 0,
+          ...(selectedTask?.status === undefined ? {} : { selectedStatus: selectedTask.status }),
+          lateAttached: selectedTask?.trackingOrigin === "late_attach"
+        },
+        operationalEvents: [...recentOperationalEvents]
       });
     }
   };

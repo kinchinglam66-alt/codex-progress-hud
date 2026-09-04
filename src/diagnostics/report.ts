@@ -1,6 +1,7 @@
 import { basename, join } from "node:path";
 import type { DesiredHudState, HudErrorCode, ObservedHudState } from "../lifecycle/types.js";
 import type { TaskStatus } from "../core/types.js";
+import type { OperationalEventCode } from "./logger.js";
 import {
   assertTrustedDirectory,
   ensureTrustedDirectory,
@@ -34,7 +35,7 @@ export interface DiagnosticReportInput {
   lease?: { active: boolean; count: number };
   compatibility?: { compatible: boolean; incompatibleClientSeen: boolean };
   tracking?: { taskCount: number; selectedStatus?: TaskStatus; lateAttached: boolean };
-  operationalEvents?: Array<{ code: string; at: string }>;
+  operationalEvents?: Array<{ code: OperationalEventCode; at: string }>;
 }
 
 const DESIRED_STATES = new Set<DesiredHudState>(["on", "off"]);
@@ -53,9 +54,11 @@ const TASK_STATUSES = new Set<TaskStatus>([
   "stalled_suspected", "disconnected_suspected", "ended_unknown", "completed_unverified",
   "succeeded_verified", "failed", "interrupted"
 ]);
-const OPERATIONAL_CODES = new Set([
-  "hook_received", "hook_failed", "lease_acquired", "lease_expired", "late_attach",
-  "stale_revision", "protocol_mismatch"
+const OPERATIONAL_CODES = new Set<OperationalEventCode>([
+  "startup_requested", "startup_ready", "startup_failed", "shutdown_requested",
+  "shutdown_complete", "shutdown_timeout", "port_conflict", "protocol_mismatch",
+  "crash_recovery", "hook_received", "hook_failed", "lease_acquired", "lease_expired",
+  "late_attach", "stale_revision"
 ]);
 
 function canonicalTimestamp(value: unknown, name: string): string {
@@ -208,14 +211,19 @@ async function writeDiagnosticReportWithFileSystem(
   const installation = snapshot.paths.installManifestExists ? "detected" : "not detected";
   const hookConclusion = snapshot.hooks === undefined
     ? "not reported"
-    : !snapshot.hooks.trusted
-      ? "untrusted; no activity"
-      : !snapshot.hooks.activitySeen ? "trusted; no activity" : "trusted; activity seen";
+    : !snapshot.hooks.expected
+      ? "not expected/disabled"
+      : !snapshot.hooks.trusted
+        ? "untrusted; no activity"
+        : !snapshot.hooks.activitySeen ? "trusted; no activity" : "trusted; activity seen";
   const leaseConclusion = snapshot.lease === undefined
     ? "not reported" : snapshot.lease.active ? `connected (${snapshot.lease.count})` : "disconnected";
-  const companionConclusion = ["running", "starting", "hidden"].includes(snapshot.lifecycle.observedState) ? "online" : "offline";
+  const companionConclusion = ["running", "starting", "hidden", "incompatible"].includes(snapshot.lifecycle.observedState) ? "online" : "offline";
   const compatibilityConclusion = snapshot.compatibility === undefined
     ? "not reported" : snapshot.compatibility.compatible ? "compatible" : "mismatch";
+  const compatibilityDetail = snapshot.compatibility?.incompatibleClientSeen
+    ? `${compatibilityConclusion}; incompatible client seen`
+    : compatibilityConclusion;
   const trackingConclusion = snapshot.tracking === undefined
     ? "not reported"
     : snapshot.tracking.selectedStatus === "quiescent"
@@ -236,7 +244,7 @@ async function writeDiagnosticReportWithFileSystem(
     `- Hook trust/activity: ${hookConclusion}`,
     `- MCP lease: ${leaseConclusion}`,
     `- Companion process: ${companionConclusion}`,
-    `- Protocol compatibility: ${compatibilityConclusion}`,
+    `- Protocol compatibility: ${compatibilityDetail}`,
     `- Tracking: ${trackingConclusion}`,
     "",
     "## Versions",

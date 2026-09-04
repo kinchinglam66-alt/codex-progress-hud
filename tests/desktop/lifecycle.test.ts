@@ -35,7 +35,20 @@ function desktopHarness(lockAcquired = true) {
   };
   const trayController = { dispose: vi.fn(), updateTasks: vi.fn() };
   const storeEvents = new EventEmitter();
-  let taskSnapshot = { revision: 0, selectedTaskId: null as string | null, tasks: [] as Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean }> };
+  type DesktopTestTaskSnapshot = {
+    revision: number;
+    selectedTaskId: string | null;
+    tasks: Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean }>;
+    selected?: { task: { status: string; trackingOrigin?: string; lastRuntimeEvidenceAt?: number } } | null;
+    compatibility?: { incompatibleClientSeen: boolean };
+  };
+  let taskSnapshot: DesktopTestTaskSnapshot = {
+    revision: 0,
+    selectedTaskId: null as string | null,
+    tasks: [] as Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean }>,
+    selected: null,
+    compatibility: { incompatibleClientSeen: false }
+  };
   const taskStore = {
     snapshot: () => taskSnapshot,
     select: vi.fn(),
@@ -49,6 +62,7 @@ function desktopHarness(lockAcquired = true) {
       port: 17_837,
       url: "http://127.0.0.1:17837"
     })),
+    leaseStore: { active: vi.fn<() => readonly unknown[]>(() => []) },
     store: taskStore
   };
   let trayCallbacks: Parameters<DesktopDependencies["createTrayController"]>[0] | undefined;
@@ -850,7 +864,15 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.diagnose).toHaveBeenCalledWith({
       observedState: "hidden",
       runtimeAgeMs: 0,
-      errors: []
+      errors: [],
+      hooks: { expected: true, trusted: false, activitySeen: false },
+      lease: { active: false, count: 0 },
+      compatibility: { compatible: true, incompatibleClientSeen: false },
+      tracking: { taskCount: 0, lateAttached: false },
+      operationalEvents: [
+        { code: "startup_requested", at: "2026-09-02T00:00:00.000Z" },
+        { code: "startup_ready", at: "2026-09-02T00:00:00.000Z" }
+      ]
     });
   });
 
@@ -867,11 +889,60 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.diagnose).toHaveBeenLastCalledWith({
       observedState: "hidden",
       runtimeAgeMs: 0,
-      errors: [{ code: "INTERNAL_ERROR", occurredAt: "2026-09-02T00:00:00.000Z" }]
+      errors: [{ code: "INTERNAL_ERROR", occurredAt: "2026-09-02T00:00:00.000Z" }],
+      hooks: { expected: true, trusted: false, activitySeen: false },
+      lease: { active: false, count: 0 },
+      compatibility: { compatible: true, incompatibleClientSeen: false },
+      tracking: { taskCount: 0, lateAttached: false },
+      operationalEvents: [
+        { code: "startup_requested", at: "2026-09-02T00:00:00.000Z" },
+        { code: "startup_ready", at: "2026-09-02T00:00:00.000Z" }
+      ]
     });
     expect(JSON.stringify(vi.mocked(harness.dependencies.diagnose).mock.calls)).not.toContain(
       "Bearer secret"
     );
+  });
+
+  it("passes production task, lease, compatibility, Hook, and operational history into diagnostics", async () => {
+    const harness = desktopHarness();
+    harness.setTaskSnapshot({
+      revision: 0,
+      selectedTaskId: "hud_safe_task_handle_1234567890",
+      tasks: [{
+        id: "hud_safe_task_handle_1234567890",
+        title: "private title must not be copied",
+        status: "quiescent",
+        lastActivityAt: 1234,
+        hiddenForTask: false
+      }],
+      selected: {
+        task: {
+          status: "quiescent",
+          trackingOrigin: "late_attach",
+          lastRuntimeEvidenceAt: 1234
+        }
+      },
+      compatibility: { incompatibleClientSeen: true }
+    });
+    harness.progressServer.leaseStore.active.mockReturnValue([{}, {}]);
+
+    await runDesktop(harness.dependencies);
+    await harness.trayCallbacks?.onDiagnose();
+
+    expect(harness.dependencies.diagnose).toHaveBeenCalledWith({
+      observedState: "hidden",
+      runtimeAgeMs: 0,
+      errors: [],
+      hooks: { expected: true, trusted: true, activitySeen: true, lastEventAt: 1234 },
+      lease: { active: true, count: 2 },
+      compatibility: { compatible: true, incompatibleClientSeen: true },
+      tracking: { taskCount: 1, selectedStatus: "quiescent", lateAttached: true },
+      operationalEvents: [
+        { code: "startup_requested", at: "2026-09-02T00:00:00.000Z" },
+        { code: "startup_ready", at: "2026-09-02T00:00:00.000Z" }
+      ]
+    });
   });
 
   it("clears runtime identity during clean exit", async () => {

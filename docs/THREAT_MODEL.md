@@ -20,6 +20,6 @@ Operational history is an allowlist of bounded event codes/categories and canoni
 
 Runtime interruption evidence is authoritative only when supplied by a trusted Hook/runtime boundary (`Interrupt`, `SessionEnd`, or an explicit runtime failure). A missing heartbeat, lease expiry, or disconnected process is suspected and is labeled accordingly; it cannot be presented as confirmed interruption or completion. Model-reported success is verified only by the configured validation evidence.
 
-An older conversation can attach on its first observed Hook, with no backfilled elapsed time. Plugin/companion updates require a full Codex restart and a new task. Deprecated `hud_open`, `hud_close`, `hud_hide`, and `tracking_start` aliases remain only for compatibility and do not form another global switch.
+An older conversation can attach on its first observed Hook after a full Codex restart, with no backfilled elapsed time; a new task is not required. A conversation frozen before installation or update cannot self-attach until the host loads the new plugin snapshot. Deprecated `hud_open` and `hud_close`, the ordinary `hud_hide` visibility alias, and `tracking_start` remain only for compatibility and do not form another global switch. `hud_close` requests immediate shutdown without persisting global off.
 
 Residual risks include same-user malware reading the application-data token, timing/path-existence inference, and inaccurate cooperative model reports. No cloud service or telemetry is present.

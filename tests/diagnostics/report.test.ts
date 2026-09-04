@@ -51,6 +51,25 @@ describe("diagnostic report", () => {
     expect(markdown).toContain("Tracking: active but quiescent; late-attached");
   });
 
+  it("does not turn an incompatible reachable companion offline and preserves prior client mismatch evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-truthful-state-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+
+    const result = await writeDiagnosticReport({
+      ...validInput(directory),
+      lifecycle: { observedState: "incompatible" },
+      hooks: { expected: false, trusted: false, activitySeen: false },
+      compatibility: { compatible: true, incompatibleClientSeen: true },
+      operationalEvents: [{ code: "protocol_mismatch", at: "2026-09-02T00:00:00.000Z" }]
+    });
+    const markdown = await readFile(result.path, "utf8");
+
+    expect(markdown).toContain("Hook trust/activity: not expected/disabled");
+    expect(markdown).toContain("Companion process: online");
+    expect(markdown).toContain("Protocol compatibility: compatible; incompatible client seen");
+    expect(markdown).toContain("protocol_mismatch at 2026-09-02T00:00:00.000Z");
+  });
+
   it("keeps diagnostic output content-free even when runtime inputs contain secrets", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-content-free-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

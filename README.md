@@ -6,9 +6,9 @@ A local, privacy-first overlay for Codex task progress and honest remaining-time
 
 Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. When the plugin is enabled and its command Hooks are trusted, tracking starts automatically for new Hook-enabled work; no start instruction is required.
 
-After installing or updating, fully quit Codex Desktop and reopen it so the host reloads the plugin, Hooks, skill, and MCP definitions. Start a new task after the restart. An older conversation is best effort: it can attach when its first observed Hook arrives, but a frozen conversation from before installation cannot be reconstructed.
+After installing or updating, fully quit Codex Desktop and reopen it so the host reloads the plugin, Hooks, skill, and MCP definitions. An existing conversation does not require a new task: it can attach on its first observed Hook after the restart, but a frozen conversation from before installation cannot be reconstructed.
 
-Window and task controls are separate presentation controls. Show/hide changes only window visibility. Per-task select, pause, resume, and stop changes only that task’s HUD presentation/timing. None of these controls enables or disables the plugin, and none pauses, cancels, or controls Codex execution. `hud_open`, `hud_close`, `hud_hide`, and `tracking_start` remain callable compatibility aliases where supported; they are not another global switch.
+Window and task controls are separate presentation controls. Show/hide changes only window visibility. Per-task select, pause, resume, and stop changes only that task’s HUD presentation/timing. None of these controls enables or disables the plugin, and none pauses, cancels, or controls Codex execution. `hud_hide` is an ordinary window-visibility alias, not a deprecated lifecycle alias. `hud_close` is a deprecated compatibility alias for an immediate shutdown request; it does not persist a global off preference. These aliases are not another global switch.
 
 ## Installation and troubleshooting
 

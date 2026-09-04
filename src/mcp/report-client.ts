@@ -420,6 +420,10 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
     this.#lease = lease;
   }
 
+  currentLease(): SessionLease | undefined {
+    return this.#lease === undefined ? undefined : { ...this.#lease };
+  }
+
   setLeaseOwnerNonce(ownerNonce: string): void {
     this.#ownerNonce = ownerNonce;
   }

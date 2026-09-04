@@ -4,7 +4,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectEntryIntent, type DesktopLaunchReason } from "../main.js";
 import { createOperationalLogger, type OperationalLogEntry, type OperationalLogger } from "../diagnostics/logger.js";
-import { writeDiagnosticReport } from "../diagnostics/report.js";
+import { writeDiagnosticReport, type DiagnosticReportInput } from "../diagnostics/report.js";
+import type { TaskStatus } from "../core/types.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
 import {
   PROTOCOL_VERSION,
@@ -70,10 +71,17 @@ export interface DesktopProgressServer {
   close(): Promise<void>;
   address(): { host: string; port: number; url: string };
   store?: {
-    snapshot(): { revision: number; selectedTaskId: string | null; tasks: Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean; selected?: boolean }> };
+    snapshot(): {
+      revision: number;
+      selectedTaskId: string | null;
+      tasks: Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean; selected?: boolean }>;
+      selected?: { task: { status: string; trackingOrigin?: string; lastRuntimeEvidenceAt?: number } } | null;
+      compatibility?: { incompatibleClientSeen: boolean };
+    };
     select(taskId: string, mode: "pinned" | "follow_activity"): unknown;
     on(event: "changed", listener: (snapshot: unknown) => void): unknown;
   };
+  leaseStore?: { active(): readonly unknown[] };
 }
 
 export interface DesktopTrayImage {
@@ -108,6 +116,11 @@ export interface DesktopDiagnosticSnapshot {
   observedState: ObservedHudState;
   runtimeAgeMs: number;
   errors: Array<{ code: HudErrorCode | "OFFLINE"; occurredAt: string }>;
+  hooks: NonNullable<DiagnosticReportInput["hooks"]>;
+  lease: NonNullable<DiagnosticReportInput["lease"]>;
+  compatibility: NonNullable<DiagnosticReportInput["compatibility"]>;
+  tracking: NonNullable<DiagnosticReportInput["tracking"]>;
+  operationalEvents: NonNullable<DiagnosticReportInput["operationalEvents"]>;
 }
 
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
@@ -206,7 +219,12 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
         },
         endpoint: { host: "127.0.0.1", port: Number.isFinite(configuredPort) ? configuredPort : 17_837 },
         runtimeAgeMs: snapshot.runtimeAgeMs,
-        errors: snapshot.errors
+        errors: snapshot.errors,
+        hooks: snapshot.hooks,
+        lease: snapshot.lease,
+        compatibility: snapshot.compatibility,
+        tracking: snapshot.tracking,
+        operationalEvents: snapshot.operationalEvents
       });
     },
     operationalLogger,
@@ -237,6 +255,7 @@ export async function runDesktop(
   let runtimeIdentity: RuntimeIdentity | undefined;
   let launchSettings: Awaited<ReturnType<LifecycleStateStore["readSettings"]>>;
   const recentErrors: DesktopDiagnosticSnapshot["errors"] = [];
+  const recentOperationalEvents: DesktopDiagnosticSnapshot["operationalEvents"] = [];
 
   const rememberError = (error: unknown): void => {
     const candidate = typeof error === "object" && error !== null
@@ -258,8 +277,11 @@ export async function runDesktop(
     at: Date = startupAt ?? resolved.now()
   ): void => {
     try {
+      const timestamp = at.toISOString();
+      recentOperationalEvents.push({ code: entry.event, at: timestamp });
+      if (recentOperationalEvents.length > 20) recentOperationalEvents.shift();
       void resolved.operationalLogger
-        ?.write({ at: at.toISOString(), ...entry })
+        ?.write({ at: timestamp, ...entry })
         .catch(() => undefined);
     } catch {
       // Operational logging is best effort and must not alter desktop lifecycle behavior.
@@ -557,15 +579,41 @@ export async function runDesktop(
               ? undefined
               : mutateSelection(selectedTaskId, "follow_activity");
           },
-          onDiagnose: () => resolved.diagnose({
-            observedState: quitting
-              ? "stopped"
-              : publishingWindowController.visibility() === "visible"
-                ? "running"
-                : "hidden",
-            runtimeAgeMs: Math.max(0, resolved.now().getTime() - publishingStartupAt.getTime()),
-            errors: [...recentErrors]
-          }),
+          onDiagnose: () => {
+            const diagnosticTaskSnapshot = latestTaskSnapshot ?? taskStore?.snapshot();
+            const selectedTask = diagnosticTaskSnapshot?.selected?.task;
+            const activitySeen = selectedTask?.lastRuntimeEvidenceAt !== undefined;
+            const selectedStatus = selectedTask?.status;
+            const leaseCount = progressServer?.leaseStore?.active().length ?? 0;
+            return resolved.diagnose({
+              observedState: quitting
+                ? "stopped"
+                : publishingWindowController.visibility() === "visible"
+                  ? "running"
+                  : "hidden",
+              runtimeAgeMs: Math.max(0, resolved.now().getTime() - publishingStartupAt.getTime()),
+              errors: [...recentErrors],
+              hooks: {
+                expected: true,
+                trusted: activitySeen,
+                activitySeen,
+                ...(selectedTask?.lastRuntimeEvidenceAt === undefined
+                  ? {}
+                  : { lastEventAt: selectedTask.lastRuntimeEvidenceAt })
+              },
+              lease: { active: leaseCount > 0, count: leaseCount },
+              compatibility: {
+                compatible: true,
+                incompatibleClientSeen: diagnosticTaskSnapshot?.compatibility?.incompatibleClientSeen === true
+              },
+              tracking: {
+                taskCount: diagnosticTaskSnapshot?.tasks.length ?? 0,
+                ...(selectedStatus === undefined ? {} : { selectedStatus: selectedStatus as TaskStatus }),
+                lateAttached: selectedTask?.trackingOrigin === "late_attach"
+              },
+              operationalEvents: [...recentOperationalEvents]
+            });
+          },
           onExit: async () => {
             const { generation } = await resolved.stateStore.setDesiredState("off");
             await resolved.stateStore.runIfGeneration(generation, "off", () => {

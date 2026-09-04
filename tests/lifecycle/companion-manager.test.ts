@@ -36,6 +36,7 @@ async function harness(options: {
   spawnMakesOnline?: boolean;
   shutdownStops?: boolean;
   logger?: { write(entry: OperationalLogEntry): Promise<void> };
+  reportWriter?: (input: any) => Promise<{ path: string }>;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hud-manager-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -84,7 +85,45 @@ async function harness(options: {
     }),
     shutdown: vi.fn(async () => {
       if (options.shutdownStops ?? true) online = false;
-    })
+    }),
+    currentLease: vi.fn<() => { id: string; ownerNonce: string; expiresAt: number } | undefined>(() => undefined),
+    status: vi.fn(async () => ({
+      revision: 1,
+      selectedTaskId: "hud_safe_task_handle_1234567890",
+      selectionMode: "follow_activity" as const,
+      tasks: [{
+        id: "hud_safe_task_handle_1234567890",
+        title: "private title must not be copied",
+        status: "quiescent" as const,
+        lastActivityAt: 1234,
+        hiddenForTask: false
+      }],
+      selected: {
+        task: {
+          id: "hud_safe_task_handle_1234567890",
+          title: "private title must not be copied",
+          status: "quiescent" as const,
+          statusDetail: undefined,
+          phase: undefined,
+          currentStep: undefined,
+          progress: undefined,
+          plan: [],
+          createdAt: 1,
+          startedAt: 1,
+          lastActivityAt: 1234,
+          completedAt: undefined,
+          activeElapsedMs: 100,
+          activeSince: undefined,
+          modelEstimateSeconds: undefined,
+          modelConfidence: undefined,
+          trackingOrigin: "late_attach" as const,
+          trackedFrom: 1,
+          lastRuntimeEvidenceAt: 1234
+        },
+        eta: null
+      },
+      compatibility: { incompatibleClientSeen: true }
+    }))
   };
   const delays: number[] = [];
   const logger = options.logger ?? { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
@@ -107,7 +146,8 @@ async function harness(options: {
       port: 17_837,
       installManifestPath: paths.installManifestPath,
       dataDirectoryPath: directory
-    }
+    },
+    ...(options.reportWriter === undefined ? {} : { reportWriter: options.reportWriter })
   });
   return {
     directory,
@@ -531,6 +571,47 @@ describe("companion lifecycle manager", () => {
       event: "crash_recovery",
       lifecycleState: "crashed",
       protocolVersion: 1
+    });
+  });
+
+  it("passes production task, lease, compatibility, Hook, and operational history into diagnostics", async () => {
+    const reportWriter = vi.fn(async (_input: any) => ({ path: "C:\\safe\\diagnostic.md" }));
+    const fixture = await harness({ online: true, reportWriter });
+    fixture.client.currentLease.mockReturnValue({
+      id: "lease_safe",
+      ownerNonce: "owner-safe",
+      expiresAt: 60_000
+    });
+    fixture.client.identity.mockRejectedValueOnce(
+      new HudClientError("VERSION_MISMATCH", "protocol changed")
+    );
+    await fixture.manager.ensureForWrite("progress_report");
+    fixture.client.health.mockResolvedValue({
+      ...compatibleHealth,
+      capabilities: {
+        service: "codex-progress-hud",
+        companionVersion: "0.2.0",
+        protocol: { current: 1, minimumClient: 1, maximumClient: 1 },
+        incompatibleClientSeen: true
+      }
+    });
+
+    await fixture.manager.diagnose();
+
+    expect(reportWriter).toHaveBeenCalledWith({
+      directory: fixture.directory + "\\diagnostics",
+      generatedAt: "1970-01-01T00:00:00.000Z",
+      versions: { plugin: "0.2.0", mcp: "0.2.0", companion: "0.2.0", protocol: 1 },
+      lifecycle: { desiredState: "on", observedState: "running" },
+      paths: { installManifestExists: true, dataDirectoryExists: true },
+      endpoint: { host: "127.0.0.1", port: 17837 },
+      runtimeAgeMs: undefined,
+      errors: [{ code: "VERSION_MISMATCH", occurredAt: "1970-01-01T00:00:00.000Z" }],
+      hooks: { expected: true, trusted: true, activitySeen: true, lastEventAt: 1234 },
+      lease: { active: true, count: 1 },
+      compatibility: { compatible: true, incompatibleClientSeen: true },
+      tracking: { taskCount: 1, selectedStatus: "quiescent", lateAttached: true },
+      operationalEvents: [{ code: "protocol_mismatch", at: "1970-01-01T00:00:00.000Z" }]
     });
   });
 
