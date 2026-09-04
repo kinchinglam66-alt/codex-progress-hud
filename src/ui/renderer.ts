@@ -1,5 +1,7 @@
 import { buildHudView } from "./view-model.js";
 import type { HudSnapshot } from "../server/task-store.js";
+import { createTaskMutationController, type RendererBootstrap } from "./task-mutations.js";
+import { taskButtonAccessibility } from "./task-controls.js";
 
 const elements = {
   shell: document.querySelector<HTMLElement>("#hud"),
@@ -29,30 +31,8 @@ const EMPTY_SNAPSHOT: HudSnapshot = {
 
 let latestSnapshot: HudSnapshot = EMPTY_SNAPSHOT;
 
-async function mutateTask(path: string, body: unknown): Promise<void> {
-  const send = async (snapshot: HudSnapshot): Promise<Response> => fetch(path, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-codex-progress-hud-revision": String(snapshot.revision)
-    },
-    body: JSON.stringify(body)
-  });
-  let response = await send(latestSnapshot);
-  if (response.status === 409) {
-    const fresh = await fetch("/api/snapshot");
-    if (!fresh.ok) return;
-    latestSnapshot = await fresh.json() as HudSnapshot;
-    render(latestSnapshot);
-    response = await send(latestSnapshot);
-  }
-  if (response.ok && response.status !== 204) {
-    latestSnapshot = await response.json() as HudSnapshot;
-    render(latestSnapshot);
-  }
-}
-
 function render(snapshot: HudSnapshot): void {
+  if (snapshot.revision < latestSnapshot.revision) return;
   latestSnapshot = snapshot;
   const view = buildHudView(snapshot);
   if (elements.shell) elements.shell.dataset.tone = view.tone;
@@ -82,10 +62,46 @@ function render(snapshot: HudSnapshot): void {
       button.className = "task-item";
       button.textContent = `${item.title} · ${item.statusLabel}`;
       button.dataset.selected = String(item.selected);
+      const accessibility = taskButtonAccessibility(item);
+      button.setAttribute("aria-pressed", accessibility["aria-pressed"]);
+      button.setAttribute("aria-label", accessibility["aria-label"]);
       button.addEventListener("click", () => void mutateTask(`/api/tasks/${encodeURIComponent(item.id)}/select`, { mode: "pinned" }));
       return button;
     }));
   }
+}
+
+let bootstrapPromise: Promise<RendererBootstrap> | undefined;
+async function loadBootstrap(): Promise<RendererBootstrap> {
+  bootstrapPromise ??= (async () => {
+    const response = await fetch("/api/bootstrap", { cache: "no-store" });
+    if (!response.ok) throw new Error("HUD bootstrap unavailable");
+    const bootstrap = await response.json() as { protocolVersion?: unknown; generation?: unknown };
+    if (
+      typeof bootstrap.protocolVersion !== "number" ||
+      !Number.isSafeInteger(bootstrap.protocolVersion) ||
+      typeof bootstrap.generation !== "number" ||
+      !Number.isSafeInteger(bootstrap.generation) ||
+      bootstrap.generation < 0
+    ) throw new Error("HUD bootstrap is invalid");
+    return { protocolVersion: bootstrap.protocolVersion, generation: bootstrap.generation };
+  })();
+  return bootstrapPromise;
+}
+
+const mutationController = createTaskMutationController({
+  fetch: (input, init) => fetch(input, init),
+  getSnapshot: () => latestSnapshot,
+  setSnapshot: (snapshot, shouldRender) => {
+    if (snapshot.revision < latestSnapshot.revision) return;
+    latestSnapshot = snapshot;
+    if (shouldRender) render(snapshot);
+  },
+  loadBootstrap
+});
+
+function mutateTask(path: string, body: unknown): Promise<void> {
+  return mutationController.mutate(path, body).catch(() => undefined);
 }
 
 elements.follow?.addEventListener("click", () => void mutateTask(

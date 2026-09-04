@@ -48,6 +48,11 @@ export interface ProgressServerControls {
   requestShutdown(): void | Promise<void>;
 }
 
+export interface ProgressServerBootstrap {
+  protocolVersion: number;
+  generation: number;
+}
+
 export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   host?: string;
   port?: number;
@@ -55,6 +60,7 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   uiDirectory?: string;
   leaseStore?: LeaseStore;
   leaseGraceMs?: number;
+  bootstrap?: () => ProgressServerBootstrap;
   now?: () => number;
   scheduleTimer?: (callback: () => void, delayMs: number) => unknown;
   cancelTimer?: (handle: unknown) => void;
@@ -671,6 +677,11 @@ export function createProgressServer(options: ProgressServerOptions) {
         } else {
           writeJson(response, 200, snapshotPayload(mcpSnapshot(request, snapshot)));
         }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/bootstrap") {
+        if (options.bootstrap === undefined) throw new Error("renderer bootstrap is unavailable");
+        writeJson(response, 200, options.bootstrap());
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/health") {

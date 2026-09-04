@@ -58,6 +58,8 @@ export interface DesktopWindowController {
   create(options: { url: string; token: string }): Promise<void>;
   show(): void;
   hide(): void;
+  selectTask(taskId: string | null): void;
+  onTaskActivity(taskId: string, options?: { isNewTask?: boolean; terminal?: boolean; hiddenForTask?: boolean }): void;
   visibility(): "visible" | "hidden";
   dispose(): void;
 }
@@ -67,7 +69,7 @@ export interface DesktopProgressServer {
   close(): Promise<void>;
   address(): { host: string; port: number; url: string };
   store?: {
-    snapshot(): { revision: number; selectedTaskId: string | null; tasks: Array<{ id: string; title: string; selected?: boolean }> };
+    snapshot(): { revision: number; selectedTaskId: string | null; tasks: Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean; selected?: boolean }> };
     select(taskId: string, mode: "pinned" | "follow_activity"): unknown;
     on(event: "changed", listener: (snapshot: unknown) => void): unknown;
   };
@@ -79,7 +81,7 @@ export interface DesktopTrayImage {
 
 export interface DesktopDependencies {
   app: DesktopAppLike;
-  createWindowController(options: { quitting(): boolean }): DesktopWindowController;
+  createWindowController(options: { quitting(): boolean; onHideSelectedTask?(taskId: string): void | Promise<void> }): DesktopWindowController;
   createTrayImage(): DesktopTrayImage;
   createTray(image: DesktopTrayImage): TrayLike;
   buildMenu(template: TrayMenuItem[]): unknown;
@@ -159,11 +161,12 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
   });
   return {
     app: electron.app,
-    createWindowController: ({ quitting }) => new WindowController({
-      createWindow: (options: BrowserWindowOptionsLike) =>
-        new electron.BrowserWindow(options) as unknown as BrowserWindowLike,
-      quitting
-    }),
+      createWindowController: ({ quitting, onHideSelectedTask }) => new WindowController({
+        createWindow: (options: BrowserWindowOptionsLike) =>
+          new electron.BrowserWindow(options) as unknown as BrowserWindowLike,
+        quitting,
+        ...(onHideSelectedTask === undefined ? {} : { onHideSelectedTask })
+      }),
     createTrayImage: () => electron.nativeImage.createFromDataURL(TRAY_PNG_DATA_URL),
     createTray: (image) => new electron.Tray(image as Electron.NativeImage),
     buildMenu: (template) => electron.Menu.buildFromTemplate(
@@ -228,6 +231,7 @@ export async function runDesktop(
   let tray: TrayLike | undefined;
   let progressServer: DesktopProgressServer | undefined;
   let windowController: DesktopWindowController | undefined;
+  let hideSelectedTaskMutation: ((taskId: string) => Promise<void>) | undefined;
   let startupAt: Date | undefined;
   let runtimeIdentity: RuntimeIdentity | undefined;
   let launchSettings: Awaited<ReturnType<LifecycleStateStore["readSettings"]>>;
@@ -350,7 +354,10 @@ export async function runDesktop(
 
   try {
     assertStarting();
-    windowController = resolved.createWindowController({ quitting: () => quitting });
+    windowController = resolved.createWindowController({
+      quitting: () => quitting,
+      onHideSelectedTask: (taskId) => hideSelectedTaskMutation?.(taskId)
+    });
     resolved.app.on("second-instance", (_event: unknown, commandLine?: unknown) => {
       try {
         const intent = Array.isArray(commandLine) &&
@@ -434,6 +441,7 @@ export async function runDesktop(
           tokenPath: resolved.tokenPath,
           uiDirectory: resolved.uiDirectory,
           health,
+          bootstrap: () => ({ protocolVersion: PROTOCOL_VERSION, generation: launchSettings.generation }),
           showWindow: () => publishingWindowController.show(),
           hideWindow: () => publishingWindowController.hide(),
           requestShutdown: () => {
@@ -452,35 +460,65 @@ export async function runDesktop(
         await publishingWindowController.create({ url: progressServer.address().url, token });
         assertStarting();
         const taskStore = progressServer.store;
-        const mutateSelection = async (taskId: string, mode: "pinned" | "follow_activity"): Promise<void> => {
+        const mutateTask = async (taskId: string, action: "select" | "visibility", body: unknown): Promise<void> => {
           if (taskStore === undefined) return;
-          const snapshot = taskStore.snapshot();
-          const response = await fetch(`${progressServer!.address().url}/api/tasks/${encodeURIComponent(taskId)}/select`, {
+          const send = (revision: number) => fetch(`${progressServer!.address().url}/api/tasks/${encodeURIComponent(taskId)}/${action}`, {
             method: "POST",
             headers: {
               authorization: `Bearer ${token}`,
               "content-type": "application/json",
               "x-codex-progress-hud-protocol": String(PROTOCOL_VERSION),
               "x-codex-progress-hud-generation": String(launchSettings.generation),
-              "x-codex-progress-hud-revision": String(snapshot.revision)
+              "x-codex-progress-hud-revision": String(revision)
             },
-            body: JSON.stringify({ mode })
+            body: JSON.stringify(body)
           });
+          let response = await send(taskStore.snapshot().revision);
           if (response.status === 409) {
-            const fresh = taskStore.snapshot();
-            await fetch(`${progressServer!.address().url}/api/tasks/${encodeURIComponent(taskId)}/select`, {
-              method: "POST",
-              headers: {
-                authorization: `Bearer ${token}`,
-                "content-type": "application/json",
-                "x-codex-progress-hud-protocol": String(PROTOCOL_VERSION),
-                "x-codex-progress-hud-generation": String(launchSettings.generation),
-                "x-codex-progress-hud-revision": String(fresh.revision)
-              },
-              body: JSON.stringify({ mode })
-            });
+            let payload: { code?: unknown } | undefined;
+            try { payload = await response.json() as { code?: unknown }; } catch { return; }
+            if (payload.code !== "STALE_REVISION") return;
+            response = await send(taskStore.snapshot().revision);
+          }
+          if (!response.ok) return;
+        };
+        hideSelectedTaskMutation = async (taskId: string): Promise<void> => {
+          await mutateTask(taskId, "visibility", { hidden: true });
+        };
+        const mutateSelection = async (taskId: string, mode: "pinned" | "follow_activity"): Promise<void> => {
+          await mutateTask(taskId, "select", { mode });
+        };
+        const currentSnapshot = taskStore?.snapshot();
+        if (currentSnapshot !== undefined) {
+          publishingWindowController.selectTask(currentSnapshot.selectedTaskId);
+        }
+        const previousByTask = new Map((currentSnapshot?.tasks ?? []).map((task) => [task.id, task]));
+        const isTerminal = (status: string): boolean => [
+          "ended_unknown", "completed_unverified", "succeeded_verified", "failed", "interrupted"
+        ].includes(status);
+        const onStoreChanged = (changed: unknown): void => {
+          const snapshot = changed as ReturnType<NonNullable<DesktopProgressServer["store"]>["snapshot"]>;
+          trayController?.updateTasks?.(snapshot.tasks.map((task) => ({
+            ...task,
+            selected: task.id === snapshot.selectedTaskId
+          })));
+          for (const task of snapshot.tasks) {
+            const previous = previousByTask.get(task.id);
+            if (previous === undefined || previous.lastActivityAt !== task.lastActivityAt) {
+              publishingWindowController.onTaskActivity(task.id, {
+                isNewTask: previous === undefined,
+                terminal: isTerminal(task.status),
+                hiddenForTask: task.hiddenForTask
+              });
+            }
+            previousByTask.set(task.id, task);
+          }
+          publishingWindowController.selectTask(snapshot.selectedTaskId);
+          for (const taskId of previousByTask.keys()) {
+            if (!snapshot.tasks.some((task) => task.id === taskId)) previousByTask.delete(taskId);
           }
         };
+        taskStore?.on("changed", onStoreChanged);
         const trayImage = resolved.createTrayImage();
         if (trayImage.isEmpty()) throw new Error("tray image is empty");
         assertStarting();
@@ -491,7 +529,10 @@ export async function runDesktop(
           buildMenu: resolved.buildMenu,
           onShow: () => publishingWindowController.show(),
           onHide: () => publishingWindowController.hide(),
-          taskItems: taskStore?.snapshot().tasks ?? [],
+          taskItems: (currentSnapshot?.tasks ?? []).map((task) => ({
+            ...task,
+            selected: task.id === currentSnapshot?.selectedTaskId
+          })),
           onSelectTask: (taskId) => mutateSelection(taskId, "pinned"),
           onFollowActivity: () => {
             const selectedTaskId = taskStore?.snapshot().selectedTaskId;
@@ -516,9 +557,6 @@ export async function runDesktop(
             });
           },
           onError: (error, action) => reportError(error, `tray action: ${action}`)
-        });
-        taskStore?.on("changed", (snapshot: unknown) => {
-          trayController?.updateTasks?.((snapshot as { tasks: Array<{ id: string; title: string; selected?: boolean }> }).tasks);
         });
         tray = undefined;
         const startupReadyAt = resolved.now();

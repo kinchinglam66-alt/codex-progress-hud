@@ -13,7 +13,7 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
 });
 
-async function startServer(options: { withUi?: boolean; withGenerationGuard?: boolean } = {}) {
+async function startServer(options: { withUi?: boolean; withGenerationGuard?: boolean; bootstrapGeneration?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-"));
   const tokenPath = join(directory, "auth.token");
   const uiDirectory = options.withUi ? join(directory, "ui") : undefined;
@@ -52,6 +52,10 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
     showWindow,
     hideWindow,
     requestShutdown,
+    bootstrap: () => ({
+      protocolVersion: RELEASE_CAPABILITIES.protocol.current,
+      generation: options.bootstrapGeneration ?? 1
+    }),
     ...(options.withGenerationGuard ? { runIfGeneration } : {}),
     ...(uiDirectory === undefined ? {} : { uiDirectory })
   });
@@ -119,6 +123,19 @@ describe("local progress HTTP service", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("exposes protocol and generation through an authenticated renderer bootstrap", async () => {
+    const fixture = await startServer({ bootstrapGeneration: 9 });
+
+    const unauthorized = await fetch(`${fixture.baseUrl}/api/bootstrap`);
+    const authorized = await fetch(`${fixture.baseUrl}/api/bootstrap`, {
+      headers: { authorization: `Bearer ${fixture.token}` }
+    });
+
+    expect(unauthorized.status).toBe(401);
+    expect(authorized.status).toBe(200);
+    expect(await authorized.json()).toEqual({ protocolVersion: 1, generation: 9 });
   });
 
   it("does not let UI files shadow reserved health routes", async () => {

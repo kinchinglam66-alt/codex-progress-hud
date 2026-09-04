@@ -12,6 +12,7 @@ import { createCompanionManager } from "../../src/lifecycle/companion-manager.js
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
 import { HudClientError } from "../../src/mcp/report-client.js";
+import { EventEmitter } from "node:events";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -27,10 +28,19 @@ function desktopHarness(lockAcquired = true) {
     create: vi.fn(async () => undefined),
     show: vi.fn(),
     hide: vi.fn(),
+    selectTask: vi.fn(),
+    onTaskActivity: vi.fn(),
     visibility: vi.fn(() => "hidden" as const),
     dispose: vi.fn()
   };
-  const trayController = { dispose: vi.fn() };
+  const trayController = { dispose: vi.fn(), updateTasks: vi.fn() };
+  const storeEvents = new EventEmitter();
+  let taskSnapshot = { revision: 0, selectedTaskId: null as string | null, tasks: [] as Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean }> };
+  const taskStore = {
+    snapshot: () => taskSnapshot,
+    select: vi.fn(),
+    on: (event: "changed", listener: (snapshot: unknown) => void) => storeEvents.on(event, listener)
+  };
   const progressServer = {
     listen: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
@@ -38,7 +48,8 @@ function desktopHarness(lockAcquired = true) {
       host: "127.0.0.1",
       port: 17_837,
       url: "http://127.0.0.1:17837"
-    }))
+    })),
+    store: taskStore
   };
   let trayCallbacks: Parameters<DesktopDependencies["createTrayController"]>[0] | undefined;
   let serverOptions: Parameters<DesktopDependencies["createProgressServer"]>[0] | undefined;
@@ -106,6 +117,10 @@ function desktopHarness(lockAcquired = true) {
     isQuitting: () => isQuitting(),
     get trayCallbacks() { return trayCallbacks; },
     get serverOptions() { return serverOptions; }
+    ,publishTaskSnapshot(snapshot: typeof taskSnapshot) {
+      taskSnapshot = snapshot;
+      storeEvents.emit("changed", snapshot);
+    }
   };
 }
 
@@ -606,6 +621,36 @@ describe("desktop lifecycle", () => {
     expect(harness.windowController.show).toHaveBeenCalledOnce();
     expect(harness.windowController.hide).toHaveBeenCalledOnce();
     expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
+  });
+
+  it("wires task activity to the window and projects selectedTaskId into tray state", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+
+    harness.publishTaskSnapshot({
+      revision: 1,
+      selectedTaskId: "task-b",
+      tasks: [
+        { id: "task-a", title: "Alpha", status: "running", lastActivityAt: 90, hiddenForTask: false },
+        { id: "task-b", title: "Beta", status: "running", lastActivityAt: 100, hiddenForTask: false }
+      ]
+    });
+
+    expect(harness.windowController.selectTask).toHaveBeenCalledWith("task-b");
+    expect(harness.windowController.onTaskActivity).toHaveBeenCalledWith("task-a", {
+      isNewTask: true,
+      terminal: false,
+      hiddenForTask: false
+    });
+    expect(harness.windowController.onTaskActivity).toHaveBeenCalledWith("task-b", {
+      isNewTask: true,
+      terminal: false,
+      hiddenForTask: false
+    });
+    expect(harness.trayController.updateTasks).toHaveBeenCalledWith([
+      expect.objectContaining({ id: "task-a", selected: false }),
+      expect.objectContaining({ id: "task-b", selected: true })
+    ]);
   });
 
   it("sets desired state off before tray Exit quits", async () => {

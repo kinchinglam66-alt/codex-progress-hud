@@ -59,6 +59,7 @@ export interface BrowserWindowLike {
 export interface WindowControllerDependencies {
   createWindow(options: BrowserWindowOptionsLike): BrowserWindowLike;
   quitting(): boolean;
+  onHideSelectedTask?(taskId: string): void | Promise<void>;
 }
 
 export interface WindowCreateOptions {
@@ -91,7 +92,6 @@ export class WindowController {
   private authorizationRequest: BrowserWindowLike["webContents"]["session"]["webRequest"] | undefined;
   private authorizationRegistered = false;
   private selectedTaskId: string | null = null;
-  private hiddenTasks = new Set<string>();
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -169,21 +169,23 @@ export class WindowController {
     this.window.hide();
   }
 
-  selectTask(taskId: string): void {
+  selectTask(taskId: string | null): void {
     this.selectedTaskId = taskId;
   }
 
   hideSelectedTask(): void {
-    if (this.selectedTaskId !== null) this.hiddenTasks.add(this.selectedTaskId);
+    if (this.selectedTaskId !== null) {
+      try {
+        void Promise.resolve(this.dependencies.onHideSelectedTask?.(this.selectedTaskId)).catch(() => undefined);
+      } catch {
+        // A close event must still hide the window if the mutation cannot start.
+      }
+    }
     if (this.window !== undefined && !this.window.isDestroyed()) this.window.hide();
   }
 
-  isHiddenForTask(taskId: string): boolean {
-    return this.hiddenTasks.has(taskId);
-  }
-
-  onTaskActivity(taskId: string, options: { isNewTask?: boolean; terminal?: boolean } = {}): void {
-    if (options.terminal || !options.isNewTask || this.hiddenTasks.has(taskId)) return;
+  onTaskActivity(taskId: string, options: { isNewTask?: boolean; terminal?: boolean; hiddenForTask?: boolean } = {}): void {
+    if (options.terminal || !options.isNewTask || options.hiddenForTask || this.selectedTaskId === taskId) return;
     this.selectedTaskId = taskId;
     this.show();
   }

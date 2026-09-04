@@ -18,6 +18,23 @@ describe("createTrayController", () => {
     expect(template.some((item) => item.label === "Start tracking" || item.label === "Stop tracking")).toBe(false);
   });
 
+  it("checks exactly the task selected by the aggregate snapshot projection", () => {
+    const template: TrayMenuItem[] = [];
+    createTrayController({
+      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
+      buildMenu: (received) => { template.push(...received); return {}; },
+      onShow: vi.fn(), onHide: vi.fn(), onDiagnose: vi.fn(), onExit: vi.fn(),
+      onSelectTask: vi.fn(),
+      taskItems: [
+        { id: "task-a", title: "Alpha", selected: false },
+        { id: "task-b", title: "Beta", selected: true }
+      ],
+      onError: vi.fn()
+    });
+
+    expect(template.filter((item) => item.type === "checkbox").map((item) => item.checked)).toEqual([false, true]);
+  });
+
   it("builds the tray without an automatic-login control", () => {
     const tray = { setContextMenu: vi.fn(), destroy: vi.fn() };
     let template: TrayMenuItem[] = [];

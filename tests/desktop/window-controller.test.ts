@@ -154,16 +154,30 @@ describe("WindowController", () => {
     expect(controller.visibility()).toBe("visible");
   });
 
-  it("hides only the selected task and does not reopen for its activity", async () => {
+  it("hides only the selected task and does not reopen while the server says it is hidden", async () => {
     const window = new FakeWindow();
     const controller = new WindowController({ createWindow: () => window, quitting: () => false });
     await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
     controller.selectTask("task-a");
     controller.hideSelectedTask();
-    controller.onTaskActivity("task-a");
+    controller.onTaskActivity("task-a", { isNewTask: true, hiddenForTask: true });
 
-    expect(controller.isHiddenForTask("task-a")).toBe(true);
     expect(window.showInactive).not.toHaveBeenCalled();
+  });
+
+  it("delegates X-hide to the revisioned visibility mutation handler", async () => {
+    const window = new FakeWindow();
+    const hideSelectedTask = vi.fn(async () => undefined);
+    const controller = new WindowController({
+      createWindow: () => window,
+      quitting: () => false,
+      onHideSelectedTask: hideSelectedTask
+    });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    controller.selectTask("task-a");
+
+    window.emit("close", { preventDefault: vi.fn() });
+    await vi.waitFor(() => expect(hideSelectedTask).toHaveBeenCalledWith("task-a"));
   });
 
   it("shows a different new task once without stealing focus for terminal notifications", async () => {
