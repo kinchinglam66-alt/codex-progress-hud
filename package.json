@@ -1,6 +1,6 @@
 {
   "name": "codex-progress-hud",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A local, privacy-first progress and ETA overlay for Codex tasks.",
   "author": "kinchinglam66-alt",
   "repository": {

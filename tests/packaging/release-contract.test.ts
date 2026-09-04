@@ -67,7 +67,7 @@ describe("Windows release source contract", () => {
 
   it("exposes reproducible package and release verification scripts", async () => {
     const pkg = JSON.parse(await text("package.json"));
-    expect(pkg.version).toBe("0.2.0");
+    expect(pkg.version).toBe("0.2.1");
     for (const name of ["build:launcher", "pack:win", "dist:win", "sync:plugin", "check:plugin-sync", "package:plugin", "checksums", "test:package-contract", "verify:release"]) {
       expect(pkg.scripts[name]).toBeTypeOf("string");
     }
@@ -77,6 +77,31 @@ describe("Windows release source contract", () => {
     expect(mcpMain).not.toContain('const version = "0.1.0"');
     expect(hookClient).toContain("RELEASE_CAPABILITIES.buildVersion");
     expect(hookClient).not.toContain('const version = "0.1.0"');
+  });
+
+  it("requires MCP-first packaged smoke and handle-free installed diagnostics", async () => {
+    const smoke = await text("scripts/smoke-packaged.mjs");
+    const diagnostic = await text("scripts/diagnose-packaged-mcp.mjs");
+    expect(smoke).toContain('readFile(resolve(root, "package.json"), "utf8")');
+    expect(smoke).toContain("APPDATA: dataDirectory");
+    expect(smoke).toContain('ELECTRON_RUN_AS_NODE: "1"');
+    expect(smoke).toContain('name: "hud_open"');
+    expect(smoke).toContain("/api/health");
+    expect(smoke).toContain('observedState !== "running"');
+    expect(smoke).toContain('name: "tracking_start"');
+    expect(smoke).toContain('name: "progress_report"');
+    expect(smoke).toContain('associationSource !== "mcp_lease"');
+    expect(smoke).toContain('name: "hud_close"');
+    expect(smoke).toContain("let opened = false");
+    expect(smoke).not.toContain('"--hud"');
+    expect(smoke).not.toContain("const hud = spawn");
+    expect(diagnostic).toContain('readFile(resolve(root, "package.json"), "utf8")');
+    expect(diagnostic).toContain("plugins/codex-progress-hud/scripts/codex-progress-hud-launcher.exe");
+    expect(diagnostic).toContain('name: "hud_open"');
+    expect(diagnostic).toContain('name: "tracking_start"');
+    expect(diagnostic).toContain('name: "progress_report"');
+    expect(diagnostic).toContain('name: "hud_close"');
+    expect(diagnostic).not.toContain('version: "0.2.0"');
   });
 
   it("keeps packaged smoke on Windows CI and publication tag-gated", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "codex-progress-hud",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local progress, status, and ETA reporting for Codex tasks.",
   "author": {
     "name": "kinchinglam66-alt",

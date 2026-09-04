@@ -19,7 +19,7 @@ export const RELEASE_CAPABILITIES: ReleaseCapabilities = {
     "tracking",
     "companion-lifecycle"
   ],
-  "buildVersion": "0.2.0"
+  "buildVersion": "0.2.1"
 } as const;
 
 export function acceptsClientProtocol(protocol: number): boolean {
