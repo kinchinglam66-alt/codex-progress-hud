@@ -12,6 +12,10 @@ Implementation commits:
 - `d3c108b` — `fix: normalize release plugin text files`
 - `adbe42a` — `test: verify automatic tracking release contract`
 - `4856141` — `docs: record task 11 release evidence`
+- `9a8c1b8` — `fix: close final release review findings`
+- `09bc058` — `docs: align release plan with final mcp format`
+- `d365ce4` — `fix: honor interrupt hook output contract`
+- `9e75e07` — `docs: remove stale launcher validation example`
 
 ## Important architecture correction
 
@@ -45,6 +49,8 @@ All paths are relative to the worktree and are ignored build outputs:
 - `git diff --check`, secret-pattern scan, absolute developer-path scan, plugin payload scan, and unexpected-root-directory scan — PASS after normalizing two release text files, anonymizing three old report/plan paths, and removing test-generated spelling-cache directories.
 
 The packaged smoke harness uses `--no-sandbox`, `--disable-gpu`, and `--in-process-gpu` only because it runs Electron inside an already restricted automated host. Production keeps `sandbox: true`, context isolation, no renderer Node integration, disabled hardware acceleration, and no spellcheck; these settings are independently covered by unit tests.
+
+The final `gpt-5.6-sol` security/release fix re-review approved `4856141..9e75e07` with no remaining material findings.
 
 ## Known limitations
 

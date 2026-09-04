@@ -14,6 +14,7 @@ Release readiness evidence:
 - Production dependency audit reported zero vulnerabilities.
 - The plugin ZIP is deterministic and contains only its 13-file whitelist.
 - Secret, absolute developer-path, cache/junk, and plugin-payload scans were clean.
+- The final bounded security/release fix re-review approved the complete remediation range with no remaining material findings.
 
 Local artifacts:
 
