@@ -20,6 +20,10 @@ export interface HudRequestOptions {
   compatibilityClose?: boolean;
 }
 
+interface InternalHudRequestOptions extends HudRequestOptions {
+  absoluteDeadlineMs?: number;
+}
+
 export interface ProgressClient {
   submit(envelope: ProgressEnvelope, options?: HudRequestOptions): Promise<ProgressClientSnapshot>;
   status(options?: HudRequestOptions): Promise<ProgressClientSnapshot>;
@@ -151,9 +155,18 @@ const legacySnapshotSchema = z.object({
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const MAX_REQUEST_TIMEOUT_MS = 60_000;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
 const REQUEST_PROTOCOL_HEADER = "x-codex-progress-hud-protocol";
 class InvalidResponseError extends Error {}
+
+function boundedTimeoutMs(requestedTimeoutMs: number | undefined): number {
+  const bounded = Math.max(
+    0,
+    Math.min(requestedTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, MAX_REQUEST_TIMEOUT_MS)
+  );
+  return Number.isFinite(bounded) ? Math.floor(bounded) : 0;
+}
 
 async function readBoundedJson(response: Response, controller: AbortController): Promise<unknown> {
   if (response.status === 204 || response.status === 304) return undefined;
@@ -239,15 +252,11 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
     path: string,
     init: RequestInit,
     authenticated: boolean,
-    options: HudRequestOptions
+    options: InternalHudRequestOptions
   ): Promise<{ response: Response; payload: unknown }> {
     const controller = new AbortController();
-    const requestedTimeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    const boundedTimeoutMs = Math.max(0, Math.min(requestedTimeoutMs, 60_000));
-    const timeoutMs = Number.isFinite(boundedTimeoutMs)
-      ? Math.floor(boundedTimeoutMs)
-      : 0;
-    const deadlineMs = Date.now() + timeoutMs;
+    const deadlineMs = options.absoluteDeadlineMs ?? Date.now() + boundedTimeoutMs(options.timeoutMs);
+    const timeoutMs = boundedTimeoutMs(Math.max(0, deadlineMs - Date.now()));
     let abortCause: "deadline" | "external" | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const claimAbortCause = (cause: "deadline" | "external") => {
@@ -324,7 +333,7 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
   async #authenticatedJson(
     path: string,
     init: RequestInit = {},
-    options: HudRequestOptions = {}
+    options: InternalHudRequestOptions = {}
   ): Promise<unknown> {
     const result = await this.#request(path, init, true, options);
     const structuredCode = z.object({ code: responseErrorCodeSchema })
@@ -354,13 +363,19 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
     return result.payload;
   }
 
-  #effectiveOptions(options: HudRequestOptions = {}): HudRequestOptions {
+  #effectiveOptions(options: InternalHudRequestOptions = {}): InternalHudRequestOptions {
     return {
       ...options,
       ...(options.leaseId === undefined && this.#ownerNonce !== undefined
         ? { leaseId: this.#lease?.id ?? "", ownerNonce: this.#lease?.ownerNonce ?? this.#ownerNonce }
         : {})
     };
+  }
+
+  #withAbsoluteDeadline(options: InternalHudRequestOptions): InternalHudRequestOptions {
+    return options.absoluteDeadlineMs === undefined
+      ? { ...options, absoluteDeadlineMs: Date.now() + boundedTimeoutMs(options.timeoutMs) }
+      : options;
   }
 
   async #ensureLeaseForMutation(): Promise<void> {
@@ -502,7 +517,7 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
     throw new HudClientError("VERSION_MISMATCH", "HUD snapshot response is incompatible");
   }
 
-  async #snapshot(path: string, init: RequestInit = {}, options: HudRequestOptions = {}): Promise<HudSnapshot> {
+  async #snapshot(path: string, init: RequestInit = {}, options: InternalHudRequestOptions = {}): Promise<HudSnapshot> {
     return this.#parseSnapshot(await this.#authenticatedJson(path, init, options));
   }
 
@@ -514,7 +529,7 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope)
     }, requestOptions);
-    const firstOptions = this.#effectiveOptions(options);
+    const firstOptions = this.#withAbsoluteDeadline(this.#effectiveOptions(options));
     try {
       return await request(firstOptions);
     } catch (error) {

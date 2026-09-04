@@ -139,6 +139,95 @@ describe("CompanionHttpClient", () => {
     expect(eventAttempts).toBe(2);
   });
 
+  it("reuses one absolute deadline across a recoverable lease retry", async () => {
+    let now = 1_000;
+    const eventHeaders: Array<{
+      deadline: string;
+      generation: string | undefined;
+      revision: string | undefined;
+    }> = [];
+    let eventAttempts = 0;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const { baseUrl, tokenPath } = await fixture((request, response) => {
+        request.resume();
+        request.on("end", () => {
+          if (request.url === "/api/leases/acquire") {
+            json(response, 200, { id: "lease_new", ownerNonce: "owner", expiresAt: 60_000 });
+            return;
+          }
+          if (request.url === "/api/events") {
+            eventHeaders.push({
+              deadline: String(request.headers["x-codex-progress-hud-deadline-ms"]),
+              generation: request.headers["x-codex-progress-hud-generation"] as string | undefined,
+              revision: request.headers["x-codex-progress-hud-revision"] as string | undefined
+            });
+            eventAttempts += 1;
+            if (eventAttempts === 1) {
+              now = 1_050;
+              json(response, 401, { code: "LEASE_REQUIRED" });
+              return;
+            }
+          }
+          json(response, 202, aggregateSnapshot);
+        });
+      });
+      const client = new CompanionHttpClient(baseUrl, tokenPath);
+      client.setLeaseOwnerNonce("owner");
+      client.setLease({ id: "lease_old", ownerNonce: "owner", expiresAt: 1 });
+
+      await expect(client.submit({
+        taskId: aggregateSnapshot.selectedTaskId,
+        event: { type: "activity_resumed" }
+      }, { timeoutMs: 100, generation: 7, revision: 3 })).resolves.toEqual(aggregateSnapshot);
+
+      expect(eventHeaders).toEqual([
+        { deadline: "1100", generation: "7", revision: "3" },
+        { deadline: "1100", generation: "7", revision: "3" }
+      ]);
+      expect(Number(eventHeaders[1]?.deadline)).toBe(1_100);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("does not extend a lease retry past its original absolute deadline", async () => {
+    let now = 1_000;
+    let eventAttempts = 0;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const { baseUrl, tokenPath } = await fixture((request, response) => {
+        request.resume();
+        request.on("end", () => {
+          if (request.url === "/api/leases/acquire") {
+            json(response, 200, { id: "lease_new", ownerNonce: "owner", expiresAt: 60_000 });
+            return;
+          }
+          if (request.url === "/api/events") {
+            eventAttempts += 1;
+            if (eventAttempts === 1) {
+              now = 1_101;
+              json(response, 401, { code: "LEASE_REQUIRED" });
+              return;
+            }
+          }
+          json(response, 202, aggregateSnapshot);
+        });
+      });
+      const client = new CompanionHttpClient(baseUrl, tokenPath);
+      client.setLeaseOwnerNonce("owner");
+      client.setLease({ id: "lease_old", ownerNonce: "owner", expiresAt: 1 });
+
+      await expect(client.submit({
+        taskId: aggregateSnapshot.selectedTaskId,
+        event: { type: "activity_resumed" }
+      }, { timeoutMs: 100 })).rejects.toMatchObject({ code: "REQUEST_TIMEOUT" });
+      expect(eventAttempts).toBe(1);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it("keeps status observational and starts the lease only for the first mutation", async () => {
     const seen: string[] = [];
     const lease = { id: "lease_lazy", ownerNonce: "owner", expiresAt: 60_000 };
