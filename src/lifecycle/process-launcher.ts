@@ -15,14 +15,20 @@ type SpawnProcess = (
   options: SpawnOptions
 ) => Pick<ChildProcess, "pid" | "unref" | "kill">;
 
-export function createProcessLauncher(spawnProcess: SpawnProcess = spawn): ProcessLauncher {
+export function createProcessLauncher(
+  spawnProcess: SpawnProcess = spawn,
+  environment: NodeJS.ProcessEnv = process.env
+): ProcessLauncher {
   return {
     async spawnHud(executablePath: string, options: { generation: number }): Promise<SpawnedHud> {
+      const childEnvironment = { ...environment };
+      delete childEnvironment.ELECTRON_RUN_AS_NODE;
       const child = spawnProcess(
         executablePath,
         ["--hud", `--manager-generation=${options.generation}`],
         {
           detached: true,
+          env: childEnvironment,
           stdio: "ignore",
           shell: false
         }

@@ -1798,6 +1798,31 @@ describe("companion lifecycle manager", () => {
 });
 
 describe("process launcher", () => {
+  it("removes Electron Node mode only from the desktop child environment", async () => {
+    const child = { pid: 9123, unref: vi.fn(), kill: vi.fn(() => true) };
+    const spawnProcess = vi.fn(() => child);
+    const parentEnvironment = {
+      ELECTRON_RUN_AS_NODE: "1",
+      CODEX_PROGRESS_HUD_DATA_DIR: "C:\\isolated-data",
+      HUD_SENTINEL: "preserved"
+    };
+    const launcher = createProcessLauncher(spawnProcess, parentEnvironment);
+
+    await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      "C:\\Program Files\\HUD\\hud.exe",
+      ["--hud", "--manager-generation=7"],
+      expect.objectContaining({
+        env: {
+          CODEX_PROGRESS_HUD_DATA_DIR: "C:\\isolated-data",
+          HUD_SENTINEL: "preserved"
+        }
+      })
+    );
+    expect(parentEnvironment.ELECTRON_RUN_AS_NODE).toBe("1");
+  });
+
   it("spawns the exact executable without a shell and detaches stdio", async () => {
     const child = {
       pid: 9123,
@@ -1805,12 +1830,17 @@ describe("process launcher", () => {
       kill: vi.fn<() => boolean>(() => true)
     };
     const spawn = vi.fn(() => child);
-    const launcher = createProcessLauncher(spawn);
+    const launcher = createProcessLauncher(spawn, {
+      HUD_SENTINEL: "preserved"
+    });
 
     const spawned = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
 
     expect(spawn).toHaveBeenCalledWith("C:\\Program Files\\HUD\\hud.exe", ["--hud", "--manager-generation=7"], {
       detached: true,
+      env: {
+        HUD_SENTINEL: "preserved"
+      },
       stdio: "ignore",
       shell: false
     });
