@@ -315,7 +315,7 @@ Use exit code 2 for `COMPANION_NOT_INSTALLED`, 3 for `INVALID_INSTALL_MANIFEST`,
 Require the nested launcher, reject a nested release `.mcp.json` command that invokes Node, verify its executable path is plugin-relative without `..`, validate the repo marketplace, and run synchronization in check mode. The root development `.mcp.json` remains valid with its Node command.
 
 ```js
-if (releaseServer.command !== "powershell.exe") fail("release MCP must use PowerShell launcher");
+if (releaseServer.command !== "./scripts/codex-progress-hud-launcher.exe") fail("release MCP must use native streaming launcher");
 if (releaseServer.args.some((value) => value.includes(".."))) fail("release MCP path escapes plugin root");
 if (marketplace.name !== "kinchinglam66-alt") fail("unexpected marketplace name");
 ```
