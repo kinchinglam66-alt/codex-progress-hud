@@ -1,52 +1,25 @@
 # Threat model
 
-## Assets
+## Assets and boundaries
 
-- Local task metadata shown by the HUD.
-- The bearer token protecting the local API.
-- Integrity of lifecycle state, progress, and ETA.
-- User attention: false completion and false precision can cause harmful decisions.
+Assets are local task metadata, the bearer token, lifecycle/progress integrity, and user attention. Electron, renderer, MCP server, Hook commands, Codex host, companion, and same-user processes are separate trust boundaries. Model output and MCP arguments are untrusted.
 
-## Trust boundaries
+## Control boundary
 
-The Electron main process, renderer, MCP server process, executing model, Codex host, and local operating-system account are separate boundaries. Model output and MCP arguments are untrusted. Other processes running as the same OS user are not assumed benign.
+Codex’s plugin page is the sole global enable/disable/uninstall switch. Trusted Hooks with an enabled plugin automatically provide runtime evidence. Window show/hide and per-task selection/timing controls are presentation controls; they neither change plugin state nor control Codex execution.
 
 ## Main threats and mitigations
 
-### Unauthorized local reads or writes
+Every API route requires a high-entropy token; the service is loopback-only, uses constant-time comparison, bounded bodies/responses, deadlines, and no CORS. The renderer is sandboxed and never receives the token. Port occupancy is not process ownership: authenticated live health must match PID and instance nonce before a manager-owned child can be force-terminated.
 
-Every API route requires a high-entropy token. The service binds only to loopback, uses constant-time token comparison, rejects oversized bodies, and does not enable CORS. The Electron session injects authentication without exposing the token to renderer JavaScript.
+Protocol incompatibility, missing installation, Hook distrust/no activity, missing MCP lease, and an offline companion are reported as separate diagnostic dimensions. A mismatched client must be updated and restarted; it is never mislabeled as offline.
 
-Residual risk: malware or a process with access to the user's application-data directory can read the token. Stronger future options include OS credential storage and named-pipe access control.
+Hooks accept only `session_id`, optional `turn_id`, optional `tool_use_id`, optional `hook_event_name`, and optional `source`. Session and turn identifiers are HMAC-hashed; the event identity hashes Hook name/source/tool-use identifier. Raw fields are discarded. Prompt, transcript path, tool input/output, cwd, arbitrary fields, title, token, secret, source contents, and command output never enter diagnostics or operational history.
 
-### Port and process ownership
+Operational history is an allowlist of bounded event codes/categories and canonical timestamps. Diagnostic reports additionally expose safe versions, lifecycle states, path-existence booleans, loopback host/port, runtime age, and bounded error codes. They are local and should be reviewed before sharing.
 
-The unauthenticated loopback `/health` response exposes only the service name and protocol version; authenticated `/api/health` carries the live PID and per-instance nonce. A listener with the wrong service identity is a `PORT_CONFLICT`, and a compatible service with the wrong protocol is a `VERSION_MISMATCH`. The lifecycle manager never treats port occupancy as process ownership.
+Runtime interruption evidence is authoritative only when supplied by a trusted Hook/runtime boundary (`Interrupt`, `SessionEnd`, or an explicit runtime failure). A missing heartbeat, lease expiry, or disconnected process is suspected and is labeled accordingly; it cannot be presented as confirmed interruption or completion. Model-reported success is verified only by the configured validation evidence.
 
-`runtime.json` is advisory, stale-prone metadata used to distinguish a previously healthy companion from a first start. Its PID is not authority to signal a process. Forced termination after a graceful-shutdown timeout is permitted only for a child spawned by the current manager when fresh authenticated health still matches both that child's PID and instance nonce. Unknown processes and stale runtime records are never termination targets.
+An older conversation can attach on its first observed Hook, with no backfilled elapsed time. Plugin/companion updates require a full Codex restart and a new task. Deprecated `hud_open`, `hud_close`, `hud_hide`, and `tracking_start` aliases remain only for compatibility and do not form another global switch.
 
-### Prompt injection and malicious reports
-
-All fields are schema-validated and length-limited. Reports cannot request shell execution or file access. Explicit runtime failure and interruption outrank cooperative model completion claims.
-
-Residual risk: a model can still provide plausible but inaccurate semantic progress. The UI displays ranges and verification distinctions rather than asserting certainty.
-
-### Sensitive information leakage
-
-The skill forbids raw prompts, reasoning, code, files, credentials, and command output. The MVP stores no task records and sends no telemetry. UI text should still be treated as potentially visible in screen sharing and screenshots.
-
-Diagnostics and operational logs use an allowlist rather than redacting arbitrary payloads after collection. Diagnostic reports may contain only safe versions, desired/observed lifecycle states, path-existence booleans, loopback host and port, runtime age, and bounded categorized error codes. Operational logs may contain only canonical timestamps, severity, fixed event/state categories, protocol version, HTTP status category, and elapsed time. Tokens, prompts, task event payloads, task titles, source/file contents, command output, raw URLs, exception text, and arbitrary client input must never enter either channel.
-
-Residual risk: even category-only lifecycle timing and path-existence data can reveal limited local operational state. Diagnostic files remain local and should be reviewed before sharing.
-
-### Renderer compromise
-
-The renderer is sandboxed, has no Node integration, receives a restrictive Content Security Policy, and loads only local resources. API authentication is added by the isolated Electron session.
-
-### Dependency and release compromise
-
-The lockfile is committed, CI uses `npm ci`, and Dependabot monitors dependencies. Release packaging must add artifact signing and checksums before binaries are published.
-
-### Unsupported Codex integration
-
-The project does not scrape or patch the Codex GUI. A future App Server bridge must use documented schemas, pin tested compatibility ranges, and degrade to cooperative MCP reporting when authoritative events are unavailable.
+Residual risks include same-user malware reading the application-data token, timing/path-existence inference, and inaccurate cooperative model reports. No cloud service or telemetry is present.

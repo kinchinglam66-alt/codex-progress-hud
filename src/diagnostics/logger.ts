@@ -22,7 +22,9 @@ export type OperationalEventCode =
   | "shutdown_timeout"
   | "port_conflict"
   | "protocol_mismatch"
-  | "crash_recovery";
+  | "crash_recovery"
+  | "hook_received" | "hook_failed" | "lease_acquired" | "lease_expired"
+  | "late_attach" | "stale_revision";
 
 export interface OperationalLogEntry {
   at: string;
@@ -53,7 +55,9 @@ const EVENT_CODES = new Set<OperationalEventCode>([
   "shutdown_timeout",
   "port_conflict",
   "protocol_mismatch",
-  "crash_recovery"
+  "crash_recovery",
+  "hook_received", "hook_failed", "lease_acquired", "lease_expired",
+  "late_attach", "stale_revision"
 ]);
 const LEVELS = new Set<OperationalLogEntry["level"]>(["info", "warn", "error"]);
 const LIFECYCLE_STATES = new Set<ObservedHudState>([

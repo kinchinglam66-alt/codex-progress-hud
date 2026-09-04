@@ -80,6 +80,22 @@ async function publishLock(directory: string, owner: HeldOwner): Promise<void> {
 }
 
 describe("operational logger", () => {
+  it("accepts bounded automatic-tracking event codes and persists only code plus timestamp", async () => {
+    const directory = await logDirectory();
+    const logger = createOperationalLogger({ logDirectory: directory, maxBytes: 256 * 1024, maxFiles: 3 });
+    await logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "hook_received" as any,
+      payload: "raw prompt/session/title/path secret"
+    } as any);
+
+    const content = await readFile(join(directory, "companion.log"), "utf8");
+    expect(content).toContain("hook_received");
+    expect(content).toContain("2026-09-02T00:00:00.000Z");
+    expect(content).not.toContain("raw prompt/session/title/path secret");
+  });
+
   it("serializes only category fields from an entry carrying sensitive extras", async () => {
     const directory = await logDirectory();
     const logger = createOperationalLogger({

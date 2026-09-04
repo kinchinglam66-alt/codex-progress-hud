@@ -1,25 +1,19 @@
 # Contributing
 
-Thank you for improving Codex Progress HUD.
+Codex Progress HUD is a local plugin and companion. Keep the Codex plugin page as the sole global enable/disable boundary: trusted Hooks plus an enabled plugin imply automatic tracking.
 
-## Before opening a change
+## Workflow
 
-For behavior changes, open an issue describing the user-visible problem, privacy impact, and how the change will be verified. Small documentation corrections can go directly to a pull request.
+1. Describe the user-visible behavior and privacy impact.
+2. Write a failing behavior test and record the RED result.
+3. Implement the smallest change, then run the focused test GREEN.
+4. Run typecheck, build, plugin validation, and the full suite.
+5. Update README, privacy, and threat-model documentation when control, data flow, retention, or permissions change.
 
-## Development workflow
+Never commit conversations, prompts, command output, credentials, generated tokens, raw Hook payloads, or private paths. Operational diagnostics must remain bounded to categories/codes and timestamps.
 
-1. Create a feature branch from `main`.
-2. Write a failing behavior test and run it to confirm the intended failure.
-3. Implement the smallest change that passes the test.
-4. Run `npm test -- --run`, `npm run typecheck`, `npm run build`, and `npm run validate:plugin`.
-5. Update privacy and threat-model documentation when data flow or permissions change.
-6. Keep commits focused and use clear imperative messages.
+## Review requirements
 
-Do not commit private Codex conversations, prompts, command output, credentials, generated bearer tokens, local databases, or screenshots containing unrelated source code.
+Explain automatic Hook attachment, old-conversation best effort, restart requirements after updates, mismatch recovery, deprecated aliases, and the separation between plugin control, window visibility, per-task controls, and Codex execution. Include exact verification commands and privacy risks. Do not package, install, access the network, modify Codex settings/cache, merge, or push as part of a normal contribution.
 
-## Pull requests
-
-Explain the behavior change, include verification output, identify security or privacy effects, and mention any experimental Codex interface involved. Maintainers may request changes when a contribution relies on undocumented GUI internals or creates a new network/data-retention surface without an explicit design.
-
-Contributions are accepted under Apache-2.0 as described in the repository license.
-
+Contributions are under Apache-2.0.

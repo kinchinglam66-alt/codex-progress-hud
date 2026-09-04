@@ -1,28 +1,23 @@
 # Privacy policy
 
-Codex Progress HUD is local-first and has no project-operated cloud service or telemetry in the MVP.
+Codex Progress HUD is local-first. It has no project-operated cloud service or telemetry.
 
-## Data processed
+## Control and processing
 
-The companion processes a task identifier, short display title, phase, current step, optional progress and confidence, optional ETA bounds, waiting reason, and terminal outcome. It also processes local lifecycle events when an explicitly configured bridge supplies them.
+Codex’s plugin page is the sole global enable/disable/uninstall control. With the plugin enabled and Hooks trusted, tracking is automatic. Window visibility and per-task controls are presentation/timing controls only; they do not change plugin state or Codex execution.
 
-The reporting skill forbids sending prompts, hidden reasoning, source code, command output, file contents, credentials, or access tokens to the HUD.
+The Hook adapter accepts `session_id`, `turn_id`, `tool_use_id`, `hook_event_name`, and `source` after schema validation. It discards raw values immediately: session and turn values are HMAC-hashed into opaque identifiers, and the event hash includes Hook name, source, and tool-use identifier. Prompt text, transcript path, tool input/output, cwd, arbitrary fields, titles, tokens, and secrets are rejected or discarded and never cross the Hook boundary.
 
 ## Storage and retention
 
-The MVP keeps task snapshots in memory. It writes one randomly generated authentication token to the user's application-data directory. It does not persist task content or timing history.
+Live task snapshots and lease state are in memory. Operational logs and diagnostic reports are local, bounded, and contain only allowlisted versions/states, bounded codes/categories, and canonical timestamps. They never contain token, raw session ID/handle, title, prompt, path, Hook payload, or secret. Review reports before sharing. Removing the application-data directory after stopping removes the local token and files; the next start creates a new token.
 
-Deleting the application-data directory after the HUD is stopped removes the local token. A new token is generated on the next start.
+## Lifecycle and migration
 
-## Network behavior
+An older conversation may attach on its first observed Hook, but old activity is not backfilled. After plugin or companion updates, fully restart Codex Desktop and begin a new task. A protocol mismatch is distinct from an offline companion; update the mismatched side and restart host and companion. `hud_open`, `hud_close`, `hud_hide`, and `tracking_start` are deprecated compatibility aliases, not global consent or a second enable switch.
 
-The companion binds only to the loopback interface. It does not send HUD data to a remote service. Dependency installation and future update checks are separate package-manager activities and are not performed by the running HUD.
+## Network
 
-## Logs
+The companion binds only to loopback and sends no HUD data to remote services. Package-manager activity is outside the running HUD.
 
-The application avoids logging task payloads and tokens. Contributors must redact personal information and secrets from bug reports, screenshots, fixtures, and diagnostics.
-
-## Changes
-
-Any release that adds telemetry, cloud synchronization, persisted history, or external model calls must update this policy before enabling that behavior and must provide explicit user control.
-
+Future telemetry, cloud synchronization, persisted task history, or external model calls require an updated policy and explicit control.

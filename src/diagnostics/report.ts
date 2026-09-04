@@ -1,5 +1,6 @@
 import { basename, join } from "node:path";
 import type { DesiredHudState, HudErrorCode, ObservedHudState } from "../lifecycle/types.js";
+import type { TaskStatus } from "../core/types.js";
 import {
   assertTrustedDirectory,
   ensureTrustedDirectory,
@@ -29,6 +30,11 @@ export interface DiagnosticReportInput {
   endpoint: { host: string; port: number };
   runtimeAgeMs?: number;
   errors: Array<{ code: HudErrorCode | "OFFLINE"; occurredAt?: string }>;
+  hooks?: { expected: boolean; trusted?: boolean; activitySeen: boolean; lastEventAt?: number };
+  lease?: { active: boolean; count: number };
+  compatibility?: { compatible: boolean; incompatibleClientSeen: boolean };
+  tracking?: { taskCount: number; selectedStatus?: TaskStatus; lateAttached: boolean };
+  operationalEvents?: Array<{ code: string; at: string }>;
 }
 
 const DESIRED_STATES = new Set<DesiredHudState>(["on", "off"]);
@@ -42,6 +48,15 @@ const ERROR_CODES = new Set<HudErrorCode | "OFFLINE">([
 ]);
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/u;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+const TASK_STATUSES = new Set<TaskStatus>([
+  "idle", "running", "quiescent", "paused", "stopped", "waiting_approval", "waiting_user",
+  "stalled_suspected", "disconnected_suspected", "ended_unknown", "completed_unverified",
+  "succeeded_verified", "failed", "interrupted"
+]);
+const OPERATIONAL_CODES = new Set([
+  "hook_received", "hook_failed", "lease_acquired", "lease_expired", "late_attach",
+  "stale_revision", "protocol_mismatch"
+]);
 
 function canonicalTimestamp(value: unknown, name: string): string {
   if (typeof value !== "string") throw new TypeError(`${name} must be a timestamp`);
@@ -135,6 +150,31 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
         : { occurredAt: canonicalTimestamp(occurredAtValue, `error ${index} time`) })
     });
   }
+  const hooksInput = input.hooks;
+  const hooks = hooksInput === undefined ? undefined : {
+    expected: hooksInput.expected,
+    trusted: hooksInput.trusted ?? false,
+    activitySeen: hooksInput.activitySeen,
+    ...(hooksInput.lastEventAt === undefined ? {} : { lastEventAt: safeInteger(hooksInput.lastEventAt, "Hook last event", 0, Number.MAX_SAFE_INTEGER) })
+  };
+  if (hooks !== undefined && (typeof hooks.expected !== "boolean" || typeof hooks.trusted !== "boolean" || typeof hooks.activitySeen !== "boolean")) throw new TypeError("Hook diagnostics must be booleans");
+  const leaseInput = input.lease;
+  const lease = leaseInput === undefined ? undefined : { active: leaseInput.active, count: safeInteger(leaseInput.count, "lease count", 0, 1_000) };
+  if (lease !== undefined && typeof lease.active !== "boolean") throw new TypeError("lease state must be boolean");
+  const compatibilityInput = input.compatibility;
+  const compatibility = compatibilityInput === undefined ? undefined : { compatible: compatibilityInput.compatible, incompatibleClientSeen: compatibilityInput.incompatibleClientSeen };
+  if (compatibility !== undefined && (typeof compatibility.compatible !== "boolean" || typeof compatibility.incompatibleClientSeen !== "boolean")) throw new TypeError("compatibility diagnostics must be booleans");
+  const trackingInput = input.tracking;
+  const tracking = trackingInput === undefined ? undefined : { taskCount: safeInteger(trackingInput.taskCount, "task count", 0, 1_000), ...(trackingInput.selectedStatus === undefined ? {} : { selectedStatus: trackingInput.selectedStatus }), lateAttached: trackingInput.lateAttached };
+  if (tracking !== undefined && (typeof tracking.lateAttached !== "boolean" || (tracking.selectedStatus !== undefined && !TASK_STATUSES.has(tracking.selectedStatus)))) throw new TypeError("tracking diagnostics are invalid");
+  const operationalEventsInput = input.operationalEvents;
+  const operationalEvents = operationalEventsInput === undefined ? undefined : (() => {
+    if (!Array.isArray(operationalEventsInput) || operationalEventsInput.length > 20) throw new TypeError("operational events must be bounded");
+    return operationalEventsInput.map((event, index) => {
+      if (typeof event !== "object" || event === null || !OPERATIONAL_CODES.has(event.code)) throw new TypeError(`operational event ${index} is invalid`);
+      return { code: event.code, at: canonicalTimestamp(event.at, `operational event ${index} time`) };
+    });
+  })();
   return {
     generatedAt,
     versions: { plugin, mcp, ...(companion === undefined ? {} : { companion }), protocol },
@@ -142,7 +182,12 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
     paths: { installManifestExists, dataDirectoryExists },
     endpoint: { host, port },
     ...(runtimeAgeValue === undefined ? {} : { runtimeAgeMs: runtimeAgeValue }),
-    errors
+    errors,
+    ...(hooks === undefined ? {} : { hooks }),
+    ...(lease === undefined ? {} : { lease }),
+    ...(compatibility === undefined ? {} : { compatibility }),
+    ...(tracking === undefined ? {} : { tracking }),
+    ...(operationalEvents === undefined ? {} : { operationalEvents })
   };
 }
 
@@ -160,11 +205,39 @@ async function writeDiagnosticReportWithFileSystem(
   const errors = snapshot.errors.length === 0
     ? "- None"
     : snapshot.errors.map((error) => line("Code", error.code)).join("\n");
+  const installation = snapshot.paths.installManifestExists ? "detected" : "not detected";
+  const hookConclusion = snapshot.hooks === undefined
+    ? "not reported"
+    : !snapshot.hooks.trusted
+      ? "untrusted; no activity"
+      : !snapshot.hooks.activitySeen ? "trusted; no activity" : "trusted; activity seen";
+  const leaseConclusion = snapshot.lease === undefined
+    ? "not reported" : snapshot.lease.active ? `connected (${snapshot.lease.count})` : "disconnected";
+  const companionConclusion = ["running", "starting", "hidden"].includes(snapshot.lifecycle.observedState) ? "online" : "offline";
+  const compatibilityConclusion = snapshot.compatibility === undefined
+    ? "not reported" : snapshot.compatibility.compatible ? "compatible" : "mismatch";
+  const trackingConclusion = snapshot.tracking === undefined
+    ? "not reported"
+    : snapshot.tracking.selectedStatus === "quiescent"
+      ? `active but quiescent${snapshot.tracking.lateAttached ? "; late-attached" : ""}`
+      : `${snapshot.tracking.taskCount} task(s)${snapshot.tracking.lateAttached ? "; late-attached" : ""}`;
+  const eventLines = snapshot.operationalEvents === undefined || snapshot.operationalEvents.length === 0
+    ? "- None"
+    : snapshot.operationalEvents.map((event) => `- ${event.code} at ${event.at}`).join("\n");
   const hostForUri = snapshot.endpoint.host === "::1" ? "[::1]" : snapshot.endpoint.host;
   const markdown = [
     "# Codex Progress HUD Diagnostic",
     "",
     line("Generated at", snapshot.generatedAt),
+    "",
+    "## Conclusion",
+    "",
+    `- Installation: ${installation}`,
+    `- Hook trust/activity: ${hookConclusion}`,
+    `- MCP lease: ${leaseConclusion}`,
+    `- Companion process: ${companionConclusion}`,
+    `- Protocol compatibility: ${compatibilityConclusion}`,
+    `- Tracking: ${trackingConclusion}`,
     "",
     "## Versions",
     "",
@@ -192,6 +265,10 @@ async function writeDiagnosticReportWithFileSystem(
     "## Categorized errors",
     "",
     errors,
+    "",
+    "## Operational history (codes and timestamps only)",
+    "",
+    eventLines,
     "",
     "## Safe verification commands",
     "",

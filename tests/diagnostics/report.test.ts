@@ -27,6 +27,55 @@ afterEach(async () => {
 });
 
 describe("diagnostic report", () => {
+  it("reports installation, Hook trust/activity, MCP lease, companion, compatibility, and tracking separately", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-dimensions-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const input = {
+      ...validInput(directory),
+      paths: { installManifestExists: false, dataDirectoryExists: true },
+      lifecycle: { observedState: "stopped" as const },
+      hooks: { expected: true, trusted: false, activitySeen: false, lastEventAt: 0 },
+      lease: { active: false, count: 0 },
+      compatibility: { compatible: false, incompatibleClientSeen: true },
+      tracking: { taskCount: 1, selectedStatus: "quiescent" as const, lateAttached: true }
+    };
+
+    const result = await writeDiagnosticReport(input as any);
+    const markdown = await readFile(result.path, "utf8");
+
+    expect(markdown).toContain("Installation: not detected");
+    expect(markdown).toContain("Hook trust/activity: untrusted; no activity");
+    expect(markdown).toContain("MCP lease: disconnected");
+    expect(markdown).toContain("Companion process: offline");
+    expect(markdown).toContain("Protocol compatibility: mismatch");
+    expect(markdown).toContain("Tracking: active but quiescent; late-attached");
+  });
+
+  it("keeps diagnostic output content-free even when runtime inputs contain secrets", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-content-free-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const input = {
+      ...validInput(directory),
+      hooks: {
+        expected: true, trusted: true, activitySeen: true, lastEventAt: 1,
+        session_id: "raw-session-secret", prompt: "private prompt", cwd: "C:\\private\\repo"
+      },
+      tracking: {
+        taskCount: 1, selectedStatus: "running" as const, lateAttached: false,
+        title: "private task title", taskHandle: "raw-handle-secret"
+      },
+      operationalEvents: [{ code: "hook_received", at: "2026-09-02T00:00:00.000Z", payload: "secret" }]
+    };
+
+    const result = await writeDiagnosticReport(input as any);
+    const markdown = await readFile(result.path, "utf8");
+    for (const secret of ["raw-session-secret", "private prompt", "C:\\private\\repo", "private task title", "raw-handle-secret", "secret"]) {
+      expect(markdown).not.toContain(secret);
+    }
+    expect(markdown).toContain("hook_received");
+    expect(markdown).toContain("2026-09-02T00:00:00.000Z");
+  });
+
   it("writes only whitelisted lifecycle diagnostics", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
