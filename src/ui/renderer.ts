@@ -10,10 +10,50 @@ const elements = {
   progressText: document.querySelector<HTMLElement>("#progress-text"),
   eta: document.querySelector<HTMLElement>("#eta"),
   step: document.querySelector<HTMLElement>("#step"),
-  updated: document.querySelector<HTMLElement>("#updated")
+  updated: document.querySelector<HTMLElement>("#updated"),
+  tasks: document.querySelector<HTMLElement>("#tasks"),
+  follow: document.querySelector<HTMLButtonElement>("#follow"),
+  compatibility: document.querySelector<HTMLElement>("#compatibility"),
+  origin: document.querySelector<HTMLElement>("#origin"),
+  confidence: document.querySelector<HTMLElement>("#confidence")
 };
 
+const EMPTY_SNAPSHOT: HudSnapshot = {
+  revision: 0,
+  selectedTaskId: null,
+  selectionMode: "follow_activity",
+  tasks: [],
+  selected: null,
+  compatibility: { incompatibleClientSeen: false }
+};
+
+let latestSnapshot: HudSnapshot = EMPTY_SNAPSHOT;
+
+async function mutateTask(path: string, body: unknown): Promise<void> {
+  const send = async (snapshot: HudSnapshot): Promise<Response> => fetch(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-codex-progress-hud-revision": String(snapshot.revision)
+    },
+    body: JSON.stringify(body)
+  });
+  let response = await send(latestSnapshot);
+  if (response.status === 409) {
+    const fresh = await fetch("/api/snapshot");
+    if (!fresh.ok) return;
+    latestSnapshot = await fresh.json() as HudSnapshot;
+    render(latestSnapshot);
+    response = await send(latestSnapshot);
+  }
+  if (response.ok && response.status !== 204) {
+    latestSnapshot = await response.json() as HudSnapshot;
+    render(latestSnapshot);
+  }
+}
+
 function render(snapshot: HudSnapshot): void {
+  latestSnapshot = snapshot;
   const view = buildHudView(snapshot);
   if (elements.shell) elements.shell.dataset.tone = view.tone;
   if (elements.title) elements.title.textContent = view.title;
@@ -28,16 +68,30 @@ function render(snapshot: HudSnapshot): void {
   if (elements.eta) elements.eta.textContent = view.etaLabel;
   if (elements.step) elements.step.textContent = view.stepLabel;
   if (elements.updated) elements.updated.textContent = view.updatedLabel;
+  if (elements.compatibility) elements.compatibility.textContent = view.compatibilityBanner ?? "";
+  if (elements.origin) elements.origin.textContent = view.trackingOriginLabel ?? "";
+  if (elements.confidence) elements.confidence.textContent = view.confidenceLabel ?? "";
+  if (elements.follow) {
+    elements.follow.textContent = view.canFollowActivity ? "跟随最新活动" : "正在跟随活动";
+    elements.follow.disabled = !view.canFollowActivity;
+  }
+  if (elements.tasks) {
+    elements.tasks.replaceChildren(...view.taskItems.map((item) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "task-item";
+      button.textContent = `${item.title} · ${item.statusLabel}`;
+      button.dataset.selected = String(item.selected);
+      button.addEventListener("click", () => void mutateTask(`/api/tasks/${encodeURIComponent(item.id)}/select`, { mode: "pinned" }));
+      return button;
+    }));
+  }
 }
 
-const EMPTY_SNAPSHOT: HudSnapshot = {
-  revision: 0,
-  selectedTaskId: null,
-  selectionMode: "follow_activity",
-  tasks: [],
-  selected: null,
-  compatibility: { incompatibleClientSeen: false }
-};
+elements.follow?.addEventListener("click", () => void mutateTask(
+  `/api/tasks/${encodeURIComponent(latestSnapshot.selectedTaskId ?? "")}/select`,
+  { mode: "follow_activity" }
+));
 
 function consumeEventBlock(block: string): void {
   const data = block

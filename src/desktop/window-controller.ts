@@ -90,6 +90,8 @@ export class WindowController {
   private window: BrowserWindowLike | undefined;
   private authorizationRequest: BrowserWindowLike["webContents"]["session"]["webRequest"] | undefined;
   private authorizationRegistered = false;
+  private selectedTaskId: string | null = null;
+  private hiddenTasks = new Set<string>();
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -141,7 +143,7 @@ export class WindowController {
       window.on("close", (event) => {
         if (this.dependencies.quitting()) return;
         event.preventDefault();
-        window.hide();
+        this.hideSelectedTask();
       });
       window.on("closed", () => {
         if (this.window !== window) return;
@@ -165,6 +167,25 @@ export class WindowController {
   hide(): void {
     if (this.window === undefined || this.window.isDestroyed() || !this.window.isVisible()) return;
     this.window.hide();
+  }
+
+  selectTask(taskId: string): void {
+    this.selectedTaskId = taskId;
+  }
+
+  hideSelectedTask(): void {
+    if (this.selectedTaskId !== null) this.hiddenTasks.add(this.selectedTaskId);
+    if (this.window !== undefined && !this.window.isDestroyed()) this.window.hide();
+  }
+
+  isHiddenForTask(taskId: string): boolean {
+    return this.hiddenTasks.has(taskId);
+  }
+
+  onTaskActivity(taskId: string, options: { isNewTask?: boolean; terminal?: boolean } = {}): void {
+    if (options.terminal || !options.isNewTask || this.hiddenTasks.has(taskId)) return;
+    this.selectedTaskId = taskId;
+    this.show();
   }
 
   visibility(): "visible" | "hidden" {

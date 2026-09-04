@@ -25,18 +25,18 @@ function task(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   };
 }
 
-function snapshot(taskValue: TaskSnapshot | null, eta: EtaEstimate | null): HudSnapshot {
+function snapshot(taskValue: TaskSnapshot | null, eta: EtaEstimate | null, tasks?: HudSnapshot["tasks"]): HudSnapshot {
   return {
     revision: 0,
     selectedTaskId: taskValue?.id ?? null,
     selectionMode: "follow_activity",
-    tasks: taskValue === null ? [] : [{
+    tasks: tasks ?? (taskValue === null ? [] : [{
       id: taskValue.id,
       title: taskValue.title,
       status: taskValue.status,
       lastActivityAt: taskValue.lastActivityAt,
       hiddenForTask: false
-    }],
+    }]),
     selected: taskValue === null ? null : { task: taskValue, eta },
     compatibility: { incompatibleClientSeen: false }
   };
@@ -138,5 +138,51 @@ describe("HUD view model", () => {
       tone: "idle",
       progressMode: "indeterminate"
     });
+  });
+
+  it("exposes a compact truthful task switcher and follow control", () => {
+    const view = buildHudView(snapshot(task({ trackingOrigin: "late_attach" }), {
+      lowSeconds: 60,
+      highSeconds: 180,
+      confidence: 0.3,
+      confidenceClass: "low",
+      signals: ["model"]
+    }, [
+      { id: "task-1", title: "修复登录流程", status: "running", lastActivityAt: 92_000, hiddenForTask: false },
+      { id: "task-2", title: "更新依赖", status: "quiescent", lastActivityAt: 91_000, hiddenForTask: true }
+    ]), 100_000);
+
+    expect(view.taskItems).toEqual([
+      { id: "task-1", title: "修复登录流程", statusLabel: "执行中", selected: true },
+      { id: "task-2", title: "更新依赖", statusLabel: "等待下一轮（已隐藏）", selected: false }
+    ]);
+    expect(view).toMatchObject({
+      selectedTaskId: "task-1",
+      trackingOriginLabel: "跟踪从任务中途开始",
+      etaLabel: "预计还需 1–3 分钟",
+      confidenceLabel: "置信度：低",
+      canFollowActivity: false
+    });
+  });
+
+  it("shows pinned selection, hidden current task, compatibility, and terminal truth", () => {
+    const selected = task({ id: "task-2", title: "发布", status: "ended_unknown", trackingOrigin: "session_start" });
+    const view = buildHudView({
+      ...snapshot(selected, null, [
+        { id: "task-1", title: "测试", status: "succeeded_verified", lastActivityAt: 200, hiddenForTask: false },
+        { id: "task-2", title: "发布", status: "ended_unknown", lastActivityAt: 300, hiddenForTask: true }
+      ]),
+      selectedTaskId: "task-2",
+      selectionMode: "pinned",
+      compatibility: { incompatibleClientSeen: true }
+    });
+
+    expect(view).toMatchObject({
+      selectedTaskId: "task-2",
+      compatibilityBanner: "插件与伴侣版本不匹配；请同时更新两者并重启 Codex",
+      canFollowActivity: true,
+      etaLabel: "任务已结束，结果未知"
+    });
+    expect(view.taskItems[1]).toEqual({ id: "task-2", title: "发布", statusLabel: "已结束，结果未知（已隐藏）", selected: true });
   });
 });

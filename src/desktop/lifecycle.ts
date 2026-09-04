@@ -66,6 +66,11 @@ export interface DesktopProgressServer {
   listen(): Promise<void>;
   close(): Promise<void>;
   address(): { host: string; port: number; url: string };
+  store?: {
+    snapshot(): { revision: number; selectedTaskId: string | null; tasks: Array<{ id: string; title: string; selected?: boolean }> };
+    select(taskId: string, mode: "pinned" | "follow_activity"): unknown;
+    on(event: "changed", listener: (snapshot: unknown) => void): unknown;
+  };
 }
 
 export interface DesktopTrayImage {
@@ -446,6 +451,36 @@ export async function runDesktop(
         assertStarting();
         await publishingWindowController.create({ url: progressServer.address().url, token });
         assertStarting();
+        const taskStore = progressServer.store;
+        const mutateSelection = async (taskId: string, mode: "pinned" | "follow_activity"): Promise<void> => {
+          if (taskStore === undefined) return;
+          const snapshot = taskStore.snapshot();
+          const response = await fetch(`${progressServer!.address().url}/api/tasks/${encodeURIComponent(taskId)}/select`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "x-codex-progress-hud-protocol": String(PROTOCOL_VERSION),
+              "x-codex-progress-hud-generation": String(launchSettings.generation),
+              "x-codex-progress-hud-revision": String(snapshot.revision)
+            },
+            body: JSON.stringify({ mode })
+          });
+          if (response.status === 409) {
+            const fresh = taskStore.snapshot();
+            await fetch(`${progressServer!.address().url}/api/tasks/${encodeURIComponent(taskId)}/select`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${token}`,
+                "content-type": "application/json",
+                "x-codex-progress-hud-protocol": String(PROTOCOL_VERSION),
+                "x-codex-progress-hud-generation": String(launchSettings.generation),
+                "x-codex-progress-hud-revision": String(fresh.revision)
+              },
+              body: JSON.stringify({ mode })
+            });
+          }
+        };
         const trayImage = resolved.createTrayImage();
         if (trayImage.isEmpty()) throw new Error("tray image is empty");
         assertStarting();
@@ -456,6 +491,14 @@ export async function runDesktop(
           buildMenu: resolved.buildMenu,
           onShow: () => publishingWindowController.show(),
           onHide: () => publishingWindowController.hide(),
+          taskItems: taskStore?.snapshot().tasks ?? [],
+          onSelectTask: (taskId) => mutateSelection(taskId, "pinned"),
+          onFollowActivity: () => {
+            const selectedTaskId = taskStore?.snapshot().selectedTaskId;
+            return selectedTaskId === null || selectedTaskId === undefined
+              ? undefined
+              : mutateSelection(selectedTaskId, "follow_activity");
+          },
           onDiagnose: () => resolved.diagnose({
             observedState: quitting
               ? "stopped"
@@ -473,6 +516,9 @@ export async function runDesktop(
             });
           },
           onError: (error, action) => reportError(error, `tray action: ${action}`)
+        });
+        taskStore?.on("changed", (snapshot: unknown) => {
+          trayController?.updateTasks?.((snapshot as { tasks: Array<{ id: string; title: string; selected?: boolean }> }).tasks);
         });
         tray = undefined;
         const startupReadyAt = resolved.now();

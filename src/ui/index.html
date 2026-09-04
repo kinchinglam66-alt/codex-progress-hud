@@ -13,6 +13,8 @@
         <span id="status">空闲</span>
         <h1 id="title">暂无活动任务</h1>
       </header>
+      <div id="compatibility" class="banner" role="status"></div>
+      <div id="tasks" class="tasks" aria-label="任务列表"></div>
       <section class="progress-row">
         <div id="progress" class="progress" data-mode="indeterminate" aria-label="任务进度">
           <span id="progress-fill"></span>
@@ -20,6 +22,7 @@
         <span id="progress-text" class="progress-text"></span>
       </section>
       <p id="eta" class="eta">等待 Codex 上报任务</p>
+      <div class="meta"><span id="origin"></span><span id="confidence"></span><button id="follow" type="button">跟随最新活动</button></div>
       <footer>
         <span id="step">启动任务后将在这里显示进度</span>
         <span id="updated"></span>
@@ -28,4 +31,3 @@
     <script type="module" src="/renderer.js"></script>
   </body>
 </html>
-

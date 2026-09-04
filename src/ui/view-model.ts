@@ -13,6 +13,12 @@ export interface HudView {
   etaLabel: string;
   stepLabel: string;
   updatedLabel: string;
+  taskItems: readonly { id: string; title: string; statusLabel: string; selected: boolean }[];
+  selectedTaskId: string | null;
+  compatibilityBanner: string | null;
+  trackingOriginLabel: string | null;
+  confidenceLabel: string | null;
+  canFollowActivity: boolean;
 }
 
 const statusPresentation: Record<TaskStatus, { label: string; tone: HudTone }> = {
@@ -67,6 +73,28 @@ function progressMode(status: TaskStatus, progress: number | undefined): Progres
   return progress === undefined ? "indeterminate" : "determinate";
 }
 
+function confidenceLabel(snapshot: HudSnapshot): string | null {
+  const confidence = snapshot.selected?.eta?.confidenceClass;
+  return confidence === undefined ? null : `置信度：${confidence === "low" ? "低" : confidence === "medium" ? "中" : "高"}`;
+}
+
+function trackingOriginLabel(snapshot: HudSnapshot): string | null {
+  return snapshot.selected?.task.trackingOrigin === "late_attach"
+    ? "跟踪从任务中途开始"
+    : null;
+}
+
+function taskItems(snapshot: HudSnapshot): HudView["taskItems"] {
+  return snapshot.tasks.map((summary) => ({
+    id: summary.id,
+    title: summary.title,
+    statusLabel: summary.hiddenForTask
+      ? `${statusPresentation[summary.status].label}（已隐藏）`
+      : statusPresentation[summary.status].label,
+    selected: summary.id === snapshot.selectedTaskId
+  }));
+}
+
 export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView {
   if (snapshot.selected === null) {
     return {
@@ -77,7 +105,15 @@ export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView
       progressPercent: null,
       etaLabel: "等待 Codex 上报任务",
       stepLabel: "启动任务后将在这里显示进度",
-      updatedLabel: ""
+      updatedLabel: "",
+      taskItems: taskItems(snapshot),
+      selectedTaskId: null,
+      compatibilityBanner: snapshot.compatibility.incompatibleClientSeen
+        ? "插件与伴侣版本不匹配；请同时更新两者并重启 Codex"
+        : null,
+      trackingOriginLabel: null,
+      confidenceLabel: null,
+      canFollowActivity: snapshot.selectionMode !== "follow_activity"
     };
   }
 
@@ -100,6 +136,14 @@ export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView
     progressPercent,
     etaLabel: etaLabel(snapshot),
     stepLabel: task.statusDetail ?? task.currentStep ?? task.phase ?? "任务正在进行",
-    updatedLabel: `${ageSeconds} 秒前更新`
+    updatedLabel: `${ageSeconds} 秒前更新`,
+    taskItems: taskItems(snapshot),
+    selectedTaskId: snapshot.selectedTaskId,
+    compatibilityBanner: snapshot.compatibility.incompatibleClientSeen
+      ? "插件与伴侣版本不匹配；请同时更新两者并重启 Codex"
+      : null,
+    trackingOriginLabel: trackingOriginLabel(snapshot),
+    confidenceLabel: confidenceLabel(snapshot),
+    canFollowActivity: snapshot.selectionMode !== "follow_activity"
   };
 }

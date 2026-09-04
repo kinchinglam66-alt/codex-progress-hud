@@ -17,7 +17,7 @@ html, body {
 #hud {
   --accent: #8b7cff;
   height: 100%;
-  padding: 15px 16px 13px;
+  padding: 12px 14px 11px;
   border: 1px solid color-mix(in srgb, var(--accent) 40%, rgba(255,255,255,.15));
   border-radius: 17px;
   background: linear-gradient(145deg, rgba(27, 27, 35, .96), rgba(13, 13, 18, .94));
@@ -26,6 +26,15 @@ html, body {
   -webkit-app-region: drag;
   user-select: none;
 }
+
+.banner { min-height: 0; margin-top: 5px; color: #ffd1a8; font-size: 10px; }
+.tasks { display: flex; gap: 5px; margin-top: 7px; overflow: hidden; }
+.task-item, #follow { border: 1px solid rgba(255,255,255,.18); border-radius: 7px; background: rgba(255,255,255,.07); color: #e9e6f4; font: inherit; font-size: 10px; padding: 4px 6px; }
+.task-item { max-width: 145px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-item[data-selected="true"] { border-color: var(--accent); }
+.meta { display: flex; gap: 9px; align-items: center; min-height: 16px; margin-top: 4px; color: #aaa6b9; font-size: 10px; }
+#follow { margin-left: auto; cursor: pointer; }
+#follow:disabled { opacity: .7; }
 
 #hud[data-tone="waiting"] { --accent: #f0b44c; }
 #hud[data-tone="warning"] { --accent: #ff8a55; }
@@ -125,4 +134,3 @@ footer {
 }
 
 #updated { flex: none; }
-

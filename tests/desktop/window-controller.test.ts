@@ -154,6 +154,30 @@ describe("WindowController", () => {
     expect(controller.visibility()).toBe("visible");
   });
 
+  it("hides only the selected task and does not reopen for its activity", async () => {
+    const window = new FakeWindow();
+    const controller = new WindowController({ createWindow: () => window, quitting: () => false });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    controller.selectTask("task-a");
+    controller.hideSelectedTask();
+    controller.onTaskActivity("task-a");
+
+    expect(controller.isHiddenForTask("task-a")).toBe(true);
+    expect(window.showInactive).not.toHaveBeenCalled();
+  });
+
+  it("shows a different new task once without stealing focus for terminal notifications", async () => {
+    const window = new FakeWindow();
+    const controller = new WindowController({ createWindow: () => window, quitting: () => false });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    controller.selectTask("task-a");
+    controller.hideSelectedTask();
+    controller.onTaskActivity("task-b", { isNewTask: true });
+    controller.onTaskActivity("task-b", { terminal: true });
+
+    expect(window.showInactive).toHaveBeenCalledOnce();
+  });
+
   it("unregisters authorization interception before destroying the window", async () => {
     const order: string[] = [];
     const window = new FakeWindow();

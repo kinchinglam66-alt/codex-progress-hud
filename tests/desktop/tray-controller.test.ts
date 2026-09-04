@@ -2,6 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { createTrayController, type TrayMenuItem } from "../../src/desktop/tray-controller.js";
 
 describe("createTrayController", () => {
+  it("exposes task selection entries without companion controls", async () => {
+    const template: TrayMenuItem[] = [];
+    const onSelectTask = vi.fn();
+    createTrayController({
+      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
+      buildMenu: (received) => { template.push(...received); return {}; },
+      onShow: vi.fn(), onHide: vi.fn(), onDiagnose: vi.fn(), onExit: vi.fn(),
+      onSelectTask, onFollowActivity: vi.fn(),
+      taskItems: [{ id: "task-1", title: "Build", selected: true }], onError: vi.fn()
+    });
+    const task = template.find((item) => item.label === "Task: Build");
+    task?.click?.({ checked: true });
+    await vi.waitFor(() => expect(onSelectTask).toHaveBeenCalledWith("task-1"));
+    expect(template.some((item) => item.label === "Start tracking" || item.label === "Stop tracking")).toBe(false);
+  });
+
   it("builds the tray without an automatic-login control", () => {
     const tray = { setContextMenu: vi.fn(), destroy: vi.fn() };
     let template: TrayMenuItem[] = [];
@@ -15,6 +31,8 @@ describe("createTrayController", () => {
       onShow: vi.fn(),
       onHide: vi.fn(),
       onDiagnose: vi.fn(),
+      onSelectTask: vi.fn(),
+      onFollowActivity: vi.fn(),
       onExit: vi.fn(),
       onError: vi.fn()
     });
@@ -22,7 +40,7 @@ describe("createTrayController", () => {
     expect(
       template.map((item) => item.type === "separator" ? "separator" : item.label)
     ).toEqual([
-      "Show HUD", "Hide HUD", "separator", "Diagnose", "separator", "Exit"
+      "Show HUD", "Hide HUD", "separator", "Follow latest activity", "Diagnose", "separator", "Exit"
     ]);
     expect(template.some((item) => item.label === "Start with Windows")).toBe(false);
     expect(tray.setContextMenu).toHaveBeenCalledWith({ kind: "menu" });
@@ -41,6 +59,8 @@ describe("createTrayController", () => {
       onShow: () => { throw failure; },
       onHide: vi.fn(),
       onDiagnose: vi.fn(),
+      onSelectTask: vi.fn(),
+      onFollowActivity: vi.fn(),
       onExit: vi.fn(),
       onError
     });
@@ -62,6 +82,8 @@ describe("createTrayController", () => {
       onShow: vi.fn(),
       onHide: async () => { throw failure; },
       onDiagnose: vi.fn(),
+      onSelectTask: vi.fn(),
+      onFollowActivity: vi.fn(),
       onExit: vi.fn(),
       onError
     });
@@ -74,8 +96,8 @@ describe("createTrayController", () => {
   it.each([
     ["Show HUD", 0, "onShow", false],
     ["Hide HUD", 1, "onHide", true],
-    ["Diagnose", 3, "onDiagnose", true],
-    ["Exit", 5, "onExit", false]
+    ["Diagnose", 4, "onDiagnose", true],
+    ["Exit", 6, "onExit", false]
   ] as const)("contains every %s action failure through the shared wrapper", async (
     action,
     index,
@@ -89,6 +111,8 @@ describe("createTrayController", () => {
       onShow: vi.fn(),
       onHide: vi.fn(),
       onDiagnose: vi.fn(),
+      onSelectTask: vi.fn(),
+      onFollowActivity: vi.fn(),
       onExit: vi.fn()
     };
     callbacks[callbackName].mockImplementation(() => {
