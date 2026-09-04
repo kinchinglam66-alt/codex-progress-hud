@@ -32,7 +32,7 @@ npm run validate:plugin
 npm run diagnose:mcp
 ```
 
-See [PRIVACY.md](PRIVACY.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+See [known side effects and limitations](docs/KNOWN-SIDE-EFFECTS.md), [PRIVACY.md](PRIVACY.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
