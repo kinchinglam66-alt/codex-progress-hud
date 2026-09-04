@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { requireWrappedMcpServers } from "./mcp-config-shape.mjs";
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(
@@ -52,9 +53,9 @@ if (manifest.hooks !== undefined) {
 
 const mcpConfigPath = resolve(pluginRoot, manifest.mcpServers);
 const mcpConfig = JSON.parse(await readFile(mcpConfigPath, "utf8"));
-const mcpServer = mcpConfig[manifest.name];
+const mcpServer = requireWrappedMcpServers(mcpConfig, "root .mcp.json")[manifest.name];
 if (!mcpServer) {
-  throw new Error(`.mcp.json must directly define ${manifest.name}`);
+  throw new Error(`.mcp.json must define ${manifest.name} inside mcpServers`);
 }
 if (mcpServer.cwd !== ".") {
   throw new Error(
@@ -123,7 +124,7 @@ if (
 const releaseRoot = resolve(pluginRoot, "plugins/codex-progress-hud");
 const releaseManifest = JSON.parse(await readFile(resolve(releaseRoot, ".codex-plugin/plugin.json"), "utf8"));
 const releaseMcp = JSON.parse(await readFile(resolve(releaseRoot, ".mcp.json"), "utf8"));
-const releaseServer = releaseMcp[manifest.name];
+const releaseServer = requireWrappedMcpServers(releaseMcp, "release .mcp.json")[manifest.name];
 if (releaseManifest.name !== manifest.name || releaseManifest.version !== packageManifest.version) {
   throw new Error("release plugin identity must match the canonical package");
 }

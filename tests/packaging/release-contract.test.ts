@@ -43,10 +43,13 @@ describe("Windows release source contract", () => {
       category: "Productivity"
     });
     const mcp = JSON.parse(await text("plugins/codex-progress-hud/.mcp.json"));
+    const rootMcp = JSON.parse(await text(".mcp.json"));
     const plugin = JSON.parse(await text("plugins/codex-progress-hud/.codex-plugin/plugin.json"));
     expect(plugin).not.toHaveProperty("hooks");
-    expect(mcp["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");
-    expect(mcp).not.toHaveProperty("mcpServers");
+    expect(Object.keys(rootMcp)).toEqual(["mcpServers"]);
+    expect(Object.keys(mcp)).toEqual(["mcpServers"]);
+    expect(mcp.mcpServers["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");
+    expect(mcp).not.toHaveProperty("codex-progress-hud");
     expect(JSON.stringify(mcp)).not.toMatch(/\bnode(?:\.exe)?\b/iu);
     await access(resolve(root, "plugins/codex-progress-hud/scripts/launch-mcp.ps1"));
     await access(resolve(root, "plugins/codex-progress-hud/scripts/launch-hook.ps1"));

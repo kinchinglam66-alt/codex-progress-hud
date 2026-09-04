@@ -35,7 +35,7 @@ try {
   const capabilities = JSON.parse(await readFile(resolve(root, "config/release-capabilities.json"), "utf8"));
   const generated = await readFile(resolve(root, "dist/generated/capabilities.js"), "utf8");
   if (pkg.version !== plugin.version || !generated.includes(`\"buildVersion\": \"${pkg.version}\"`)) throw new Error("release versions are not synchronized");
-  if (mcp[plugin.name]?.command !== "./scripts/codex-progress-hud-launcher.exe" || mcp.mcpServers !== undefined || /\bnode(?:\.exe)?\b/iu.test(JSON.stringify(mcp))) throw new Error("release MCP path must use the direct Node-free native launcher mapping");
+  if (mcp.mcpServers?.[plugin.name]?.command !== "./scripts/codex-progress-hud-launcher.exe" || mcp[plugin.name] !== undefined || /\bnode(?:\.exe)?\b/iu.test(JSON.stringify(mcp))) throw new Error("release MCP path must use the wrapped Node-free native launcher mapping");
   if (hooks.hooks?.Interrupt === undefined || Object.keys(hooks.hooks ?? {}).length !== 6) throw new Error("release Hook set is invalid");
   if (!generated.includes(`\"current\": ${capabilities.protocol.current}`)) throw new Error("generated protocol is stale");
   for (const mode of ["--hud", "--mcp-stdio", "--hook-event=SessionStart"]) {
