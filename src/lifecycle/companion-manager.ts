@@ -187,7 +187,8 @@ export function createCompanionManager(
   let lastRecoveryAt = Number.NEGATIVE_INFINITY;
   const recentErrors: DiagnosticReportInput["errors"] = [];
   const activeWriteCancellations = new Set<() => void>();
-  let legacyMigrationAttempted = false;
+  let legacyMigrationComplete = false;
+  let legacyMigrationClosed = false;
   let legacyMigrationFlight: Promise<void> | undefined;
 
   function record(entry: Omit<OperationalLogEntry, "at">): void {
@@ -267,16 +268,17 @@ export function createCompanionManager(
   }
 
   async function migrateLegacyBeforeFirstWrite(deadline: number, signal: AbortSignal): Promise<void> {
-    if (legacyMigrationAttempted) {
-      if (legacyMigrationFlight !== undefined) await legacyMigrationFlight;
+    if (legacyMigrationComplete || legacyMigrationClosed) return;
+    if (legacyMigrationFlight !== undefined) {
+      await legacyMigrationFlight;
       return;
     }
-    legacyMigrationAttempted = true;
     if (dependencies.store.migrateLegacyDesiredState === undefined) return;
     const flight = dependencies.store.migrateLegacyDesiredState(stateOptions(deadline, signal)).then(() => undefined);
     legacyMigrationFlight = flight;
     try {
       await flight;
+      if (!legacyMigrationClosed) legacyMigrationComplete = true;
     } finally {
       if (legacyMigrationFlight === flight) legacyMigrationFlight = undefined;
     }
@@ -858,6 +860,7 @@ export function createCompanionManager(
       const shutdownStartedAt = now();
       const shutdownDeadline = shutdownStartedAt + shutdownTimeoutMs;
       const persistDesiredState = options.persistDesiredState !== false;
+      if (persistDesiredState) legacyMigrationClosed = true;
       for (const cancel of activeWriteCancellations) cancel();
       let offSettings;
       try {

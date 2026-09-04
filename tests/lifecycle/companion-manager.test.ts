@@ -726,6 +726,51 @@ describe("companion lifecycle manager", () => {
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
   });
 
+  it("retries legacy migration on the next write after the first attempt times out", async () => {
+    const fixture = await harness({ desiredState: "off" });
+    let migrationCalls = 0;
+    const store = {
+      ...fixture.store,
+      migrateLegacyDesiredState: vi.fn(async (options) => {
+        migrationCalls += 1;
+        if (migrationCalls === 1) throw new LifecycleStateTimeoutError();
+        return fixture.store.migrateLegacyDesiredState!(options);
+      })
+    } satisfies LifecycleStateStore;
+    const manager = createCompanionManager({
+      store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-migration-retry"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const operation = vi.fn(async () => "submitted");
+
+    await expect(manager.executeWrite("progress_report", operation)).resolves.toMatchObject({
+      kind: "error",
+      code: "START_TIMEOUT"
+    });
+    expect(migrationCalls).toBe(1);
+    expect(operation).not.toHaveBeenCalled();
+
+    await expect(manager.executeWrite("progress_report", operation)).resolves.toEqual({
+      kind: "completed",
+      value: "submitted"
+    });
+
+    expect(migrationCalls).toBe(2);
+    expect(operation).toHaveBeenCalledOnce();
+    expect(await fixture.store.readSettings()).toMatchObject({ desiredState: "on", generation: 3 });
+  });
+
   it("keeps close authoritative when it races a first-write legacy migration", async () => {
     const fixture = await harness({ desiredState: "off" });
     let migrationEntered!: () => void;
@@ -765,6 +810,12 @@ describe("companion lifecycle manager", () => {
     expect(operation).not.toHaveBeenCalled();
     expect(await fixture.store.readSettings()).toMatchObject({ desiredState: "off" });
     expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+
+    await expect(manager.executeWrite("progress_report", operation)).resolves.toEqual({
+      kind: "suppressed",
+      code: "MANUALLY_DISABLED"
+    });
+    expect(migrateLegacyDesiredState).toHaveBeenCalledOnce();
   });
 
   it("prevents a deferred startup from publishing runtime or showing after close commits off", async () => {
