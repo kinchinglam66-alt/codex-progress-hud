@@ -18,6 +18,7 @@ export interface HudRequestOptions {
   leaseId?: string;
   ownerNonce?: string;
   compatibilityClose?: boolean;
+  retryOnLeaseForbidden?: boolean;
 }
 
 export interface ProgressClient {
@@ -520,7 +521,7 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
     } catch (error) {
       if (
         !(error instanceof HudClientError) || error.code !== "LEASE_FORBIDDEN" ||
-        this.#ownerNonce === undefined || explicitLease
+        this.#ownerNonce === undefined || explicitLease || options?.retryOnLeaseForbidden === false
       ) {
         throw error;
       }

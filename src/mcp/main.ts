@@ -26,6 +26,9 @@ import {
 } from "./tools.js";
 import { createFallbackTaskHandle } from "./task-association.js";
 
+const taskAssociationDescription =
+  "When supplied, use the valid opaque task_handle; otherwise use this MCP process's MCP-lease association.";
+
 export async function runMcpServer(): Promise<void> {
   const version = RELEASE_CAPABILITIES.buildVersion;
   const server = new McpServer({ name: "codex-progress-hud", version });
@@ -60,7 +63,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Report task progress",
       description:
-        "Report a concise task phase, optional measured progress, ETA range, or waiting state to the local Progress HUD using the opaque task_handle injected by Hooks. Never include secrets, prompts, source code, reasoning, or command output.",
+        `${taskAssociationDescription} Report a concise task phase, optional measured progress, ETA range, or waiting state to the local Progress HUD. Never include secrets, prompts, source code, reasoning, or command output.`,
       inputSchema: progressReportSchema
     },
     (input) => handlers.progressReport(input)
@@ -71,7 +74,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Report task outcome",
       description:
-        "Report a terminal semantic outcome for the opaque task_handle injected by Hooks. A verified claim requires a prior validation_observed report that actually passed; runtime failure and interruption remain authoritative.",
+        `${taskAssociationDescription} Report a terminal semantic outcome. A verified claim requires a prior validation_observed report that actually passed; runtime failure and interruption remain authoritative.`,
       inputSchema: taskOutcomeSchema
     },
     (input) => handlers.taskOutcome(input)
@@ -82,7 +85,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Report validation observation",
       description:
-        "Report only whether bounded validation was observed to pass or fail for the opaque task_handle injected by Hooks. This is evidence, not a Codex execution control.",
+        `${taskAssociationDescription} Report only whether bounded validation was observed to pass or fail. This is evidence, not a Codex execution control.`,
       inputSchema: validationObservedSchema
     },
     (input) => handlers.validationObserved(input)
@@ -102,7 +105,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Start HUD tracking",
       description:
-        "Manually start or restart HUD tracking for the supplied opaque task_handle when the user explicitly requests it. This is not required for automatic Hook tracking and does not start or stop Codex execution.",
+        `${taskAssociationDescription} Manually start or restart HUD tracking when the user explicitly requests it. This does not start or stop Codex execution.`,
       inputSchema: trackingStartSchema
     },
     (input) => handlers.trackingStart(input)
@@ -113,7 +116,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Pause HUD tracking",
       description:
-        "Pause HUD updates and active-work timing for the supplied opaque task_handle. This is idempotent and does not pause Codex execution.",
+        `${taskAssociationDescription} Pause HUD updates and active-work timing. This is idempotent and does not pause Codex execution.`,
       inputSchema: taskControlSchema
     },
     (input) => handlers.trackingPause(input)
@@ -123,7 +126,7 @@ export async function runMcpServer(): Promise<void> {
     "tracking_resume",
     {
       title: "Resume HUD tracking",
-      description: "Resume HUD updates and active-work timing for the supplied opaque task_handle. This is idempotent and does not resume or control Codex execution.",
+      description: `${taskAssociationDescription} Resume HUD updates and active-work timing. This is idempotent and does not resume or control Codex execution.`,
       inputSchema: taskControlSchema
     },
     (input) => handlers.trackingResume(input)
@@ -134,7 +137,7 @@ export async function runMcpServer(): Promise<void> {
     {
       title: "Stop HUD tracking",
       description:
-        "Stop HUD tracking for the supplied opaque task_handle and keep its final snapshot visible. This is idempotent and does not stop Codex execution.",
+        `${taskAssociationDescription} Stop HUD tracking and keep its final snapshot visible. This is idempotent and does not stop Codex execution.`,
       inputSchema: taskControlSchema
     },
     (input) => handlers.trackingStop(input)

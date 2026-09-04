@@ -200,7 +200,12 @@ export function createToolHandlers({
     operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<ToolResult>
   ): Promise<ToolResult> {
     try {
-      const result = await companionManager.executeWrite(reason, operation);
+      const result = await companionManager.executeWrite(reason, (makeRequestOptions) =>
+        operation(() => ({
+          ...makeRequestOptions(),
+          ...(association.source === "explicit" ? { retryOnLeaseForbidden: false } : {})
+        }))
+      );
       if (result.kind === "completed") return result.value;
       if (result.kind === "suppressed") return suppressedResult(suppressedText, association);
       return lifecycleErrorResult(result, association);

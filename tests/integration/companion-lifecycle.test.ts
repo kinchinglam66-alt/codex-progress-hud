@@ -1119,4 +1119,113 @@ describe("source-mode companion lifecycle", () => {
       await client.close().catch(() => undefined);
     }
   }, 20_000);
+
+  it("isolates fallback task leases across two independent MCP processes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-mcp-lease-isolation-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const settings = await store.setDesiredState("on");
+    const runtime = {
+      pid: process.pid,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: new Date().toISOString()
+    };
+    await store.writeRuntime(runtime, settings.generation);
+    let targetClosed = false;
+    const companion = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      health: () => ({ service: "codex-progress-hud" as const, ...runtime, visibility: "visible" as const }),
+      showWindow: () => undefined,
+      hideWindow: () => undefined,
+      requestShutdown: () => undefined,
+      runIfGeneration: async (generation, desiredState, operation, signal) => {
+        return store.runIfGeneration(generation, desiredState, operation, { signal });
+      }
+    });
+    await companion.listen();
+    cleanups.push(async () => {
+      if (!targetClosed) {
+        targetClosed = true;
+        await companion.close();
+      }
+    });
+
+    const environment = {
+      ...getDefaultEnvironment(),
+      CODEX_PROGRESS_HUD_DATA_DIR: directory,
+      CODEX_PROGRESS_HUD_TOKEN_PATH: join(directory, "auth.token"),
+      CODEX_PROGRESS_HUD_URL: companion.address().url
+    };
+    const firstTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve(pluginRoot, "dist/main.js"), "--mcp-stdio"],
+      cwd: directory,
+      env: environment,
+      stderr: "pipe"
+    });
+    const secondTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve(pluginRoot, "dist/main.js"), "--mcp-stdio"],
+      cwd: directory,
+      env: environment,
+      stderr: "pipe"
+    });
+    const firstClient = new Client({ name: "lease-isolation-a", version: "1.0.0" });
+    const secondClient = new Client({ name: "lease-isolation-b", version: "1.0.0" });
+    const observer = new CompanionHttpClient(companion.address().url, join(directory, "auth.token"));
+
+    try {
+      await Promise.all([firstClient.connect(firstTransport), secondClient.connect(secondTransport)]);
+      const firstStart = await firstClient.callTool({
+        name: "tracking_start",
+        arguments: { title: "Lease A" }
+      });
+      const secondStart = await secondClient.callTool({
+        name: "tracking_start",
+        arguments: { title: "Lease B" }
+      });
+      expect(firstStart.structuredContent).toMatchObject({
+        ok: true,
+        associationSource: "mcp_lease"
+      });
+      expect(secondStart.structuredContent).toMatchObject({
+        ok: true,
+        associationSource: "mcp_lease"
+      });
+
+      const snapshot = await observer.status();
+      expect(snapshot.tasks).toHaveLength(2);
+      const taskA = snapshot.tasks.find((task) => task.title === "Lease A");
+      const taskB = snapshot.tasks.find((task) => task.title === "Lease B");
+      expect(taskA?.id).toBeDefined();
+      expect(taskB?.id).toBeDefined();
+      expect(taskA?.id).not.toBe(taskB?.id);
+
+      const crossLeasePause = await secondClient.callTool({
+        name: "tracking_pause",
+        arguments: { task_handle: taskA!.id }
+      });
+      expect(crossLeasePause.structuredContent).toMatchObject({
+        ok: false,
+        associationSource: "explicit",
+        code: "LEASE_FORBIDDEN"
+      });
+      expect(crossLeasePause.isError).toBe(true);
+      expect(JSON.stringify(crossLeasePause.structuredContent)).not.toContain("ownerNonce");
+      expect(JSON.stringify(crossLeasePause.structuredContent)).not.toContain("lease_");
+    } finally {
+      await Promise.all([
+        firstClient.close().catch(() => undefined),
+        secondClient.close().catch(() => undefined)
+      ]);
+    }
+  }, 20_000);
 });

@@ -1,10 +1,14 @@
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { beforeAll, describe, expect, it } from "vitest";
+import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
+import { CompanionHttpClient } from "../../src/mcp/report-client.js";
+import { createProgressServer } from "../../src/server/http-server.js";
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -34,13 +38,47 @@ describe("plugin MCP stdio server", () => {
     async () => {
       const taskDirectory = await mkdtemp(join(tmpdir(), "codex-progress-hud-task-"));
       const dataDirectory = join(taskDirectory, "isolated-hud-data");
+      const stateStore = createLifecycleStateStore({
+        settingsPath: join(dataDirectory, "settings.json"),
+        runtimePath: join(dataDirectory, "runtime.json"),
+        installManifestPath: join(dataDirectory, "install.json")
+      });
+      const settings = await stateStore.setDesiredState("on");
+      const runtime = {
+        pid: process.pid,
+        version: "0.2.0-test",
+        protocolVersion: 1 as const,
+        instanceNonce: randomUUID(),
+        startedAt: new Date().toISOString()
+      };
+      await stateStore.writeRuntime(runtime, settings.generation);
+      const companion = createProgressServer({
+        port: 0,
+        tokenPath: join(dataDirectory, "auth.token"),
+        health: () => ({ service: "codex-progress-hud" as const, ...runtime, visibility: "visible" as const }),
+        showWindow: () => undefined,
+        hideWindow: () => undefined,
+        requestShutdown: () => undefined,
+        runIfGeneration: (generation, desiredState, operation, signal) =>
+          stateStore.runIfGeneration(generation, desiredState, operation, { signal })
+      });
+      await companion.listen();
+      const observer = new CompanionHttpClient(
+        companion.address().url,
+        join(dataDirectory, "auth.token")
+      );
       const packageJson = JSON.parse(
         await readFile(resolve(pluginRoot, "package.json"), "utf8")
       ) as { main?: string };
       expect(packageJson.main).toBeDefined();
       const child = spawn(process.execPath, [resolve(pluginRoot, packageJson.main!), "--mcp-stdio"], {
         cwd: taskDirectory,
-        env: { ...process.env, CODEX_PROGRESS_HUD_DATA_DIR: dataDirectory },
+        env: {
+          ...process.env,
+          CODEX_PROGRESS_HUD_DATA_DIR: dataDirectory,
+          CODEX_PROGRESS_HUD_TOKEN_PATH: join(dataDirectory, "auth.token"),
+          CODEX_PROGRESS_HUD_URL: companion.address().url
+        },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true
       });
@@ -135,18 +173,71 @@ describe("plugin MCP stdio server", () => {
         });
         expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("required", expect.arrayContaining(["task_handle"]));
         expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("properties.task_id");
+        for (const [toolName, requiredField] of [
+          ["progress_report", "phase"],
+          ["validation_observed", "result"],
+          ["task_outcome", "outcome"]
+        ] as const) {
+          expect(toolByName.get(toolName)?.inputSchema).toMatchObject({
+            required: expect.arrayContaining([requiredField])
+          });
+          expect(toolByName.get(toolName)?.inputSchema).not.toHaveProperty(
+            "required",
+            expect.arrayContaining(["task_handle"])
+          );
+        }
+        expect(toolByName.get("tracking_start")?.inputSchema).not.toHaveProperty(
+          "required",
+          expect.arrayContaining(["task_handle"])
+        );
+        for (const toolName of [
+          "tracking_start", "tracking_pause", "tracking_resume", "tracking_stop",
+          "progress_report", "validation_observed", "task_outcome"
+        ]) {
+          const description = toolByName.get(toolName)?.description ?? "";
+          expect(description).toContain("opaque task_handle");
+          expect(description).toContain("MCP-lease");
+          expect(description).not.toContain("injected by Hooks");
+        }
         const observational = await request(3, "tools/call", {
           name: "tracking_status",
           arguments: {}
         });
         expect(observational.error).toBeUndefined();
-        await expect(access(dataDirectory)).rejects.toMatchObject({ code: "ENOENT" });
-        const noAssociation = await request(4, "tools/call", {
-          name: "tracking_pause",
+        const trackingStart = await request(4, "tools/call", {
+          name: "tracking_start",
+          arguments: { title: "Handle-free stdio task" }
+        });
+        const progressReport = await request(5, "tools/call", {
+          name: "progress_report",
+          arguments: { phase: "verification" }
+        });
+        const validationObserved = await request(6, "tools/call", {
+          name: "validation_observed",
+          arguments: { result: "passed" }
+        });
+        const taskOutcome = await request(7, "tools/call", {
+          name: "task_outcome",
+          arguments: { outcome: "completed", verified: true }
+        });
+        for (const response of [trackingStart, progressReport, validationObserved, taskOutcome]) {
+          expect(response.error).toBeUndefined();
+          expect(response.result).toMatchObject({
+            structuredContent: { ok: true, associationSource: "mcp_lease" }
+          });
+          expect(JSON.stringify(response.result)).not.toContain("ownerNonce");
+          expect(JSON.stringify(response.result)).not.toContain("lease_");
+        }
+        const snapshotStatus = await request(8, "tools/call", {
+          name: "tracking_status",
           arguments: {}
         });
-        expect(noAssociation.error).toBeUndefined();
-        expect(JSON.stringify(noAssociation.result)).toContain('"associationSource":"mcp_lease"');
+        expect(snapshotStatus.error).toBeUndefined();
+        const snapshot = JSON.parse(
+          ((snapshotStatus.result as { content: Array<{ text: string }> }).content[0]!).text
+        ) as { tasks: unknown[] };
+        expect(snapshot.tasks).toHaveLength(1);
+        expect((await observer.status()).tasks).toHaveLength(1);
         expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
         expect(stdoutLines.every((line) => {
           try { return (JSON.parse(line) as { jsonrpc?: unknown }).jsonrpc === "2.0"; }
@@ -156,6 +247,7 @@ describe("plugin MCP stdio server", () => {
         child.stdin.end();
         if (child.exitCode === null && child.signalCode === null) child.kill();
         await exit;
+        await companion.close();
         await rm(taskDirectory, { recursive: true, force: true });
       }
     },
