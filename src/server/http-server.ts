@@ -263,6 +263,11 @@ function unsafeTaskRequestTarget(rawUrl: string): boolean {
   return false;
 }
 
+function eventRequiresExistingTask(event: ProgressEnvelope["event"]): boolean {
+  return event.type !== "tracking_started" && event.type !== "model_progress" &&
+    event.type !== "waiting";
+}
+
 function afterRevision(url: URL): number | undefined {
   const value = url.searchParams.get("afterRevision");
   if (value === null) return undefined;
@@ -822,7 +827,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           });
           return;
         }
-        if (isControl && !store.has(envelope.taskId)) {
+        if (eventRequiresExistingTask(envelope.event) && !store.has(envelope.taskId)) {
           cancellation.complete();
           writeJson(response, 404, {
             error: "task handle is not associated with a tracked task",

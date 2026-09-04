@@ -251,7 +251,7 @@ describe("local progress HTTP service", () => {
     const event = JSON.stringify({
       taskId: "protocol-negotiation",
       title: "Protocol negotiation",
-      event: { type: "turn_started" }
+      event: { type: "tracking_started" }
     });
     const sseController = new AbortController();
     const sseResponse = await fetch(`${fixture.baseUrl}/api/events`, {
@@ -470,7 +470,7 @@ describe("local progress HTTP service", () => {
     const event = JSON.stringify({
       taskId: "generation-race",
       title: "Generation race",
-      event: { type: "turn_started" }
+      event: { type: "tracking_started" }
     });
 
     const missing = await fetch(`${fixture.baseUrl}/api/events`, {
@@ -546,7 +546,7 @@ describe("local progress HTTP service", () => {
       body: JSON.stringify({
         taskId: "task-1",
         title: "Fix login",
-        event: { type: "turn_started" }
+        event: { type: "tracking_started" }
       })
     });
 
@@ -571,7 +571,7 @@ describe("local progress HTTP service", () => {
       body: JSON.stringify({
         taskId: "task-1",
         title: "Fix login",
-        event: { type: "turn_started" }
+        event: { type: "tracking_started" }
       })
     });
     const snapshotResponse = await fetch(`${baseUrl}/api/snapshot`, {
@@ -585,7 +585,13 @@ describe("local progress HTTP service", () => {
     expect(snapshot.selected?.task).toMatchObject({ id: "task-1", status: "running" });
   });
 
-  it("rejects unknown per-task controls without creating, revising, or selecting a task", async () => {
+  it.each([
+    { type: "tracking_paused" },
+    { type: "tracking_resumed" },
+    { type: "tracking_stopped" },
+    { type: "validation_observed", result: "passed" },
+    { type: "model_outcome", outcome: "completed", verified: false }
+  ] as const)("rejects unknown non-creating event $type", async (event) => {
     const { baseUrl, token } = await startServer({ withGenerationGuard: true });
     const started = await fetch(`${baseUrl}/api/events`, {
       method: "POST",
@@ -601,23 +607,42 @@ describe("local progress HTTP service", () => {
       headers: { authorization: `Bearer ${token}` }
     })).json();
 
-    for (const type of ["tracking_paused", "tracking_resumed", "tracking_stopped"] as const) {
-      const response = await fetch(`${baseUrl}/api/events`, {
-        method: "POST",
-        headers: mutationHeaders(token, 1),
-        body: JSON.stringify({ taskId: taskB, event: { type } })
-      });
+    const response = await fetch(`${baseUrl}/api/events`, {
+      method: "POST",
+      headers: mutationHeaders(token, 1),
+      body: JSON.stringify({ taskId: taskB, event })
+    });
 
-      expect(response.status).toBe(404);
-      expect(await response.json()).toEqual({
-        error: "task handle is not associated with a tracked task",
-        code: "TASK_NOT_FOUND"
-      });
-      const after = await (await fetch(`${baseUrl}/api/snapshot`, {
-        headers: { authorization: `Bearer ${token}` }
-      })).json();
-      expect(after).toEqual(before);
-    }
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: "task handle is not associated with a tracked task",
+      code: "TASK_NOT_FOUND"
+    });
+    const after = await (await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${token}` }
+    })).json();
+    expect(after).toEqual(before);
+  });
+
+  it.each([
+    { type: "tracking_started" },
+    { type: "model_progress", phase: "testing" },
+    { type: "waiting", reason: "user" }
+  ] as const)("creates a new task for creating event $type", async (event) => {
+    const { baseUrl, token } = await startServer();
+    const response = await fetch(`${baseUrl}/api/events`, {
+      method: "POST",
+      headers: mutationHeaders(token, 0),
+      body: JSON.stringify({ taskId: taskB, title: "New task", event })
+    });
+
+    expect(response.status).toBe(202);
+    const snapshot = await (await fetch(`${baseUrl}/api/snapshot`, {
+      headers: { authorization: `Bearer ${token}` }
+    })).json();
+    expect(snapshot.tasks).toEqual([
+      expect.objectContaining({ id: taskB })
+    ]);
   });
 
   it("preserves established titles unless a semantic report supplies a bounded replacement", async () => {
@@ -675,7 +700,7 @@ describe("local progress HTTP service", () => {
         body: JSON.stringify({
           taskId: "legacy-deadline-client",
           title: "Compatibility",
-          event: { type: "turn_started" }
+          event: { type: "tracking_started" }
         })
       });
 

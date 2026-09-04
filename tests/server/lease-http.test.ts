@@ -59,7 +59,7 @@ describe("MCP lease HTTP boundary", () => {
     await fetch(`${server.address().url}/api/events`, {
       method: "POST",
       headers: headers(token, lease.id, lease.ownerNonce),
-      body: JSON.stringify({ taskId: taskHandle, event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "tracking_started" } })
     });
     const bindResponse = await fetch(`${server.address().url}/api/leases/bind`, {
       method: "POST",
@@ -98,11 +98,11 @@ describe("MCP lease HTTP boundary", () => {
     const secondHandle = "hud_bbbbbbbbbbbbbbbbbbbb";
     await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, first.id, first.ownerNonce),
-      body: JSON.stringify({ taskId: firstHandle, event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: firstHandle, event: { type: "tracking_started" } })
     });
     await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, second.id, second.ownerNonce),
-      body: JSON.stringify({ taskId: secondHandle, event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: secondHandle, event: { type: "tracking_started" } })
     });
 
     const eventResponse = await fetch(`${server.address().url}/api/events`, {
@@ -156,11 +156,11 @@ describe("MCP lease HTTP boundary", () => {
     const secondHandle = "hud_bbbbbbbbbbbbbbbbbbbb";
     await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, first.id, first.ownerNonce),
-      body: JSON.stringify({ taskId: firstHandle, event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: firstHandle, event: { type: "tracking_started" } })
     });
     await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, second.id, second.ownerNonce),
-      body: JSON.stringify({ taskId: secondHandle, event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: secondHandle, event: { type: "tracking_started" } })
     });
     const before = await (await fetch(`${server.address().url}/api/snapshot`, {
       headers: headers(token)
@@ -280,7 +280,13 @@ describe("MCP lease HTTP boundary", () => {
     expect(requestShutdown).not.toHaveBeenCalled();
   });
 
-  it("does not preclaim an unknown control handle before TASK_NOT_FOUND", async () => {
+  it.each([
+    { type: "tracking_paused" },
+    { type: "tracking_resumed" },
+    { type: "tracking_stopped" },
+    { type: "validation_observed", result: "passed" },
+    { type: "model_outcome", outcome: "completed", verified: false }
+  ] as const)("does not preclaim an unknown $type handle before TASK_NOT_FOUND", async (event) => {
     const { server, token } = await fixture();
     const acquire = async (ownerNonce: string) => {
       const response = await fetch(`${server.address().url}/api/leases/acquire`, {
@@ -297,7 +303,7 @@ describe("MCP lease HTTP boundary", () => {
 
     const missing = await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, first.id, first.ownerNonce),
-      body: JSON.stringify({ taskId: taskHandle, event: { type: "tracking_paused" } })
+      body: JSON.stringify({ taskId: taskHandle, event })
     });
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ code: "TASK_NOT_FOUND" });
@@ -308,7 +314,7 @@ describe("MCP lease HTTP boundary", () => {
 
     const legitimate = await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, second.id, second.ownerNonce),
-      body: JSON.stringify({ taskId: taskHandle, event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "tracking_started" } })
     });
     expect(legitimate.status).toBe(202);
     expect(server.leaseStore.boundHandles(second.id, second.ownerNonce)).toEqual([taskHandle]);
@@ -452,7 +458,7 @@ describe("MCP lease HTTP boundary", () => {
     const firstWrite = await fetch(`${server.address().url}/api/events`, {
       method: "POST",
       headers: headers(token, first.id, first.ownerNonce),
-      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "tracking_started" } })
     });
     expect(firstWrite.status).toBe(202);
     const before = await (await fetch(`${server.address().url}/api/snapshot`, { headers: headers(token) })).json();
@@ -491,7 +497,7 @@ describe("MCP lease HTTP boundary", () => {
     await fetch(`${server.address().url}/api/events`, {
       method: "POST",
       headers: headers(token, acquired.id, acquired.ownerNonce),
-      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "tracking_started" } })
     });
     const released = await fetch(`${server.address().url}/api/leases/release`, {
       method: "POST",
@@ -524,7 +530,7 @@ describe("MCP lease HTTP boundary", () => {
     await fetch(`${server.address().url}/api/events`, {
       method: "POST",
       headers: headers(token, first.id, first.ownerNonce),
-      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "turn_started" } })
+      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "tracking_started" } })
     });
     await fetch(`${server.address().url}/api/leases/release`, {
       method: "POST",
