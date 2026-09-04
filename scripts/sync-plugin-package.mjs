@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(root, "plugins/codex-progress-hud");
 const checkOnly = process.argv.includes("--check");
+const normalizeText = (content) => content.replace(/\r\n/gu, "\n").replace(/\n*$/u, "\n");
 const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 const rootPlugin = JSON.parse(await readFile(resolve(root, ".codex-plugin/plugin.json"), "utf8"));
 const releasePlugin = { ...rootPlugin, version: packageManifest.version };
@@ -37,7 +38,7 @@ const copies = new Map([
 ]);
 
 for (const [target, source] of copies) {
-  generated.set(target, (await readFile(resolve(root, source), "utf8")).replace(/(?:\r?\n)*$/u, "\n"));
+  generated.set(target, normalizeText(await readFile(resolve(root, source), "utf8")));
 }
 
 const drift = [];
@@ -45,7 +46,7 @@ for (const [relativePath, content] of generated) {
   const target = resolve(outputRoot, relativePath);
   if (checkOnly) {
     const current = await readFile(target, "utf8").catch(() => undefined);
-    if (current !== content) drift.push(relativePath);
+    if (current === undefined || normalizeText(current) !== normalizeText(content)) drift.push(relativePath);
     continue;
   }
   await mkdir(dirname(target), { recursive: true });
