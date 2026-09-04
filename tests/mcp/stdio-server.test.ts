@@ -131,8 +131,9 @@ describe("plugin MCP stdio server", () => {
         expect(toolByName.get("hud_open")?.description).toContain("Deprecated");
         expect(toolByName.get("hud_close")?.description).toContain("Deprecated");
         expect(toolByName.get("progress_report")?.inputSchema).toMatchObject({
-          required: expect.arrayContaining(["task_handle", "phase"])
+          required: expect.arrayContaining(["phase"])
         });
+        expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("required", expect.arrayContaining(["task_handle"]));
         expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("properties.task_id");
         const observational = await request(3, "tools/call", {
           name: "tracking_status",
@@ -145,7 +146,7 @@ describe("plugin MCP stdio server", () => {
           arguments: {}
         });
         expect(noAssociation.error).toBeUndefined();
-        expect(JSON.stringify(noAssociation.result)).toContain("NO_SESSION_ASSOCIATION");
+        expect(JSON.stringify(noAssociation.result)).toContain('"associationSource":"mcp_lease"');
         expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
         expect(stdoutLines.every((line) => {
           try { return (JSON.parse(line) as { jsonrpc?: unknown }).jsonrpc === "2.0"; }
