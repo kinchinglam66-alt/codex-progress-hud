@@ -356,6 +356,25 @@ describe("MCP progress tool handlers", () => {
   });
 
   it.each([
+    ["trackingStart", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingStart(null)],
+    ["trackingPause", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingPause(null)],
+    ["trackingResume", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingResume(null)],
+    ["trackingStop", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingStop(null)]
+  ] as const)("rejects whole-input null for %s without association or writes", async (_name, invoke) => {
+    const submit = vi.fn();
+    const companionManager = createManager();
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    const result = await invoke(handlers);
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Invalid");
+    expect(result.structuredContent).toBeUndefined();
+    expect(submit).not.toHaveBeenCalled();
+    expect(companionManager.ensureForWrite).not.toHaveBeenCalled();
+  });
+
+  it.each([
     ["tracking_start", (handlers: ReturnType<typeof createHandlers>) =>
       handlers.trackingStart({ task_handle: taskHandleA })],
     ["progress_report", (handlers: ReturnType<typeof createHandlers>) =>

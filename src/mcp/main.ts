@@ -24,10 +24,12 @@ import {
   taskControlSchema,
   validationObservedSchema
 } from "./tools.js";
+import { createFallbackTaskHandle } from "./task-association.js";
 
 export async function runMcpServer(): Promise<void> {
   const version = RELEASE_CAPABILITIES.buildVersion;
   const server = new McpServer({ name: "codex-progress-hud", version });
+  const fallbackTaskHandle = createFallbackTaskHandle();
   const ownerNonce = randomUUID();
   const progressClient = new CompanionHttpClient();
   progressClient.setLeaseOwnerNonce(ownerNonce);
@@ -51,7 +53,7 @@ export async function runMcpServer(): Promise<void> {
       dataDirectoryPath: defaultDataDirectory()
     }
   });
-  const handlers = createToolHandlers({ progressClient, companionManager });
+  const handlers = createToolHandlers({ progressClient, companionManager, fallbackTaskHandle });
 
   server.registerTool(
     "progress_report",

@@ -20,7 +20,6 @@ import {
   type ProgressClientSnapshot
 } from "./report-client.js";
 import {
-  createFallbackTaskHandle,
   resolveTaskAssociation,
   type ResolvedTaskAssociation,
   type TaskAssociationSource
@@ -161,13 +160,11 @@ export interface ToolHandlerDependencies {
   fallbackTaskHandle: string;
 }
 
-export function createToolHandlers(
-  dependencies: ToolHandlerDependencies | Omit<ToolHandlerDependencies, "fallbackTaskHandle">
-) {
-  const { progressClient: client, companionManager } = dependencies;
-  const fallbackTaskHandle = "fallbackTaskHandle" in dependencies
-    ? dependencies.fallbackTaskHandle
-    : createFallbackTaskHandle();
+export function createToolHandlers({
+  progressClient: client,
+  companionManager,
+  fallbackTaskHandle
+}: ToolHandlerDependencies) {
   function lifecycleErrorResult(
     result: Extract<EnsureResult, { kind: "error" }>,
     association: ResolvedTaskAssociation
@@ -338,7 +335,7 @@ export function createToolHandlers(
     taskStatus,
 
     async trackingStart(input: unknown): Promise<ToolResult> {
-      const parsed = trackingStartSchema.safeParse(input ?? {});
+      const parsed = trackingStartSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking start");
       const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
@@ -361,7 +358,7 @@ export function createToolHandlers(
     },
 
     async trackingPause(input?: unknown): Promise<ToolResult> {
-      const parsed = taskControlSchema.safeParse(input ?? {});
+      const parsed = taskControlSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking pause");
       const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
@@ -374,7 +371,7 @@ export function createToolHandlers(
     },
 
     async trackingResume(input?: unknown): Promise<ToolResult> {
-      const parsed = taskControlSchema.safeParse(input ?? {});
+      const parsed = taskControlSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking resume");
       const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
@@ -387,7 +384,7 @@ export function createToolHandlers(
     },
 
     async trackingStop(input?: unknown): Promise<ToolResult> {
-      const parsed = taskControlSchema.safeParse(input ?? {});
+      const parsed = taskControlSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking stop");
       const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
