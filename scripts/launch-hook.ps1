@@ -5,7 +5,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Stop-Launcher {
-  [Console]::Out.WriteLine('{"continue":true}')
+  if ($HookName -eq "Interrupt") {
+    [Console]::Out.WriteLine('{}')
+  } else {
+    [Console]::Out.WriteLine('{"continue":true}')
+  }
   [Console]::Error.WriteLine("Codex Progress HUD Hook launcher skipped: unavailable")
   exit 0
 }

@@ -290,7 +290,7 @@ if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
   [Console]::Error.WriteLine("COMPANION_EXECUTABLE_MISSING: Reinstall Codex Progress HUD.")
   exit 4
 }
-& $executablePath --mcp-stdio
+& '.\scripts\codex-progress-hud-launcher.exe' --mcp-stdio
 exit $LASTEXITCODE
 ```
 

@@ -42,7 +42,8 @@ export interface HookEnvelope {
 }
 
 export interface HookResult {
-  continue: true;
+  continue?: true;
+  systemMessage?: string;
   hookSpecificOutput?: {
     hookEventName: "SessionStart" | "UserPromptSubmit";
     additionalContext: string;
@@ -111,6 +112,7 @@ export function createHookEnvelope(
 }
 
 export function hookResult(hook: HookName, taskHandle: string): HookResult {
+  if (hook === "Interrupt") return {};
   const result: HookResult = { continue: true };
   if (hook === "SessionStart" || hook === "UserPromptSubmit") {
     result.hookSpecificOutput = {

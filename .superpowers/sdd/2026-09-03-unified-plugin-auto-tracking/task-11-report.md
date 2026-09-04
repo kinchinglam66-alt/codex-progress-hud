@@ -19,7 +19,7 @@ The detailed older packaging plan expected PowerShell to own the long-lived MCP 
 
 The plugin manifest intentionally omits an unsupported `hooks` property. Codex discovers the conventional `hooks/hooks.json` file. The `.mcp.json` now uses Codex's documented direct server map rather than the legacy `mcpServers` wrapper. This matches the installed plugin-creator validator's allowed manifest keys and avoids the earlier plugin/tool-visibility risks.
 
-The final release/security review initially rejected the range. Its seven findings were addressed with regression coverage: direct-map MCP configuration, Hook-started zero-lease shutdown, registered fail-open `Interrupt`, release-time native-bridge recompilation plus binary integrity stamping, SHA-pinned GitHub Actions and official npm registry URLs, generated Hook-client versioning, and version-derived release artifact paths. The local .NET Framework compiler does not produce byte-for-byte identical EXEs across rebuilds, so the project does not claim reproducible native builds; the release job instead compiles from reviewed source every time.
+The final release/security review initially rejected the range. Its seven findings were addressed with regression coverage: direct-map MCP configuration, Hook-started zero-lease shutdown, registered fail-open `Interrupt`, release-time native-bridge recompilation plus binary integrity stamping, SHA-pinned GitHub Actions and official npm registry URLs, generated Hook-client versioning, and version-derived release artifact paths. A follow-up contract check also made both successful and fail-open `Interrupt` executions emit `{}`, avoiding unsupported turn-control fields. The local .NET Framework compiler does not produce byte-for-byte identical EXEs across rebuilds, so the project does not claim reproducible native builds; the release job instead compiles from reviewed source every time.
 
 ## Artifacts
 
@@ -27,15 +27,15 @@ All paths are relative to the worktree and are ignored build outputs:
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
-| `release/Codex-Progress-HUD-Setup-0.2.0.exe` | 112,970,032 | `c310d4fea1b740dcc651639f1283b3225fbe346a4a5d87583ad5fa99b43827c3` |
-| `release/codex-progress-hud-plugin-0.2.0.zip` | 44,207 | `71e6c6542f4c6f4c3e592f9ebeb7146f92ace73feb6c37495b4e9c6bac7888fc` |
+| `release/Codex-Progress-HUD-Setup-0.2.0.exe` | 112,969,968 | `5e1e6799a54fb03f3992a942999b485696175cca9eb52c923dbf2dff9a130769` |
+| `release/codex-progress-hud-plugin-0.2.0.zip` | 44,294 | `c6536c8725b303df56f19efa168f2292f2c809f1afc5132452d144fd503d3434` |
 | `release/SHA256SUMS.txt` | 203 | contains both hashes above |
 
 `Get-AuthenticodeSignature` reports `NotSigned`, as disclosed in the installation and security documentation.
 
 ## Verification evidence
 
-- `npm run verify:release` — PASS: 36 test files / 548 tests, typecheck, build, source smoke, native-launcher integrity, plugin synchronization, plugin validation, and package contract.
+- `npm run verify:release` — PASS: 36 test files / 551 tests, typecheck, build, source smoke, native-launcher integrity, plugin synchronization, plugin validation, and package contract.
 - `npm run smoke:packaged` — PASS: packaged HUD health/authentication, MCP connection, all 14 tools, and shutdown. Five consecutive runs passed after the harness was isolated and made to await Electron exit.
 - `npm run diagnose:mcp:packaged` — PASS: real release bridge completed MCP initialize and `tools/list` with 14 tools.
 - `npm run release:artifacts` — PASS: NSIS installer, deterministic whitelist ZIP, and checksum file.

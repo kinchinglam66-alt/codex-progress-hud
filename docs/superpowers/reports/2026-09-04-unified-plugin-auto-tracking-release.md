@@ -6,7 +6,7 @@ The unified one-switch automatic-tracking architecture is implemented and locall
 
 Release readiness evidence:
 
-- 36 test files and 548 tests passed in the serialized release gate.
+- 36 test files and 551 tests passed in the serialized release gate.
 - The packaged HUD passed health, bearer authentication, 14-tool MCP discovery, and controlled shutdown.
 - The release plugin's native bridge passed real MCP initialize and `tools/list` without global Node.
 - Automatic new-task tracking, late attachment, two-session owner isolation, protocol mismatch, lease expiry, zero-lease Hook shutdown, and fail-open `Interrupt` behavior have dedicated integration coverage.
@@ -17,8 +17,8 @@ Release readiness evidence:
 
 Local artifacts:
 
-- `release/Codex-Progress-HUD-Setup-0.2.0.exe` — SHA-256 `c310d4fea1b740dcc651639f1283b3225fbe346a4a5d87583ad5fa99b43827c3`
-- `release/codex-progress-hud-plugin-0.2.0.zip` — SHA-256 `71e6c6542f4c6f4c3e592f9ebeb7146f92ace73feb6c37495b4e9c6bac7888fc`
+- `release/Codex-Progress-HUD-Setup-0.2.0.exe` — SHA-256 `5e1e6799a54fb03f3992a942999b485696175cca9eb52c923dbf2dff9a130769`
+- `release/codex-progress-hud-plugin-0.2.0.zip` — SHA-256 `c6536c8725b303df56f19efa168f2292f2c809f1afc5132452d144fd503d3434`
 - `release/SHA256SUMS.txt`
 
 The installer and native bridge are intentionally unsigned at this stage. They have not been installed, pushed, tagged, published, or uploaded. See `docs/INSTALL-WINDOWS.md` and `docs/RELEASE-CHECKLIST.md` before public distribution.

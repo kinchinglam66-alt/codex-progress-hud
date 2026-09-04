@@ -140,7 +140,7 @@ export async function runHookEvent(
   const writeStderr = dependencies.writeStderr ?? ((value: string) => process.stderr.write(value));
   const controller = new AbortController();
   const deadlineMs = Date.now() + boundedTimeout(dependencies.timeoutMs);
-  let result: HookResult = { continue: true };
+  let result: HookResult = hookName === "Interrupt" ? {} : { continue: true };
   try {
     result = await executeHookEvent(
       hookName,

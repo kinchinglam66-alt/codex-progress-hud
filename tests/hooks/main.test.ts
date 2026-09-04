@@ -115,6 +115,23 @@ describe("Hook command runtime", () => {
     expect(fixture.stderr).toEqual([]);
   });
 
+  it("emits valid non-controlling JSON for Interrupt on success and fail-open", async () => {
+    const interruptInput = Readable.from([JSON.stringify({
+      session_id: "session-1",
+      turn_id: "turn-1",
+      hook_event_name: "Interrupt"
+    })]);
+    const success = runtime({ stdin: interruptInput });
+    await runHookEvent("Interrupt", success.dependencies);
+    expect(success.stdout).toEqual(["{}\n"]);
+
+    const failed = runtime({
+      stdin: Readable.from(["not-json"])
+    });
+    await runHookEvent("Interrupt", failed.dependencies);
+    expect(failed.stdout).toEqual(["{}\n"]);
+  });
+
   it("fails open for malformed and oversized stdin without protocol noise", async () => {
     for (const stdin of [
       Readable.from(["not-json"]),
@@ -318,10 +335,10 @@ describe.runIf(process.platform === "win32")("PowerShell Hook launcher", () => {
   const probeBuilder = join(import.meta.dirname, "launcher-probe.ps1");
   const powershell = "powershell.exe";
 
-  async function runLauncher(appData: string, extraEnvironment: NodeJS.ProcessEnv = {}) {
+  async function runLauncher(appData: string, extraEnvironment: NodeJS.ProcessEnv = {}, hookName = "Stop") {
     return runProcess(
       powershell,
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", launcher, "-HookName", "Stop"],
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", launcher, "-HookName", hookName],
       { ...process.env, APPDATA: appData, ...extraEnvironment }
     );
   }
@@ -337,6 +354,16 @@ describe.runIf(process.platform === "win32")("PowerShell Hook launcher", () => {
     expect(result.stderr.length).toBeGreaterThan(0);
     expect(result.stderr.length).toBeLessThanOrEqual(512);
     expect(result.stderr).not.toContain(appData);
+  });
+
+  it("fails open with valid empty JSON for Interrupt", async () => {
+    const appData = await mkdtemp(join(tmpdir(), "hud-hook-launcher-interrupt-"));
+    cleanups.push(() => rm(appData, { recursive: true, force: true }));
+
+    const result = await runLauncher(appData, {}, "Interrupt");
+
+    expect(result.code).toBe(0);
+    expect(result.stdout.replaceAll("\r\n", "\n")).toBe("{}\n");
   });
 
   it("fails open when a validated executable path cannot be started", async () => {

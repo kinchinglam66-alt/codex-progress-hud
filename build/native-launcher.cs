@@ -101,7 +101,7 @@ public static class CodexProgressHudLauncher
             return Run(mode);
         } catch (LauncherFailure failure) {
             if (isHook) {
-                Console.Out.WriteLine("{\"continue\":true}");
+                Console.Out.WriteLine(mode == "--hook-event=Interrupt" ? "{}" : "{\"continue\":true}");
                 Console.Error.WriteLine("Codex Progress HUD Hook launcher skipped: unavailable");
                 return 0;
             }
@@ -109,7 +109,7 @@ public static class CodexProgressHudLauncher
             return failure.ExitCode;
         } catch {
             if (isHook) {
-                Console.Out.WriteLine("{\"continue\":true}");
+                Console.Out.WriteLine(mode == "--hook-event=Interrupt" ? "{}" : "{\"continue\":true}");
                 Console.Error.WriteLine("Codex Progress HUD Hook launcher skipped: unavailable");
                 return 0;
             }

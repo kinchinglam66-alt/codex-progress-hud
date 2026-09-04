@@ -28,6 +28,15 @@ function run(path: string, extraEnvironment: NodeJS.ProcessEnv = {}, input?: str
   });
 }
 
+function runHook(path: string, hookName: string) {
+  return spawnSync(launcher, [`--hook-event=${hookName}`], {
+    env: { ...process.env, APPDATA: path },
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false
+  });
+}
+
 async function manifest(appDataPath: string, value: unknown): Promise<void> {
   const path = join(appDataPath, "codex-progress-hud", "install.json");
   await mkdir(dirname(path), { recursive: true });
@@ -43,6 +52,13 @@ describe.runIf(process.platform === "win32")("packaged MCP launcher", () => {
     expect(result.status).toBe(2);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("COMPANION_NOT_INSTALLED");
+  });
+
+  it("uses the Interrupt-specific non-controlling fail-open contract", async () => {
+    const result = runHook(await appData(), "Interrupt");
+    expect(result.status).toBe(0);
+    expect(result.stdout.replaceAll("\r\n", "\n")).toBe("{}\n");
+    expect(result.stderr).toContain("skipped");
   });
 
   it("rejects malformed and out-of-directory manifests", async () => {

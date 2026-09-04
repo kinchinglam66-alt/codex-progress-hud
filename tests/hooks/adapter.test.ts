@@ -82,7 +82,7 @@ describe("privacy-bounded Hook adapter", () => {
     }
   );
 
-  it.each(["PostToolUse", "Stop", "Interrupt", "SessionEnd"] as const)(
+  it.each(["PostToolUse", "Stop", "SessionEnd"] as const)(
     "returns no context for %s",
     (hook) => {
       expect(normalizeHookInput(hook, {
@@ -91,6 +91,14 @@ describe("privacy-bounded Hook adapter", () => {
       }, 100, secret).result).toEqual({ continue: true });
     }
   );
+
+  it("returns only valid empty JSON for Interrupt", () => {
+    expect(normalizeHookInput("Interrupt", {
+      session_id: "session-1",
+      turn_id: "turn-1",
+      hook_event_name: "Interrupt"
+    }, 100, secret).result).toEqual({});
+  });
 
   it("derives deterministic identifiers from the token and changes them with the token", () => {
     const input = {
