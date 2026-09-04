@@ -7,7 +7,6 @@ export interface McpLeaseLifecycleDependencies {
   ownerNonce: string;
   ttlMs?: number;
   ensureReady(reason: HudWriteReason): Promise<EnsureResult>;
-  migrateLegacy?(): Promise<unknown>;
   schedule(callback: () => void, delayMs: number): unknown;
   cancel(handle: unknown): void;
 }
@@ -77,9 +76,6 @@ export function createMcpLeaseLifecycle(
       if (startFlight !== undefined) return startFlight.promise;
       const startGeneration = generation;
       const promise = (async (): Promise<SessionLease> => {
-        if (dependencies.migrateLegacy !== undefined) {
-          await dependencies.migrateLegacy().catch(() => undefined);
-        }
         if (closed || generation !== startGeneration) throw cancelled();
         const ready = await dependencies.ensureReady("tracking_start");
         if (closed || generation !== startGeneration) throw cancelled();

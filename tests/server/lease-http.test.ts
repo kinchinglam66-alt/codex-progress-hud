@@ -133,8 +133,79 @@ describe("MCP lease HTTP boundary", () => {
       })
     });
     const hookSnapshot = await hookResponse.json() as { tasks: Array<{ id: string }> };
-    expect(hookSnapshot.tasks.map(({ id }) => id)).toEqual([firstHandle]);
+    expect(hookSnapshot.tasks.map(({ id }) => id)).toEqual([
+      firstHandle,
+      "hud_cccccccccccccccccccc"
+    ]);
     expect(JSON.stringify(hookSnapshot)).not.toContain(secondHandle);
+    expect(server.leaseStore.boundHandles(first.id, first.ownerNonce)).toEqual([
+      firstHandle,
+      "hud_cccccccccccccccccccc"
+    ]);
+  });
+
+  it("rejects an MCP Hook targeting another session's handle with zero mutation", async () => {
+    const { server, token } = await fixture();
+    const acquire = async (ownerNonce: string) => await (await fetch(
+      `${server.address().url}/api/leases/acquire`,
+      { method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce }) }
+    )).json() as { id: string; ownerNonce: string };
+    const first = await acquire("owner-a");
+    const second = await acquire("owner-b");
+    const firstHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    const secondHandle = "hud_bbbbbbbbbbbbbbbbbbbb";
+    await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, first.id, first.ownerNonce),
+      body: JSON.stringify({ taskId: firstHandle, event: { type: "turn_started" } })
+    });
+    await fetch(`${server.address().url}/api/events`, {
+      method: "POST", headers: headers(token, second.id, second.ownerNonce),
+      body: JSON.stringify({ taskId: secondHandle, event: { type: "turn_started" } })
+    });
+    const before = await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json();
+
+    const rejected = await fetch(`${server.address().url}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...headers(token, first.id, first.ownerNonce), "x-codex-progress-hud-revision": String(before.revision) },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        taskHandle: secondHandle,
+        eventId: "evt_crosssessionabcdefghijklmnopqrstuvwx",
+        sessionKey: "session_crosssessionabcdefghijklmnopqrst",
+        hook: "Stop",
+        receivedAt: 100
+      })
+    });
+
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toMatchObject({ code: "LEASE_FORBIDDEN" });
+    expect(await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json()).toEqual(before);
+    expect(server.leaseStore.boundHandles(first.id, first.ownerNonce)).toEqual([firstHandle]);
+    expect(server.leaseStore.boundHandles(second.id, second.ownerNonce)).toEqual([secondHandle]);
+  });
+
+  it("keeps authenticated Hook-process traffic separate from MCP lease ownership", async () => {
+    const { server, token } = await fixture();
+    const taskHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    const response = await fetch(`${server.address().url}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...headers(token), "x-codex-progress-hud-revision": "0" },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        taskHandle,
+        eventId: "evt_hookprocessabcdefghijklmnopqrstuvwxyz",
+        sessionKey: "session_hookprocessabcdefghijklmnopqrstuv",
+        hook: "UserPromptSubmit",
+        receivedAt: 100
+      })
+    });
+
+    expect(response.status).toBe(202);
+    expect((await response.json()).tasks.map(({ id }: { id: string }) => id)).toEqual([taskHandle]);
   });
 
   it("does not preclaim an unknown control handle before TASK_NOT_FOUND", async () => {
@@ -148,6 +219,9 @@ describe("MCP lease HTTP boundary", () => {
     const first = await acquire("owner-a");
     const second = await acquire("owner-b");
     const taskHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    const before = await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json();
 
     const missing = await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, first.id, first.ownerNonce),
@@ -156,6 +230,9 @@ describe("MCP lease HTTP boundary", () => {
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ code: "TASK_NOT_FOUND" });
     expect(server.leaseStore.boundHandles(first.id, first.ownerNonce)).toEqual([]);
+    expect(await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json()).toEqual(before);
 
     const legitimate = await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, second.id, second.ownerNonce),
@@ -168,7 +245,7 @@ describe("MCP lease HTTP boundary", () => {
   it("returns TASK_NOT_FOUND before any lease expiry transition for an unknown control", async () => {
     let now = 0;
     const leaseStore = new LeaseStore({
-      now: () => now,
+      monotonicNow: () => now,
       minTtlMs: 1,
       maxTtlMs: 100,
       defaultTtlMs: 100
@@ -196,6 +273,53 @@ describe("MCP lease HTTP boundary", () => {
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ code: "TASK_NOT_FOUND" });
     expect(expired).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["unsupported", "999"]
+  ])("runs only the protocol diagnostic guard before unknown-control %s rejection", async (_name, protocol) => {
+    let now = 0;
+    const leaseStore = new LeaseStore({
+      monotonicNow: () => now,
+      minTtlMs: 1,
+      maxTtlMs: 100,
+      defaultTtlMs: 1
+    });
+    const expired = vi.fn();
+    leaseStore.on("expired", expired);
+    const { server, token } = await fixture({ leaseStore });
+    const lease = await (await fetch(`${server.address().url}/api/leases/acquire`, {
+      method: "POST", headers: headers(token), body: JSON.stringify({ ownerNonce: "owner-a", ttlMs: 1 })
+    })).json() as { id: string; ownerNonce: string };
+    expired.mockClear();
+    now = 1;
+    const requestHeaders = headers(token, lease.id, lease.ownerNonce);
+    if (protocol === undefined) delete requestHeaders["x-codex-progress-hud-protocol"];
+    else requestHeaders["x-codex-progress-hud-protocol"] = protocol;
+
+    const response = await fetch(`${server.address().url}/api/events`, {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify({
+        taskId: "hud_aaaaaaaaaaaaaaaaaaaa",
+        event: { type: "tracking_paused" }
+      })
+    });
+
+    expect(response.status).toBe(426);
+    expect(await response.json()).toMatchObject({ code: "VERSION_MISMATCH" });
+    expect(expired).not.toHaveBeenCalled();
+    const snapshot = await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json();
+    expect(snapshot).toMatchObject({
+      revision: 1,
+      tasks: [],
+      selectedTaskId: null,
+      selectionMode: "follow_activity",
+      compatibility: { incompatibleClientSeen: true }
+    });
   });
 
   it("rejects explicit binding of a nonexistent task without changing lease state", async () => {

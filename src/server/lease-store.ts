@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID as nodeRandomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 export interface SessionLease {
   id: string;
@@ -8,7 +9,7 @@ export interface SessionLease {
 }
 
 export interface LeaseStoreOptions {
-  now?: () => number;
+  monotonicNow?: () => number;
   randomUUID?: () => string;
   minTtlMs?: number;
   maxTtlMs?: number;
@@ -48,16 +49,14 @@ function checkedHandle(taskHandle: string): void {
 export class LeaseStore extends EventEmitter {
   readonly #leases = new Map<string, SessionLease>();
   readonly #bindings = new Map<string, Set<string>>();
-  readonly #now: () => number;
+  readonly #monotonicNow: () => number;
   readonly #randomUUID: () => string;
   readonly #minTtlMs: number;
   readonly #maxTtlMs: number;
   readonly #defaultTtlMs: number;
-  #lastNow = 0;
-
   constructor(options: LeaseStoreOptions = {}) {
     super();
-    this.#now = options.now ?? Date.now;
+    this.#monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.#randomUUID = options.randomUUID ?? nodeRandomUUID;
     this.#minTtlMs = checkedBound("minTtlMs", options.minTtlMs ?? DEFAULT_MIN_TTL_MS);
     this.#maxTtlMs = checkedBound("maxTtlMs", options.maxTtlMs ?? DEFAULT_MAX_TTL_MS);
@@ -113,7 +112,7 @@ export class LeaseStore extends EventEmitter {
   }
 
   sweep(nowMs = this.#safeNow()): number {
-    const now = this.#monotonic(nowMs, "nowMs");
+    const now = this.#checkedTime(nowMs, "nowMs");
     const expired: LeaseExpiredEvent[] = [];
     for (const [id, lease] of this.#leases) {
       if (lease.expiresAt > now) continue;
@@ -172,14 +171,13 @@ export class LeaseStore extends EventEmitter {
   }
 
   #safeNow(): number {
-    return this.#monotonic(this.#now(), "clock");
+    return this.#checkedTime(this.#monotonicNow(), "monotonic clock");
   }
 
-  #monotonic(value: number, name: string): number {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new RangeError(`${name} must return a nonnegative safe integer`);
+  #checkedTime(value: number, name: string): number {
+    if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+      throw new RangeError(`${name} must return a nonnegative finite safe value`);
     }
-    this.#lastNow = Math.max(this.#lastNow, value);
-    return this.#lastNow;
+    return Math.floor(value);
   }
 }

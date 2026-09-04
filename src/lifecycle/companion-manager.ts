@@ -187,6 +187,8 @@ export function createCompanionManager(
   let lastRecoveryAt = Number.NEGATIVE_INFINITY;
   const recentErrors: DiagnosticReportInput["errors"] = [];
   const activeWriteCancellations = new Set<() => void>();
+  let legacyMigrationAttempted = false;
+  let legacyMigrationFlight: Promise<void> | undefined;
 
   function record(entry: Omit<OperationalLogEntry, "at">): void {
     try {
@@ -257,8 +259,27 @@ export function createCompanionManager(
     };
   }
 
-  function stateOptions(deadline: number): StateOperationOptions {
-    return { timeoutMs: Math.max(0, deadline - now()) };
+  function stateOptions(deadline: number, signal?: AbortSignal): StateOperationOptions {
+    return {
+      timeoutMs: Math.max(0, deadline - now()),
+      ...(signal === undefined ? {} : { signal })
+    };
+  }
+
+  async function migrateLegacyBeforeFirstWrite(deadline: number, signal: AbortSignal): Promise<void> {
+    if (legacyMigrationAttempted) {
+      if (legacyMigrationFlight !== undefined) await legacyMigrationFlight;
+      return;
+    }
+    legacyMigrationAttempted = true;
+    if (dependencies.store.migrateLegacyDesiredState === undefined) return;
+    const flight = dependencies.store.migrateLegacyDesiredState(stateOptions(deadline, signal)).then(() => undefined);
+    legacyMigrationFlight = flight;
+    try {
+      await flight;
+    } finally {
+      if (legacyMigrationFlight === flight) legacyMigrationFlight = undefined;
+    }
   }
 
   const OPERATION_DEADLINE = Symbol("operation-deadline");
@@ -837,6 +858,7 @@ export function createCompanionManager(
       const shutdownStartedAt = now();
       const shutdownDeadline = shutdownStartedAt + shutdownTimeoutMs;
       const persistDesiredState = options.persistDesiredState !== false;
+      for (const cancel of activeWriteCancellations) cancel();
       let offSettings;
       try {
         offSettings = persistDesiredState
@@ -853,7 +875,6 @@ export function createCompanionManager(
         if (!(error instanceof LifecycleStateTimeoutError)) throw error;
         return shutdownTimedOut(shutdownStartedAt);
       }
-      for (const cancel of activeWriteCancellations) cancel();
       record({
         level: "info",
         event: "shutdown_requested",
@@ -1025,6 +1046,16 @@ export function createCompanionManager(
       activeWriteCancellations.add(cancelForClose);
       let writeSnapshot: HudLifecycleSnapshot = { observedState: "stopped" };
       try {
+        await migrateLegacyBeforeFirstWrite(deadline, controller.signal);
+        if (abortCause !== undefined) {
+          return abortCause === "close"
+            ? { kind: "suppressed", code: "MANUALLY_DISABLED" }
+            : {
+              kind: "error",
+              code: "START_TIMEOUT",
+              snapshot: { ...writeSnapshot, code: "START_TIMEOUT" }
+            };
+        }
         let ensured = await ensureForWrite(reason, deadline);
         if (ensured.kind !== "ready") return ensured;
         const writeGeneration = ensured.generation;

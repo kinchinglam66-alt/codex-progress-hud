@@ -712,6 +712,61 @@ describe("companion lifecycle manager", () => {
     expect(client.shutdown).toHaveBeenCalledOnce();
   });
 
+  it("migrates legacy off before the first ordinary write can be suppressed", async () => {
+    const { manager, store, launcher } = await harness({ desiredState: "off" });
+    const operation = vi.fn(async () => "submitted");
+
+    await expect(manager.executeWrite("progress_report", operation)).resolves.toEqual({
+      kind: "completed",
+      value: "submitted"
+    });
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(await store.readSettings()).toMatchObject({ desiredState: "on", generation: 3 });
+    expect(launcher.spawnHud).toHaveBeenCalledOnce();
+  });
+
+  it("keeps close authoritative when it races a first-write legacy migration", async () => {
+    const fixture = await harness({ desiredState: "off" });
+    let migrationEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { migrationEntered = resolve; });
+    let releaseMigration!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseMigration = resolve; });
+    const migrateLegacyDesiredState = vi.fn(async (options) => {
+      migrationEntered();
+      await gate;
+      if (options?.signal?.aborted) throw new LifecycleStateTimeoutError();
+      return fixture.store.migrateLegacyDesiredState!(options);
+    });
+    const store = { ...fixture.store, migrateLegacyDesiredState } satisfies LifecycleStateStore;
+    const manager = createCompanionManager({
+      store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-migration-race"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    const operation = vi.fn(async () => "submitted");
+    const writing = manager.executeWrite("progress_report", operation);
+    await entered;
+    const closing = manager.close();
+    releaseMigration();
+
+    await expect(writing).resolves.toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
+    await expect(closing).resolves.toMatchObject({ desiredState: "off", observedState: "stopped" });
+    expect(operation).not.toHaveBeenCalled();
+    expect(await fixture.store.readSettings()).toMatchObject({ desiredState: "off" });
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+  });
+
   it("prevents a deferred startup from publishing runtime or showing after close commits off", async () => {
     const { manager, launcher, terminate, setOnline, store, client } = await harness({
       spawnMakesOnline: false

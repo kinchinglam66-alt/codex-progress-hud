@@ -187,7 +187,6 @@ export async function runMcpServer(): Promise<void> {
     client: progressClient,
     ownerNonce,
     ensureReady: (reason) => companionManager.ensureForWrite(reason),
-    migrateLegacy: () => stateStore.migrateLegacyDesiredState?.() ?? Promise.resolve(undefined),
     schedule: (callback, delayMs) => {
       const timer = setTimeout(callback, delayMs);
       timer.unref();

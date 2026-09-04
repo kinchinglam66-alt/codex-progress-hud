@@ -320,7 +320,7 @@ export function createProgressServer(options: ProgressServerOptions) {
 
   const now = options.now ?? Date.now;
   const store = new TaskStore({ now });
-  const leaseStore = options.leaseStore ?? new LeaseStore({ now });
+  const leaseStore = options.leaseStore ?? new LeaseStore();
   const leaseGraceMs = options.leaseGraceMs ?? DEFAULT_LEASE_GRACE_MS;
   if (!Number.isSafeInteger(leaseGraceMs) || leaseGraceMs < 30_000 || leaseGraceMs > 60_000) {
     throw new RangeError("leaseGraceMs must be an integer between 30000 and 60000");
@@ -331,7 +331,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   let shuttingDown = false;
   let graceTimer: unknown;
   let graceHandles = new Set<string>();
-  const leaseSweepTimer = setInterval(() => leaseStore.sweep(now()), 1_000);
+  const leaseSweepTimer = setInterval(() => leaseStore.sweep(), 1_000);
   leaseSweepTimer.unref();
   const hookEventIds = new Set<string>();
   const hookEventOrder: string[] = [];
@@ -694,6 +694,9 @@ export function createProgressServer(options: ProgressServerOptions) {
           const revision = requestRevision(request);
           if (revision === undefined) return { kind: "revision_required" as const };
           if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
+          if (!taskLeaseAccepted(request, envelope.taskHandle)) {
+            return { kind: "lease_forbidden" as const };
+          }
           if (hookEventIds.has(envelope.eventId)) return store.snapshot();
           const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
           rememberHookEvent(envelope.eventId);
@@ -712,6 +715,11 @@ export function createProgressServer(options: ProgressServerOptions) {
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
           "kind" in result.value && result.value.kind === "stale_revision") {
           writeStaleRevision(response);
+          return;
+        }
+        if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "lease_forbidden") {
+          writeJson(response, 403, { error: "task handle is not available to this MCP lease", code: "LEASE_FORBIDDEN" });
           return;
         }
         writeJson(response, 202, mcpSnapshot(request, result.value as HudSnapshot));
@@ -778,12 +786,18 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         const envelope = parseProgressEnvelope(await readJson(request));
-        if (
-          (envelope.event.type === "tracking_paused" ||
-            envelope.event.type === "tracking_resumed" ||
-            envelope.event.type === "tracking_stopped") &&
-          !store.has(envelope.taskId)
-        ) {
+        const isControl = envelope.event.type === "tracking_paused" ||
+          envelope.event.type === "tracking_resumed" ||
+          envelope.event.type === "tracking_stopped";
+        if (isControl && !leaseProtocolAccepted(request)) {
+          cancellation.complete();
+          writeJson(response, 426, {
+            error: "client protocol is unsupported",
+            code: "VERSION_MISMATCH"
+          });
+          return;
+        }
+        if (isControl && !store.has(envelope.taskId)) {
           cancellation.complete();
           writeJson(response, 404, {
             error: "task handle is not associated with a tracked task",

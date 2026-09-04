@@ -4,7 +4,7 @@ import { LeaseStore } from "../../src/server/lease-store.js";
 describe("LeaseStore", () => {
   it("creates opaque bounded leases and renews only for the owner", () => {
     let now = 10_000;
-    const store = new LeaseStore({ now: () => now, randomUUID: () => "lease-uuid" });
+    const store = new LeaseStore({ monotonicNow: () => now, randomUUID: () => "lease-uuid" });
 
     const lease = store.acquire("owner-a", 60_000);
 
@@ -23,7 +23,7 @@ describe("LeaseStore", () => {
   it("clamps requested TTLs to safe bounds", () => {
     let now = 1_000;
     const store = new LeaseStore({
-      now: () => now,
+      monotonicNow: () => now,
       minTtlMs: 5_000,
       maxTtlMs: 20_000,
       defaultTtlMs: 10_000
@@ -36,7 +36,7 @@ describe("LeaseStore", () => {
 
   it("expires leases only after the injected clock reaches the deadline", () => {
     let now = 0;
-    const store = new LeaseStore({ now: () => now, minTtlMs: 1, maxTtlMs: 100, defaultTtlMs: 100 });
+    const store = new LeaseStore({ monotonicNow: () => now, minTtlMs: 1, maxTtlMs: 100, defaultTtlMs: 100 });
     const lease = store.acquire("owner");
 
     now = 99;
@@ -50,7 +50,7 @@ describe("LeaseStore", () => {
 
   it("routes release at the expiry deadline through the expiry transition", () => {
     let now = 0;
-    const store = new LeaseStore({ now: () => now, minTtlMs: 1, maxTtlMs: 100, defaultTtlMs: 10 });
+    const store = new LeaseStore({ monotonicNow: () => now, minTtlMs: 1, maxTtlMs: 100, defaultTtlMs: 10 });
     const expired = vi.fn();
     const released = vi.fn();
     store.on("expired", expired);
@@ -69,18 +69,29 @@ describe("LeaseStore", () => {
     expect(store.active()).toEqual([]);
   });
 
-  it("never moves lease time backwards when the injected clock rolls back", () => {
-    let now = 100;
-    const store = new LeaseStore({ now: () => now, minTtlMs: 10, maxTtlMs: 10, defaultTtlMs: 10 });
-    const lease = store.acquire("owner");
+  it("expires by real elapsed monotonic time even while wall time remains rolled back", () => {
+    let elapsedNow = 0;
+    const wallClock = vi.spyOn(Date, "now").mockReturnValue(100);
+    try {
+      const store = new LeaseStore({
+        monotonicNow: () => elapsedNow,
+        minTtlMs: 10,
+        maxTtlMs: 10,
+        defaultTtlMs: 10
+      });
+      const lease = store.acquire("owner");
+      expect(lease.expiresAt).toBe(10);
 
-    now = 40;
-    expect(store.renew(lease.id, "owner")).toEqual(lease);
-    expect(store.sweep()).toBe(0);
+      wallClock.mockReturnValue(0);
+      elapsedNow = 9;
+      expect(store.sweep()).toBe(0);
 
-    now = 110;
-    expect(store.sweep()).toBe(1);
-    expect(store.active()).toEqual([]);
+      elapsedNow = 10;
+      expect(store.sweep()).toBe(1);
+      expect(store.active()).toEqual([]);
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it("checks owner capabilities and preserves task binding isolation", () => {
