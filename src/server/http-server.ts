@@ -24,6 +24,8 @@ const MCP_CLIENT_HEADER = "x-codex-progress-hud-client";
 const COMPATIBILITY_CLOSE_HEADER = "x-codex-progress-hud-compat-close";
 const DEFAULT_LEASE_GRACE_MS = 45_000;
 
+type TaskLeaseDecision = "accepted" | "lease_required" | "lease_forbidden";
+
 const selectionRequestSchema = z.object({
   mode: z.enum(["pinned", "follow_activity"])
 }).strict();
@@ -450,20 +452,26 @@ export function createProgressServer(options: ProgressServerOptions) {
     return Number.isSafeInteger(protocol) ? protocol : undefined;
   }
 
-  function mcpLeaseAccepted(request: IncomingMessage): boolean {
-    if (!isMcpRequest(request)) return true;
+  function mcpLeaseDecision(request: IncomingMessage): TaskLeaseDecision {
+    if (!isMcpRequest(request)) return "accepted";
     const credentials = leaseCredentials(request);
-    return credentials !== undefined && leaseStore.has(credentials.id, credentials.ownerNonce);
+    return credentials !== undefined && leaseStore.has(credentials.id, credentials.ownerNonce)
+      ? "accepted"
+      : "lease_required";
   }
 
-  function taskLeaseAccepted(request: IncomingMessage, taskHandle: string, allowBind = true): boolean {
-    if (!isMcpRequest(request)) return true;
+  function taskLeaseAccepted(request: IncomingMessage, taskHandle: string, allowBind = true): TaskLeaseDecision {
+    const leaseDecision = mcpLeaseDecision(request);
+    if (leaseDecision !== "accepted") return leaseDecision;
+    if (!isMcpRequest(request)) return "accepted";
     const credentials = leaseCredentials(request);
-    if (credentials === undefined || !leaseStore.has(credentials.id, credentials.ownerNonce)) return false;
-    if (leaseStore.authorize(credentials.id, credentials.ownerNonce, taskHandle)) return true;
-    if (!allowBind) return false;
+    if (credentials === undefined) return "lease_required";
+    if (leaseStore.authorize(credentials.id, credentials.ownerNonce, taskHandle)) return "accepted";
+    if (!allowBind) return "lease_forbidden";
     return leaseStore.bind(credentials.id, credentials.ownerNonce, taskHandle) &&
-      leaseStore.authorize(credentials.id, credentials.ownerNonce, taskHandle);
+      leaseStore.authorize(credentials.id, credentials.ownerNonce, taskHandle)
+      ? "accepted"
+      : "lease_forbidden";
   }
 
   function leaseProtocolAccepted(request: IncomingMessage): boolean {
@@ -479,7 +487,7 @@ export function createProgressServer(options: ProgressServerOptions) {
     signal: AbortSignal,
     operation: (signal: AbortSignal) => unknown | Promise<unknown>
   ): Promise<
-    | { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" | "lease_forbidden" }
+    | { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" | "lease_required" | "lease_forbidden" }
     | { accepted: true; value: unknown }
   > {
     const clientProtocol = requestProtocol(request);
@@ -487,7 +495,8 @@ export function createProgressServer(options: ProgressServerOptions) {
       store.setIncompatibleClientSeen(true);
       return { accepted: false, reason: "version_mismatch" };
     }
-    if (!mcpLeaseAccepted(request)) return { accepted: false, reason: "lease_forbidden" };
+    const leaseDecision = mcpLeaseDecision(request);
+    if (leaseDecision !== "accepted") return { accepted: false, reason: leaseDecision };
     if (shuttingDown) return { accepted: false, reason: "shutting_down" };
     if (options.runIfGeneration === undefined) {
       if (signal.aborted) throw signal.reason;
@@ -501,7 +510,7 @@ export function createProgressServer(options: ProgressServerOptions) {
 
   function writeMutationRejection(
     response: ServerResponse,
-    result: { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" | "lease_forbidden" }
+    result: { accepted: false; reason: "version_mismatch" | "generation_rejected" | "shutting_down" | "lease_required" | "lease_forbidden" }
   ): void {
     if (result.reason === "version_mismatch") {
       writeJson(response, 426, {
@@ -512,6 +521,10 @@ export function createProgressServer(options: ProgressServerOptions) {
     }
     if (result.reason === "shutting_down") {
       writeJson(response, 423, { error: "shutdown in progress", code: "SHUTTING_DOWN" });
+      return;
+    }
+    if (result.reason === "lease_required") {
+      writeJson(response, 401, { error: "MCP lease is required for this session", code: "LEASE_REQUIRED" });
       return;
     }
     if (result.reason === "lease_forbidden") {
@@ -721,9 +734,8 @@ export function createProgressServer(options: ProgressServerOptions) {
           const revision = requestRevision(request);
           if (revision === undefined) return { kind: "revision_required" as const };
           if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
-          if (!taskLeaseAccepted(request, envelope.taskHandle)) {
-            return { kind: "lease_forbidden" as const };
-          }
+          const leaseDecision = taskLeaseAccepted(request, envelope.taskHandle);
+          if (leaseDecision !== "accepted") return { kind: leaseDecision };
           if (hookEventIds.has(envelope.eventId)) return store.snapshot();
           const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
           rememberHookEvent(envelope.eventId, envelope.receivedAt);
@@ -745,6 +757,11 @@ export function createProgressServer(options: ProgressServerOptions) {
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
           "kind" in result.value && result.value.kind === "stale_revision") {
           writeStaleRevision(response);
+          return;
+        }
+        if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "lease_required") {
+          writeJson(response, 401, { error: "MCP lease is required for this session", code: "LEASE_REQUIRED" });
           return;
         }
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
@@ -775,9 +792,8 @@ export function createProgressServer(options: ProgressServerOptions) {
           if (!store.snapshot().tasks.some((task) => task.id === route.taskId)) {
             return { kind: "task_not_found" as const };
           }
-          if (!taskLeaseAccepted(request, route.taskId, false)) {
-            return { kind: "lease_forbidden" as const };
-          }
+          const leaseDecision = taskLeaseAccepted(request, route.taskId, false);
+          if (leaseDecision !== "accepted") return { kind: leaseDecision };
           const snapshot = route.action === "select"
             ? store.select(route.taskId, selectionMode!, now())
             : store.setHidden(route.taskId, visibilityHidden!, now());
@@ -800,6 +816,10 @@ export function createProgressServer(options: ProgressServerOptions) {
           }
           if (result.value.kind === "task_not_found") {
             writeJson(response, 404, { error: "task not found" });
+            return;
+          }
+          if (result.value.kind === "lease_required") {
+            writeJson(response, 401, { error: "MCP lease is required for this session", code: "LEASE_REQUIRED" });
             return;
           }
           if (result.value.kind === "lease_forbidden") {
@@ -837,9 +857,8 @@ export function createProgressServer(options: ProgressServerOptions) {
         }
         const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
-          if (!taskLeaseAccepted(request, envelope.taskId)) {
-            return { kind: "lease_forbidden" as const };
-          }
+          const leaseDecision = taskLeaseAccepted(request, envelope.taskId);
+          if (leaseDecision !== "accepted") return { kind: leaseDecision };
           return store.apply(envelope);
         });
         cancellation.complete();
@@ -855,6 +874,13 @@ export function createProgressServer(options: ProgressServerOptions) {
             error: "task handle is not associated with a tracked task",
             code: "TASK_NOT_FOUND"
           });
+          return;
+        }
+        if (
+          result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "lease_required"
+        ) {
+          writeJson(response, 401, { error: "MCP lease is required for this session", code: "LEASE_REQUIRED" });
           return;
         }
         if (

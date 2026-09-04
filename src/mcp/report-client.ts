@@ -18,7 +18,6 @@ export interface HudRequestOptions {
   leaseId?: string;
   ownerNonce?: string;
   compatibilityClose?: boolean;
-  retryOnLeaseForbidden?: boolean;
 }
 
 export interface ProgressClient {
@@ -520,14 +519,17 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
       return await request(firstOptions);
     } catch (error) {
       if (
-        !(error instanceof HudClientError) || error.code !== "LEASE_FORBIDDEN" ||
-        this.#ownerNonce === undefined || explicitLease || options?.retryOnLeaseForbidden === false
+        !(error instanceof HudClientError) || error.code !== "LEASE_REQUIRED" ||
+        this.#ownerNonce === undefined || explicitLease
       ) {
         throw error;
       }
       this.#invalidateLease(firstOptions.leaseId);
       await this.#ensureLeaseForMutation();
-      return request(this.#effectiveOptions());
+      const retryOptions = { ...firstOptions };
+      delete retryOptions.leaseId;
+      delete retryOptions.ownerNonce;
+      return request(this.#effectiveOptions(retryOptions));
     }
   }
 

@@ -18,6 +18,7 @@ import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { ProcessLauncher, SpawnedHud } from "../../src/lifecycle/process-launcher.js";
 import { CompanionHttpClient } from "../../src/mcp/report-client.js";
 import { createProgressServer } from "../../src/server/http-server.js";
+import { LeaseStore } from "../../src/server/lease-store.js";
 import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 
 interface TestOwnedCompanion extends SpawnedHud {
@@ -1208,17 +1209,21 @@ describe("source-mode companion lifecycle", () => {
       expect(taskA?.id).toBeDefined();
       expect(taskB?.id).toBeDefined();
       expect(taskA?.id).not.toBe(taskB?.id);
+      const leasesBefore = companion.leaseStore.active().map((lease) => lease.id).sort();
 
       const crossLeasePause = await secondClient.callTool({
         name: "tracking_pause",
         arguments: { task_handle: taskA!.id }
       });
+      const after = await observer.status();
       expect(crossLeasePause.structuredContent).toMatchObject({
         ok: false,
         associationSource: "explicit",
         code: "LEASE_FORBIDDEN"
       });
       expect(crossLeasePause.isError).toBe(true);
+      expect(after).toEqual(snapshot);
+      expect(companion.leaseStore.active().map((lease) => lease.id).sort()).toEqual(leasesBefore);
       expect(JSON.stringify(crossLeasePause.structuredContent)).not.toContain("ownerNonce");
       expect(JSON.stringify(crossLeasePause.structuredContent)).not.toContain("lease_");
     } finally {
@@ -1226,6 +1231,100 @@ describe("source-mode companion lifecycle", () => {
         firstClient.close().catch(() => undefined),
         secondClient.close().catch(() => undefined)
       ]);
+    }
+  }, 20_000);
+
+  it("recovers an explicit task handle after its MCP lease expires", async () => {
+    let monotonicNow = 0;
+    const leaseStore = new LeaseStore({
+      monotonicNow: () => monotonicNow,
+      minTtlMs: 1,
+      maxTtlMs: 100,
+      defaultTtlMs: 100
+    });
+    const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-mcp-lease-recovery-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const paths = {
+      settingsPath: join(directory, "settings.json"),
+      runtimePath: join(directory, "runtime.json"),
+      installManifestPath: join(directory, "install.json")
+    };
+    const store = createLifecycleStateStore(paths);
+    const settings = await store.setDesiredState("on");
+    const runtime = {
+      pid: process.pid,
+      version: "0.2.0-test",
+      protocolVersion: 1 as const,
+      instanceNonce: randomUUID(),
+      startedAt: new Date().toISOString()
+    };
+    await store.writeRuntime(runtime, settings.generation);
+    let targetClosed = false;
+    const companion = createProgressServer({
+      port: 0,
+      tokenPath: join(directory, "auth.token"),
+      leaseStore,
+      health: () => ({ service: "codex-progress-hud" as const, ...runtime, visibility: "visible" as const }),
+      showWindow: () => undefined,
+      hideWindow: () => undefined,
+      requestShutdown: () => undefined,
+      runIfGeneration: (generation, desiredState, operation, signal) =>
+        store.runIfGeneration(generation, desiredState, operation, { signal })
+    });
+    await companion.listen();
+    cleanups.push(async () => {
+      if (!targetClosed) {
+        targetClosed = true;
+        await companion.close();
+      }
+    });
+    const environment = {
+      ...getDefaultEnvironment(),
+      CODEX_PROGRESS_HUD_DATA_DIR: directory,
+      CODEX_PROGRESS_HUD_TOKEN_PATH: join(directory, "auth.token"),
+      CODEX_PROGRESS_HUD_URL: companion.address().url
+    };
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [resolve(pluginRoot, "dist/main.js"), "--mcp-stdio"],
+      cwd: directory,
+      env: environment,
+      stderr: "pipe"
+    });
+    const client = new Client({ name: "lease-recovery", version: "1.0.0" });
+    const observer = new CompanionHttpClient(companion.address().url, join(directory, "auth.token"));
+
+    try {
+      await client.connect(transport);
+      const started = await client.callTool({
+        name: "tracking_start",
+        arguments: { title: "Recoverable explicit task" }
+      });
+      expect(started.structuredContent).toMatchObject({
+        ok: true,
+        associationSource: "mcp_lease"
+      });
+      const taskHandle = (await observer.status()).tasks[0]?.id;
+      expect(taskHandle).toBeDefined();
+      const initialLease = companion.leaseStore.active()[0];
+      expect(initialLease).toBeDefined();
+
+      monotonicNow = 101;
+      const recovered = await client.callTool({
+        name: "progress_report",
+        arguments: { task_handle: taskHandle!, phase: "recovered" }
+      });
+      expect(recovered.structuredContent).toMatchObject({
+        ok: true,
+        associationSource: "explicit"
+      });
+      const replacementLease = companion.leaseStore.active()[0];
+      expect(replacementLease).toBeDefined();
+      expect(replacementLease?.id).not.toBe(initialLease?.id);
+      expect(companion.leaseStore.active()).toHaveLength(1);
+      expect((await observer.status()).selected?.task.phase).toBe("recovered");
+    } finally {
+      await client.close().catch(() => undefined);
     }
   }, 20_000);
 });

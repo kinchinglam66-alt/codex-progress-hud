@@ -480,6 +480,47 @@ describe("MCP lease HTTP boundary", () => {
     expect(hidden.selected).toBeNull();
   });
 
+  it("reports an expired MCP lease as required so its owner can reacquire", async () => {
+    let now = 0;
+    const leaseStore = new LeaseStore({
+      monotonicNow: () => now,
+      minTtlMs: 1,
+      maxTtlMs: 100,
+      defaultTtlMs: 100
+    });
+    const { server, token } = await fixture({ leaseStore });
+    const acquired = await (await fetch(`${server.address().url}/api/leases/acquire`, {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify({ ownerNonce: "owner-a", ttlMs: 1 })
+    })).json() as { id: string; ownerNonce: string };
+    const taskHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    const started = await fetch(`${server.address().url}/api/events`, {
+      method: "POST",
+      headers: headers(token, acquired.id, acquired.ownerNonce),
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "tracking_started" } })
+    });
+    expect(started.status).toBe(202);
+
+    now = 1;
+    const stale = await fetch(`${server.address().url}/api/events`, {
+      method: "POST",
+      headers: headers(token, acquired.id, acquired.ownerNonce),
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "model_progress", phase: "retry" } })
+    });
+
+    expect(stale.status).toBe(401);
+    expect(await stale.json()).toEqual({
+      error: "MCP lease is required for this session",
+      code: "LEASE_REQUIRED"
+    });
+    const snapshot = await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json();
+    expect(snapshot).toMatchObject({ revision: 1 });
+    expect(snapshot.selected.task.phase).toBeUndefined();
+  });
+
   it("marks bound nonterminal tasks disconnected before graceful final-lease shutdown", async () => {
     let grace!: () => void;
     let delay = 0;

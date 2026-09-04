@@ -121,7 +121,7 @@ describe("CompanionHttpClient", () => {
           return;
         }
         if (request.url === "/api/events" && eventAttempts++ === 0) {
-          json(response, 403, { code: "LEASE_FORBIDDEN" });
+          json(response, 401, { code: "LEASE_REQUIRED" });
           return;
         }
         json(response, 202, aggregateSnapshot);
@@ -211,7 +211,7 @@ describe("CompanionHttpClient", () => {
           pendingOldResponses.push(response);
           if (pendingOldResponses.length === 2) {
             for (const oldResponse of pendingOldResponses) {
-              json(oldResponse, 403, { code: "LEASE_FORBIDDEN" });
+              json(oldResponse, 401, { code: "LEASE_REQUIRED" });
             }
           }
           return;
