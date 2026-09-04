@@ -69,11 +69,13 @@ const expectedLease = () => expect.objectContaining({
   signal: expect.any(AbortSignal)
 });
 
+const fallbackTaskHandle = "hud_ZmFsbGJhY2staGFuZGxlLTEyMzQ";
+
 function createHandlers(
   progressClient: Parameters<typeof createToolHandlers>[0]["progressClient"],
   companionManager: CompanionManager = createManager()
 ) {
-  return createToolHandlers({ progressClient, companionManager });
+  return createToolHandlers({ progressClient, companionManager, fallbackTaskHandle });
 }
 
 function createRunningDeadlineManager(startupTimeoutMs: number): CompanionManager {
@@ -137,21 +139,32 @@ describe("MCP progress tool handlers", () => {
     }).success).toBe(true);
   });
 
-  it("does not guess the selected or most recently active task for a semantic write", async () => {
+  it("uses the MCP lease fallback for handle-free task writes", async () => {
     const submit = vi.fn(async () => ({
       task: { status: "running" },
       eta: null
     }));
-    const status = vi.fn(async () => ({ task: null, eta: null }));
+    const status = vi.fn(async () => ({
+      task: { id: taskHandleA, title: "Selected task", status: "running" },
+      eta: null
+    }));
     const handlers = createHandlers({ submit, status });
 
     const result = await handlers.progressReport({
-      title: "No implicit target",
+      title: "Fallback target",
       phase: "testing"
     });
 
-    expect(result.isError).toBe(true);
-    expect(submit).not.toHaveBeenCalled();
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ok: true, associationSource: "mcp_lease" });
+    expect(result.structuredContent).not.toHaveProperty("taskHandle");
+    expect(JSON.stringify(result.structuredContent)).not.toContain(fallbackTaskHandle);
+    expect(JSON.stringify(result.structuredContent)).not.toContain("owner-nonce");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("secret-token");
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: fallbackTaskHandle }),
+      expect.anything()
+    );
     expect(status).not.toHaveBeenCalled();
   });
 
@@ -210,7 +223,7 @@ describe("MCP progress tool handlers", () => {
     }), expectedLease());
   });
 
-  it("returns a structured TASK_NOT_FOUND result for a stale control handle", async () => {
+  it("preserves downstream TASK_NOT_FOUND for an explicit stale control handle", async () => {
     const handlers = createHandlers({
       submit: vi.fn(async () => {
         throw new HudClientError("TASK_NOT_FOUND", "unknown task handle");
@@ -221,7 +234,11 @@ describe("MCP progress tool handlers", () => {
     const result = await handlers.trackingStop({ task_handle: taskHandleB });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "TASK_NOT_FOUND" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      associationSource: "explicit",
+      code: "TASK_NOT_FOUND"
+    });
   });
 
   it("keeps pause, resume, and stop controls per handle and never treats them as Codex execution controls", async () => {
@@ -256,17 +273,127 @@ describe("MCP progress tool handlers", () => {
     expect(status).not.toHaveBeenCalled();
   });
 
-  it("returns NO_SESSION_ASSOCIATION when a per-task control has no Hook handle", async () => {
-    const submit = vi.fn();
-    const status = vi.fn(async () => ({ task: { id: taskHandleA, title: "Guess me", status: "running" }, eta: null }));
+  it.each([
+    ["tracking_start", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingStart({ title: "Fallback task" }), { type: "tracking_started" }],
+    ["progress_report", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.progressReport({ phase: "testing" }), { type: "model_progress", phase: "testing" }]
+  ] as const)("uses the fallback handle for handle-free %s", async (_name, invoke, expectedEvent) => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    const result = await invoke(handlers);
+
+    expect(result.structuredContent).toMatchObject({ ok: true, associationSource: "mcp_lease" });
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: fallbackTaskHandle, event: expectedEvent }),
+      expect.anything()
+    );
+  });
+
+  it.each([
+    ["tracking_pause", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingPause({})],
+    ["tracking_resume", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingResume({})],
+    ["tracking_stop", (handlers: ReturnType<typeof createHandlers>) => handlers.trackingStop({})],
+    ["validation_observed", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.validationObserved({ result: "passed" })],
+    ["task_outcome", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.taskOutcome({ outcome: "completed", verified: false })]
+  ] as const)("uses the fallback handle and preserves TASK_NOT_FOUND for handle-free %s", async (_name, invoke) => {
+    const submit = vi.fn(async () => {
+      throw new HudClientError("TASK_NOT_FOUND", "unknown task handle");
+    });
+    const status = vi.fn(async () => ({
+      task: { id: taskHandleA, title: "Selected task", status: "running" },
+      eta: null
+    }));
     const handlers = createHandlers({ submit, status });
 
-    const result = await handlers.trackingPause({});
+    const result = await invoke(handlers);
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "NO_SESSION_ASSOCIATION" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      associationSource: "mcp_lease",
+      code: "TASK_NOT_FOUND"
+    });
+    expect(result.structuredContent).not.toHaveProperty("taskHandle");
+    expect(JSON.stringify(result.structuredContent)).not.toContain(fallbackTaskHandle);
+    expect(JSON.stringify(result.structuredContent)).not.toContain("owner-nonce");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("secret-token");
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: fallbackTaskHandle }),
+      expect.anything()
+    );
     expect(status).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["tracking_start", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingStart({ task_handle: "task-1" })],
+    ["progress_report", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.progressReport({ task_handle: "task-1", phase: "testing" })],
+    ["tracking_pause", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingPause({ task_handle: "task-1" })],
+    ["tracking_resume", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingResume({ task_handle: "task-1" })],
+    ["tracking_stop", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingStop({ task_handle: "task-1" })],
+    ["validation_observed", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.validationObserved({ task_handle: "task-1", result: "passed" })],
+    ["task_outcome", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.taskOutcome({ task_handle: "task-1", outcome: "completed" })]
+  ] as const)("rejects malformed explicit handles for %s before any write", async (_name, invoke) => {
+    const submit = vi.fn();
+    const companionManager = createManager();
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    const result = await invoke(handlers);
+
+    expect(result.isError).toBe(true);
     expect(submit).not.toHaveBeenCalled();
+    expect(companionManager.ensureForWrite).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["tracking_start", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingStart({ task_handle: taskHandleA })],
+    ["progress_report", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.progressReport({ task_handle: taskHandleA, phase: "testing" })],
+    ["tracking_pause", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingPause({ task_handle: taskHandleA })],
+    ["tracking_resume", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingResume({ task_handle: taskHandleA })],
+    ["tracking_stop", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.trackingStop({ task_handle: taskHandleA })],
+    ["validation_observed", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.validationObserved({ task_handle: taskHandleA, result: "passed" })],
+    ["task_outcome", (handlers: ReturnType<typeof createHandlers>) =>
+      handlers.taskOutcome({ task_handle: taskHandleA, outcome: "completed" })]
+  ] as const)("uses a valid explicit handle for %s", async (_name, invoke) => {
+    const submit = vi.fn(async () => ({ task: { status: "running" }, eta: null }));
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    const result = await invoke(handlers);
+
+    expect(result.structuredContent).toMatchObject({ ok: true, associationSource: "explicit" });
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: taskHandleA }),
+      expect.anything()
+    );
+  });
+
+  it("keeps status tools read-only without an association lookup", async () => {
+    const progressClient = { submit: vi.fn(), status: vi.fn(async () => ({ task: null, eta: null })) };
+    const companionManager = createManager();
+    const handlers = createHandlers(progressClient, companionManager);
+
+    await handlers.taskStatus();
+    await handlers.trackingStatus();
+
+    expect(progressClient.submit).not.toHaveBeenCalled();
+    expect(progressClient.status).toHaveBeenCalledTimes(2);
+    expect(companionManager.ensureForWrite).not.toHaveBeenCalled();
   });
 
   it("carries the manager generation lease through the actual event submit", async () => {
@@ -396,7 +523,11 @@ describe("MCP progress tool handlers", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).not.toContain("token=secret");
-    expect(result.structuredContent).toEqual({ ok: false, code: "INTERNAL_ERROR" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      associationSource: "explicit",
+      code: "INTERNAL_ERROR"
+    });
     expect(companionManager.ensureForWrite).toHaveBeenCalledOnce();
     expect(submit).toHaveBeenCalledOnce();
   });
@@ -416,7 +547,11 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "VERSION_MISMATCH" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      associationSource: "explicit",
+      code: "VERSION_MISMATCH"
+    });
     expect(result.content[0]?.text).toContain("Update the plugin and companion");
     expect(result.content[0]?.text).toContain("quit Codex");
     expect(result.content[0]?.text).toContain("reopen it");
@@ -436,7 +571,11 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "STALE_REVISION" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      associationSource: "explicit",
+      code: "STALE_REVISION"
+    });
   });
 
   it("preserves a structured lifecycle client error from control handlers", async () => {
@@ -575,7 +714,7 @@ describe("MCP progress tool handlers", () => {
         kind: "resolved",
         value: {
           isError: true,
-          structuredContent: { ok: false, code: "START_TIMEOUT" }
+          structuredContent: { ok: false, associationSource: "explicit", code: "START_TIMEOUT" }
         }
       });
       expect(elapsedMs).toBeLessThan(300);
@@ -594,18 +733,6 @@ describe("MCP progress tool handlers", () => {
 
     expect(result.content[0]?.text).toContain('"task":null');
     expect(status).toHaveBeenCalledOnce();
-  });
-
-  it("returns a clear error when a control needs a current task but none exists", async () => {
-    const handlers = createHandlers({
-      submit: vi.fn(),
-      status: vi.fn(async () => ({ task: null, eta: null }))
-    });
-
-    const result = await handlers.trackingPause({});
-
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "NO_SESSION_ASSOCIATION" });
   });
 
   it("maps lifecycle operations to exact structured HUD states", async () => {
@@ -709,6 +836,7 @@ describe("MCP progress tool handlers", () => {
     );
     expect(result.structuredContent).toEqual({
       ok: true,
+      associationSource: "explicit",
       desiredState: "off",
       code: "MANUALLY_DISABLED"
     });
@@ -740,6 +868,7 @@ describe("MCP progress tool handlers", () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual({
       ok: false,
+      associationSource: "explicit",
       desiredState: "on",
       observedState: "stopped",
       code: "COMPANION_NOT_INSTALLED"
@@ -816,6 +945,7 @@ describe("MCP progress tool handlers", () => {
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual({
       ok: false,
+      associationSource: "explicit",
       code: failure instanceof HudClientError ? failure.code : "INTERNAL_ERROR"
     });
     expect(companionManager.ensureForWrite).toHaveBeenCalledOnce();
@@ -833,7 +963,10 @@ describe("MCP progress tool handlers", () => {
     const result = await handlers.taskStatus();
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "OFFLINE" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      code: "OFFLINE"
+    });
     expect(result.structuredContent).not.toHaveProperty("observedState");
   });
 
@@ -851,7 +984,11 @@ describe("MCP progress tool handlers", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual({ ok: false, code: "OFFLINE" });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      associationSource: "explicit",
+      code: "OFFLINE"
+    });
     expect(result.structuredContent).not.toHaveProperty("observedState");
     expect(companionManager.ensureForWrite).toHaveBeenCalledTimes(2);
     expect(submit).toHaveBeenCalledTimes(2);

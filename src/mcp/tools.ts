@@ -19,6 +19,12 @@ import {
   type ProgressClient,
   type ProgressClientSnapshot
 } from "./report-client.js";
+import {
+  createFallbackTaskHandle,
+  resolveTaskAssociation,
+  type ResolvedTaskAssociation,
+  type TaskAssociationSource
+} from "./task-association.js";
 
 export const taskHandleSchema = z.string().regex(/^hud_[A-Za-z0-9_-]{20,96}$/u);
 const title = z.string().trim().min(1).max(160);
@@ -35,7 +41,7 @@ export const taskControlSchema = z.object({
 
 export const progressReportSchema = z
   .object({
-    task_handle: taskHandleSchema,
+    task_handle: taskHandleSchema.optional(),
     title: title.optional(),
     phase,
     current_step: step.optional(),
@@ -57,7 +63,7 @@ export const progressReportSchema = z
   );
 
 export const taskOutcomeSchema = z.object({
-  task_handle: taskHandleSchema,
+  task_handle: taskHandleSchema.optional(),
   title: title.optional(),
   outcome: z.enum(["completed", "blocked", "failed"]),
   verified: z.boolean().default(false),
@@ -65,7 +71,7 @@ export const taskOutcomeSchema = z.object({
 }).strict();
 
 export const validationObservedSchema = z.object({
-  task_handle: taskHandleSchema,
+  task_handle: taskHandleSchema.optional(),
   result: z.enum(["passed", "failed"])
 }).strict();
 
@@ -79,9 +85,10 @@ export interface ToolResult extends CallToolResult {
 export interface HudToolPayload {
   [key: string]: unknown;
   ok: boolean;
+  associationSource?: TaskAssociationSource;
   desiredState?: "on" | "off";
   observedState?: ObservedHudState;
-  code?: HudErrorCode | HudClientErrorCode | "NO_SESSION_ASSOCIATION";
+  code?: HudErrorCode | HudClientErrorCode;
   reportPath?: string;
 }
 
@@ -101,12 +108,15 @@ function invalidResult(kind: string): ToolResult {
   return { content: [{ type: "text", text: `Invalid ${kind}.` }], isError: true };
 }
 
-function clientFailureResult(error?: unknown): ToolResult {
+function clientFailureResult(
+  error?: unknown,
+  associationSource?: TaskAssociationSource
+): ToolResult {
   const code = error instanceof HudClientError ? error.code : "INTERNAL_ERROR";
   const text = clientFailureText(code, "Progress HUD request failed");
   return structuredResult(
     text,
-    { ok: false, code },
+    { ok: false, ...(associationSource === undefined ? {} : { associationSource }), code },
     true
   );
 }
@@ -115,29 +125,6 @@ function clientFailureText(code: HudClientErrorCode | HudErrorCode, prefix: stri
   return code === "VERSION_MISMATCH"
     ? `${prefix} (${code}). Progress HUD plugin and companion versions do not match. Update the plugin and companion, then fully quit Codex, reopen it, and begin or resume a Hook-enabled task.`
     : `${prefix} (${code}). Check HUD status or run diagnostics.`;
-}
-
-function noSessionAssociationResult(): ToolResult {
-  return structuredResult(
-    "No Hook session association is available. Use the task_handle supplied by SessionStart or UserPromptSubmit.",
-    { ok: false, code: "NO_SESSION_ASSOCIATION" },
-    true
-  );
-}
-
-function controlHandle(input: unknown, kind: string): string | ToolResult {
-  const parsed = taskControlSchema.safeParse(input ?? {});
-  if (parsed.success && parsed.data.task_handle !== undefined) return parsed.data.task_handle;
-  if (parsed.success) return noSessionAssociationResult();
-  if (
-    input === undefined ||
-    input === null ||
-    (typeof input === "object" && input !== null && !Array.isArray(input) &&
-      !("task_handle" in input))
-  ) {
-    return noSessionAssociationResult();
-  }
-  return invalidResult(kind);
 }
 
 function submittedTaskStatus(snapshot: ProgressClientSnapshot, taskHandle: string): string {
@@ -154,33 +141,42 @@ function submittedTaskStatus(snapshot: ProgressClientSnapshot, taskHandle: strin
 
 async function submitForTask(
   client: ProgressClient,
-  taskHandle: string,
+  association: ResolvedTaskAssociation,
   event: ProgressEnvelope["event"],
   requestOptions: () => HudRequestOptions
 ): Promise<ToolResult> {
   const snapshot = await client.submit({
-    taskId: taskHandle,
+    taskId: association.taskHandle,
     event
   }, requestOptions());
-  return textResult(
-    `Tracking ${event.type.replace("tracking_", "")}: ${submittedTaskStatus(snapshot, taskHandle)}.`
+  return structuredResult(
+    `Tracking ${event.type.replace("tracking_", "")}: ${submittedTaskStatus(snapshot, association.taskHandle)}.`,
+    { ok: true, associationSource: association.source }
   );
 }
 
 export interface ToolHandlerDependencies {
   progressClient: ProgressClient;
   companionManager: CompanionManager;
+  fallbackTaskHandle: string;
 }
 
-export function createToolHandlers({
-  progressClient: client,
-  companionManager
-}: ToolHandlerDependencies) {
-  function lifecycleErrorResult(result: Extract<EnsureResult, { kind: "error" }>): ToolResult {
+export function createToolHandlers(
+  dependencies: ToolHandlerDependencies | Omit<ToolHandlerDependencies, "fallbackTaskHandle">
+) {
+  const { progressClient: client, companionManager } = dependencies;
+  const fallbackTaskHandle = "fallbackTaskHandle" in dependencies
+    ? dependencies.fallbackTaskHandle
+    : createFallbackTaskHandle();
+  function lifecycleErrorResult(
+    result: Extract<EnsureResult, { kind: "error" }>,
+    association: ResolvedTaskAssociation
+  ): ToolResult {
     return structuredResult(
       clientFailureText(result.code, "Progress HUD lifecycle failed"),
       {
         ok: false,
+        associationSource: association.source,
         ...(result.snapshot.desiredState === undefined
           ? {}
           : { desiredState: result.snapshot.desiredState }),
@@ -191,15 +187,17 @@ export function createToolHandlers({
     );
   }
 
-  function suppressedResult(text: string): ToolResult {
+  function suppressedResult(text: string, association: ResolvedTaskAssociation): ToolResult {
     return structuredResult(text, {
       ok: true,
+      associationSource: association.source,
       desiredState: "off",
       code: "MANUALLY_DISABLED"
     });
   }
 
   async function runWrite(
+    association: ResolvedTaskAssociation,
     reason: HudWriteReason,
     suppressedText: string,
     operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<ToolResult>
@@ -207,10 +205,10 @@ export function createToolHandlers({
     try {
       const result = await companionManager.executeWrite(reason, operation);
       if (result.kind === "completed") return result.value;
-      if (result.kind === "suppressed") return suppressedResult(suppressedText);
-      return lifecycleErrorResult(result);
+      if (result.kind === "suppressed") return suppressedResult(suppressedText, association);
+      return lifecycleErrorResult(result, association);
     } catch (error) {
-      return clientFailureResult(error);
+      return clientFailureResult(error, association.source);
     }
   }
 
@@ -247,6 +245,7 @@ export function createToolHandlers({
       const parsed = progressReportSchema.safeParse(input);
       if (!parsed.success) return invalidResult("progress report");
       const value = parsed.data;
+      const association = resolveTaskAssociation(value.task_handle, fallbackTaskHandle);
       let event: ProgressEnvelope["event"];
       if (value.waiting_for !== undefined) {
         event = {
@@ -269,15 +268,19 @@ export function createToolHandlers({
         };
       }
       return runWrite(
+        association,
         "progress_report",
         "HUD is manually closed; progress was not displayed.",
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
-            taskId: value.task_handle,
+            taskId: association.taskHandle,
             ...(value.title === undefined ? {} : { title: value.title }),
             event
           }, makeRequestOptions());
-          return textResult(`Progress recorded: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
+          return structuredResult(
+            `Progress recorded: ${submittedTaskStatus(snapshot, association.taskHandle)}.`,
+            { ok: true, associationSource: association.source }
+          );
         }
       );
     },
@@ -286,12 +289,14 @@ export function createToolHandlers({
       const parsed = taskOutcomeSchema.safeParse(input);
       if (!parsed.success) return invalidResult("task outcome");
       const value = parsed.data;
+      const association = resolveTaskAssociation(value.task_handle, fallbackTaskHandle);
       return runWrite(
+        association,
         "task_outcome",
         "HUD is manually closed; the outcome was not displayed.",
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
-            taskId: value.task_handle,
+            taskId: association.taskHandle,
             ...(value.title === undefined ? {} : { title: value.title }),
             event: {
               type: "model_outcome",
@@ -300,7 +305,10 @@ export function createToolHandlers({
               ...(value.detail === undefined ? {} : { detail: value.detail })
             }
           }, makeRequestOptions());
-          return textResult(`Outcome recorded: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
+          return structuredResult(
+            `Outcome recorded: ${submittedTaskStatus(snapshot, association.taskHandle)}.`,
+            { ok: true, associationSource: association.source }
+          );
         }
       );
     },
@@ -309,15 +317,20 @@ export function createToolHandlers({
       const parsed = validationObservedSchema.safeParse(input);
       if (!parsed.success) return invalidResult("validation observation");
       const value = parsed.data;
+      const association = resolveTaskAssociation(value.task_handle, fallbackTaskHandle);
       return runWrite(
+        association,
         "task_outcome",
         "HUD is manually closed; validation evidence was not displayed.",
         async (makeRequestOptions) => {
           const snapshot = await client.submit({
-            taskId: value.task_handle,
+            taskId: association.taskHandle,
             event: { type: "validation_observed", result: value.result }
           }, makeRequestOptions());
-          return textResult(`Validation ${value.result}: ${submittedTaskStatus(snapshot, value.task_handle)}.`);
+          return structuredResult(
+            `Validation ${value.result}: ${submittedTaskStatus(snapshot, association.taskHandle)}.`,
+            { ok: true, associationSource: association.source }
+          );
         }
       );
     },
@@ -326,64 +339,63 @@ export function createToolHandlers({
 
     async trackingStart(input: unknown): Promise<ToolResult> {
       const parsed = trackingStartSchema.safeParse(input ?? {});
-      if (!parsed.success) {
-        if (
-          input === undefined ||
-          input === null ||
-          (typeof input === "object" && input !== null && !Array.isArray(input) &&
-            !("task_handle" in input))
-        ) {
-          return noSessionAssociationResult();
-        }
-        return invalidResult("tracking start");
-      }
-      const taskHandle = parsed.data.task_handle;
-      if (taskHandle === undefined) return noSessionAssociationResult();
+      if (!parsed.success) return invalidResult("tracking start");
+      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
+        association,
         "tracking_start",
         "HUD is manually closed; tracking was not started.",
         async (makeRequestOptions) => {
           const taskTitle = parsed.data.title ?? "Codex task";
           const snapshot = await client.submit({
-            taskId: taskHandle,
+            taskId: association.taskHandle,
             title: taskTitle,
             event: { type: "tracking_started" }
           }, makeRequestOptions());
-          return textResult(`Tracking started: ${submittedTaskStatus(snapshot, taskHandle)}.`);
+          return structuredResult(
+            `Tracking started: ${submittedTaskStatus(snapshot, association.taskHandle)}.`,
+            { ok: true, associationSource: association.source }
+          );
         }
       );
     },
 
     async trackingPause(input?: unknown): Promise<ToolResult> {
-      const handle = controlHandle(input, "tracking pause");
-      if (typeof handle !== "string") return handle;
+      const parsed = taskControlSchema.safeParse(input ?? {});
+      if (!parsed.success) return invalidResult("tracking pause");
+      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
+        association,
         "progress_report",
         "HUD is manually closed; tracking was not paused.",
         (makeRequestOptions) =>
-          submitForTask(client, handle, { type: "tracking_paused" }, makeRequestOptions)
+          submitForTask(client, association, { type: "tracking_paused" }, makeRequestOptions)
       );
     },
 
     async trackingResume(input?: unknown): Promise<ToolResult> {
-      const handle = controlHandle(input, "tracking resume");
-      if (typeof handle !== "string") return handle;
+      const parsed = taskControlSchema.safeParse(input ?? {});
+      if (!parsed.success) return invalidResult("tracking resume");
+      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
+        association,
         "progress_report",
         "HUD is manually closed; tracking was not resumed.",
         (makeRequestOptions) =>
-          submitForTask(client, handle, { type: "tracking_resumed" }, makeRequestOptions)
+          submitForTask(client, association, { type: "tracking_resumed" }, makeRequestOptions)
       );
     },
 
     async trackingStop(input?: unknown): Promise<ToolResult> {
-      const handle = controlHandle(input, "tracking stop");
-      if (typeof handle !== "string") return handle;
+      const parsed = taskControlSchema.safeParse(input ?? {});
+      if (!parsed.success) return invalidResult("tracking stop");
+      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
       return runWrite(
+        association,
         "progress_report",
         "HUD is manually closed; tracking was not stopped.",
         (makeRequestOptions) =>
-          submitForTask(client, handle, { type: "tracking_stopped" }, makeRequestOptions)
+          submitForTask(client, association, { type: "tracking_stopped" }, makeRequestOptions)
       );
     },
 
