@@ -528,6 +528,7 @@ describe("local progress HTTP service", () => {
       tasks: [],
       selected: null,
       compatibility: { incompatibleClientSeen: false },
+      hooks: { activitySeen: false },
       capabilities: {
         service: "codex-progress-hud",
         companionVersion: "0.1.0",
@@ -733,7 +734,7 @@ describe("local progress HTTP service", () => {
 
     expect(response.status).toBe(200);
     expect(new TextDecoder().decode(firstChunk?.value)).toContain(
-      'data: {"revision":0,"selectedTaskId":null,"selectionMode":"follow_activity","tasks":[],"selected":null,"compatibility":{"incompatibleClientSeen":false},"capabilities":'
+      'data: {"revision":0,"selectedTaskId":null,"selectionMode":"follow_activity","tasks":[],"selected":null,"compatibility":{"incompatibleClientSeen":false},"hooks":{"activitySeen":false},"capabilities":'
     );
   });
 
@@ -768,6 +769,7 @@ describe("local progress HTTP service", () => {
       code: "STALE_REVISION",
       revision: 1
     });
+    expect(fixture.server.hookActivity()).toEqual({ activitySeen: true, lastEventAt: 100 });
     expect(fixture.server.store.snapshot().tasks).toHaveLength(1);
   });
 

@@ -138,6 +138,10 @@ const aggregateSnapshotSchema = z.object({
   tasks: z.array(taskSummarySchema),
   selected: z.object({ task: taskSnapshotSchema, eta: etaSchema.nullable() }).strict().nullable(),
   compatibility: z.object({ incompatibleClientSeen: z.boolean() }).strict(),
+  hooks: z.object({
+    activitySeen: z.boolean(),
+    lastEventAt: z.number().int().nonnegative().optional()
+  }).strict().optional(),
   capabilities: capabilitiesSchema.optional()
 }).strict();
 const legacySnapshotSchema = z.object({

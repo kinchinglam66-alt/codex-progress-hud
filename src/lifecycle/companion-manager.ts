@@ -1178,7 +1178,7 @@ export function createCompanionManager(
         }
       }
       const selectedTask = taskSnapshot?.selected?.task;
-      const activitySeen = selectedTask?.lastRuntimeEvidenceAt !== undefined;
+      const hookActivity = taskSnapshot?.hooks ?? { activitySeen: false };
       const currentLease = dependencies.client.currentLease?.();
       const incompatibleClientSeen = snapshot.health?.capabilities?.incompatibleClientSeen
         ?? taskSnapshot?.compatibility.incompatibleClientSeen
@@ -1210,11 +1210,11 @@ export function createCompanionManager(
         errors: [...recentErrors],
         hooks: {
           expected: true,
-          trusted: activitySeen,
-          activitySeen,
-          ...(selectedTask?.lastRuntimeEvidenceAt === undefined
+          ...(hookActivity.activitySeen ? { trusted: true } : {}),
+          activitySeen: hookActivity.activitySeen,
+          ...(hookActivity.lastEventAt === undefined
             ? {}
-            : { lastEventAt: selectedTask.lastRuntimeEvidenceAt })
+            : { lastEventAt: hookActivity.lastEventAt })
         },
         lease: { active: currentLease !== undefined, count: currentLease === undefined ? 0 : 1 },
         compatibility: {

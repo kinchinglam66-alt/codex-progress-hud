@@ -82,6 +82,7 @@ export interface DesktopProgressServer {
     on(event: "changed", listener: (snapshot: unknown) => void): unknown;
   };
   leaseStore?: { active(): readonly unknown[] };
+  hookActivity?: () => { activitySeen: boolean; lastEventAt?: number };
 }
 
 export interface DesktopTrayImage {
@@ -582,7 +583,7 @@ export async function runDesktop(
           onDiagnose: () => {
             const diagnosticTaskSnapshot = latestTaskSnapshot ?? taskStore?.snapshot();
             const selectedTask = diagnosticTaskSnapshot?.selected?.task;
-            const activitySeen = selectedTask?.lastRuntimeEvidenceAt !== undefined;
+            const hookActivity = progressServer?.hookActivity?.() ?? { activitySeen: false };
             const selectedStatus = selectedTask?.status;
             const leaseCount = progressServer?.leaseStore?.active().length ?? 0;
             return resolved.diagnose({
@@ -595,11 +596,11 @@ export async function runDesktop(
               errors: [...recentErrors],
               hooks: {
                 expected: true,
-                trusted: activitySeen,
-                activitySeen,
-                ...(selectedTask?.lastRuntimeEvidenceAt === undefined
+                ...(hookActivity.activitySeen ? { trusted: true } : {}),
+                activitySeen: hookActivity.activitySeen,
+                ...(hookActivity.lastEventAt === undefined
                   ? {}
-                  : { lastEventAt: selectedTask.lastRuntimeEvidenceAt })
+                  : { lastEventAt: hookActivity.lastEventAt })
               },
               lease: { active: leaseCount > 0, count: leaseCount },
               compatibility: {

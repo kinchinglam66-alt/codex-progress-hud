@@ -20,6 +20,7 @@ export interface HudAggregateSnapshot {
   tasks: TaskSummary[];
   selected: { task: TaskSnapshot; eta: EtaEstimate | null } | null;
   compatibility: { incompatibleClientSeen: boolean };
+  hooks?: { activitySeen: boolean; lastEventAt?: number };
 }
 
 export type HudSnapshot = HudAggregateSnapshot;

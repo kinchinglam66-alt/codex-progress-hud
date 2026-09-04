@@ -40,6 +40,12 @@ Base commit: `45ba6e0ffcd346d0ac289ab59b9c944a6a2c0c7c`
 
 `task-9-review.md` was not modified or staged.
 
+## Final bounded correction
+
+A fix re-review found that production still inferred Hook trust from the selected task's generic runtime evidence. The final correction records Hook receipt once at the HTTP boundary, exposes only `{activitySeen, lastEventAt}` in aggregate/status diagnostics, and uses that global state in both desktop and MCP diagnostic paths. A non-selected task's Hook can therefore establish global activity, while an expected Hook with no observed event is reported as “trust not confirmed” rather than falsely “untrusted.” `PRIVACY.md` now matches the README and threat model for existing-conversation late attachment, `hud_hide`, and non-persistent `hud_close` behavior.
+
+Focused verification after this correction: 5 files and 208 tests passed, including the HTTP boundary, report client, both production callers, and report formatter. The first focused run exposed only the known Windows `ENOTEMPTY` teardown race; an unchanged isolated desktop rerun passed 47/47. Fresh final checks passed: serialized full suite 30 files/529 tests, typecheck, build, plugin validation, and `git diff --check`.
+
 ## Compatibility and privacy notes
 
 The report API keeps the Task 10 dimensions optional for existing callers. Both production callers populate them. History is constructed and serialized as the fixed `{code, at}` shape only; no caller-provided identifiers or payloads are retained.

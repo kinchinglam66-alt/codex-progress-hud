@@ -344,6 +344,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   leaseSweepTimer.unref();
   const hookEventIds = new Set<string>();
   const hookEventOrder: string[] = [];
+  let lastHookEventAt: number | undefined;
   function capabilities(health: HudHealth): HudCapabilities {
     return {
       service: "codex-progress-hud",
@@ -354,8 +355,14 @@ export function createProgressServer(options: ProgressServerOptions) {
   }
 
   function snapshotPayload(snapshot = store.snapshot()): HudSnapshot & { capabilities?: HudCapabilities } {
-    if (options.health === undefined) return snapshot;
-    return { ...snapshot, capabilities: capabilities(options.health()) };
+    return {
+      ...snapshot,
+      hooks: {
+        activitySeen: lastHookEventAt !== undefined,
+        ...(lastHookEventAt === undefined ? {} : { lastEventAt: lastHookEventAt })
+      },
+      ...(options.health === undefined ? {} : { capabilities: capabilities(options.health()) })
+    };
   }
 
   function mcpSnapshot(request: IncomingMessage, snapshot: HudSnapshot): HudSnapshot {
@@ -512,9 +519,10 @@ export function createProgressServer(options: ProgressServerOptions) {
     });
   }
 
-  function rememberHookEvent(eventId: string): void {
+  function rememberHookEvent(eventId: string, receivedAt: number): void {
     hookEventIds.add(eventId);
     hookEventOrder.push(eventId);
+    lastHookEventAt = lastHookEventAt === undefined ? receivedAt : Math.max(lastHookEventAt, receivedAt);
     while (hookEventOrder.length > MAX_REMEMBERED_HOOK_IDS) {
       const oldest = hookEventOrder.shift();
       if (oldest !== undefined) hookEventIds.delete(oldest);
@@ -713,7 +721,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           }
           if (hookEventIds.has(envelope.eventId)) return store.snapshot();
           const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
-          rememberHookEvent(envelope.eventId);
+          rememberHookEvent(envelope.eventId, envelope.receivedAt);
           return snapshot;
         });
         cancellation.complete();
@@ -907,6 +915,10 @@ export function createProgressServer(options: ProgressServerOptions) {
   return {
     store,
     leaseStore,
+    hookActivity: () => ({
+      activitySeen: lastHookEventAt !== undefined,
+      ...(lastHookEventAt === undefined ? {} : { lastEventAt: lastHookEventAt })
+    }),
     async listen(): Promise<void> {
       await tokenPromise;
       if (server !== undefined) return;

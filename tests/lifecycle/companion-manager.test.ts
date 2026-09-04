@@ -118,11 +118,12 @@ async function harness(options: {
           modelConfidence: undefined,
           trackingOrigin: "late_attach" as const,
           trackedFrom: 1,
-          lastRuntimeEvidenceAt: 1234
+          lastRuntimeEvidenceAt: 999
         },
         eta: null
       },
-      compatibility: { incompatibleClientSeen: true }
+      compatibility: { incompatibleClientSeen: true },
+      hooks: { activitySeen: true, lastEventAt: 1234 }
     }))
   };
   const delays: number[] = [];

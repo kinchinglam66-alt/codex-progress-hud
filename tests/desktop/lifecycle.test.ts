@@ -63,6 +63,7 @@ function desktopHarness(lockAcquired = true) {
       url: "http://127.0.0.1:17837"
     })),
     leaseStore: { active: vi.fn<() => readonly unknown[]>(() => []) },
+    hookActivity: vi.fn((): { activitySeen: boolean; lastEventAt?: number } => ({ activitySeen: false })),
     store: taskStore
   };
   let trayCallbacks: Parameters<DesktopDependencies["createTrayController"]>[0] | undefined;
@@ -865,7 +866,7 @@ describe("desktop lifecycle", () => {
       observedState: "hidden",
       runtimeAgeMs: 0,
       errors: [],
-      hooks: { expected: true, trusted: false, activitySeen: false },
+      hooks: { expected: true, activitySeen: false },
       lease: { active: false, count: 0 },
       compatibility: { compatible: true, incompatibleClientSeen: false },
       tracking: { taskCount: 0, lateAttached: false },
@@ -890,7 +891,7 @@ describe("desktop lifecycle", () => {
       observedState: "hidden",
       runtimeAgeMs: 0,
       errors: [{ code: "INTERNAL_ERROR", occurredAt: "2026-09-02T00:00:00.000Z" }],
-      hooks: { expected: true, trusted: false, activitySeen: false },
+      hooks: { expected: true, activitySeen: false },
       lease: { active: false, count: 0 },
       compatibility: { compatible: true, incompatibleClientSeen: false },
       tracking: { taskCount: 0, lateAttached: false },
@@ -920,12 +921,13 @@ describe("desktop lifecycle", () => {
         task: {
           status: "quiescent",
           trackingOrigin: "late_attach",
-          lastRuntimeEvidenceAt: 1234
+          lastRuntimeEvidenceAt: 999
         }
       },
       compatibility: { incompatibleClientSeen: true }
     });
     harness.progressServer.leaseStore.active.mockReturnValue([{}, {}]);
+    harness.progressServer.hookActivity.mockReturnValue({ activitySeen: true, lastEventAt: 1234 });
 
     await runDesktop(harness.dependencies);
     await harness.trayCallbacks?.onDiagnose();

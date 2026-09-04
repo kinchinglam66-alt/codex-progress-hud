@@ -156,11 +156,11 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
   const hooksInput = input.hooks;
   const hooks = hooksInput === undefined ? undefined : {
     expected: hooksInput.expected,
-    trusted: hooksInput.trusted ?? false,
+    ...(hooksInput.trusted === undefined ? {} : { trusted: hooksInput.trusted }),
     activitySeen: hooksInput.activitySeen,
     ...(hooksInput.lastEventAt === undefined ? {} : { lastEventAt: safeInteger(hooksInput.lastEventAt, "Hook last event", 0, Number.MAX_SAFE_INTEGER) })
   };
-  if (hooks !== undefined && (typeof hooks.expected !== "boolean" || typeof hooks.trusted !== "boolean" || typeof hooks.activitySeen !== "boolean")) throw new TypeError("Hook diagnostics must be booleans");
+  if (hooks !== undefined && (typeof hooks.expected !== "boolean" || (hooks.trusted !== undefined && typeof hooks.trusted !== "boolean") || typeof hooks.activitySeen !== "boolean")) throw new TypeError("Hook diagnostics must be booleans");
   const leaseInput = input.lease;
   const lease = leaseInput === undefined ? undefined : { active: leaseInput.active, count: safeInteger(leaseInput.count, "lease count", 0, 1_000) };
   if (lease !== undefined && typeof lease.active !== "boolean") throw new TypeError("lease state must be boolean");
@@ -212,9 +212,11 @@ async function writeDiagnosticReportWithFileSystem(
   const hookConclusion = snapshot.hooks === undefined
     ? "not reported"
     : !snapshot.hooks.expected
-      ? "not expected/disabled"
-      : !snapshot.hooks.trusted
-        ? "untrusted; no activity"
+      ? "not expected by this plugin build"
+      : snapshot.hooks.trusted === false
+        ? "not trusted; no activity"
+        : snapshot.hooks.trusted === undefined
+          ? "expected; trust not confirmed; no activity"
         : !snapshot.hooks.activitySeen ? "trusted; no activity" : "trusted; activity seen";
   const leaseConclusion = snapshot.lease === undefined
     ? "not reported" : snapshot.lease.active ? `connected (${snapshot.lease.count})` : "disconnected";

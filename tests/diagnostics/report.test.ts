@@ -44,7 +44,7 @@ describe("diagnostic report", () => {
     const markdown = await readFile(result.path, "utf8");
 
     expect(markdown).toContain("Installation: not detected");
-    expect(markdown).toContain("Hook trust/activity: untrusted; no activity");
+    expect(markdown).toContain("Hook trust/activity: not trusted; no activity");
     expect(markdown).toContain("MCP lease: disconnected");
     expect(markdown).toContain("Companion process: offline");
     expect(markdown).toContain("Protocol compatibility: mismatch");
@@ -64,10 +64,24 @@ describe("diagnostic report", () => {
     });
     const markdown = await readFile(result.path, "utf8");
 
-    expect(markdown).toContain("Hook trust/activity: not expected/disabled");
+    expect(markdown).toContain("Hook trust/activity: not expected by this plugin build");
     expect(markdown).toContain("Companion process: online");
     expect(markdown).toContain("Protocol compatibility: compatible; incompatible client seen");
     expect(markdown).toContain("protocol_mismatch at 2026-09-02T00:00:00.000Z");
+  });
+
+  it("does not claim an expected Hook is untrusted before activity is observed", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-hook-unknown-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+
+    const result = await writeDiagnosticReport({
+      ...validInput(directory),
+      hooks: { expected: true, activitySeen: false }
+    });
+    const markdown = await readFile(result.path, "utf8");
+
+    expect(markdown).toContain("Hook trust/activity: expected; trust not confirmed; no activity");
+    expect(markdown).not.toContain("untrusted");
   });
 
   it("keeps diagnostic output content-free even when runtime inputs contain secrets", async () => {
