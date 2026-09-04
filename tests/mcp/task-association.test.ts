@@ -11,6 +11,7 @@ describe("MCP task association", () => {
     const handle = createFallbackTaskHandle(() => Buffer.alloc(24, 7));
 
     expect(handle).toMatch(/^hud_[A-Za-z0-9_-]{20,96}$/u);
+    expect(handle).toBe("hud_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH");
   });
 
   it("prefers a validated explicit handle", () => {
