@@ -1,0 +1,14 @@
+{
+  "name": "kinchinglam66-alt",
+  "interface": { "displayName": "kinchinglam66-alt" },
+  "owner": { "name": "kinchinglam66-alt" },
+  "plugins": [
+    {
+      "name": "codex-progress-hud",
+      "source": { "source": "local", "path": "./plugins/codex-progress-hud" },
+      "description": "Local progress, task status, and honest ETA ranges for Codex.",
+      "category": "Productivity",
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+    }
+  ]
+}

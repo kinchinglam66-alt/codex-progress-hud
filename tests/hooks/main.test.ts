@@ -346,7 +346,7 @@ describe.runIf(process.platform === "win32")("PowerShell Hook launcher", () => {
     const executablePath = join(installDirectory, "Codex Progress HUD.exe");
     const manifestDirectory = join(appData, "codex-progress-hud");
     await Promise.all([
-      mkdir(installDirectory, { recursive: true }),
+      mkdir(join(installDirectory, "resources"), { recursive: true }),
       mkdir(manifestDirectory, { recursive: true })
     ]);
     await writeFile(executablePath, "not a Windows executable");
@@ -371,7 +371,7 @@ describe.runIf(process.platform === "win32")("PowerShell Hook launcher", () => {
     const executablePath = join(installDirectory, "Codex Progress HUD.exe");
     const manifestDirectory = join(appData, "codex-progress-hud");
     await Promise.all([
-      mkdir(installDirectory, { recursive: true }),
+      mkdir(join(installDirectory, "resources"), { recursive: true }),
       mkdir(manifestDirectory, { recursive: true })
     ]);
     const built = await runProcess(
@@ -432,12 +432,12 @@ describe("packaged Hook contract", () => {
       readFile(join(root, "scripts", "validate-plugin.mjs"), "utf8")
     ]);
     const manifest = JSON.parse(manifestText) as { hooks?: string };
-    expect(manifest.hooks).toBe("./hooks/hooks.json");
+    expect(manifest.hooks).toBeUndefined();
     expect(launcher).toContain("install.json");
     expect(launcher).toContain("executablePath");
     expect(launcher).toContain("Test-Path -LiteralPath");
     expect(launcher).toContain("--hook-event=");
-    expect(launcher.toLowerCase()).not.toContain("node");
+    expect(launcher).not.toMatch(/(?:^|\s)(?:node|npm)(?:\.exe)?(?:\s|$)/imu);
     const parameterBlock = launcher.match(/param\s*\(([\s\S]*?)\)/iu)?.[1] ?? "";
     expect(parameterBlock).not.toMatch(/executablepath/iu);
     expect(copyAssets).toContain("hooks/hooks.json");

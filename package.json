@@ -1,6 +1,6 @@
 {
   "name": "codex-progress-hud",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local, privacy-first progress and ETA overlay for Codex tasks.",
   "author": "kinchinglam66-alt",
   "repository": {
@@ -27,8 +27,20 @@
     "start:mcp": "npm run build && node dist/main.js --mcp-stdio",
     "mcp": "node dist/mcp/main.js",
     "smoke": "npm run build && node scripts/smoke-test.mjs",
+    "smoke:packaged": "node scripts/smoke-packaged.mjs",
     "diagnose:mcp": "vitest --run tests/mcp/stdio-server.test.ts --reporter=verbose",
-    "validate:plugin": "node scripts/validate-plugin.mjs"
+    "diagnose:mcp:packaged": "node scripts/diagnose-packaged-mcp.mjs",
+    "validate:plugin": "node scripts/validate-plugin.mjs",
+    "build:launcher": "node scripts/build-native-launcher.mjs",
+    "pack:win": "npm run build && electron-builder --win --x64 --dir",
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "sync:plugin": "npm run build:launcher && node scripts/sync-plugin-package.mjs",
+    "check:plugin-sync": "node scripts/sync-plugin-package.mjs --check",
+    "package:plugin": "node scripts/package-plugin.mjs",
+    "checksums": "node scripts/write-checksums.mjs",
+    "release:artifacts": "npm run dist:win && npm run sync:plugin && npm run package:plugin && npm run checksums",
+    "test:package-contract": "node scripts/package-contract-test.mjs",
+    "verify:release": "npm test -- --run --maxWorkers=1 --no-file-parallelism && npm run typecheck && npm run build && npm run smoke && npm run check:plugin-sync && npm run validate:plugin && npm run test:package-contract"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -37,6 +49,7 @@
   "devDependencies": {
     "@types/node": "^26.4.0",
     "electron": "^44.1.0",
+    "electron-builder": "26.15.3",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }

@@ -589,7 +589,7 @@ Before installation, resolve and stop only the known development companion. Inst
 
 - [ ] **Step 3: Install the repository marketplace and release plugin**
 
-Run `codex plugin marketplace list`. If `kinchinglam66-alt` is absent, run `codex plugin marketplace add C:\\Users\\asus\\Documents\\Codex\\2026-09-01\\z\\outputs\\codex-progress-hud`. Then run `codex plugin add codex-progress-hud@kinchinglam66-alt`. Do not hand-edit marketplace JSON or Codex config.
+Run `codex plugin marketplace list`. If `kinchinglam66-alt` is absent, run `codex plugin marketplace add <checkout-path>`. Then run `codex plugin add codex-progress-hud@kinchinglam66-alt`. Do not hand-edit marketplace JSON or Codex config.
 
 - [ ] **Step 4: Restart Codex and execute the manual lifecycle matrix**
 

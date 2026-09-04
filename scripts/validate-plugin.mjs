@@ -46,8 +46,8 @@ if (
 if (manifest.mcpServers !== "./.mcp.json") {
   throw new Error("plugin.json must reference ./.mcp.json");
 }
-if (manifest.hooks !== "./hooks/hooks.json") {
-  throw new Error("plugin.json must reference ./hooks/hooks.json");
+if (manifest.hooks !== undefined) {
+  throw new Error("plugin.json must omit unsupported hooks metadata; hooks/hooks.json is convention-discovered");
 }
 
 const mcpConfigPath = resolve(pluginRoot, manifest.mcpServers);
@@ -67,7 +67,7 @@ if (!Array.isArray(mcpServer.args) || typeof mcpServer.args[0] !== "string") {
 
 await access(resolve(pluginRoot, mcpServer.cwd, mcpServer.args[0]));
 await access(resolve(pluginRoot, "skills/progress-reporting/SKILL.md"));
-const hooksConfigPath = resolve(pluginRoot, manifest.hooks);
+const hooksConfigPath = resolve(pluginRoot, "hooks/hooks.json");
 const hooksConfig = JSON.parse(await readFile(hooksConfigPath, "utf8"));
 const supportedHookNames = [
   "SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"
@@ -113,7 +113,7 @@ if (hooksConfig.hooks.SessionStart[0].matcher !== "startup|resume|clear|compact"
 const hookLauncher = await readFile(resolve(pluginRoot, "scripts/launch-hook.ps1"), "utf8");
 const launcherParameterBlock = hookLauncher.match(/param\s*\(([\s\S]*?)\)/iu)?.[1] ?? "";
 if (
-  /\b(?:node|npm)\b/iu.test(hookLauncher) ||
+  /(?:^|\s)(?:node|npm)(?:\.exe)?(?:\s|$)/imu.test(hookLauncher) ||
   /executablepath/iu.test(launcherParameterBlock) ||
   /-ExecutablePath\b/iu.test(hookLauncher) ||
   !hookLauncher.includes("install.json") ||
@@ -123,4 +123,25 @@ if (
 ) {
   throw new Error("Hook launcher must validate install.json and invoke the installed executable directly");
 }
-process.stdout.write("Plugin manifest and MCP launch configuration are valid.\n");
+const releaseRoot = resolve(pluginRoot, "plugins/codex-progress-hud");
+const releaseManifest = JSON.parse(await readFile(resolve(releaseRoot, ".codex-plugin/plugin.json"), "utf8"));
+const releaseMcp = JSON.parse(await readFile(resolve(releaseRoot, ".mcp.json"), "utf8"));
+const releaseServer = releaseMcp.mcpServers?.[manifest.name];
+if (releaseManifest.name !== manifest.name || releaseManifest.version !== packageManifest.version) {
+  throw new Error("release plugin identity must match the canonical package");
+}
+if (releaseServer?.command !== "./scripts/codex-progress-hud-launcher.exe" || releaseServer.cwd !== ".") {
+  throw new Error("release MCP must use the native launcher from the plugin root");
+}
+if (!Array.isArray(releaseServer.args) || releaseServer.args.some((value) => typeof value !== "string" || value.includes("..")) || /\bnode(?:\.exe)?\b/iu.test(JSON.stringify(releaseServer))) {
+  throw new Error("release MCP launcher must be plugin-relative and Node-free");
+}
+for (const relativePath of ["hooks/hooks.json", "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1", "skills/progress-reporting/SKILL.md"]) {
+  await access(resolve(releaseRoot, relativePath));
+}
+const marketplace = JSON.parse(await readFile(resolve(pluginRoot, ".agents/plugins/marketplace.json"), "utf8"));
+const marketplacePlugin = marketplace.plugins?.find((entry) => entry.name === manifest.name);
+if (marketplace.name !== "kinchinglam66-alt" || marketplacePlugin?.source?.path !== "./plugins/codex-progress-hud") {
+  throw new Error("repository marketplace does not expose the release plugin");
+}
+process.stdout.write("Plugin manifest, Hooks, marketplace, and MCP launch configurations are valid.\n");

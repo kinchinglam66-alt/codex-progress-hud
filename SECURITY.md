@@ -17,6 +17,7 @@ If private vulnerability reporting is unavailable, open a public issue containin
 - The renderer has no Node integration and runs with context isolation and sandboxing.
 - Model-provided fields are untrusted and validated before entering the reducer.
 - The project does not treat model text as proof of runtime success.
+- Release installers are unsigned until a trusted code-signing certificate is configured; verify the published SHA-256 checksums before execution.
+- Packaged launchers accept only the installer-written exact executable path and never invoke a shell-selected Node runtime.
 
 See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for detailed assumptions and residual risks.
-

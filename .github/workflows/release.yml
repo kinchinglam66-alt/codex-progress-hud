@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          $expected = "v$((Get-Content -Raw package.json | ConvertFrom-Json).version)"
+          if ($env:GITHUB_REF_NAME -ne $expected) { throw "Tag $env:GITHUB_REF_NAME does not match $expected" }
+      - run: npm run verify:release
+      - run: npm run release:artifacts
+      - run: npm run smoke:packaged
+      - run: npm run diagnose:mcp:packaged
+      - name: Verify checksums
+        shell: pwsh
+        run: Get-Content release/SHA256SUMS.txt | ForEach-Object { $hash, $file = $_ -split '  ', 2; if ((Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "Checksum mismatch: $file" } }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Codex-Progress-HUD-Setup-0.2.0.exe
+            release/codex-progress-hud-plugin-0.2.0.zip
+            release/SHA256SUMS.txt

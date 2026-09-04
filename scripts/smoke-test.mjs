@@ -9,7 +9,7 @@ let shutdownRequested = false;
 const health = {
   service: "codex-progress-hud",
   pid: process.pid,
-  version: "0.1.0-smoke",
+  version: "0.2.0-smoke",
   protocolVersion: 1,
   instanceNonce: "smoke-owned-instance",
   startedAt: new Date().toISOString(),
@@ -29,7 +29,8 @@ try {
   const token = (await readFile(tokenPath, "utf8")).trim();
   const headers = {
     authorization: `Bearer ${token}`,
-    "content-type": "application/json"
+    "content-type": "application/json",
+    "x-codex-progress-hud-protocol": "1"
   };
   const identityResponse = await fetch(`${server.address().url}/health`);
   const identity = await identityResponse.json();
@@ -37,9 +38,11 @@ try {
   const authenticatedHealth = await healthResponse.json();
   const eventResponse = await fetch(`${server.address().url}/api/events`, {
     method: "POST",
-    headers,
+    headers: { ...headers, "x-codex-progress-hud-revision": "0" },
     body: JSON.stringify({
-      taskId: "smoke-task",
+      schemaVersion: 1,
+      taskId: "hud_smoke_task_abcdefghijklmnopqrstuvwxyz",
+      eventId: "evt_smoke_event_abcdefghijklmnopqrstuvwxyz",
       title: "Synthetic verification",
       event: {
         type: "model_progress",
@@ -67,8 +70,8 @@ try {
     authenticatedHealth.instanceNonce !== health.instanceNonce ||
     eventResponse.status !== 202 ||
     snapshotResponse.status !== 200 ||
-    snapshot.task?.status !== "running" ||
-    snapshot.task?.progress !== 0.5 ||
+    snapshot.selected?.task?.status !== "running" ||
+    snapshot.selected?.task?.progress !== 0.5 ||
     shutdownResponse.status !== 202 ||
     shutdown.accepted !== true ||
     !shutdownRequested

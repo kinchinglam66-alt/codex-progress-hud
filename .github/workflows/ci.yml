@@ -26,4 +26,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run validate:plugin
-
+      - if: runner.os == 'Windows'
+        run: npm run pack:win
+      - if: runner.os == 'Windows'
+        run: npm run smoke:packaged
+      - if: runner.os == 'Windows'
+        run: npm run diagnose:mcp:packaged

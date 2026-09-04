@@ -14,6 +14,7 @@ export interface BrowserWindowOptionsLike {
     contextIsolation: boolean;
     nodeIntegration: boolean;
     sandbox: boolean;
+    spellcheck: boolean;
     partition: string;
   };
 }
@@ -87,6 +88,7 @@ const WINDOW_OPTIONS: BrowserWindowOptionsLike = {
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
+    spellcheck: false,
     partition: "codex-progress-hud"
   }
 };

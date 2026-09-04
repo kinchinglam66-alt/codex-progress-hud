@@ -10,13 +10,9 @@ After installing or updating, fully quit Codex Desktop and reopen it so the host
 
 Window and task controls are separate presentation controls. Show/hide changes only window visibility. Per-task select, pause, resume, and stop changes only that task’s HUD presentation/timing. None of these controls enables or disables the plugin, and none pauses, cancels, or controls Codex execution. `hud_hide` is an ordinary window-visibility alias, not a deprecated lifecycle alias. `hud_close` is a deprecated compatibility alias for an immediate shutdown request; it does not persist a global off preference. These aliases are not another global switch.
 
-## Installation and troubleshooting
+## Windows installation and troubleshooting
 
-```powershell
-npm ci
-npm run build
-npm run validate:plugin
-```
+Install the Windows companion first, then add and enable the matching release plugin in Codex. Review its Hooks and fully restart Codex once. The installer is per-user, requires no global Node.js, and is unsigned until a trusted signing certificate is configured. See [Install on Windows](docs/INSTALL-WINDOWS.md) for checksum, install, update, disable, and uninstall instructions.
 
 If tools are missing, run `npm run diagnose:mcp`. If tools are present but the companion is offline, check the installed bundle and local executable. If versions mismatch, update both sides and fully restart Codex; do not mix an old MCP client with a new companion. `hud_diagnose` reports installation, Hook trust/activity, MCP lease, companion process, protocol compatibility, and per-task tracking separately.
 

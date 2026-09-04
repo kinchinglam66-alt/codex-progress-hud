@@ -9,7 +9,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: HUD version
+      label: Plugin, companion, and protocol versions
     validations:
       required: true
   - type: input
@@ -39,11 +39,21 @@ body:
       label: Expected behavior
     validations:
       required: true
+  - type: input
+    id: error-code
+    attributes:
+      label: Structured error code
+      description: Include only the bounded code shown by the HUD or launcher.
+  - type: textarea
+    id: lifecycle-state
+    attributes:
+      label: Desired and observed states
+      description: Include installation, Hook activity, MCP lease, companion, compatibility, and tracking categories without task content.
   - type: textarea
     id: mcp-diagnostic
     attributes:
       label: MCP diagnostic result
-      description: Run npm run diagnose:mcp and paste only the redacted summary. Do not include tokens or private paths.
+      description: Attach only the sanitized report after reviewing it. Never include tokens, prompts, source files, raw identifiers, private paths, or unredacted logs.
   - type: input
     id: activated-cache-version
     attributes:

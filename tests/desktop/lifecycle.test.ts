@@ -15,6 +15,12 @@ import { HudClientError } from "../../src/mcp/report-client.js";
 import { EventEmitter } from "node:events";
 
 const cleanups: Array<() => Promise<void>> = [];
+const removeFixtureDirectory = (path: string) => rm(path, {
+  recursive: true,
+  force: true,
+  maxRetries: 5,
+  retryDelay: 20
+});
 
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
@@ -71,6 +77,7 @@ function desktopHarness(lockAcquired = true) {
   let hideSelectedTask: ((taskId: string) => void | Promise<void>) | undefined;
   const dependencies: DesktopDependencies = {
     app: {
+      disableHardwareAcceleration: vi.fn(),
       requestSingleInstanceLock: vi.fn(() => lockAcquired),
       releaseSingleInstanceLock: vi.fn(() => order.push("release-singleton")),
       whenReady: vi.fn(async () => undefined),
@@ -158,7 +165,7 @@ function deferred<T>() {
 
 async function realStateStores() {
   const directory = await mkdtemp(join(tmpdir(), "hud-desktop-publication-"));
-  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  cleanups.push(() => removeFixtureDirectory(directory));
   const paths = {
     settingsPath: join(directory, "settings.json"),
     runtimePath: join(directory, "runtime.json"),
@@ -193,6 +200,7 @@ describe("desktop lifecycle", () => {
 
     await runDesktop(harness.dependencies);
 
+    expect(harness.dependencies.app.disableHardwareAcceleration).toHaveBeenCalledOnce();
     expect(harness.dependencies.app.quit).toHaveBeenCalledOnce();
     expect(harness.dependencies.createProgressServer).not.toHaveBeenCalled();
     expect(harness.dependencies.stateStore.writeRuntime).not.toHaveBeenCalled();
@@ -310,6 +318,7 @@ describe("desktop lifecycle", () => {
     const { desktopStore, closingStore } = await realStateStores();
     const activationCommitted = deferred<void>();
     const allowActivationReturn = deferred<void>();
+    const activationGuardComplete = deferred<void>();
     let activation: ReturnType<LifecycleStateStore["setDesiredState"]> | undefined;
     harness.dependencies.stateStore = {
       ...desktopStore,
@@ -324,6 +333,11 @@ describe("desktop lifecycle", () => {
         })();
         if (state === "on") activation = pending;
         return pending;
+      },
+      runIfGeneration: async (generation, desiredState, operation, options) => {
+        const result = await desktopStore.runIfGeneration(generation, desiredState, operation, options);
+        activationGuardComplete.resolve();
+        return result;
       }
     };
     await runDesktop(harness.dependencies, { kind: "manager", generation: 1 });
@@ -337,7 +351,7 @@ describe("desktop lifecycle", () => {
 
     allowActivationReturn.resolve();
     await activation;
-    await Promise.resolve();
+    await activationGuardComplete.promise;
     expect(event.preventDefault).toHaveBeenCalledOnce();
     expect(harness.windowController.show).not.toHaveBeenCalled();
   });

@@ -1,0 +1,26 @@
+appId: io.github.kinchinglam66alt.codex-progress-hud
+productName: Codex Progress HUD
+asar: true
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+  - LICENSE
+  - NOTICE
+extraResources:
+  - from: build/stop-companion.ps1
+    to: stop-companion.ps1
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: Codex-Progress-HUD-Setup-${version}.${ext}
+nsis:
+  perMachine: false
+  oneClick: false
+  allowElevation: false
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  runAfterFinish: false
+  include: build/installer.nsh

@@ -48,6 +48,7 @@ export function scheduleAfterReady(
 }
 
 export interface DesktopAppLike {
+  disableHardwareAcceleration(): void;
   requestSingleInstanceLock(): boolean;
   releaseSingleInstanceLock(): void;
   whenReady(): Promise<void>;
@@ -240,6 +241,7 @@ export async function runDesktop(
   launchReason: DesktopLaunchReason = { kind: "explicit" }
 ): Promise<void> {
   const resolved = dependencies ?? await defaultDesktopDependencies();
+  resolved.app.disableHardwareAcceleration();
   if (!resolved.app.requestSingleInstanceLock()) {
     resolved.app.quit();
     return;

@@ -14,6 +14,12 @@ import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 
 const cleanups: Array<() => Promise<void>> = [];
+const removeFixtureDirectory = (path: string) => rm(path, {
+  recursive: true,
+  force: true,
+  maxRetries: 5,
+  retryDelay: 20
+});
 
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
@@ -39,7 +45,7 @@ async function harness(options: {
   reportWriter?: (input: any) => Promise<{ path: string }>;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hud-manager-"));
-  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  cleanups.push(() => removeFixtureDirectory(directory));
   const executablePath = join(directory, "CodexProgressHUD.exe");
   const paths = {
     settingsPath: join(directory, "settings.json"),
@@ -174,7 +180,7 @@ async function guardedControlHarness(options: {
   lockAfterRejection?: boolean;
 }) {
   const directory = await mkdtemp(join(tmpdir(), "hud-manager-guarded-control-"));
-  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  cleanups.push(() => removeFixtureDirectory(directory));
   const paths = {
     settingsPath: join(directory, "settings.json"),
     runtimePath: join(directory, "runtime.json"),
@@ -654,7 +660,7 @@ describe("companion lifecycle manager", () => {
 
   it("sends the current on generation when hiding through the real guarded server", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-manager-real-hide-"));
-    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    cleanups.push(() => removeFixtureDirectory(directory));
     const paths = {
       settingsPath: join(directory, "settings.json"),
       runtimePath: join(directory, "runtime.json"),
@@ -702,7 +708,7 @@ describe("companion lifecycle manager", () => {
 
   it("returns current lifecycle truth when hide loses a generation race", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-manager-raced-hide-"));
-    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    cleanups.push(() => removeFixtureDirectory(directory));
     const paths = {
       settingsPath: join(directory, "settings.json"),
       runtimePath: join(directory, "runtime.json"),
@@ -1036,6 +1042,8 @@ describe("companion lifecycle manager", () => {
       online: true
     });
     let attempts = 0;
+    let retrySettled!: () => void;
+    const retryFinished = new Promise<void>((resolve_) => { retrySettled = resolve_; });
 
     const result = await manager.executeWrite("tracking_start", async (makeRequestOptions) => {
       const { signal } = makeRequestOptions();
@@ -1044,10 +1052,15 @@ describe("companion lifecycle manager", () => {
         setOnline(false);
         throw new HudClientError("OFFLINE", "companion disappeared before recovery");
       }
-      await manager.close();
-      if (code === "REQUEST_CANCELLED") expect(signal.aborted).toBe(true);
-      throw new HudClientError(code, "manual off won before retry submit");
+      try {
+        await manager.close();
+        if (code === "REQUEST_CANCELLED") expect(signal.aborted).toBe(true);
+        throw new HudClientError(code, "manual off won before retry submit");
+      } finally {
+        retrySettled();
+      }
     });
+    await retryFinished;
 
     expect(result).toEqual({ kind: "suppressed", code: "MANUALLY_DISABLED" });
     expect(attempts).toBe(2);
@@ -1236,7 +1249,7 @@ describe("companion lifecycle manager", () => {
 
   it("derives hanging startup request deadlines from the startup wall-clock budget", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-manager-budget-"));
-    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    cleanups.push(() => removeFixtureDirectory(directory));
     const tokenPath = join(directory, "auth.token");
     const executablePath = join(directory, "CodexProgressHUD.exe");
     const installManifestPath = join(directory, "install.json");
@@ -1459,7 +1472,7 @@ describe("companion lifecycle manager", () => {
 
   it("reports a live hanging listener as a degraded shutdown timeout without claiming completion", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-close-budget-"));
-    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    cleanups.push(() => removeFixtureDirectory(directory));
     const tokenPath = join(directory, "auth.token");
     await writeFile(tokenPath, "budget-token\n");
     const server = createServer(() => undefined);

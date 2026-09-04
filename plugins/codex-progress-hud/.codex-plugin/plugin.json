@@ -1,0 +1,35 @@
+{
+  "name": "codex-progress-hud",
+  "version": "0.2.0",
+  "description": "Local progress, status, and ETA reporting for Codex tasks.",
+  "author": {
+    "name": "kinchinglam66-alt",
+    "url": "https://github.com/kinchinglam66-alt"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "progress",
+    "eta",
+    "overlay",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex Progress HUD",
+    "shortDescription": "Show task progress, status, and honest ETA ranges.",
+    "longDescription": "A privacy-first local companion that lets Codex report structured task progress to an always-on-top desktop overlay.",
+    "developerName": "kinchinglam66-alt",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Show this task's automatic Progress HUD status.",
+      "Report this task's current phase and ETA.",
+      "Show the latest Progress HUD status."
+    ],
+    "brandColor": "#7C5CFC"
+  }
+}

@@ -15,6 +15,7 @@ import {
 } from "../server/paths.js";
 import { CompanionHttpClient } from "./report-client.js";
 import { createMcpLeaseLifecycle } from "./lease-lifecycle.js";
+import { RELEASE_CAPABILITIES } from "../generated/capabilities.js";
 import {
   createToolHandlers,
   progressReportSchema,
@@ -25,7 +26,7 @@ import {
 } from "./tools.js";
 
 export async function runMcpServer(): Promise<void> {
-  const version = "0.1.0";
+  const version = RELEASE_CAPABILITIES.buildVersion;
   const server = new McpServer({ name: "codex-progress-hud", version });
   const ownerNonce = randomUUID();
   const progressClient = new CompanionHttpClient();

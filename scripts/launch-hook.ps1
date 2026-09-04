@@ -65,9 +65,11 @@ try {
     throw "installed executable path is not canonical"
   }
 
-  & $fullExecutablePath "--hook-event=$HookName"
-  if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+  $entryScript = Join-Path $fullInstallDirectory "resources\app.asar\dist\main.js"
+  . (Join-Path $PSScriptRoot "invoke-node-mode.ps1")
+  $exitCode = Invoke-CodexProgressHudNodeMode $fullExecutablePath $entryScript "--hook-event=$HookName"
+  if ($exitCode -ne 0) {
+    exit $exitCode
   }
   exit 0
 }

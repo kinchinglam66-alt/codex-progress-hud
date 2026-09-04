@@ -74,6 +74,7 @@ describe("WindowController", () => {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        spellcheck: false,
         partition: "codex-progress-hud"
       }
     });
