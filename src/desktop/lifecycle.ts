@@ -36,6 +36,7 @@ import {
   type BrowserWindowLike,
   type BrowserWindowOptionsLike
 } from "./window-controller.js";
+import { createTaskMutationController } from "../ui/task-mutations.js";
 
 export function scheduleAfterReady(
   ready: Promise<void>,
@@ -58,7 +59,7 @@ export interface DesktopWindowController {
   create(options: { url: string; token: string }): Promise<void>;
   show(): void;
   hide(): void;
-  selectTask(taskId: string | null): void;
+  selectTask(taskId: string | null, options?: { hiddenForTask?: boolean }): void;
   onTaskActivity(taskId: string, options?: { isNewTask?: boolean; terminal?: boolean; hiddenForTask?: boolean }): void;
   visibility(): "visible" | "hidden";
   dispose(): void;
@@ -457,30 +458,44 @@ export async function runDesktop(
         assertStarting();
         const token = await resolved.readToken(resolved.tokenPath);
         assertStarting();
+        const taskStore = progressServer.store;
+        const currentSnapshot = taskStore?.snapshot();
+        if (currentSnapshot !== undefined) {
+          const selectedTask = currentSnapshot.tasks.find((task) => task.id === currentSnapshot.selectedTaskId);
+          publishingWindowController.selectTask(currentSnapshot.selectedTaskId, {
+            hiddenForTask: selectedTask?.hiddenForTask === true
+          });
+        }
         await publishingWindowController.create({ url: progressServer.address().url, token });
         assertStarting();
-        const taskStore = progressServer.store;
+        let latestTaskSnapshot = currentSnapshot;
+        const mutationController = taskStore === undefined || latestTaskSnapshot === undefined
+          ? undefined
+          : createTaskMutationController({
+              fetch: (input, init) => {
+                const headers = new Headers(init?.headers);
+                headers.set("authorization", `Bearer ${token}`);
+                return fetch(new URL(input, progressServer!.address().url).toString(), {
+                  ...init,
+                  headers
+                });
+              },
+              getSnapshot: () => latestTaskSnapshot!,
+              setSnapshot: (snapshot) => {
+                if (latestTaskSnapshot === undefined || snapshot.revision >= latestTaskSnapshot.revision) {
+                  latestTaskSnapshot = snapshot;
+                }
+              },
+              loadBootstrap: async () => ({
+                protocolVersion: PROTOCOL_VERSION,
+                generation: launchSettings.generation
+              })
+            });
         const mutateTask = async (taskId: string, action: "select" | "visibility", body: unknown): Promise<void> => {
-          if (taskStore === undefined) return;
-          const send = (revision: number) => fetch(`${progressServer!.address().url}/api/tasks/${encodeURIComponent(taskId)}/${action}`, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${token}`,
-              "content-type": "application/json",
-              "x-codex-progress-hud-protocol": String(PROTOCOL_VERSION),
-              "x-codex-progress-hud-generation": String(launchSettings.generation),
-              "x-codex-progress-hud-revision": String(revision)
-            },
-            body: JSON.stringify(body)
-          });
-          let response = await send(taskStore.snapshot().revision);
-          if (response.status === 409) {
-            let payload: { code?: unknown } | undefined;
-            try { payload = await response.json() as { code?: unknown }; } catch { return; }
-            if (payload.code !== "STALE_REVISION") return;
-            response = await send(taskStore.snapshot().revision);
-          }
-          if (!response.ok) return;
+          await mutationController?.mutate(
+            `/api/tasks/${encodeURIComponent(taskId)}/${action}`,
+            body
+          );
         };
         hideSelectedTaskMutation = async (taskId: string): Promise<void> => {
           await mutateTask(taskId, "visibility", { hidden: true });
@@ -488,16 +503,15 @@ export async function runDesktop(
         const mutateSelection = async (taskId: string, mode: "pinned" | "follow_activity"): Promise<void> => {
           await mutateTask(taskId, "select", { mode });
         };
-        const currentSnapshot = taskStore?.snapshot();
-        if (currentSnapshot !== undefined) {
-          publishingWindowController.selectTask(currentSnapshot.selectedTaskId);
-        }
         const previousByTask = new Map((currentSnapshot?.tasks ?? []).map((task) => [task.id, task]));
         const isTerminal = (status: string): boolean => [
           "ended_unknown", "completed_unverified", "succeeded_verified", "failed", "interrupted"
         ].includes(status);
         const onStoreChanged = (changed: unknown): void => {
           const snapshot = changed as ReturnType<NonNullable<DesktopProgressServer["store"]>["snapshot"]>;
+          if (latestTaskSnapshot === undefined || snapshot.revision >= latestTaskSnapshot.revision) {
+            latestTaskSnapshot = snapshot;
+          }
           trayController?.updateTasks?.(snapshot.tasks.map((task) => ({
             ...task,
             selected: task.id === snapshot.selectedTaskId
@@ -513,7 +527,10 @@ export async function runDesktop(
             }
             previousByTask.set(task.id, task);
           }
-          publishingWindowController.selectTask(snapshot.selectedTaskId);
+          const selectedTask = snapshot.tasks.find((task) => task.id === snapshot.selectedTaskId);
+          publishingWindowController.selectTask(snapshot.selectedTaskId, {
+            hiddenForTask: selectedTask?.hiddenForTask === true
+          });
           for (const taskId of previousByTask.keys()) {
             if (!snapshot.tasks.some((task) => task.id === taskId)) previousByTask.delete(taskId);
           }

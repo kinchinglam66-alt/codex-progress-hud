@@ -151,7 +151,10 @@ async function serveUi(
   const assets: Record<string, { file: string; type: string }> = {
     "/": { file: "index.html", type: "text/html; charset=utf-8" },
     "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
-    "/renderer.js": { file: "renderer.js", type: "text/javascript; charset=utf-8" }
+    "/renderer.js": { file: "renderer.js", type: "text/javascript; charset=utf-8" },
+    "/view-model.js": { file: "view-model.js", type: "text/javascript; charset=utf-8" },
+    "/task-mutations.js": { file: "task-mutations.js", type: "text/javascript; charset=utf-8" },
+    "/task-controls.js": { file: "task-controls.js", type: "text/javascript; charset=utf-8" }
   };
   const asset = assets[pathname];
   if (asset === undefined) return false;

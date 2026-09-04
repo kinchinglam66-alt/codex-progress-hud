@@ -67,6 +67,10 @@ export interface WindowCreateOptions {
   token: string;
 }
 
+export interface SelectedTaskVisibility {
+  hiddenForTask?: boolean;
+}
+
 const WINDOW_OPTIONS: BrowserWindowOptionsLike = {
   width: 340,
   height: 146,
@@ -92,6 +96,7 @@ export class WindowController {
   private authorizationRequest: BrowserWindowLike["webContents"]["session"]["webRequest"] | undefined;
   private authorizationRegistered = false;
   private selectedTaskId: string | null = null;
+  private selectedTaskHidden = false;
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -151,7 +156,9 @@ export class WindowController {
         this.window = undefined;
       });
       window.setAlwaysOnTop(true, "floating");
-      window.once("ready-to-show", () => this.show());
+      window.once("ready-to-show", () => {
+        if (!this.selectedTaskHidden) this.show();
+      });
       await window.loadURL(options.url);
     } catch (error) {
       this.release(window);
@@ -169,8 +176,9 @@ export class WindowController {
     this.window.hide();
   }
 
-  selectTask(taskId: string | null): void {
+  selectTask(taskId: string | null, options: SelectedTaskVisibility = {}): void {
     this.selectedTaskId = taskId;
+    this.selectedTaskHidden = taskId !== null && options.hiddenForTask === true;
   }
 
   hideSelectedTask(): void {
@@ -187,6 +195,7 @@ export class WindowController {
   onTaskActivity(taskId: string, options: { isNewTask?: boolean; terminal?: boolean; hiddenForTask?: boolean } = {}): void {
     if (options.terminal || !options.isNewTask || options.hiddenForTask || this.selectedTaskId === taskId) return;
     this.selectedTaskId = taskId;
+    this.selectedTaskHidden = false;
     this.show();
   }
 

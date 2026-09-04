@@ -21,6 +21,16 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
     await mkdir(uiDirectory);
     await mkdir(join(uiDirectory, "api"));
     await writeFile(join(uiDirectory, "index.html"), "<h1>HUD</h1>");
+    await writeFile(join(uiDirectory, "styles.css"), "body { color: white; }");
+    await writeFile(join(uiDirectory, "renderer.js"), [
+      'import { buildHudView } from "./view-model.js";',
+      'import { createTaskMutationController } from "./task-mutations.js";',
+      'import { taskButtonAccessibility } from "./task-controls.js";',
+      "void buildHudView; void createTaskMutationController; void taskButtonAccessibility;"
+    ].join("\n"));
+    await writeFile(join(uiDirectory, "view-model.js"), "export const buildHudView = () => ({});");
+    await writeFile(join(uiDirectory, "task-mutations.js"), "export const createTaskMutationController = () => ({});");
+    await writeFile(join(uiDirectory, "task-controls.js"), "export const taskButtonAccessibility = () => ({});");
     await writeFile(join(uiDirectory, "health"), "shadowed health");
     await writeFile(join(uiDirectory, "api", "health"), "shadowed API health");
   }
@@ -150,6 +160,43 @@ describe("local progress HTTP service", () => {
       protocolVersion: 1
     });
     expect(apiResponse.status).toBe(401);
+  });
+
+  it("serves the complete renderer module graph from an exact static allowlist", async () => {
+    const { baseUrl } = await startServer({ withUi: true });
+    const pending = ["/renderer.js"];
+    const loaded = new Map<string, string>();
+
+    while (pending.length > 0) {
+      const pathname = pending.shift()!;
+      if (loaded.has(pathname)) continue;
+      const response = await fetch(`${baseUrl}${pathname}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+      const source = await response.text();
+      loaded.set(pathname, source);
+      for (const match of source.matchAll(/from\s+["']\.\/([^"']+)["']/gu)) {
+        pending.push(`/${match[1]}`);
+      }
+    }
+
+    expect([...loaded.keys()].sort()).toEqual([
+      "/renderer.js",
+      "/task-controls.js",
+      "/task-mutations.js",
+      "/view-model.js"
+    ]);
+    const css = await fetch(`${baseUrl}/styles.css`);
+    expect(css.status).toBe(200);
+    expect(css.headers.get("content-type")).toBe("text/css; charset=utf-8");
+
+    const denied = await Promise.all([
+      "/task-controls.js.map",
+      "/renderer.d.ts",
+      "/task-controls.js/../package.json",
+      "/%2e%2e/package.json"
+    ].map((pathname) => fetch(`${baseUrl}${pathname}`)));
+    expect(denied.map((response) => response.status)).toEqual([404, 404, 404, 404]);
   });
 
   it("rejects unauthenticated access to every new API route", async () => {

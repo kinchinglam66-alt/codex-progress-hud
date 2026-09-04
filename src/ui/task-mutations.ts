@@ -1,18 +1,20 @@
-import type { HudSnapshot } from "../server/task-store.js";
-
 export interface RendererBootstrap {
   protocolVersion: number;
   generation: number;
 }
 
-export interface TaskMutationControllerOptions {
+export interface RevisionSnapshot {
+  revision: number;
+}
+
+export interface TaskMutationControllerOptions<TSnapshot extends RevisionSnapshot> {
   fetch(input: string, init?: RequestInit): Promise<Response>;
-  getSnapshot(): HudSnapshot;
-  setSnapshot(snapshot: HudSnapshot, shouldRender: boolean): void;
+  getSnapshot(): TSnapshot;
+  setSnapshot(snapshot: TSnapshot, shouldRender: boolean): void;
   loadBootstrap(): Promise<RendererBootstrap>;
 }
 
-function mutationHeaders(snapshot: HudSnapshot, bootstrap: RendererBootstrap): Record<string, string> {
+function mutationHeaders(snapshot: RevisionSnapshot, bootstrap: RendererBootstrap): Record<string, string> {
   return {
     "content-type": "application/json",
     "x-codex-progress-hud-protocol": String(bootstrap.protocolVersion),
@@ -31,7 +33,9 @@ async function staleRevision(response: Response): Promise<boolean> {
   }
 }
 
-export function createTaskMutationController(options: TaskMutationControllerOptions): {
+export function createTaskMutationController<TSnapshot extends RevisionSnapshot>(
+  options: TaskMutationControllerOptions<TSnapshot>
+): {
   mutate(path: string, body: unknown): Promise<void>;
 } {
   let nextIntent = 0;
@@ -52,12 +56,12 @@ export function createTaskMutationController(options: TaskMutationControllerOpti
         retried = true;
         const fresh = await options.fetch("/api/snapshot", { cache: "no-store" });
         if (!fresh.ok) return;
-        const freshSnapshot = await fresh.json() as HudSnapshot;
+        const freshSnapshot = await fresh.json() as TSnapshot;
         options.setSnapshot(freshSnapshot, intent === nextIntent);
         continue;
       }
       if (!response.ok || response.status === 204) return;
-      const next = await response.json() as HudSnapshot;
+      const next = await response.json() as TSnapshot;
       if (next.revision < options.getSnapshot().revision) return;
       options.setSnapshot(next, intent === nextIntent);
       return;

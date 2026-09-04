@@ -53,6 +53,7 @@ function desktopHarness(lockAcquired = true) {
   };
   let trayCallbacks: Parameters<DesktopDependencies["createTrayController"]>[0] | undefined;
   let serverOptions: Parameters<DesktopDependencies["createProgressServer"]>[0] | undefined;
+  let hideSelectedTask: ((taskId: string) => void | Promise<void>) | undefined;
   const dependencies: DesktopDependencies = {
     app: {
       requestSingleInstanceLock: vi.fn(() => lockAcquired),
@@ -64,6 +65,7 @@ function desktopHarness(lockAcquired = true) {
     },
     createWindowController: vi.fn((options) => {
       isQuitting = options.quitting;
+      hideSelectedTask = options.onHideSelectedTask;
       return windowController;
     }),
     createTrayImage: vi.fn(() => ({ isEmpty: () => false })),
@@ -116,8 +118,13 @@ function desktopHarness(lockAcquired = true) {
     progressServer,
     isQuitting: () => isQuitting(),
     get trayCallbacks() { return trayCallbacks; },
-    get serverOptions() { return serverOptions; }
-    ,publishTaskSnapshot(snapshot: typeof taskSnapshot) {
+    get serverOptions() { return serverOptions; },
+    get hideSelectedTask() { return hideSelectedTask; },
+    get taskSnapshot() { return taskSnapshot; },
+    setTaskSnapshot(snapshot: typeof taskSnapshot) {
+      taskSnapshot = snapshot;
+    },
+    publishTaskSnapshot(snapshot: typeof taskSnapshot) {
       taskSnapshot = snapshot;
       storeEvents.emit("changed", snapshot);
     }
@@ -636,7 +643,7 @@ describe("desktop lifecycle", () => {
       ]
     });
 
-    expect(harness.windowController.selectTask).toHaveBeenCalledWith("task-b");
+    expect(harness.windowController.selectTask).toHaveBeenCalledWith("task-b", { hiddenForTask: false });
     expect(harness.windowController.onTaskActivity).toHaveBeenCalledWith("task-a", {
       isNewTask: true,
       terminal: false,
@@ -650,6 +657,142 @@ describe("desktop lifecycle", () => {
     expect(harness.trayController.updateTasks).toHaveBeenCalledWith([
       expect.objectContaining({ id: "task-a", selected: false }),
       expect.objectContaining({ id: "task-b", selected: true })
+    ]);
+  });
+
+  it("synchronizes persisted selected-task visibility before creating the window", async () => {
+    const harness = desktopHarness();
+    harness.setTaskSnapshot({
+      revision: 4,
+      selectedTaskId: "task-a",
+      tasks: [
+        { id: "task-a", title: "Alpha", status: "running", lastActivityAt: 100, hiddenForTask: true }
+      ]
+    });
+
+    await runDesktop(harness.dependencies);
+
+    expect(harness.windowController.selectTask).toHaveBeenCalledWith("task-a", { hiddenForTask: true });
+    expect(harness.windowController.selectTask.mock.invocationCallOrder[0])
+      .toBeLessThan(harness.windowController.create.mock.invocationCallOrder[0]!);
+  });
+
+  it("serializes tray selection and X-hide through one newest-intent revision queue", async () => {
+    const harness = desktopHarness();
+    harness.setTaskSnapshot({
+      revision: 1,
+      selectedTaskId: "task-a",
+      tasks: [
+        { id: "task-a", title: "Alpha", status: "running", lastActivityAt: 100, hiddenForTask: false },
+        { id: "task-b", title: "Beta", status: "running", lastActivityAt: 90, hiddenForTask: false }
+      ]
+    });
+    const firstResponse = deferred<void>();
+    const requests: Array<{ path: string; revision: number; body: Record<string, unknown> }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const headers = new Headers(init?.headers);
+      const revision = Number(headers.get("x-codex-progress-hud-revision"));
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const requestIndex = requests.push({ path, revision, body }) - 1;
+      if (requestIndex === 0) await firstResponse.promise;
+      const current = harness.taskSnapshot;
+      if (revision !== current.revision) {
+        return new Response(JSON.stringify({ code: "STALE_REVISION", revision: current.revision }), {
+          status: 409,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      const taskId = decodeURIComponent(path.split("/")[3]!);
+      const next = {
+        ...current,
+        revision: current.revision + 1,
+        selectedTaskId: path.endsWith("/select") ? taskId : current.selectedTaskId,
+        tasks: current.tasks.map((task) => path.endsWith("/visibility") && task.id === taskId
+          ? { ...task, hiddenForTask: body.hidden === true }
+          : task)
+      };
+      harness.setTaskSnapshot(next);
+      return new Response(JSON.stringify(next), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    await runDesktop(harness.dependencies);
+
+    const selectA = Promise.resolve(harness.trayCallbacks?.onSelectTask?.("task-a"));
+    const hideA = Promise.resolve(harness.hideSelectedTask?.("task-a"));
+    const selectB = Promise.resolve(harness.trayCallbacks?.onSelectTask?.("task-b"));
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(0));
+    let orderingError: unknown;
+    try {
+      expect(requests).toHaveLength(1);
+    } catch (error) {
+      orderingError = error;
+    } finally {
+      firstResponse.resolve();
+      await Promise.allSettled([selectA, hideA, selectB]);
+      fetchSpy.mockRestore();
+    }
+    if (orderingError !== undefined) throw orderingError;
+
+    expect(requests.map(({ path }) => path)).toEqual([
+      "/api/tasks/task-a/select",
+      "/api/tasks/task-a/visibility",
+      "/api/tasks/task-b/select"
+    ]);
+    expect(requests.map(({ revision }) => revision)).toEqual([1, 2, 3]);
+    expect(harness.taskSnapshot.selectedTaskId).toBe("task-b");
+    expect(harness.taskSnapshot.tasks.find((task) => task.id === "task-a")?.hiddenForTask).toBe(true);
+  });
+
+  it("refreshes a desktop mutation snapshot before one STALE_REVISION retry", async () => {
+    const harness = desktopHarness();
+    harness.setTaskSnapshot({
+      revision: 1,
+      selectedTaskId: "task-a",
+      tasks: [
+        { id: "task-a", title: "Alpha", status: "running", lastActivityAt: 100, hiddenForTask: false },
+        { id: "task-b", title: "Beta", status: "running", lastActivityAt: 90, hiddenForTask: false }
+      ]
+    });
+    const requests: Array<{ path: string; revision: string | null }> = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const revision = new Headers(init?.headers).get("x-codex-progress-hud-revision");
+      requests.push({ path, revision });
+      if (requests.length === 1) {
+        harness.setTaskSnapshot({ ...harness.taskSnapshot, revision: 2 });
+        return new Response(JSON.stringify({ code: "STALE_REVISION", revision: 2 }), {
+          status: 409,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (path === "/api/snapshot") {
+        return new Response(JSON.stringify(harness.taskSnapshot), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      const next = { ...harness.taskSnapshot, revision: 3, selectedTaskId: "task-b" };
+      harness.setTaskSnapshot(next);
+      return new Response(JSON.stringify(next), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      });
+    });
+    await runDesktop(harness.dependencies);
+
+    try {
+      await harness.trayCallbacks?.onSelectTask?.("task-b");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    expect(requests).toEqual([
+      { path: "/api/tasks/task-b/select", revision: "1" },
+      { path: "/api/snapshot", revision: null },
+      { path: "/api/tasks/task-b/select", revision: "2" }
     ]);
   });
 

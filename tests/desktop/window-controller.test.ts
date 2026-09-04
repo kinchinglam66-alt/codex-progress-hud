@@ -192,6 +192,31 @@ describe("WindowController", () => {
     expect(window.showInactive).toHaveBeenCalledOnce();
   });
 
+  it("keeps a recreated hidden-current window hidden while allowing one eligible new task", async () => {
+    const firstWindow = new FakeWindow();
+    const secondWindow = new FakeWindow();
+    const createWindow = vi.fn()
+      .mockReturnValueOnce(firstWindow)
+      .mockReturnValueOnce(secondWindow);
+    const controller = new WindowController({ createWindow, quitting: () => false });
+    controller.selectTask("task-a", { hiddenForTask: true });
+
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    firstWindow.emit("ready-to-show");
+    controller.dispose();
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    secondWindow.emit("ready-to-show");
+
+    expect(firstWindow.showInactive).not.toHaveBeenCalled();
+    expect(secondWindow.showInactive).not.toHaveBeenCalled();
+
+    controller.onTaskActivity("task-b", { isNewTask: true, hiddenForTask: false });
+    controller.onTaskActivity("task-b", { hiddenForTask: false });
+    controller.onTaskActivity("task-c", { isNewTask: true, terminal: true, hiddenForTask: false });
+
+    expect(secondWindow.showInactive).toHaveBeenCalledOnce();
+  });
+
   it("unregisters authorization interception before destroying the window", async () => {
     const order: string[] = [];
     const window = new FakeWindow();
