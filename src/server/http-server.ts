@@ -722,6 +722,9 @@ export function createProgressServer(options: ProgressServerOptions) {
           if (hookEventIds.has(envelope.eventId)) return store.snapshot();
           const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
           rememberHookEvent(envelope.eventId, envelope.receivedAt);
+          if (!isMcpRequest(request)) {
+            scheduleGraceShutdown({ taskHandles: [envelope.taskHandle] });
+          }
           return snapshot;
         });
         cancellation.complete();

@@ -34,7 +34,7 @@ The release plugin includes a small open-source Windows bridge compiled from `bu
 
 The Codex plugin page is the only global enable/disable/uninstall switch. Show/hide changes only the floating window. Select, pause, resume, and stop affect only one task's HUD timing and never pause or stop Codex itself.
 
-Disabling or uninstalling stops new plugin activity. The companion exits after the final MCP lease disappears and a 30–60 second grace period. The deprecated `hud_close` alias requests immediate shutdown but does not persist an off preference; an enabled task may restart the companion.
+Disabling or uninstalling stops new plugin activity. The companion exits after the final MCP lease disappears and a 30–60 second grace period. A companion started by a Hook also starts the same grace timer while waiting for its first MCP lease, so a missing or disabled MCP configuration cannot leave it running indefinitely. The deprecated `hud_close` alias requests immediate shutdown but does not persist an off preference; an enabled task may restart the companion.
 
 ## Update and recovery
 

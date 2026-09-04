@@ -263,7 +263,7 @@ Run: `npm test -- --run tests/packaging/plugin-marketplace.test.ts tests/packagi
 Run:
 
 ```powershell
-& 'C:\Users\asus\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' 'C:\Users\asus\.codex\skills\.system\plugin-creator\scripts\create_basic_plugin.py' codex-progress-hud --path 'C:\Users\asus\Documents\Codex\2026-09-01\z\outputs\codex-progress-hud\plugins' --marketplace-path 'C:\Users\asus\Documents\Codex\2026-09-01\z\outputs\codex-progress-hud\.agents\plugins\marketplace.json' --marketplace-name kinchinglam66-alt --with-skills --with-scripts --with-mcp --with-marketplace
+& '<bundled-python>' '<plugin-creator>/scripts/create_basic_plugin.py' codex-progress-hud --path '<repo>/plugins' --marketplace-path '<repo>/.agents/plugins/marketplace.json' --marketplace-name kinchinglam66-alt --with-skills --with-scripts --with-mcp --with-marketplace
 ```
 
 Expected: the helper creates the nested plugin and marketplace without changing the existing personal marketplace.

@@ -48,6 +48,18 @@
         ]
       }
     ],
+    "Interrupt": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}/scripts/launch-hook.ps1\" -HookName Interrupt",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "matcher": ".*",

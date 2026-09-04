@@ -16,7 +16,7 @@ public static class CodexProgressHudLauncher
 {
     private static readonly HashSet<string> HookModes = new HashSet<string>(StringComparer.Ordinal) {
         "--hook-event=SessionStart", "--hook-event=UserPromptSubmit", "--hook-event=PostToolUse",
-        "--hook-event=Stop", "--hook-event=SessionEnd"
+        "--hook-event=Stop", "--hook-event=Interrupt", "--hook-event=SessionEnd"
     };
 
     private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }

@@ -11,12 +11,13 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --registry=https://registry.npmjs.org
       - name: Verify tag matches package version
         shell: pwsh
         run: |
@@ -26,12 +27,19 @@ jobs:
       - run: npm run release:artifacts
       - run: npm run smoke:packaged
       - run: npm run diagnose:mcp:packaged
+      - name: Resolve artifact names
+        id: artifacts
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          "installer=release/Codex-Progress-HUD-Setup-$version.exe" >> $env:GITHUB_OUTPUT
+          "plugin=release/codex-progress-hud-plugin-$version.zip" >> $env:GITHUB_OUTPUT
       - name: Verify checksums
         shell: pwsh
         run: Get-Content release/SHA256SUMS.txt | ForEach-Object { $hash, $file = $_ -split '  ', 2; if ((Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "Checksum mismatch: $file" } }
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
-            release/Codex-Progress-HUD-Setup-0.2.0.exe
-            release/codex-progress-hud-plugin-0.2.0.zip
+            ${{ steps.artifacts.outputs.installer }}
+            ${{ steps.artifacts.outputs.plugin }}
             release/SHA256SUMS.txt

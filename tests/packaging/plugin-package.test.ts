@@ -30,7 +30,8 @@ function centralDirectoryNames(zip: Buffer): string[] {
 describe("release plugin ZIP", () => {
   it("contains only the deterministic runtime whitelist", async () => {
     execFileSync(process.execPath, ["scripts/package-plugin.mjs"], { cwd: root, stdio: "pipe" });
-    const zip = await readFile(resolve(root, "release/codex-progress-hud-plugin-0.2.0.zip"));
+    const pkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as { version: string };
+    const zip = await readFile(resolve(root, `release/codex-progress-hud-plugin-${pkg.version}.zip`));
     const names = centralDirectoryNames(zip).sort();
     expect(names).toEqual(expected);
     expect(names.join("\n")).not.toMatch(/node_modules|\.git\/|\.token|\.map$|tests\//iu);

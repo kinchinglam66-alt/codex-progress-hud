@@ -1,11 +1,9 @@
 {
-  "mcpServers": {
-    "codex-progress-hud": {
-      "command": "./scripts/codex-progress-hud-launcher.exe",
-      "args": [
-        "--mcp-stdio"
-      ],
-      "cwd": "."
-    }
+  "codex-progress-hud": {
+    "command": "./scripts/codex-progress-hud-launcher.exe",
+    "args": [
+      "--mcp-stdio"
+    ],
+    "cwd": "."
   }
 }

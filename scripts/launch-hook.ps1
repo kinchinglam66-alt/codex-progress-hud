@@ -11,7 +11,7 @@ function Stop-Launcher {
 }
 
 try {
-  $supportedHooks = @("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd")
+  $supportedHooks = @("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "Interrupt", "SessionEnd")
   if ([string]::IsNullOrWhiteSpace($HookName) -or -not $supportedHooks.Contains($HookName)) {
     throw "unsupported Hook event"
   }

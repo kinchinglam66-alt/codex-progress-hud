@@ -3,6 +3,7 @@ import { processLauncher } from "../lifecycle/process-launcher.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
 import { defaultDataDirectory, defaultDiagnosticsDirectory, defaultInstallManifestPath, defaultRuntimePath, defaultServiceUrl, defaultSettingsPath } from "../server/paths.js";
 import { CompanionHttpClient, type HudRequestOptions } from "../mcp/report-client.js";
+import { RELEASE_CAPABILITIES } from "../generated/capabilities.js";
 import type { HookEnvelope } from "./schema.js";
 
 export interface HookProgressClient {
@@ -50,7 +51,7 @@ export function createHookClient(dependencies: HookClientDependencies): HookEven
 }
 
 export function createDefaultHookClient(): HookEventClient {
-  const version = "0.1.0";
+  const version = RELEASE_CAPABILITIES.buildVersion;
   const progressClient = new CompanionHttpClient();
   const serviceUrl = new URL(defaultServiceUrl());
   const companionManager = createCompanionManager({

@@ -9,12 +9,10 @@ const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"),
 const rootPlugin = JSON.parse(await readFile(resolve(root, ".codex-plugin/plugin.json"), "utf8"));
 const releasePlugin = { ...rootPlugin, version: packageManifest.version };
 const releaseMcp = {
-  mcpServers: {
-    "codex-progress-hud": {
-      command: "./scripts/codex-progress-hud-launcher.exe",
-      args: ["--mcp-stdio"],
-      cwd: "."
-    }
+  "codex-progress-hud": {
+    command: "./scripts/codex-progress-hud-launcher.exe",
+    args: ["--mcp-stdio"],
+    cwd: "."
   }
 };
 

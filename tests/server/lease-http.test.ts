@@ -208,6 +208,78 @@ describe("MCP lease HTTP boundary", () => {
     expect((await response.json()).tasks.map(({ id }: { id: string }) => id)).toEqual([taskHandle]);
   });
 
+  it("shuts down after the grace period when a Hook-started companion never receives a lease", async () => {
+    let grace!: () => void;
+    let delay = 0;
+    const { server, token, requestShutdown } = await fixture({
+      scheduleTimer: (callback, delayMs) => {
+        grace = callback;
+        delay = delayMs;
+        return "initial-hook-grace";
+      }
+    });
+    const taskHandle = "hud_aaaaaaaaaaaaaaaaaaaa";
+    const response = await fetch(`${server.address().url}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...headers(token), "x-codex-progress-hud-revision": "0" },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        taskHandle,
+        eventId: "evt_hookwithoutleaseabcdefghijklmnopqrstu",
+        sessionKey: "session_hookwithoutleaseabcdefghijklmnop",
+        hook: "SessionStart",
+        source: "resume",
+        receivedAt: 100
+      })
+    });
+
+    expect(response.status).toBe(202);
+    expect(delay).toBe(30_000);
+    grace();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(requestShutdown).toHaveBeenCalledOnce();
+    const snapshot = await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token)
+    })).json();
+    expect(snapshot.selected.task.status).toBe("disconnected_suspected");
+  });
+
+  it("cancels the initial Hook grace timer when MCP acquires a lease", async () => {
+    let grace!: () => void;
+    const cancelled = vi.fn();
+    const { server, token, requestShutdown } = await fixture({
+      scheduleTimer: (callback) => {
+        grace = callback;
+        return "initial-hook-grace";
+      },
+      cancelTimer: cancelled
+    });
+    await fetch(`${server.address().url}/api/hooks/events`, {
+      method: "POST",
+      headers: { ...headers(token), "x-codex-progress-hud-revision": "0" },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        taskHandle: "hud_aaaaaaaaaaaaaaaaaaaa",
+        eventId: "evt_hookthenleaseabcdefghijklmnopqrstuv",
+        sessionKey: "session_hookthenleaseabcdefghijklmnopqr",
+        hook: "UserPromptSubmit",
+        receivedAt: 100
+      })
+    });
+    const acquired = await fetch(`${server.address().url}/api/leases/acquire`, {
+      method: "POST",
+      headers: headers(token),
+      body: JSON.stringify({ ownerNonce: "owner-after-hook" })
+    });
+
+    expect(acquired.status).toBe(200);
+    expect(cancelled).toHaveBeenCalledWith("initial-hook-grace");
+    grace();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(requestShutdown).not.toHaveBeenCalled();
+  });
+
   it("does not preclaim an unknown control handle before TASK_NOT_FOUND", async () => {
     const { server, token } = await fixture();
     const acquire = async (ownerNonce: string) => {

@@ -45,7 +45,8 @@ describe("Windows release source contract", () => {
     const mcp = JSON.parse(await text("plugins/codex-progress-hud/.mcp.json"));
     const plugin = JSON.parse(await text("plugins/codex-progress-hud/.codex-plugin/plugin.json"));
     expect(plugin).not.toHaveProperty("hooks");
-    expect(mcp.mcpServers["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");
+    expect(mcp["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");
+    expect(mcp).not.toHaveProperty("mcpServers");
     expect(JSON.stringify(mcp)).not.toMatch(/\bnode(?:\.exe)?\b/iu);
     await access(resolve(root, "plugins/codex-progress-hud/scripts/launch-mcp.ps1"));
     await access(resolve(root, "plugins/codex-progress-hud/scripts/launch-hook.ps1"));
@@ -68,8 +69,11 @@ describe("Windows release source contract", () => {
       expect(pkg.scripts[name]).toBeTypeOf("string");
     }
     const mcpMain = await text("src/mcp/main.ts");
+    const hookClient = await text("src/hooks/client.ts");
     expect(mcpMain).toContain("RELEASE_CAPABILITIES.buildVersion");
     expect(mcpMain).not.toContain('const version = "0.1.0"');
+    expect(hookClient).toContain("RELEASE_CAPABILITIES.buildVersion");
+    expect(hookClient).not.toContain('const version = "0.1.0"');
   });
 
   it("keeps packaged smoke on Windows CI and publication tag-gated", async () => {
@@ -80,9 +84,22 @@ describe("Windows release source contract", () => {
     expect(release).toContain('tags: ["v*"]');
     expect(release).toContain("contents: write");
     expect(release).toContain("npm run verify:release");
-    expect(release).toContain("softprops/action-gh-release@v2");
-    expect(release).toContain("Codex-Progress-HUD-Setup-0.2.0.exe");
-    expect(release).toContain("codex-progress-hud-plugin-0.2.0.zip");
+    expect(ci).not.toMatch(/uses:\s+[^\s]+@v\d+/u);
+    expect(release).not.toMatch(/uses:\s+[^\s]+@v\d+/u);
+    expect(release).toContain("softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228");
+    expect(release).toContain("npm ci --registry=https://registry.npmjs.org");
+    expect(release).toContain("steps.artifacts.outputs.installer");
+    expect(release).toContain("steps.artifacts.outputs.plugin");
+    expect(release).not.toContain("Codex-Progress-HUD-Setup-0.2.0.exe");
+    expect(release).not.toContain("codex-progress-hud-plugin-0.2.0.zip");
     expect(release).toContain("SHA256SUMS.txt");
+  });
+
+  it("rebuilds the native launcher from reviewed source for releases", async () => {
+    const pkg = JSON.parse(await text("package.json"));
+    const builder = await text("scripts/build-native-launcher.mjs");
+    expect(pkg.scripts["build:launcher:release"]).toContain("--force");
+    expect(pkg.scripts["release:artifacts"]).toContain("build:launcher:release");
+    expect(builder).toContain("native-launcher.binary.sha256");
   });
 });

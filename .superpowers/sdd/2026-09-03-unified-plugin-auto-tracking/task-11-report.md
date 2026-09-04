@@ -10,12 +10,16 @@ Implementation commits:
 
 - `f5c0184` — `build: package Windows companion and release plugin`
 - `d3c108b` — `fix: normalize release plugin text files`
+- `adbe42a` — `test: verify automatic tracking release contract`
+- `4856141` — `docs: record task 11 release evidence`
 
 ## Important architecture correction
 
 The detailed older packaging plan expected PowerShell to own the long-lived MCP stdio stream. A new streaming test proved that Windows PowerShell waits for redirected stdin EOF in this launch shape, so MCP initialize timed out while one-shot Hook input still worked. The release `.mcp.json` therefore invokes the checked-in 9 KB native C# bridge directly. Its source is `build/native-launcher.cs`; it strictly validates `%APPDATA%\codex-progress-hud\install.json`, checks the exact installed EXE and `resources/app.asar`, sets `ELECTRON_RUN_AS_NODE=1`, and relays UTF-8 JSON lines without requiring global Node. Both requested PowerShell launchers remain staged and validated for compatibility/manual diagnostics.
 
-The plugin manifest intentionally omits an unsupported `hooks` property. Codex discovers the conventional `hooks/hooks.json` file. This matches the installed plugin-creator validator's allowed manifest keys and avoids the earlier plugin-visibility risk.
+The plugin manifest intentionally omits an unsupported `hooks` property. Codex discovers the conventional `hooks/hooks.json` file. The `.mcp.json` now uses Codex's documented direct server map rather than the legacy `mcpServers` wrapper. This matches the installed plugin-creator validator's allowed manifest keys and avoids the earlier plugin/tool-visibility risks.
+
+The final release/security review initially rejected the range. Its seven findings were addressed with regression coverage: direct-map MCP configuration, Hook-started zero-lease shutdown, registered fail-open `Interrupt`, release-time native-bridge recompilation plus binary integrity stamping, SHA-pinned GitHub Actions and official npm registry URLs, generated Hook-client versioning, and version-derived release artifact paths. The local .NET Framework compiler does not produce byte-for-byte identical EXEs across rebuilds, so the project does not claim reproducible native builds; the release job instead compiles from reviewed source every time.
 
 ## Artifacts
 
@@ -23,15 +27,15 @@ All paths are relative to the worktree and are ignored build outputs:
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
-| `release/Codex-Progress-HUD-Setup-0.2.0.exe` | 112,969,804 | `98800d8af34e5821b097ddb123f2211f1618977e29b0b4becfe5ff97e451e220` |
-| `release/codex-progress-hud-plugin-0.2.0.zip` | 43,885 | `ee42f117caf91c9b81ac21123ea8b4447c5d59a70e389256e0ea66dabf0db98f` |
+| `release/Codex-Progress-HUD-Setup-0.2.0.exe` | 112,970,032 | `c310d4fea1b740dcc651639f1283b3225fbe346a4a5d87583ad5fa99b43827c3` |
+| `release/codex-progress-hud-plugin-0.2.0.zip` | 44,207 | `71e6c6542f4c6f4c3e592f9ebeb7146f92ace73feb6c37495b4e9c6bac7888fc` |
 | `release/SHA256SUMS.txt` | 203 | contains both hashes above |
 
 `Get-AuthenticodeSignature` reports `NotSigned`, as disclosed in the installation and security documentation.
 
 ## Verification evidence
 
-- `npm run verify:release` — PASS: 36 test files / 545 tests, typecheck, build, source smoke, plugin synchronization, plugin validation, and package contract.
+- `npm run verify:release` — PASS: 36 test files / 548 tests, typecheck, build, source smoke, native-launcher integrity, plugin synchronization, plugin validation, and package contract.
 - `npm run smoke:packaged` — PASS: packaged HUD health/authentication, MCP connection, all 14 tools, and shutdown. Five consecutive runs passed after the harness was isolated and made to await Electron exit.
 - `npm run diagnose:mcp:packaged` — PASS: real release bridge completed MCP initialize and `tools/list` with 14 tools.
 - `npm run release:artifacts` — PASS: NSIS installer, deterministic whitelist ZIP, and checksum file.
@@ -47,9 +51,9 @@ The packaged smoke harness uses `--no-sandbox`, `--disable-gpu`, and `--in-proce
 - The local installer and native bridge are unsigned. Public releases should add trusted Authenticode signing.
 - Windows 10/11 x64 is the only packaged target in 0.2.0.
 - Codex currently provides no supported persistent custom sidebar surface, so the durable UI is the floating HUD plus MCP tool results.
-- Official Hooks currently provide no `Interrupt` event. Unexpected termination is inferred from lease loss and runtime evidence and is never labeled verified completion.
+- Codex `Interrupt` Hooks provide authoritative user-interruption evidence. Missing heartbeats and lease loss remain suspected evidence and are never labeled verified completion.
 - An older conversation can attach on its first post-install observed Hook, but elapsed time before attachment is not reconstructed.
-- The installed official Python plugin validator could not execute in this host because its Python runtime lacked PyYAML. The repository validator, package contract, plugin-creator manifest-key ruling, and real MCP launch were all exercised instead.
+- The installed official Python plugin validator could not execute in this host because its Python runtime lacked PyYAML. The repository validator, package contract, plugin-creator manifest-key ruling, and real MCP launch were all exercised instead. A real Codex marketplace install/enable/restart remains an explicit pre-publication acceptance step.
 
 ## Publication boundary
 

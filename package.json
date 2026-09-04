@@ -32,15 +32,16 @@
     "diagnose:mcp:packaged": "node scripts/diagnose-packaged-mcp.mjs",
     "validate:plugin": "node scripts/validate-plugin.mjs",
     "build:launcher": "node scripts/build-native-launcher.mjs",
+    "build:launcher:release": "node scripts/build-native-launcher.mjs --force",
     "pack:win": "npm run build && electron-builder --win --x64 --dir",
     "dist:win": "npm run build && electron-builder --win --x64",
     "sync:plugin": "npm run build:launcher && node scripts/sync-plugin-package.mjs",
     "check:plugin-sync": "node scripts/sync-plugin-package.mjs --check",
     "package:plugin": "node scripts/package-plugin.mjs",
     "checksums": "node scripts/write-checksums.mjs",
-    "release:artifacts": "npm run dist:win && npm run sync:plugin && npm run package:plugin && npm run checksums",
+    "release:artifacts": "npm run build:launcher:release && npm run dist:win && node scripts/sync-plugin-package.mjs && npm run package:plugin && npm run checksums",
     "test:package-contract": "node scripts/package-contract-test.mjs",
-    "verify:release": "npm test -- --run --maxWorkers=1 --no-file-parallelism && npm run typecheck && npm run build && npm run smoke && npm run check:plugin-sync && npm run validate:plugin && npm run test:package-contract"
+    "verify:release": "npm test -- --run --maxWorkers=1 --no-file-parallelism && npm run typecheck && npm run build && npm run smoke && npm run build:launcher && npm run check:plugin-sync && npm run validate:plugin && npm run test:package-contract"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

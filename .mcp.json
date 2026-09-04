@@ -1,9 +1,7 @@
 {
-  "mcpServers": {
-    "codex-progress-hud": {
-      "command": "node",
-      "args": ["./dist/mcp/main.js"],
-      "cwd": "."
-    }
+  "codex-progress-hud": {
+    "command": "node",
+    "args": ["./dist/mcp/main.js"],
+    "cwd": "."
   }
 }

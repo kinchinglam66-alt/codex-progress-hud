@@ -406,7 +406,7 @@ describe("packaged Hook contract", () => {
       hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number; async?: boolean }> }>>
     };
     expect(Object.keys(config.hooks).sort()).toEqual([
-      "PostToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"
+      "Interrupt", "PostToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"
     ]);
     for (const [name, groups] of Object.entries(config.hooks)) {
       expect(groups.length).toBeGreaterThan(0);
