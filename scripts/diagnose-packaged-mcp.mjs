@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { removeTemporaryDirectory, runPackagedCleanup } from "./packaged-cleanup.mjs";
 
 if (process.platform !== "win32") {
   process.stdout.write("Packaged MCP diagnostic is Windows-only; skipped.\n");
@@ -38,7 +39,6 @@ const transport = new StdioClientTransport({
   stderr: "inherit"
 });
 const client = new Client({ name: "packaged-mcp-diagnostic", version: packageManifest.version });
-let opened = false;
 
 function assertToolSuccess(result, name) {
   if (result.isError === true || result.structuredContent?.ok !== true) {
@@ -46,8 +46,32 @@ function assertToolSuccess(result, name) {
   }
 }
 
-try {
-  await client.connect(transport);
+async function closeMcp() {
+  let firstError;
+  try {
+    await client.close();
+  } catch (error) {
+    firstError = error;
+  }
+  try {
+    await transport.close();
+  } catch (error) {
+    firstError ??= error;
+  }
+  if (firstError !== undefined) throw firstError;
+}
+
+async function closeHud() {
+  const closedResult = await client.callTool({ name: "hud_close", arguments: {} });
+  assertToolSuccess(closedResult, "hud_close");
+  if (closedResult.structuredContent?.observedState !== "stopped") {
+    throw new Error(`installed launcher hud_close did not observe stopped state: ${JSON.stringify(closedResult.structuredContent ?? {})}`);
+  }
+}
+
+await runPackagedCleanup({
+  connect: () => client.connect(transport),
+  open: async () => {
   const tools = await client.listTools();
   if (tools.tools.length !== 14) throw new Error(`expected 14 MCP tools, received ${tools.tools.length}`);
   const openedResult = await client.callTool({ name: "hud_open", arguments: {} });
@@ -55,7 +79,8 @@ try {
   if (openedResult.structuredContent?.observedState !== "running") {
     throw new Error(`installed launcher did not open a running HUD: ${JSON.stringify(openedResult.structuredContent ?? {})}`);
   }
-  opened = true;
+  },
+  work: async (close) => {
   const started = await client.callTool({
     name: "tracking_start",
     arguments: { title: "Packaged diagnostic" }
@@ -72,10 +97,12 @@ try {
   if (reported.structuredContent?.associationSource !== "mcp_lease") {
     throw new Error("installed launcher progress_report did not use the MCP lease association");
   }
+    await close();
+  },
+  close: closeHud,
+  emergencyClose: closeHud,
+  release: closeMcp,
+  cleanup: () => removeTemporaryDirectory(appData)
+});
+
   process.stdout.write("Packaged MCP installed-launcher path, 14 tools, and handle-free reporting passed.\n");
-} finally {
-  if (opened) await client.callTool({ name: "hud_close", arguments: {} }).catch(() => undefined);
-  await client.close().catch(() => undefined);
-  await transport.close().catch(() => undefined);
-  await rm(appData, { recursive: true, force: true }).catch(() => undefined);
-}

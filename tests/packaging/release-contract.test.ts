@@ -92,7 +92,9 @@ describe("Windows release source contract", () => {
     expect(smoke).toContain('name: "progress_report"');
     expect(smoke).toContain('associationSource !== "mcp_lease"');
     expect(smoke).toContain('name: "hud_close"');
-    expect(smoke).toContain("let opened = false");
+    expect(smoke).toContain('import { removeTemporaryDirectory, runPackagedCleanup } from "./packaged-cleanup.mjs"');
+    expect(smoke).toContain("await runPackagedCleanup");
+    expect(smoke).toContain("emergencyClose: closeHud");
     expect(smoke).not.toContain('"--hud"');
     expect(smoke).not.toContain("const hud = spawn");
     expect(diagnostic).toContain('readFile(resolve(root, "package.json"), "utf8")');
@@ -101,6 +103,9 @@ describe("Windows release source contract", () => {
     expect(diagnostic).toContain('name: "tracking_start"');
     expect(diagnostic).toContain('name: "progress_report"');
     expect(diagnostic).toContain('name: "hud_close"');
+    expect(diagnostic).toContain('import { removeTemporaryDirectory, runPackagedCleanup } from "./packaged-cleanup.mjs"');
+    expect(diagnostic).toContain("await runPackagedCleanup");
+    expect(diagnostic).toContain("emergencyClose: closeHud");
     expect(diagnostic).not.toContain('version: "0.2.0"');
   });
 
