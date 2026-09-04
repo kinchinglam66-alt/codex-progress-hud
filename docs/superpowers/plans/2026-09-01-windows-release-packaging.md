@@ -298,27 +298,21 @@ Use exit code 2 for `COMPANION_NOT_INSTALLED`, 3 for `INVALID_INSTALL_MANIFEST`,
 
 - [ ] **Step 5: Generate the nested release package from canonical files**
 
-`sync-plugin-package.mjs` copies the canonical skill, launcher, README, LICENSE, NOTICE, PRIVACY, and SECURITY files; derives release plugin metadata from the root manifest but sets version from `package.json`; and writes this nested `.mcp.json`:
+`sync-plugin-package.mjs` copies the canonical skill, launcher, README, LICENSE, NOTICE, PRIVACY, and SECURITY files; derives release plugin metadata from the root manifest but sets version from `package.json`; and writes this nested `.mcp.json` using Codex's documented direct server map and the native streaming bridge selected during implementation:
 
 ```json
 {
-  "mcpServers": {
-    "codex-progress-hud": {
-      "command": "powershell.exe",
-      "args": [
-        "-NoLogo", "-NoProfile", "-NonInteractive",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "./scripts/launch-mcp.ps1"
-      ],
-      "cwd": "."
-    }
+  "codex-progress-hud": {
+    "command": "./scripts/codex-progress-hud-launcher.exe",
+    "args": ["--mcp-stdio"],
+    "cwd": "."
   }
 }
 ```
 
 - [ ] **Step 6: Extend plugin and marketplace validation**
 
-Require the nested launcher, reject a nested release `.mcp.json` command that invokes Node, verify its script path is plugin-relative without `..`, validate the repo marketplace, and run synchronization in check mode. The root development `.mcp.json` remains valid with its Node command.
+Require the nested launcher, reject a nested release `.mcp.json` command that invokes Node, verify its executable path is plugin-relative without `..`, validate the repo marketplace, and run synchronization in check mode. The root development `.mcp.json` remains valid with its Node command.
 
 ```js
 if (releaseServer.command !== "powershell.exe") fail("release MCP must use PowerShell launcher");
