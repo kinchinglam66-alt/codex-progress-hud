@@ -26,6 +26,8 @@ Reading that store with a second model adds no independently observed facts. Wit
 
 ## Observation prerequisite
 
+Gate result (2026-09-05): `insufficient_evidence`; see the [source feasibility report](../reports/2026-09-05-independent-observation-feasibility.md). CLI proxy support is present, but passive existing-Desktop attachment and host Hook delivery remain unverified. Cooperative tracking was observed working. Proceed with source-neutral Plan A offline evaluation before a live provider; do not claim zero main-model interference. Hook trust review and an observed diagnostic failure remain follow-up items, not diagnosed causes of missing automatic tracking.
+
 Evaluate these routes separately:
 
 1. A documented, authorized event subscription to the already-running Codex Desktop host, carrying conversation and turn identity.
