@@ -31,3 +31,7 @@ Window visibility, live host disable/uninstall behavior, and the final patched r
 - Packaged desktop tests ran serially with the installed HUD temporarily closed. When the installed HUD was running, its Electron single-instance lock prevented the isolated smoke desktop from starting; this is a known local test constraint.
 
 These results do not claim that the current Codex process hot-reloaded the new runtime or that the package is publicly released.
+
+## Installed runtime after final host restart
+
+The existing conversation loaded plugin `0.2.1+codex.20260905024605` after a full host restart. Handle-free start and progress writes returned `running`. A passing validation followed by verified completion produced a terminal record. A subsequent handle-free start/report created a second record: the previous record remained `succeeded_verified`, the new record was `running`, and the new record had no inherited verification evidence. All writes returned `associationSource=mcp_lease` and success. This closes the installed-runtime terminal-restart checkpoint; it is a tool/snapshot observation, not screenshot-based visual inspection.
