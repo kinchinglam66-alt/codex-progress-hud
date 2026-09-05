@@ -1,20 +1,20 @@
 # Install on Windows
 
-Codex Progress HUD 0.2.0 supports Windows 10/11 x64. The companion installer is currently unsigned, so Windows SmartScreen may ask you to review the publisher warning.
+Codex Progress HUD 0.2.1 supports Windows 10/11 x64. The companion installer is currently unsigned, so Windows SmartScreen may ask you to review the publisher warning.
 
 ## Verify and install
 
 Download these three files from the same GitHub release:
 
-- `Codex-Progress-HUD-Setup-0.2.0.exe`
-- `codex-progress-hud-plugin-0.2.0.zip`
+- `Codex-Progress-HUD-Setup-0.2.1.exe`
+- `codex-progress-hud-plugin-0.2.1.zip`
 - `SHA256SUMS.txt`
 
 Verify the downloads before running them:
 
 ```powershell
-Get-FileHash .\Codex-Progress-HUD-Setup-0.2.0.exe -Algorithm SHA256
-Get-FileHash .\codex-progress-hud-plugin-0.2.0.zip -Algorithm SHA256
+Get-FileHash .\Codex-Progress-HUD-Setup-0.2.1.exe -Algorithm SHA256
+Get-FileHash .\codex-progress-hud-plugin-0.2.1.zip -Algorithm SHA256
 ```
 
 Compare both lowercase hashes with `SHA256SUMS.txt`, then run the companion installer. It installs per user without elevation and does not enable login startup.
@@ -26,7 +26,7 @@ codex plugin marketplace add kinchinglam66-alt/codex-progress-hud --ref main
 codex plugin add codex-progress-hud@kinchinglam66-alt
 ```
 
-Review and trust the plugin Hooks when Codex asks. Fully quit and reopen Codex once. Tracking then starts automatically; no per-task activation phrase is required. A resumed older conversation may attach on its first observed Hook, without backfilling earlier elapsed time. If that conversation retained a pre-install plugin snapshot, start or fork a continuation task.
+Hooks are optional best-effort compatibility support; review and trust them only if you want those signals. Fully quit and reopen Codex once. Task tracking is model-reported: use the supplied opaque task handle when present, otherwise the MCP-process lease fallback associates the call. A resumed older conversation can report after restart, without backfilling earlier elapsed time. If that conversation retained a pre-install plugin snapshot, start or fork a continuation task.
 
 The release plugin includes a small open-source Windows bridge compiled from `build/native-launcher.cs`. It validates the installer manifest and streams MCP JSON directly to the packaged companion, avoiding a global Node.js dependency and PowerShell's non-streaming redirected-input behavior.
 
@@ -34,7 +34,7 @@ The release plugin includes a small open-source Windows bridge compiled from `bu
 
 The Codex plugin page is the only global enable/disable/uninstall switch. Show/hide changes only the floating window. Select, pause, resume, and stop affect only one task's HUD timing and never pause or stop Codex itself.
 
-Disabling or uninstalling stops new plugin activity. The companion exits after the final MCP lease disappears and a 30–60 second grace period. A companion started by a Hook also starts the same grace timer while waiting for its first MCP lease, so a missing or disabled MCP configuration cannot leave it running indefinitely. The deprecated `hud_close` alias requests immediate shutdown but does not persist an off preference; an enabled task may restart the companion.
+Disabling or uninstalling stops new plugin activity. The companion exits after the final MCP lease disappears and a 30–60 second grace period. A companion started by a Hook also starts the same grace timer while waiting for its first MCP lease, so a missing or disabled MCP configuration cannot leave it running indefinitely. The deprecated `hud_close` alias requests immediate shutdown but does not persist an off preference; a later task write may restart the companion.
 
 ## Update and recovery
 

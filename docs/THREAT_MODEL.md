@@ -6,7 +6,7 @@ Assets are local task metadata, the bearer token, lifecycle/progress integrity, 
 
 ## Control boundary
 
-Codex’s plugin page is the sole global enable/disable/uninstall switch. Trusted Hooks with an enabled plugin automatically provide runtime evidence. Window show/hide and per-task selection/timing controls are presentation controls; they neither change plugin state nor control Codex execution.
+Codex’s plugin page is the sole global enable/disable/uninstall switch. Enablement loads capabilities but does not force model calls. Hooks are optional best-effort compatibility signals, not a prerequisite or unconditional automatic-tracking path. Window show/hide and per-task selection/timing controls are presentation controls; they neither change plugin state nor control Codex execution.
 
 ## Main threats and mitigations
 
@@ -20,6 +20,6 @@ Operational history is an allowlist of bounded event codes/categories and canoni
 
 Runtime interruption evidence is authoritative only when supplied by a trusted Hook/runtime boundary (`Interrupt`, `SessionEnd`, or an explicit runtime failure). A missing heartbeat, lease expiry, or disconnected process is suspected and is labeled accordingly; it cannot be presented as confirmed interruption or completion. Model-reported success is verified only by the configured validation evidence.
 
-An older conversation can attach on its first observed Hook after a full Codex restart, with no backfilled elapsed time; a new task is not required. A conversation frozen before installation or update cannot self-attach until the host loads the new plugin snapshot. Deprecated `hud_open` and `hud_close`, the ordinary `hud_hide` visibility alias, and `tracking_start` remain only for compatibility and do not form another global switch. `hud_close` requests immediate shutdown without persisting global off.
+An existing conversation can report after a full Codex restart, with no backfilled elapsed time; a new task is not required. A conversation frozen before installation or update cannot report until the host loads the new plugin snapshot. Restarting the MCP process creates a new task association, and multiple conversations sharing one MCP process cannot be distinguished by the fallback. Deprecated `hud_open` and `hud_close`, the ordinary `hud_hide` visibility alias, and supported explicit `tracking_start` do not form another global switch. `hud_close` requests immediate shutdown without persisting global off.
 
-Residual risks include same-user malware reading the application-data token, timing/path-existence inference, and inaccurate cooperative model reports. No cloud service or telemetry is present.
+Residual risks include same-user malware reading the application-data token, timing/path-existence inference, indistinguishable conversations sharing one MCP process, and inaccurate cooperative model reports. The fallback identifier is content-free, process-memory-only, locally authenticated, and not telemetry. No cloud service or telemetry is present.

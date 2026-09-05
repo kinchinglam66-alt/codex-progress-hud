@@ -4,17 +4,17 @@ A local, privacy-first overlay for Codex task progress and honest remaining-time
 
 ## One plugin switch
 
-Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. When the plugin is enabled and its command Hooks are trusted, tracking starts automatically for new Hook-enabled work; no start instruction is required.
+Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. Enablement loads the plugin capabilities; it does not force model progress calls. Task tracking occurs when the model reports, using a supplied opaque handle when available or the MCP-process lease fallback otherwise.
 
-After installing or updating, fully quit Codex Desktop and reopen it so the host reloads the plugin, Hooks, skill, and MCP definitions. An existing conversation does not require a new task: it can attach on its first observed Hook after the restart, but a frozen conversation from before installation cannot be reconstructed.
+After installing or updating, fully quit Codex Desktop and reopen it so the host reloads the plugin, optional Hooks, skill, and MCP definitions. An existing conversation can report after the restart without backfilling prior activity. A frozen conversation from before installation cannot be reconstructed.
 
 Window and task controls are separate presentation controls. Show/hide changes only window visibility. Per-task select, pause, resume, and stop changes only that task’s HUD presentation/timing. None of these controls enables or disables the plugin, and none pauses, cancels, or controls Codex execution. `hud_hide` is an ordinary window-visibility alias, not a deprecated lifecycle alias. `hud_close` is a deprecated compatibility alias for an immediate shutdown request; it does not persist a global off preference. These aliases are not another global switch.
 
 ## Windows installation and troubleshooting
 
-Install the Windows companion first, then add and enable the matching release plugin in Codex. Review its Hooks and fully restart Codex once. The installer is per-user, requires no global Node.js, and is unsigned until a trusted signing certificate is configured. See [Install on Windows](docs/INSTALL-WINDOWS.md) for checksum, install, update, disable, and uninstall instructions.
+Install the Windows companion first, then add and enable the matching release plugin in Codex. Hooks are optional best-effort compatibility support; review or trust them only if you want those signals. Fully restart Codex once. The installer is per-user, requires no global Node.js, and is unsigned until a trusted signing certificate is configured. See [Install on Windows](docs/INSTALL-WINDOWS.md) for checksum, install, update, disable, and uninstall instructions.
 
-If tools are missing, run `npm run diagnose:mcp`. If tools are present but the companion is offline, check the installed bundle and local executable. If versions mismatch, update both sides and fully restart Codex; do not mix an old MCP client with a new companion. `hud_diagnose` reports installation, Hook trust/activity, MCP lease, companion process, protocol compatibility, and per-task tracking separately.
+If tools are missing, run `npm run diagnose:mcp`. If tools are present but the companion is offline, check the installed bundle and local executable. If versions mismatch, update both sides and fully restart Codex; do not mix an old MCP client with a new companion. `hud_diagnose` reports plugin enablement, Hook trust/activity, MCP lease, companion process, protocol compatibility, and per-task tracking separately. Multiple conversations sharing one MCP process cannot be distinguished by the fallback lease.
 
 ## Privacy-bounded Hooks
 

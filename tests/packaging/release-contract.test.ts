@@ -46,6 +46,9 @@ describe("Windows release source contract", () => {
     const rootMcp = JSON.parse(await text(".mcp.json"));
     const plugin = JSON.parse(await text("plugins/codex-progress-hud/.codex-plugin/plugin.json"));
     expect(plugin).not.toHaveProperty("hooks");
+    expect(plugin.version).toBe("0.2.1");
+    expect(plugin.interface.defaultPrompt.join(" ")).not.toMatch(/automatic|must report/iu);
+    expect(plugin.interface.defaultPrompt.join(" ")).toContain("MCP lease");
     expect(Object.keys(rootMcp)).toEqual(["mcpServers"]);
     expect(Object.keys(mcp)).toEqual(["mcpServers"]);
     expect(mcp.mcpServers["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");

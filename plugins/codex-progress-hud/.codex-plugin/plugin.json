@@ -26,9 +26,9 @@
       "Interactive"
     ],
     "defaultPrompt": [
-      "Show this task's automatic Progress HUD status.",
-      "Report this task's current phase and ETA.",
-      "Show the latest Progress HUD status."
+      "Report this task's current phase and ETA when useful.",
+      "Show the latest Progress HUD status when requested.",
+      "Use the supplied task handle when present; otherwise use the MCP lease."
     ],
     "brandColor": "#7C5CFC"
   }

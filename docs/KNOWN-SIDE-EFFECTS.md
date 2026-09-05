@@ -6,15 +6,15 @@ Codex Progress HUD is an observational companion. It does not pause, resume, can
 
 - The Windows companion creates an Electron process and a floating window. This consumes memory, some CPU/GPU time, and desktop space. Always-on-top presentation can distract from or cover other applications.
 - The companion listens on loopback port `17837` by default. Another service on that port can prevent startup; an authenticated service-identity mismatch is reported as a port conflict.
-- The companion may start when a trusted Hook observes activity. It normally exits after the last MCP lease disappears and its grace period expires, so process presence is not identical to plugin enablement.
+- The companion may start when a trusted Hook observes activity or when an MCP task write needs it. It normally exits after the last MCP lease disappears and its grace period expires, so process presence is not identical to plugin enablement.
 - Show, hide, pause, resume, and stop are presentation or tracking controls. They do not disable the plugin and do not affect the underlying Codex task.
 
 ## Codex workflow overhead
 
-- Trusted command Hooks run on session, prompt, tool, stop, interrupt, and session-end events. They are bounded to short deadlines and fail open, but still add local process and loopback-request overhead.
+- Optional command Hooks can run on session, prompt, tool, stop, interrupt, and session-end events. They are bounded to short deadlines and fail open, but still add local process and loopback-request overhead.
 - The progress-reporting skill and MCP tool calls add a small amount of context and execution work to a task. Excessively frequent reports can create noise and consume more time than they save.
 - Hook-provided context can influence the executing model to report progress. Reports remain cooperative model output and can be late, incomplete, inconsistent, or omitted.
-- If a Hook is unavailable or no opaque task handle is injected, the agent must not invent an identifier. The HUD may remain empty even though the plugin and companion are healthy.
+- If a Hook is unavailable or no opaque task handle is supplied, the agent must not invent an identifier; omit it and use the MCP-process lease fallback. Multiple conversations sharing one MCP process cannot be distinguished by that fallback.
 
 ## ETA and progress accuracy
 
@@ -34,10 +34,10 @@ Codex Progress HUD is an observational companion. It does not pause, resume, can
 
 ## Installation and compatibility effects
 
-- Version 0.2.0 supports Windows 10/11 x64. Other desktop platforms are not release-supported yet.
+- Version 0.2.1 supports Windows 10/11 x64. Other desktop platforms are not release-supported yet.
 - The installer is currently unsigned and can trigger Windows SmartScreen warnings. Users should verify release checksums before installation.
-- Installing or updating the plugin requires a full Codex Desktop restart to reload its manifest, MCP definitions, skill, and Hooks.
-- An older conversation can attach only after a new Hook is observed. Activity before installation is not reconstructed, and a conversation retaining a pre-install plugin snapshot may require a continuation task.
+- Installing or updating the plugin requires a full Codex Desktop restart to reload its manifest, MCP definitions, skill, and optional Hooks.
+- An existing conversation can report after restart without backfilling activity before installation. Restarting the MCP process creates a new task association, and a conversation retaining a pre-install plugin snapshot may require a continuation task.
 - Plugin and companion protocol versions must match. A stale cache or partial update can expose tools while leaving lifecycle operations incompatible.
 
 ## Privacy and security residual risks
