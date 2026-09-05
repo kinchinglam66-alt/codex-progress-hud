@@ -8,8 +8,9 @@ description: Report structured task progress, waiting states, remaining-time ran
 For every task-scoped write, pass a valid opaque `task_handle` only when Codex
 supplied one. Otherwise omit it and let the MCP process lease associate the
 write. Never invent, infer, persist, or disclose a handle. The fallback is a
-content-free random identifier held only in MCP-process memory and used through
-an authenticated local lease; it is not telemetry.
+content-free random identifier. Its current association is MCP-process-local;
+the identifier is sent through an authenticated local lease and also held in
+the companion's in-memory snapshot. It is not persisted or sent as telemetry.
 
 `progress_report` may create a task. Use `tracking_start` for an explicit task
 start or restart when the user requests it; it is supported, not deprecated.
