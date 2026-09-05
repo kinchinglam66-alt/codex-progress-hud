@@ -73,9 +73,15 @@ const fallbackTaskHandle = "hud_ZmFsbGJhY2staGFuZGxlLTEyMzQ";
 
 function createHandlers(
   progressClient: Parameters<typeof createToolHandlers>[0]["progressClient"],
-  companionManager: CompanionManager = createManager()
+  companionManager: CompanionManager = createManager(),
+  createFallbackTaskHandle?: () => string
 ) {
-  return createToolHandlers({ progressClient, companionManager, fallbackTaskHandle });
+  return createToolHandlers({
+    progressClient,
+    companionManager,
+    fallbackTaskHandle,
+    ...(createFallbackTaskHandle === undefined ? {} : { createFallbackTaskHandle })
+  });
 }
 
 function createRunningDeadlineManager(startupTimeoutMs: number): CompanionManager {
@@ -161,6 +167,7 @@ describe("MCP progress tool handlers", () => {
     expect(JSON.stringify(result.structuredContent)).not.toContain(fallbackTaskHandle);
     expect(JSON.stringify(result.structuredContent)).not.toContain("owner-nonce");
     expect(JSON.stringify(result.structuredContent)).not.toContain("secret-token");
+    expect(submit).toHaveBeenCalledOnce();
     expect(submit).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: fallbackTaskHandle }),
       expect.anything()
@@ -289,6 +296,194 @@ describe("MCP progress tool handlers", () => {
       expect.objectContaining({ taskId: fallbackTaskHandle, event: expectedEvent }),
       expect.anything()
     );
+  });
+
+  it.each([
+    "ended_unknown",
+    "completed_unverified",
+    "succeeded_verified",
+    "failed",
+    "interrupted"
+  ] as const)("rotates the handle-free fallback after a %s start and routes later reports to it", async (terminalStatus) => {
+    const calls: Array<{ taskId: string; event: unknown }> = [];
+    const submit = vi.fn(async (envelope) => {
+      calls.push({ taskId: envelope.taskId, event: envelope.event });
+      return {
+        task: {
+          id: envelope.taskId,
+          title: calls.length === 1 ? "Finished task" : "New task",
+          status: calls.length === 1 ? terminalStatus : "running"
+        },
+        eta: null
+      };
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    await handlers.trackingStart({ title: "Restart task" });
+    await handlers.progressReport({ phase: "after restart" });
+
+    expect(calls).toHaveLength(3);
+    expect(calls[0]?.taskId).toBe(fallbackTaskHandle);
+    expect(calls[1]?.taskId).toMatch(/^hud_[A-Za-z0-9_-]{20,96}$/u);
+    expect(calls[1]?.taskId).not.toBe(fallbackTaskHandle);
+    expect(calls[2]?.taskId).toBe(calls[1]?.taskId);
+  });
+
+  it("serializes simultaneous handle-free starts without creating duplicate replacement tasks", async () => {
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const calls: string[] = [];
+    const submit = vi.fn(async (envelope: { taskId: string }) => {
+      calls.push(envelope.taskId);
+      if (calls.length === 1) {
+        await firstStarted;
+        return { task: { id: envelope.taskId, status: "succeeded_verified" }, eta: null };
+      }
+      return { task: { id: envelope.taskId, status: "running" }, eta: null };
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    const first = handlers.trackingStart({ title: "First restart" });
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    const second = handlers.trackingStart({ title: "Second restart" });
+    await Promise.resolve();
+    expect(submit).toHaveBeenCalledOnce();
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls).size).toBe(2);
+    expect(calls[0]).toBe(fallbackTaskHandle);
+    expect(calls[1]).toBe(calls[2]);
+  });
+
+  it("reuses one replacement candidate when the write manager retries the terminal start", async () => {
+    const calls: string[] = [];
+    let candidateAttempts = 0;
+    const replacement = "hud_cccccccccccccccccccc";
+    const submit = vi.fn(async (
+      envelope: { taskId: string },
+      options: { signal?: AbortSignal }
+    ) => {
+      calls.push(envelope.taskId);
+      if (envelope.taskId === fallbackTaskHandle) {
+        return { task: { id: envelope.taskId, status: "failed" }, eta: null };
+      }
+      if (candidateAttempts++ === 0) {
+        throw new HudClientError("OFFLINE", "retry terminal start");
+      }
+      return { task: { id: envelope.taskId, status: "running" }, eta: null };
+    });
+    const handlers = createHandlers(
+      { submit, status: vi.fn() },
+      undefined,
+      () => replacement
+    );
+
+    await handlers.trackingStart({ title: "Retry restart" });
+    await handlers.progressReport({ phase: "after retry" });
+
+    expect(calls).toEqual([
+      fallbackTaskHandle,
+      replacement,
+      fallbackTaskHandle,
+      replacement,
+      replacement
+    ]);
+    expect(submit.mock.calls[1]?.[1]?.signal).toBe(submit.mock.calls[3]?.[1]?.signal);
+  });
+
+  it("does not rotate on progress after a terminal fallback write", async () => {
+    const calls: string[] = [];
+    const submit = vi.fn(async (envelope) => {
+      calls.push(envelope.taskId);
+      return { task: { id: envelope.taskId, status: "succeeded_verified" }, eta: null };
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    await handlers.progressReport({ phase: "late one" });
+    await handlers.progressReport({ phase: "late two" });
+
+    expect(calls).toEqual([fallbackTaskHandle, fallbackTaskHandle]);
+  });
+
+  it("keeps the old fallback when the replacement start fails", async () => {
+    const calls: string[] = [];
+    const replacement = "hud_dddddddddddddddddddd";
+    const submit = vi.fn(async (envelope) => {
+      calls.push(envelope.taskId);
+      if (calls.length === 1) return { task: { id: envelope.taskId, status: "failed" }, eta: null };
+      if (calls.length === 2) throw new HudClientError("REQUEST_TIMEOUT", "replacement timed out");
+      return { task: { id: envelope.taskId, status: "running" }, eta: null };
+    });
+    const handlers = createHandlers(
+      { submit, status: vi.fn() },
+      undefined,
+      () => replacement
+    );
+
+    const result = await handlers.trackingStart({ title: "Failed restart" });
+    await handlers.progressReport({ phase: "still old" });
+
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([fallbackTaskHandle, replacement, fallbackTaskHandle]);
+  });
+
+  it("keeps the old fallback when a handle-free start is suppressed", async () => {
+    const submit = vi.fn(async (envelope) => ({
+      task: { id: envelope.taskId, status: "running" },
+      eta: null
+    }));
+    let writeCalls = 0;
+    const companionManager = createManager({
+      executeWrite: vi.fn(async (_reason, operation) => {
+        writeCalls += 1;
+        if (writeCalls === 1) return { kind: "suppressed" as const, code: "MANUALLY_DISABLED" as const };
+        return {
+          kind: "completed" as const,
+          value: await operation(() => ({ generation: 7, signal: new AbortController().signal }))
+        };
+      })
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() }, companionManager);
+
+    await handlers.trackingStart({ title: "Suppressed restart" });
+    await handlers.progressReport({ phase: "after suppression" });
+
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: fallbackTaskHandle }),
+      expect.anything()
+    );
+  });
+
+  it("does not retarget an already delayed report when a later start rotates the fallback", async () => {
+    let releaseReport!: () => void;
+    const reportStarted = new Promise<void>((resolve) => { releaseReport = resolve; });
+    const calls: Array<{ taskId: string; event: string }> = [];
+    const submit = vi.fn(async (envelope) => {
+      calls.push({ taskId: envelope.taskId, event: envelope.event.type });
+      if (envelope.event.type === "model_progress") {
+        await reportStarted;
+        return { task: { id: envelope.taskId, status: "succeeded_verified" }, eta: null };
+      }
+      if (envelope.taskId === fallbackTaskHandle) {
+        return { task: { id: envelope.taskId, status: "succeeded_verified" }, eta: null };
+      }
+      return { task: { id: envelope.taskId, status: "running" }, eta: null };
+    });
+    const handlers = createHandlers({ submit, status: vi.fn() });
+
+    const delayedReport = handlers.progressReport({ phase: "delayed" });
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    const restart = handlers.trackingStart({ title: "New work" });
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(3));
+    releaseReport();
+    await Promise.all([delayedReport, restart]);
+
+    expect(calls[0]).toEqual({ taskId: fallbackTaskHandle, event: "model_progress" });
+    expect(calls[1]?.taskId).toBe(fallbackTaskHandle);
+    expect(calls[2]?.taskId).not.toBe(fallbackTaskHandle);
   });
 
   it.each([
@@ -574,6 +769,7 @@ describe("MCP progress tool handlers", () => {
     expect(result.content[0]?.text).toContain("Update the plugin and companion");
     expect(result.content[0]?.text).toContain("quit Codex");
     expect(result.content[0]?.text).toContain("reopen it");
+    expect(result.content[0]?.text).not.toContain("Hook-enabled");
   });
 
   it("preserves a stale revision code from a semantic write", async () => {

@@ -13,10 +13,13 @@ an authenticated local lease; it is not telemetry.
 
 `progress_report` may create a task. Use `tracking_start` for an explicit task
 start or restart when the user requests it; it is supported, not deprecated.
-Completed snapshots remain terminal until the controller creates a fresh task
-for a later explicit start. Other task writes require an existing task. Status
-tools are observational and must not start, show, hide, close, or otherwise
-change the companion or task.
+Completed snapshots remain terminal. A handle-free `tracking_start` explicitly
+requested after any terminal fallback state creates one fresh MCP-process task
+association and preserves the old snapshot; supplied explicit handles keep their
+existing behavior. Progress, validation, outcomes, status, pause, resume, and
+stop never roll a task over automatically. Other task writes require an
+existing task. Status tools are observational and must not start, show, hide,
+close, or otherwise change the companion or task.
 
 Plugin enablement means its capabilities are loaded. Companion running means a
 local service is alive. Task tracking means the model is reporting. These are

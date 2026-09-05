@@ -20,6 +20,7 @@ import {
   type ProgressClientSnapshot
 } from "./report-client.js";
 import {
+  createFallbackTaskHandle as generateFallbackTaskHandle,
   resolveTaskAssociation,
   type ResolvedTaskAssociation,
   type TaskAssociationSource
@@ -122,7 +123,7 @@ function clientFailureResult(
 
 function clientFailureText(code: HudClientErrorCode | HudErrorCode, prefix: string): string {
   return code === "VERSION_MISMATCH"
-    ? `${prefix} (${code}). Progress HUD plugin and companion versions do not match. Update the plugin and companion, then fully quit Codex, reopen it, and begin or resume a Hook-enabled task.`
+    ? `${prefix} (${code}). Progress HUD plugin and companion versions do not match. Update the plugin and companion, then fully quit Codex, reopen it, and begin or resume a task with Progress HUD tracking enabled.`
     : `${prefix} (${code}). Check HUD status or run diagnostics.`;
 }
 
@@ -136,6 +137,18 @@ function submittedTaskStatus(snapshot: ProgressClientSnapshot, taskHandle: strin
   return snapshot.task?.id === undefined || snapshot.task.id === taskHandle
     ? snapshot.task?.status ?? "accepted"
     : "accepted";
+}
+
+const TERMINAL_TASK_STATUSES = new Set([
+  "ended_unknown",
+  "completed_unverified",
+  "succeeded_verified",
+  "failed",
+  "interrupted"
+]);
+
+function submittedTaskIsTerminal(snapshot: ProgressClientSnapshot, taskHandle: string): boolean {
+  return TERMINAL_TASK_STATUSES.has(submittedTaskStatus(snapshot, taskHandle));
 }
 
 async function submitForTask(
@@ -158,13 +171,23 @@ export interface ToolHandlerDependencies {
   progressClient: ProgressClient;
   companionManager: CompanionManager;
   fallbackTaskHandle: string;
+  createFallbackTaskHandle?: () => string;
 }
+
+type WriteExecution<T> =
+  | { kind: "completed"; value: T }
+  | Exclude<EnsureResult, { kind: "ready" }>
+  | { kind: "exception"; error: unknown };
 
 export function createToolHandlers({
   progressClient: client,
   companionManager,
-  fallbackTaskHandle
+  fallbackTaskHandle,
+  createFallbackTaskHandle = generateFallbackTaskHandle
 }: ToolHandlerDependencies) {
+  let currentFallbackTaskHandle = fallbackTaskHandle;
+  let fallbackStartFlight: Promise<ToolResult> | undefined;
+
   function lifecycleErrorResult(
     result: Extract<EnsureResult, { kind: "error" }>,
     association: ResolvedTaskAssociation
@@ -193,20 +216,110 @@ export function createToolHandlers({
     });
   }
 
+  function mapWriteExecution<T>(
+    execution: WriteExecution<T>,
+    association: ResolvedTaskAssociation,
+    suppressedText: string,
+    completed: (value: T) => ToolResult
+  ): ToolResult {
+    if (execution.kind === "completed") return completed(execution.value);
+    if (execution.kind === "suppressed") return suppressedResult(suppressedText, association);
+    if (execution.kind === "error") return lifecycleErrorResult(execution, association);
+    return clientFailureResult(execution.error, association.source);
+  }
+
+  async function executeWrite<T>(
+    reason: HudWriteReason,
+    operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<T>
+  ): Promise<WriteExecution<T>> {
+    try {
+      return await companionManager.executeWrite(reason, operation);
+    } catch (error) {
+      return { kind: "exception", error };
+    }
+  }
+
+  async function fallbackAssociation(explicitTaskHandle: string | undefined): Promise<ResolvedTaskAssociation> {
+    if (explicitTaskHandle === undefined && fallbackStartFlight !== undefined) {
+      await fallbackStartFlight.catch(() => undefined);
+    }
+    return resolveTaskAssociation(explicitTaskHandle, currentFallbackTaskHandle);
+  }
+
   async function runWrite(
     association: ResolvedTaskAssociation,
     reason: HudWriteReason,
     suppressedText: string,
     operation: (makeRequestOptions: MakeHudRequestOptions) => Promise<ToolResult>
   ): Promise<ToolResult> {
-    try {
-      const result = await companionManager.executeWrite(reason, operation);
-      if (result.kind === "completed") return result.value;
-      if (result.kind === "suppressed") return suppressedResult(suppressedText, association);
-      return lifecycleErrorResult(result, association);
-    } catch (error) {
-      return clientFailureResult(error, association.source);
-    }
+    return mapWriteExecution(
+      await executeWrite(reason, operation),
+      association,
+      suppressedText,
+      (value) => value
+    );
+  }
+
+  async function handleFreeTrackingStart(title_: string): Promise<ToolResult> {
+    const association = resolveTaskAssociation(undefined, currentFallbackTaskHandle);
+    let replacementTaskHandle: string | undefined;
+    const execution = await executeWrite(
+      "tracking_start",
+      async (makeRequestOptions) => {
+        const firstSnapshot = await client.submit({
+          taskId: association.taskHandle,
+          title: title_,
+          event: { type: "tracking_started" }
+        }, makeRequestOptions());
+        if (!submittedTaskIsTerminal(firstSnapshot, association.taskHandle)) {
+          return {
+            result: structuredResult(
+              `Tracking started: ${submittedTaskStatus(firstSnapshot, association.taskHandle)}.`,
+              { ok: true, associationSource: association.source }
+            )
+          };
+        }
+
+        replacementTaskHandle ??= createFallbackTaskHandle();
+        const replacementSnapshot = await client.submit({
+          taskId: replacementTaskHandle,
+          title: title_,
+          event: { type: "tracking_started" }
+        }, makeRequestOptions());
+        return {
+          result: structuredResult(
+            `Tracking started: ${submittedTaskStatus(replacementSnapshot, replacementTaskHandle)}.`,
+            { ok: true, associationSource: association.source }
+          ),
+          replacementTaskHandle
+        };
+      }
+    );
+    return mapWriteExecution(
+      execution,
+      association,
+      "HUD is manually closed; tracking was not started.",
+      (value) => {
+        if (value.replacementTaskHandle !== undefined) {
+          currentFallbackTaskHandle = value.replacementTaskHandle;
+        }
+        return value.result;
+      }
+    );
+  }
+
+  function queueHandleFreeTrackingStart(title_: string): Promise<ToolResult> {
+    const previous = fallbackStartFlight;
+    const flight = (async () => {
+      if (previous !== undefined) await previous.catch(() => undefined);
+      return handleFreeTrackingStart(title_);
+    })();
+    fallbackStartFlight = flight;
+    void flight.then(
+      () => { if (fallbackStartFlight === flight) fallbackStartFlight = undefined; },
+      () => { if (fallbackStartFlight === flight) fallbackStartFlight = undefined; }
+    );
+    return flight;
   }
 
   function lifecycleResult(
@@ -242,7 +355,7 @@ export function createToolHandlers({
       const parsed = progressReportSchema.safeParse(input);
       if (!parsed.success) return invalidResult("progress report");
       const value = parsed.data;
-      const association = resolveTaskAssociation(value.task_handle, fallbackTaskHandle);
+      const association = await fallbackAssociation(value.task_handle);
       let event: ProgressEnvelope["event"];
       if (value.waiting_for !== undefined) {
         event = {
@@ -286,7 +399,7 @@ export function createToolHandlers({
       const parsed = taskOutcomeSchema.safeParse(input);
       if (!parsed.success) return invalidResult("task outcome");
       const value = parsed.data;
-      const association = resolveTaskAssociation(value.task_handle, fallbackTaskHandle);
+      const association = await fallbackAssociation(value.task_handle);
       return runWrite(
         association,
         "task_outcome",
@@ -314,7 +427,7 @@ export function createToolHandlers({
       const parsed = validationObservedSchema.safeParse(input);
       if (!parsed.success) return invalidResult("validation observation");
       const value = parsed.data;
-      const association = resolveTaskAssociation(value.task_handle, fallbackTaskHandle);
+      const association = await fallbackAssociation(value.task_handle);
       return runWrite(
         association,
         "task_outcome",
@@ -337,7 +450,10 @@ export function createToolHandlers({
     async trackingStart(input: unknown): Promise<ToolResult> {
       const parsed = trackingStartSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking start");
-      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
+      if (parsed.data.task_handle === undefined) {
+        return queueHandleFreeTrackingStart(parsed.data.title ?? "Codex task");
+      }
+      const association = resolveTaskAssociation(parsed.data.task_handle, currentFallbackTaskHandle);
       return runWrite(
         association,
         "tracking_start",
@@ -360,7 +476,7 @@ export function createToolHandlers({
     async trackingPause(input?: unknown): Promise<ToolResult> {
       const parsed = taskControlSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking pause");
-      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
+      const association = await fallbackAssociation(parsed.data.task_handle);
       return runWrite(
         association,
         "progress_report",
@@ -373,7 +489,7 @@ export function createToolHandlers({
     async trackingResume(input?: unknown): Promise<ToolResult> {
       const parsed = taskControlSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking resume");
-      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
+      const association = await fallbackAssociation(parsed.data.task_handle);
       return runWrite(
         association,
         "progress_report",
@@ -386,7 +502,7 @@ export function createToolHandlers({
     async trackingStop(input?: unknown): Promise<ToolResult> {
       const parsed = taskControlSchema.safeParse(input === undefined ? {} : input);
       if (!parsed.success) return invalidResult("tracking stop");
-      const association = resolveTaskAssociation(parsed.data.task_handle, fallbackTaskHandle);
+      const association = await fallbackAssociation(parsed.data.task_handle);
       return runWrite(
         association,
         "progress_report",

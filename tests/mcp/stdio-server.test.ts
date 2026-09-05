@@ -210,7 +210,12 @@ describe("plugin MCP stdio server", () => {
         });
         const progressReport = await request(5, "tools/call", {
           name: "progress_report",
-          arguments: { phase: "verification" }
+          arguments: {
+            phase: "verification",
+            progress: 0.8,
+            eta_low_seconds: 10,
+            eta_high_seconds: 20
+          }
         });
         const validationObserved = await request(6, "tools/call", {
           name: "validation_observed",
@@ -238,6 +243,56 @@ describe("plugin MCP stdio server", () => {
         ) as { tasks: unknown[] };
         expect(snapshot.tasks).toHaveLength(1);
         expect((await observer.status()).tasks).toHaveLength(1);
+
+        const secondTrackingStart = await request(9, "tools/call", {
+          name: "tracking_start",
+          arguments: { title: "Handle-free second stdio task" }
+        });
+        const secondProgressReport = await request(10, "tools/call", {
+          name: "progress_report",
+          arguments: {
+            phase: "second verification",
+            progress: 0.2,
+            eta_low_seconds: 30,
+            eta_high_seconds: 40
+          }
+        });
+        for (const response of [secondTrackingStart, secondProgressReport]) {
+          expect(response.error).toBeUndefined();
+          expect(response.result).toMatchObject({
+            structuredContent: { ok: true, associationSource: "mcp_lease" }
+          });
+          expect(JSON.stringify(response.result)).not.toContain("ownerNonce");
+          expect(JSON.stringify(response.result)).not.toContain("lease_");
+        }
+        const restartedStatus = await request(11, "tools/call", {
+          name: "tracking_status",
+          arguments: {}
+        });
+        const restartedSnapshot = JSON.parse(
+          ((restartedStatus.result as { content: Array<{ text: string }> }).content[0]!).text
+        ) as {
+          tasks: Array<{ status: string }>;
+          selected: { task: {
+            status: string;
+            progress?: number;
+            verificationEvidence?: unknown;
+          } } | null;
+        };
+        expect(restartedSnapshot.tasks).toHaveLength(2);
+        expect(restartedSnapshot.tasks.map((task) => task.status)).toEqual(
+          expect.arrayContaining(["succeeded_verified", "running"])
+        );
+        expect(restartedSnapshot.selected?.task).toMatchObject({
+          status: "running",
+          progress: 0.2
+        });
+        expect(restartedSnapshot.selected?.task.verificationEvidence).toBeUndefined();
+        const restartedObserverSnapshot = await observer.status();
+        expect(restartedObserverSnapshot.tasks).toHaveLength(2);
+        expect(restartedObserverSnapshot.tasks.map((task) => task.status)).toEqual(
+          expect.arrayContaining(["succeeded_verified", "running"])
+        );
         expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
         expect(stdoutLines.every((line) => {
           try { return (JSON.parse(line) as { jsonrpc?: unknown }).jsonrpc === "2.0"; }

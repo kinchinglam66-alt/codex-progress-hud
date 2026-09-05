@@ -4,7 +4,7 @@ A local, privacy-first overlay for Codex task progress and honest remaining-time
 
 ## One plugin switch
 
-Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. Enablement loads the plugin capabilities; it does not force model progress calls. Task tracking occurs when the model reports, using a supplied opaque handle when available or the MCP-process lease fallback otherwise.
+Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. Enablement loads the plugin capabilities; it does not force model progress calls. Task tracking occurs when the model reports, using a supplied opaque handle when available or the MCP-process lease fallback otherwise. After a fallback task reaches a terminal state, an explicitly requested handle-free `tracking_start` creates one fresh fallback task and preserves the old record; ordinary progress and delayed reports never roll over automatically.
 
 After installing or updating, fully quit Codex Desktop and reopen it so the host reloads the plugin, optional Hooks, skill, and MCP definitions. An existing conversation can report after the restart without backfilling prior activity. A frozen conversation from before installation cannot be reconstructed.
 
