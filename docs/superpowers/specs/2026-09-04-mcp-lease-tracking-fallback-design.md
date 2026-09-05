@@ -4,6 +4,10 @@
 
 Approved in conversation on 2026-09-04. This design is a prerequisite correction for the ETA v2 work: the project cannot evaluate its own progress reporting until a supported Codex path can create and address a task without relying on command Hooks.
 
+## Acceptance amendment (2026-09-05)
+
+Installed acceptance showed that a process-lifetime fixed fallback prevents subsequent work after terminal completion. Continuous use requires one current fallback per MCP process: an explicit handle-free `tracking_start` that observes its own terminal task creates a new random fallback and preserves the old terminal record. Concurrent starts serialize; retries retain the same candidate and write deadline; failed or suppressed starts do not replace the current association. Other calls do not rotate it, and already-in-flight calls retain their captured association. Explicit handles and terminal reducer protections stay unchanged. This amendment supersedes fixed-lifetime statements in the original design and plan below.
+
 ## Problem
 
 The installed plugin exposes all MCP tools, but repeated `UserPromptSubmit` turns produce no Hook activity and no task association. The current Codex plugin validator rejects a top-level `hooks` manifest field, and observed runtime behavior does not discover the packaged `hooks/hooks.json`. Consequently, `tracking_start` without a Hook-injected handle returns `NO_SESSION_ASSOCIATION` and the HUD remains empty.

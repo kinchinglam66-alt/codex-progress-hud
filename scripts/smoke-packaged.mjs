@@ -122,6 +122,31 @@ await runPackagedCleanup({
     throw new Error("packaged progress_report did not use the MCP lease association");
   }
 
+  const validation = await client.callTool({ name: "validation_observed", arguments: { result: "passed" } });
+  assertToolSuccess(validation, "validation_observed");
+  const outcome = await client.callTool({ name: "task_outcome", arguments: { outcome: "completed", verified: true } });
+  assertToolSuccess(outcome, "task_outcome");
+  const beforeResult = await client.callTool({ name: "tracking_status", arguments: {} });
+  if (beforeResult.isError) throw new Error("packaged pre-restart status failed");
+  const before = JSON.parse(beforeResult.content.find((item) => item.type === "text").text);
+  if (before.tasks.length !== 1 || before.selected?.task.status !== "succeeded_verified") {
+    throw new Error("packaged first task did not reach verified completion");
+  }
+  const completedId = before.selected.task.id;
+  const restarted = await client.callTool({ name: "tracking_start", arguments: { title: "Packaged subsequent task" } });
+  assertToolSuccess(restarted, "tracking_start after completion");
+  const nextReport = await client.callTool({ name: "progress_report", arguments: { phase: "subsequent task" } });
+  assertToolSuccess(nextReport, "progress_report after restart");
+  const afterResult = await client.callTool({ name: "tracking_status", arguments: {} });
+  if (afterResult.isError) throw new Error("packaged post-restart status failed");
+  const after = JSON.parse(afterResult.content.find((item) => item.type === "text").text);
+  if (after.tasks.length !== 2 || after.selected?.task.id === completedId ||
+      after.selected?.task.status !== "running" || after.selected?.task.phase !== "subsequent task" ||
+      after.selected?.task.verificationEvidence !== undefined ||
+      after.tasks.find((task) => task.id === completedId)?.status !== "succeeded_verified") {
+    throw new Error("packaged terminal restart did not preserve history and start fresh running work");
+  }
+
     await close();
   },
   close: closeHud,
@@ -132,4 +157,4 @@ await runPackagedCleanup({
   }
 });
 
-  process.stdout.write("Packaged MCP-first HUD, authenticated health, 14 tools, and handle-free reporting passed.\n");
+  process.stdout.write("Packaged MCP-first HUD, authenticated health, 14 tools, handle-free reporting, and terminal restart passed.\n");
