@@ -10,6 +10,14 @@ export type PackagedCleanupOptions = {
 };
 
 export function runPackagedCleanup(options: PackagedCleanupOptions): Promise<unknown>;
+export function assertToolSuccess(
+  result: { isError?: boolean; structuredContent?: { ok?: boolean; observedState?: string } },
+  name: string
+): void;
+export function assertHudCloseStopped(
+  result: { isError?: boolean; structuredContent?: { ok?: boolean; observedState?: string } },
+  context: string
+): void;
 export function removeTemporaryDirectory(
   path: string,
   remove?: (path: string, options: { recursive: true; force: true }) => Promise<void>

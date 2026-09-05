@@ -4,7 +4,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { removeTemporaryDirectory, runPackagedCleanup } from "./packaged-cleanup.mjs";
+import {
+  assertHudCloseStopped,
+  assertToolSuccess,
+  removeTemporaryDirectory,
+  runPackagedCleanup
+} from "./packaged-cleanup.mjs";
 
 if (process.platform !== "win32") {
   process.stdout.write("Packaged MCP diagnostic is Windows-only; skipped.\n");
@@ -40,12 +45,6 @@ const transport = new StdioClientTransport({
 });
 const client = new Client({ name: "packaged-mcp-diagnostic", version: packageManifest.version });
 
-function assertToolSuccess(result, name) {
-  if (result.isError === true || result.structuredContent?.ok !== true) {
-    throw new Error(`packaged ${name} failed: ${JSON.stringify(result.structuredContent ?? {})}`);
-  }
-}
-
 async function closeMcp() {
   let firstError;
   try {
@@ -63,10 +62,7 @@ async function closeMcp() {
 
 async function closeHud() {
   const closedResult = await client.callTool({ name: "hud_close", arguments: {} });
-  assertToolSuccess(closedResult, "hud_close");
-  if (closedResult.structuredContent?.observedState !== "stopped") {
-    throw new Error(`installed launcher hud_close did not observe stopped state: ${JSON.stringify(closedResult.structuredContent ?? {})}`);
-  }
+  assertHudCloseStopped(closedResult, "installed launcher");
 }
 
 await runPackagedCleanup({

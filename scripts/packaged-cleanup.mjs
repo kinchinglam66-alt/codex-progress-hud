@@ -6,6 +6,19 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+export function assertToolSuccess(result, name) {
+  if (result.isError === true || result.structuredContent?.ok !== true) {
+    throw new Error(`packaged ${name} failed: ${JSON.stringify(result.structuredContent ?? {})}`);
+  }
+}
+
+export function assertHudCloseStopped(result, context) {
+  assertToolSuccess(result, "hud_close");
+  if (result.structuredContent?.observedState !== "stopped") {
+    throw new Error(`${context} hud_close did not observe stopped state: ${JSON.stringify(result.structuredContent ?? {})}`);
+  }
+}
+
 export async function removeTemporaryDirectory(
   path,
   remove = removeDirectory
