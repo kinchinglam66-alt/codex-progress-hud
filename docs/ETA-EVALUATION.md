@@ -1,6 +1,6 @@
 # Offline ETA evaluation (Plan A, first implementation slice)
 
-This is an evaluation foundation, not a new online estimator or evidence of improved real-world accuracy. The installed plugin, main-model reporting, calibration store, HUD display and lifecycle are unchanged. There are no network calls, credentials, transcript readers or automatic data collection.
+This is an evaluation foundation, not a new online estimator or evidence of improved real-world accuracy. The installed plugin, main-model reporting, HUD display and lifecycle are unchanged. A subsequent source-level calibration-quality change is described below. There are no network calls, credentials, transcript readers or automatic data collection.
 
 ## Interface
 
@@ -60,10 +60,22 @@ npm run typecheck
 
 The synthetic tests cover active/wait/pause timing, prefix isolation, malformed inputs/outputs, duplicate/split guards, unscored outcomes, exceptions, the existing estimator adapter and paired comparison. Their hand-calculated numbers are correctness fixtures, not benchmark claims.
 
-Next: add a consented, task-disjoint evaluation dataset and fit candidates only on training data. One existing runtime concern is that `aggregateCalibration` currently pools all accepted outcome categories; this module deliberately does not change that behavior. A future calibration change must keep failure/interruption observations separate, evaluate matched held-out prefixes and assess compatibility before replacing online behavior. Independent model integration remains gated by the [observation feasibility report](superpowers/reports/2026-09-05-independent-observation-feasibility.md).
+Next: add a consented, task-disjoint evaluation dataset and fit candidates only on training data. Calibration candidates must be evaluated on matched held-out prefixes before replacing online behavior. Independent model integration remains gated by the [observation feasibility report](superpowers/reports/2026-09-05-independent-observation-feasibility.md).
+
+## Calibration sample quality follow-up
+
+`aggregateCalibration` now counts only `succeeded_verified` observations. Failed, interrupted and unverified-completion samples remain valid input categories but contribute neither durations/errors nor minimum-sample counts. Every sample is validated before filtering, including rejection of extra content fields. This fixes stopping-time contamination; it does not correct selection bias toward successful tasks or establish ETA accuracy on unfinished tasks.
+
+New summaries carry `outcomeBasis: "verified_success_only"`. Lookup validates this contract and numeric bounds before producing an estimate; `minimumSamples` must be a positive safe integer. The marker describes the aggregation policy, not cryptographic proof that a task really completed. Dataset producers remain responsible for truthful labels and for not duplicating one task's observations as independent samples.
+
+Persistence advances to schema version 2 with the same strict summary schema used by lookup. Version 1 files cannot reveal whether failed durations were included, so `load()` returns an empty calibration set without modifying the old file. Rebuild from trusted original samples when available; do not relabel old averages as verified-only. An explicit future `save()` can replace that file with v2 data; users needing historical retention should back it up before that call. This change does not access or rewrite any installed calibration file.
+
+The current production entry points do not call these calibration aggregation/lookup/persistence APIs; this is a tested algorithm foundation, not an online migration or a fix for missing GUI observations. Existing sample-count-derived `confidence` and mean-duration-plus-error ranges are still heuristics, not calibrated coverage probabilities. Further work needs per-prediction targets, phase/remaining-time semantics and task-disjoint empirical interval validation.
 
 ## Development verification, 2026-09-05
 
 Baseline ETA/calibration tests: 27 passed. New replay tests: 24 passed after test-first failing assertions. Complete isolated-worktree suite: 647 tests in 41 files passed, with no skips. TypeScript type checking and build compilation passed. One independent read-only review found no blocking issues; its two suggested assertion improvements were added and the focused suite rerun.
 
 The first full-suite attempt lacked the worktree-local TypeScript path required by an existing integration fixture (633 passed, 14 skipped, one failed suite). A local ignored TypeScript dependency junction to the existing dependency installation fixed the test environment; the complete rerun above is the acceptance result. No tracked dependency changes were required. No installed-plugin or live-provider acceptance is claimed by these results.
+
+Calibration-quality follow-up: 14 expected failing assertions reproduced outcome contamination, missing provenance, invalid minimum counts and unsafe legacy reuse before implementation. The updated full suite passed 659 tests in 41 files. An additional persistence/lookup round-trip test then passed with the 20-test calibration-focused suite; type checking and build compilation also passed. A read-only review found no blocking issues. These numbers describe this follow-up, not an accuracy benchmark.

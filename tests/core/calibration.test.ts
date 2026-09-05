@@ -22,7 +22,7 @@ const samples = [
     phaseClass: "implementation",
     durationSeconds: 140,
     estimateErrorSeconds: 30,
-    outcomeCategory: "completed_unverified"
+    outcomeCategory: "succeeded_verified"
   }
 ] as const;
 
@@ -31,11 +31,46 @@ describe("content-free ETA calibration", () => {
     expect(aggregateCalibration(samples)).toEqual([
       {
         phaseClass: "implementation",
+        outcomeBasis: "verified_success_only",
         sampleCount: 3,
         averageDurationSeconds: 120,
         averageEstimateErrorSeconds: 20
       }
     ]);
+  });
+
+  it.each(["failed", "interrupted", "completed_unverified"] as const)(
+    "does not let %s observations shift successful durations or meet the minimum", outcomeCategory => {
+      const incomplete = { ...samples[0], durationSeconds: 1, estimateErrorSeconds: 0, outcomeCategory };
+      const mixed = aggregateCalibration([samples[0], samples[1], incomplete]);
+      expect(mixed).toEqual([{
+        phaseClass: "implementation", outcomeBasis: "verified_success_only",
+        sampleCount: 2, averageDurationSeconds: 110, averageEstimateErrorSeconds: 15
+      }]);
+      expect(lookupCalibration(mixed, "implementation")).toBeUndefined();
+      expect(aggregateCalibration([incomplete])).toEqual([]);
+    }
+  );
+
+  it("still rejects sensitive fields on excluded samples", () => {
+    expect(() => aggregateCalibration([{ ...samples[0], outcomeCategory: "failed", prompt: "private" }])).toThrow();
+  });
+
+  it.each([0, -1, 0.5, NaN, Infinity])("rejects invalid minimum sample count %s", minimum => {
+    expect(() => lookupCalibration([], "implementation", minimum)).toThrow(RangeError);
+  });
+
+  it("declines unproven or malformed summaries instead of producing trusted estimates", () => {
+    const good = { phaseClass: "implementation", outcomeBasis: "verified_success_only" as const,
+      sampleCount: 3, averageDurationSeconds: 120, averageEstimateErrorSeconds: 20 };
+    for (const bad of [
+      { ...good, outcomeBasis: undefined },
+      { ...good, averageDurationSeconds: NaN },
+      { ...good, sampleCount: Infinity },
+      { ...good, averageEstimateErrorSeconds: -1 }
+    ]) {
+      expect(lookupCalibration([bad as typeof good], "implementation")).toBeUndefined();
+    }
   });
 
   it("rejects titles, paths, prompts, and arbitrary extra fields", () => {

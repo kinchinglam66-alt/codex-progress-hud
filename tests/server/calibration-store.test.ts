@@ -3,7 +3,7 @@ import {
   CalibrationStore,
   type CalibrationFileSystem
 } from "../../src/server/calibration-store.js";
-import type { CalibrationSummary } from "../../src/core/calibration.js";
+import { aggregateCalibration, lookupCalibration, type CalibrationSummary } from "../../src/core/calibration.js";
 
 class MemoryFileSystem implements CalibrationFileSystem {
   readonly files = new Map<string, string>();
@@ -37,18 +37,21 @@ class MemoryFileSystem implements CalibrationFileSystem {
 const summaries: CalibrationSummary[] = [
   {
     phaseClass: "testing",
+    outcomeBasis: "verified_success_only",
     sampleCount: 4,
     averageDurationSeconds: 120,
     averageEstimateErrorSeconds: 20
   },
   {
     phaseClass: "implementation",
+    outcomeBasis: "verified_success_only",
     sampleCount: 3,
     averageDurationSeconds: 300,
     averageEstimateErrorSeconds: 40
   },
   {
     phaseClass: "review",
+    outcomeBasis: "verified_success_only",
     sampleCount: 5,
     averageDurationSeconds: 90,
     averageEstimateErrorSeconds: 10
@@ -56,6 +59,22 @@ const summaries: CalibrationSummary[] = [
 ];
 
 describe("private calibration persistence", () => {
+  it("round-trips verified-only aggregation through persistence and lookup", async () => {
+    const fileSystem = new MemoryFileSystem();
+    const store = new CalibrationStore("calibration.json", { fileSystem });
+    const successful = [100, 120, 140].map(durationSeconds => ({
+      phaseClass: "testing", durationSeconds, estimateErrorSeconds: 20,
+      outcomeCategory: "succeeded_verified"
+    }));
+    await store.save(aggregateCalibration([
+      ...successful,
+      { ...successful[0], durationSeconds: 1, outcomeCategory: "interrupted" }
+    ]));
+    expect(lookupCalibration(await store.load(), "testing")).toEqual({
+      lowSeconds: 100, highSeconds: 140, confidence: 0.6
+    });
+  });
+
   it("writes only a strict versioned, content-free bounded summary document atomically", async () => {
     const fileSystem = new MemoryFileSystem();
     const store = new CalibrationStore("calibration.json", {
@@ -69,7 +88,7 @@ describe("private calibration persistence", () => {
     expect(fileSystem.renames).toEqual([["calibration.json.tmp", "calibration.json"]]);
     const persisted = JSON.parse(fileSystem.files.get("calibration.json")!);
     expect(persisted).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       summaries: [summaries[1], summaries[2]]
     });
     expect(JSON.stringify(persisted)).not.toMatch(/title|task|prompt|path|repository|output/i);
@@ -99,7 +118,7 @@ describe("private calibration persistence", () => {
     await expect(store.load()).resolves.toEqual([]);
     fileSystem.files.set(
       "calibration.json",
-      JSON.stringify({ schemaVersion: 2, summaries })
+      JSON.stringify({ schemaVersion: 99, summaries })
     );
     await expect(store.load()).resolves.toEqual([]);
   });
@@ -108,10 +127,31 @@ describe("private calibration persistence", () => {
     const fileSystem = new MemoryFileSystem();
     fileSystem.files.set(
       "calibration.json",
-      JSON.stringify({ schemaVersion: 1, summaries: [summaries[0]] })
+      JSON.stringify({ schemaVersion: 2, summaries: [summaries[0]] })
     );
     const store = new CalibrationStore("calibration.json", { fileSystem });
 
     await expect(store.load()).resolves.toEqual([summaries[0]]);
+  });
+
+  it("does not promote legacy mixed summaries or rewrite them during read", async () => {
+    const fileSystem = new MemoryFileSystem();
+    const { outcomeBasis: _basis, ...legacy } = summaries[0]!;
+    const original = JSON.stringify({ schemaVersion: 1, summaries: [legacy] });
+    fileSystem.files.set("calibration.json", original);
+    const store = new CalibrationStore("calibration.json", { fileSystem });
+    await expect(store.load()).resolves.toEqual([]);
+    expect(fileSystem.files.get("calibration.json")).toBe(original);
+    expect(fileSystem.writes).toEqual([]);
+  });
+
+  it("rejects v2 summaries without verified-outcome provenance on load and save", async () => {
+    const fileSystem = new MemoryFileSystem();
+    const { outcomeBasis: _basis, ...unproven } = summaries[0]!;
+    fileSystem.files.set("calibration.json", JSON.stringify({ schemaVersion: 2, summaries: [unproven] }));
+    const store = new CalibrationStore("calibration.json", { fileSystem });
+    await expect(store.load()).resolves.toEqual([]);
+    await expect(store.save([unproven as CalibrationSummary])).rejects.toThrow();
+    expect(fileSystem.writes).toEqual([]);
   });
 });

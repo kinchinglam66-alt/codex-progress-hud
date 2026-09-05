@@ -17,12 +17,15 @@ export const calibrationSampleSchema = z
 
 export type CalibrationSample = z.infer<typeof calibrationSampleSchema>;
 
-export interface CalibrationSummary {
-  phaseClass: string;
-  sampleCount: number;
-  averageDurationSeconds: number;
-  averageEstimateErrorSeconds: number;
-}
+export const calibrationSummarySchema = z.object({
+  phaseClass: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/u),
+  outcomeBasis: z.literal("verified_success_only"),
+  sampleCount: z.number().int().positive().max(1_000_000),
+  averageDurationSeconds: z.number().finite().nonnegative().max(31_536_000),
+  averageEstimateErrorSeconds: z.number().finite().nonnegative().max(31_536_000)
+}).strict();
+
+export type CalibrationSummary = z.infer<typeof calibrationSummarySchema>;
 
 function roundSecond(value: number): number {
   return Math.round(value * 100) / 100;
@@ -36,6 +39,8 @@ export function aggregateCalibration(values: readonly unknown[]): CalibrationSum
   const buckets = new Map<string, { duration: number; error: number; count: number }>();
   for (const value of values) {
     const sample = calibrationSampleSchema.parse(value);
+    // Stopping duration is not a successful-completion duration. Validate even excluded input.
+    if (sample.outcomeCategory !== "succeeded_verified") continue;
     const bucket = buckets.get(sample.phaseClass) ?? { duration: 0, error: 0, count: 0 };
     bucket.duration += sample.durationSeconds;
     bucket.error += sample.estimateErrorSeconds;
@@ -45,6 +50,7 @@ export function aggregateCalibration(values: readonly unknown[]): CalibrationSum
 
   return [...buckets.entries()].map(([phaseClass, bucket]) => ({
     phaseClass,
+    outcomeBasis: "verified_success_only",
     sampleCount: bucket.count,
     averageDurationSeconds: roundSecond(bucket.duration / bucket.count),
     averageEstimateErrorSeconds: roundSecond(bucket.error / bucket.count)
@@ -56,8 +62,14 @@ export function lookupCalibration(
   phaseClass: string,
   minimumSamples = 3
 ): CalibrationEstimate | undefined {
-  const summary = summaries.find((candidate) => candidate.phaseClass === phaseClass);
-  if (summary === undefined || summary.sampleCount < minimumSamples) return undefined;
+  if (!Number.isSafeInteger(minimumSamples) || minimumSamples < 1) {
+    throw new RangeError("minimumSamples must be a positive safe integer");
+  }
+  const parsed = calibrationSummarySchema.safeParse(
+    summaries.find((candidate) => candidate.phaseClass === phaseClass)
+  );
+  if (!parsed.success || parsed.data.sampleCount < minimumSamples) return undefined;
+  const summary = parsed.data;
   return {
     lowSeconds: Math.max(0, summary.averageDurationSeconds - summary.averageEstimateErrorSeconds),
     highSeconds: summary.averageDurationSeconds + summary.averageEstimateErrorSeconds,

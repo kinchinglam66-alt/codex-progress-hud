@@ -1,20 +1,9 @@
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { z } from "zod";
-import type { CalibrationSummary } from "../core/calibration.js";
+import { calibrationSummarySchema, type CalibrationSummary } from "../core/calibration.js";
 
-const CALIBRATION_SCHEMA_VERSION = 1 as const;
+const CALIBRATION_SCHEMA_VERSION = 2 as const;
 const DEFAULT_MAX_SUMMARIES = 64;
-const MAX_SAMPLE_COUNT = 1_000_000;
-const MAX_SECONDS = 31_536_000;
-
-const calibrationSummarySchema = z
-  .object({
-    phaseClass: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/u),
-    sampleCount: z.number().int().positive().max(MAX_SAMPLE_COUNT),
-    averageDurationSeconds: z.number().finite().nonnegative().max(MAX_SECONDS),
-    averageEstimateErrorSeconds: z.number().finite().nonnegative().max(MAX_SECONDS)
-  })
-  .strict();
 
 const calibrationDocumentSchema = z
   .object({
