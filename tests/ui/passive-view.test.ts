@@ -1,6 +1,6 @@
 import {expect, it} from 'vitest';
 import {TaskStore} from '../../src/server/task-store.js';
-import {buildConversationViews} from '../../src/ui/view-model.js';
+import {buildConversationViews,createConversationViewProjector} from '../../src/ui/view-model.js';
 import type {PassiveGoalView} from '../../src/server/passive-goals.js';
 import type {ObserverDiagnostics} from '../../src/core/observer-diagnostics.js';
 
@@ -12,6 +12,63 @@ function row(patch: Partial<PassiveGoalView> = {}) {
     {conversationKey: 'chat', turnKey: 'turn', isCurrentTurn: true});
   return store.conversationRows(0)[0]!;
 }
+
+it('projects elapsed over estimated total and never retreats when ETA increases',()=>{
+  const project=createConversationViewProjector();
+  const value=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});
+  expect(project([value])[0]).toMatchObject({progressPercent:50,progressMode:'determinate',progressLabel:'预估进度'});
+  expect(project([value],60)[0]?.progressPercent).toBe(80);
+  value.goal!.activeSeconds=160;
+  value.goal!.prediction={remainingSeconds:900,observedActiveSeconds:160,errorPercent:30};
+  expect(project([value])[0]?.progressPercent).toBe(80);
+  value.goal!.activeSeconds=900;
+  expect(project([value])[0]?.progressPercent).toBe(84);
+});
+it.each(['waiting','paused','interrupted','failed'] as const)('freezes progress while %s despite a revised prediction',runtime=>{
+  const project=createConversationViewProjector();
+  const value=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});
+  expect(project([value])[0]?.progressPercent).toBe(50);
+  value.goal!.runtime=runtime;value.goal!.prediction!.remainingSeconds=1;
+  expect(project([value],500)[0]?.progressPercent).toBe(50);
+  value.goal!.runtime='running';
+  expect(project([value])[0]?.progressPercent).toBe(99);
+});
+it('retains established progress without an estimate but never fabricates an initial value',()=>{
+  const project=createConversationViewProjector(),value=row({prediction:null});
+  expect(project([value])[0]?.progressPercent).toBeNull();
+  value.goal!.activeSeconds=100;value.goal!.prediction={remainingSeconds:100,observedActiveSeconds:100,errorPercent:30};
+  expect(project([value])[0]?.progressPercent).toBe(50);
+  value.goal!.prediction=null;
+  expect(project([value])[0]?.progressPercent).toBe(50);
+});
+it('isolates equal-name conversations and resets a new goal or removed task',()=>{
+  const project=createConversationViewProjector();
+  const a=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});
+  const b=row({activeSeconds:0,prediction:{remainingSeconds:100,observedActiveSeconds:0,errorPercent:30}});
+  b.conversationKey='other';
+  expect(project([a,b]).map(v=>v.progressPercent)).toEqual([50,0]);
+  a.goal!.generation++;a.goal!.activeSeconds=0;a.goal!.prediction!.observedActiveSeconds=0;
+  expect(project([a])[0]?.progressPercent).toBe(0);
+  expect(project([])).toEqual([]);
+  expect(project([row({prediction:null})])[0]?.progressPercent).toBeNull();
+});
+it('caps overdue progress below completion and continues hiding completed goals',()=>{
+  const project=createConversationViewProjector();
+  const value=row({activeSeconds:200,prediction:{remainingSeconds:100,observedActiveSeconds:0,errorPercent:30}});
+  expect(project([value])[0]?.progressPercent).toBe(99);
+  value.goal!.status='completed';expect(project([value])).toEqual([]);
+});
+it('retains the peak across same-goal snapshot refreshes and rejects invalid estimates',()=>{
+  const project=createConversationViewProjector();
+  const value=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});
+  expect(project([value],20)[0]?.progressPercent).toBe(60);
+  expect(project([structuredClone(value)])[0]?.progressPercent).toBe(60);
+  value.goal!.prediction!.remainingSeconds=Number.NaN;
+  expect(project([value])[0]?.progressPercent).toBe(60);
+  expect(createConversationViewProjector()([value])[0]?.progressPercent).toBeNull();
+  value.task.id='replacement-task';value.goal!.prediction=null;
+  expect(project([value])[0]?.progressPercent).toBeNull();
+});
 
 it('shows whole-goal time beyond 24 hours without inventing completion percentage', () => {
   const view = buildConversationViews([row()], 1)[0]!;

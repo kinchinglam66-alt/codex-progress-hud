@@ -105,6 +105,7 @@ h1 {
 
 .progress-text {
   min-width: 30px;
+  white-space: nowrap;
   color: #d8d4e7;
   font-size: 11px;
   text-align: right;

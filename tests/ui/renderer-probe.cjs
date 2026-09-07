@@ -43,13 +43,25 @@ app.whenReady().then(async()=>{
     if(getComputedStyle(title).textOverflow!=='ellipsis' || title.scrollWidth<=title.clientWidth)throw Error('missing ellipsis');
     render([]);if(root.children.length!==0)throw Error('empty rows');
     const {createHudDisplayClock,startDisplayTicker}=await import(${JSON.stringify(clockUrl)});
-    const {buildConversationViews}=await import(${JSON.stringify(viewUrl)});
+    const {createConversationViewProjector}=await import(${JSON.stringify(viewUrl)});
+    const project=createConversationViewProjector();
+    const progressRow={conversationKey:'progress',task:{id:'progress'},eta:null,name:{value:'进度测试',freshness:'fresh'},
+      goal:{generation:1,estimateRevision:1,runtime:'running',status:'running',activeSeconds:100,
+        prediction:{remainingSeconds:100,errorPercent:30,observedActiveSeconds:100}}};
+    render(project([progressRow]));
+    const progressBar=root.querySelector('[role=progressbar]');
+    if(progressBar.getAttribute('aria-valuenow')!=='50' || !root.textContent.includes('预估 50%'))throw Error('estimated progress missing');
+    if(progressBar.querySelector('.progress-fill').style.width!=='50%')throw Error('estimated width mismatch');
+    progressRow.goal.prediction.remainingSeconds=900;
+    render(project([progressRow]));
+    if(progressBar.getAttribute('aria-valuenow')!=='50')throw Error('ETA revision reversed progress');
+    if(!progressBar.getAttribute('aria-label').includes('预估进度'))throw Error('estimate label missing');
     const clock=createHudDisplayClock();
     const goal={generation:1,estimateRevision:1,sampledAtMs:0,runtime:'running',status:'running',activeSeconds:0,
       prediction:{remainingSeconds:3600,errorPercent:30,observedActiveSeconds:0}};
     const row={conversationKey:'clock',task:{id:'clock'},eta:null,name:{value:'计时测试',freshness:'fresh'},goal};
     clock.accept({revision:1,rows:[row]},true);
-    const draw=()=>{const frame=clock.read();render(buildConversationViews(frame.snapshot.rows,frame.elapsedSeconds));};
+    const draw=()=>{const frame=clock.read();render(project(frame.snapshot.rows,frame.elapsedSeconds));};
     draw();const clockNode=root.children[0];
     if(!clockNode.textContent.includes('01:00:00'))throw Error('initial countdown');
     const stop=startDisplayTicker(draw);

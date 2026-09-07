@@ -1,4 +1,4 @@
-import { buildHudView, buildConversationViews } from "./view-model.js";
+import { buildHudView, createConversationViewProjector } from "./view-model.js";
 import { createConversationRenderer } from "./conversation-renderer.js";
 import type { HudSnapshot } from "../server/task-store.js";
 import {createHudDisplayClock, startDisplayTicker} from './display-clock.js';
@@ -9,12 +9,13 @@ const banner = document.querySelector<HTMLElement>("#compatibility")!;
 const empty = document.querySelector<HTMLElement>("#empty")!;
 const renderRows = createConversationRenderer(tasks);
 const displayClock = createHudDisplayClock();
+const projectRows = createConversationViewProjector();
 
 function render(): void {
   const frame = displayClock.read();
   if (frame === null) return;
   const {snapshot, elapsedSeconds, connected, updatedKeys} = frame;
-  const views = buildConversationViews(snapshot.rows ?? [], elapsedSeconds, updatedKeys);
+  const views = projectRows(snapshot.rows ?? [], elapsedSeconds, updatedKeys);
   renderRows(views);
   status.textContent = views.length === 0 ? "暂无进行中任务" : String(views.length) + " 个显示任务";
   empty.hidden = views.length !== 0;

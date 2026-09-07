@@ -27,11 +27,47 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
       title: row.name.value ?? "聊天名称暂不可用",
       statusLabel: view.statusLabel, tone: view.tone,
       progressMode: view.progressMode, progressPercent: view.progressPercent,
+      progressLabel: row.goal === undefined ? '任务进度' : '预估进度',
       etaLabel: view.etaLabel + (row.goal?.prediction != null && updatedKeys.includes(row.conversationKey) ? ' · 已更新' : ''),
       nameFreshness: row.name.freshness,
       ...(row.observer?observerPresentation(row.observer,elapsedSeconds):{})
     };
   });
+}
+
+/** Display-only history, scoped to this HUD and goal identity. No inference or work-state writes. */
+export function createConversationViewProjector() {
+  const peaks=new Map<string,{taskId:string;generation:number;percent:number|null}>();
+  return (rows:readonly ConversationRow[],elapsedSeconds=0,updatedKeys:readonly string[]=[]) => {
+    const views=buildConversationViews(rows,elapsedSeconds,updatedKeys);
+    const present=new Set(views.map(view=>view.key));
+    for(const key of peaks.keys())if(!present.has(key))peaks.delete(key);
+    const byKey=new Map(rows.map(row=>[row.conversationKey,row]));
+    return views.map(view=>{
+      const goal=byKey.get(view.key)?.goal;
+      if(!goal){peaks.delete(view.key);return view;}
+      let peak=peaks.get(view.key);
+      if(!peak || peak.generation!==goal.generation || peak.taskId!==view.taskId){
+        peak={taskId:view.taskId,generation:goal.generation,percent:null};peaks.set(view.key,peak);
+      }
+      const running=goal.runtime==='running';
+      const delta=running&&Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0;
+      const active=goal.activeSeconds+delta;
+      // An existing paused/waiting/terminal display cannot jump due to a late estimate.
+      if(running || peak.percent===null){
+        const countdown=projectCountdown({prediction:goal.prediction,activeSeconds:active,
+          state:running?'running':goal.runtime==='paused'?'paused':'waiting'});
+        if(goal.prediction && countdown.status!=='unknown'){
+          const remaining=Math.max(0,goal.prediction.remainingSeconds-(active-goal.prediction.observedActiveSeconds));
+          const total=active+remaining;
+          const percent=total>0?Math.min(99,Math.floor(active/total*100)):0;
+          peak.percent=Math.max(peak.percent??0,percent);
+        }
+      }
+      return {...view,progressPercent:peak.percent,
+        progressMode:peak.percent===null?view.progressMode:running?'determinate' as const:'paused' as const};
+    });
+  };
 }
 
 function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsedSeconds: number,observer?:ObserverDiagnostics):

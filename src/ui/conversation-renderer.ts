@@ -49,12 +49,13 @@ export function createConversationRenderer(container: HTMLElement) {
       entry.title.textContent = view.title;
       entry.title.title = view.title;
       entry.status.textContent = view.statusLabel + (view.nameFreshness === "stale" ? " · 名称待同步" : "");
-      entry.bar.setAttribute("aria-label", view.title + " · 任务进度");
+      entry.bar.setAttribute("aria-label", view.title + " · " + (view.progressLabel ?? '任务进度'));
       entry.bar.dataset.mode = view.progressMode;
       if (view.progressPercent === null) entry.bar.removeAttribute("aria-valuenow");
       else entry.bar.setAttribute("aria-valuenow", String(view.progressPercent));
       entry.fill.style.width = String(view.progressPercent ?? 34) + "%";
-      entry.percent.textContent = view.progressPercent === null ? "" : String(view.progressPercent) + "%";
+      entry.percent.textContent = view.progressPercent === null ? "" :
+        (view.progressLabel === '预估进度' ? '预估 ' : '') + String(view.progressPercent) + "%";
       entry.eta.textContent = view.etaLabel;
       entry.freshness.textContent=view.freshnessLabel??'';
       entry.freshness.hidden=!view.freshnessLabel;
