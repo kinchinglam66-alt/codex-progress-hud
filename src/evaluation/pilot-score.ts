@@ -6,10 +6,15 @@ const labelSchema=z.discriminatedUnion('outcome',[
   z.object({...identity,outcome:z.literal('interrupted'),censoredActiveSeconds:seconds.optional()}).strict(),
   z.object({...identity,outcome:z.literal('replaced'),censoredActiveSeconds:seconds.optional()}).strict(),
 ]);
+const forecastSchema=z.object({schemaVersion:z.literal(1),predictionId:z.number().int().nonnegative(),generation:z.number().int().nonnegative(),
+  snapshotActiveSeconds:seconds,acceptedAt:z.number().finite().nonnegative(),rawSeconds:seconds.nullable(),shadowSeconds:seconds.nullable(),
+  paceReason:z.enum(['eligible','missing_measurements','insufficient_intervals','incompatible_units','unknown_clock','parallel_work','invalid_composition']),
+  calibration:z.literal('uncalibrated'),versions:z.object({input:z.string(),prompt:z.string(),model:z.string(),algorithm:z.string()}).strict()}).strict();
 const resultSchema=z.object({session:z.string(),key:z.string(),generation:z.number().int().nonnegative(),kind:z.literal('result'),
   accepted:z.boolean(),status:z.string(),at:z.number().finite().nonnegative(),requestedAt:z.number().finite().nonnegative(),
   observedActiveSeconds:seconds,activeSeconds:seconds,
-  estimate:z.object({remainingSeconds:seconds,errorPercent:z.number().finite().min(0).max(1000)}).nullable()});
+  estimate:z.object({remainingSeconds:seconds,errorPercent:z.number().finite().min(0).max(1000)}).nullable(),
+  forecast:forecastSchema.optional()});
 
 /** Offline per-goal scoring. Human labels are supplied separately and are never
  * inferred from observer status. This is not cross-task calibration evidence. */
@@ -33,7 +38,8 @@ export function scorePilotGoal(records:readonly unknown[],rawLabel:unknown){
       covered:actualRemainingSeconds>=Math.max(0,estimate.remainingSeconds-margin) && actualRemainingSeconds<=estimate.remainingSeconds+margin,
       latencyMs:value.at-value.requestedAt,phase:progress<1/3?'early':progress<2/3?'middle':'late',
       displayedRemainingSeconds:Math.max(0,estimate.remainingSeconds-(value.activeSeconds-value.observedActiveSeconds)),
-      actualRemainingAtDeliverySeconds:label.completedActiveSeconds-value.activeSeconds}];
+      actualRemainingAtDeliverySeconds:label.completedActiveSeconds-value.activeSeconds,
+      shadowRemainingSeconds:value.forecast?.shadowSeconds??null}];
   }):[];
   return {eligible,outcome:label.outcome,attempts:attempts.length,predictions:points.length,
     availability:eligible && attempts.length?points.length/attempts.length:null,

@@ -1,57 +1,113 @@
+export type TriggerReason = 'initial'|'important_event'|'status_evidence'|'overdue'|'periodic'|'pre_dispatch_retry';
+
+export type RequestBlockReason = 'invalid_clock'|'invalid_counter'|'context_missing'|'request_in_flight'
+  |'no_new_information'|'no_active_progress'|'global_concurrency_limit'|'hourly_limit'|'runtime_ineligible'
+  |'initial_delay'|'cooldown'|'event_coalescing'|'adaptive_interval'|'overdue_already_checked'|'retry_backoff';
+
 export interface RequestContext {
-  /** Monotonic wall time since goal creation; not the pause-excluding HUD clock. */
   elapsedSeconds:number;
   lastRequestSeconds:number|null;
   remainingSeconds:number|null;
   unknownResults:number;
   eventAtSeconds:number|null;
+  eventSequence?:number;
+  consumedEventSequence?:number;
+  eventReason?:TriggerReason|null;
   contentReady:boolean;
   hasNewInformation:boolean;
-  /** Owner grants at most once for the same current action; not a timer-only retry. */
+  activeSeconds?:number;
+  lastRequestActiveSeconds?:number|null;
   overdueActionRecheck?:boolean;
-  /** Owner-proven, single retry for a transient failure before model dispatch. */
+  overdueAlreadyChecked?:boolean;
+  overdueEligibleActiveSeconds?:number|null;
   preDispatchRetry?:boolean;
+  retryBackoff?:boolean;
   state:'running'|'waiting'|'paused'|'terminal';
   statusEvidenceArrived:boolean;
   goalInFlight:boolean;
   globalInFlight:number;
-  /** Owner computes a rolling-hour count across goal replacements. */
   conversationStartsLastHour:number;
 }
 
-/** Eligibility only; owner still needs atomic resource and usage admission. */
-export function canRequest(input:RequestContext):boolean {
-  return requestBlockReason(input) === null;
+export interface TriggerDecision {
+  reason:TriggerReason|null;
+  blockReason:RequestBlockReason|null;
+  earliestEligibleWallSeconds:number|null;
+  eligibleActiveSeconds:number|null;
 }
 
-/** Static reason codes only; never include task text or provider errors. */
-export function requestBlockReason(input:RequestContext):string|null {
-  const {elapsedSeconds:now,lastRequestSeconds:last,eventAtSeconds:event}=input;
-  const times=[now,...(last===null?[]:[last]),...(event===null?[]:[event]),
-    ...(input.remainingSeconds===null?[]:[input.remainingSeconds])];
-  if(times.some(x=>!Number.isFinite(x)||x<0)||
-    (last!==null&&last>now)||(event!==null&&event>now))return 'invalid_clock';
+const ordinaryInterval=(remaining:number|null,unknown:number):number=>{
+  if(remaining===null)return unknown<=1?300:unknown===2?600:1800;
+  return remaining<=1800?300:remaining<=7200?600:remaining<=28800?900:1800;
+};
+
+const decision=(blockReason:RequestBlockReason|null, reason:TriggerReason|null = null,
+  earliestEligibleWallSeconds:number|null = null, eligibleActiveSeconds:number|null = null):TriggerDecision =>
+  ({reason,blockReason,earliestEligibleWallSeconds,eligibleActiveSeconds});
+
+/** Pure trigger eligibility; resource admission and spend authorization remain owner/worker duties. */
+export function decideTrigger(input:RequestContext):TriggerDecision {
+  const numeric=[input.elapsedSeconds,input.lastRequestSeconds,input.eventAtSeconds,input.remainingSeconds,
+    input.activeSeconds,input.lastRequestActiveSeconds,input.overdueEligibleActiveSeconds]
+    .filter((value):value is number=>value!==null&&value!==undefined);
+  if(numeric.some(value=>!Number.isFinite(value)||value<0)||
+    (input.lastRequestSeconds!==null&&input.lastRequestSeconds>input.elapsedSeconds)||
+    (input.eventAtSeconds!==null&&input.eventAtSeconds>input.elapsedSeconds)||
+    (input.activeSeconds!==undefined&&input.lastRequestActiveSeconds!==undefined&&
+      input.lastRequestActiveSeconds!==null&&input.lastRequestActiveSeconds>input.activeSeconds))
+    return decision('invalid_clock');
   if([input.unknownResults,input.globalInFlight,input.conversationStartsLastHour]
-    .some(x=>!Number.isSafeInteger(x)||x<0))return 'invalid_counter';
-  if(!input.contentReady)return 'context_missing';
-  if(input.goalInFlight)return 'request_in_flight';
-  const overdue=input.overdueActionRecheck===true && input.remainingSeconds===0 &&
-    last!==null && input.state==='running';
-  const retry=input.preDispatchRetry===true;
-  if(!input.hasNewInformation&&!overdue&&!retry)return 'no_new_information';
-  if(input.globalInFlight>=2)return 'global_concurrency_limit';
-  if(input.conversationStartsLastHour>=12)return 'hourly_limit';
-  const freshEvent=event!==null&&(last===null||event>last);
-  if(input.state!=='running'&&!(input.state==='waiting'&&input.statusEvidenceArrived&&(freshEvent||retry)))return 'runtime_ineligible';
-  if(now<15)return 'initial_delay';
-  if(last!==null&&now-last<60)return 'cooldown';
-  // Pending important events are coalesced even if a periodic check is due.
-  if(freshEvent)return now-event!>=10?null:'event_coalescing';
-  if(overdue||retry)return null;
-  if(last===null)return null;
-  const remaining=input.remainingSeconds;
-  const interval=remaining===null
-    ? input.unknownResults<=1?120:input.unknownResults===2?300:600
-    : remaining<=1800?120:remaining<=7200?300:remaining<=28800?900:1800;
-  return now-last>=interval?null:'adaptive_interval';
+    .some(value=>!Number.isSafeInteger(value)||value<0))return decision('invalid_counter');
+  if(!input.contentReady)return decision('context_missing');
+  if(input.goalInFlight)return decision('request_in_flight');
+
+  const freshEvent=input.eventSequence!==undefined&&input.consumedEventSequence!==undefined
+    ? input.eventSequence>input.consumedEventSequence
+    : input.eventAtSeconds!==null&&
+      (input.lastRequestSeconds===null||input.eventAtSeconds>input.lastRequestSeconds);
+  const statusEvent=freshEvent&&input.state==='waiting'&&input.statusEvidenceArrived;
+  const importantEvent=freshEvent&&!statusEvent&&input.eventReason!=='periodic';
+  const activeClock=input.activeSeconds!==undefined&&input.lastRequestActiveSeconds!==undefined&&
+    input.lastRequestActiveSeconds!==null;
+  const activeProgress=activeClock&&input.activeSeconds!>input.lastRequestActiveSeconds!;
+  const interval=ordinaryInterval(input.remainingSeconds,input.unknownResults);
+  const eligibleActiveSeconds=activeClock?input.lastRequestActiveSeconds!+interval:null;
+
+  if(input.state!=='running'&&!statusEvent)return decision('runtime_ineligible',null,null,eligibleActiveSeconds);
+  if(input.globalInFlight>=2)return decision('global_concurrency_limit',null,null,eligibleActiveSeconds);
+  if(input.conversationStartsLastHour>=12)return decision('hourly_limit',null,null,eligibleActiveSeconds);
+  if(input.elapsedSeconds<15)return decision('initial_delay',null,15,eligibleActiveSeconds);
+  if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<60)
+    return decision('cooldown',null,input.lastRequestSeconds+60,eligibleActiveSeconds);
+  if(freshEvent&&input.eventAtSeconds!==null&&input.elapsedSeconds-input.eventAtSeconds<10)
+    return decision('event_coalescing',null,input.eventAtSeconds+10,eligibleActiveSeconds);
+
+  if(input.lastRequestSeconds===null&&!statusEvent){
+    return input.hasNewInformation?decision(null,'initial',null,null):
+      decision('no_new_information',null,null,null);
+  }
+  if(input.preDispatchRetry===true)return decision(null,'pre_dispatch_retry',null,eligibleActiveSeconds);
+  if(statusEvent)return decision(null,'status_evidence',null,eligibleActiveSeconds);
+  if(importantEvent)return decision(null,'important_event',null,eligibleActiveSeconds);
+  if(input.overdueActionRecheck===true&&input.remainingSeconds===0)
+    return decision(null,'overdue',null,input.overdueEligibleActiveSeconds??input.activeSeconds??null);
+  if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
+  if(!input.hasNewInformation&&!activeProgress)
+    return decision(activeClock?'no_active_progress':'no_new_information',null,null,eligibleActiveSeconds);
+  if(activeClock) {
+    if(!activeProgress||input.activeSeconds!<eligibleActiveSeconds!)
+      return decision(activeProgress?'adaptive_interval':'no_active_progress',null,null,eligibleActiveSeconds);
+    return decision(null,'periodic',null,eligibleActiveSeconds);
+  }
+  if(input.elapsedSeconds-input.lastRequestSeconds!<interval)
+    return decision('adaptive_interval',null,input.lastRequestSeconds!+interval,null);
+  return decision(null,'periodic',null,null);
+}
+
+export function canRequest(input:RequestContext):boolean {
+  return decideTrigger(input).blockReason===null;
+}
+
+export function requestBlockReason(input:RequestContext):RequestBlockReason|null {
+  return decideTrigger(input).blockReason;
 }

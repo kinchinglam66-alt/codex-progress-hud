@@ -52,3 +52,31 @@ it('marks clipping caused by redaction expansion and still respects field bounds
   expect(decoded.messages[0].truncated).toBe(true);
   expect(decoded.truncated).toBe(true);
 });
+
+it('retains the initial requirement and intermediate amendments before old tool logs',()=>{
+  const messages=[{kind:'user',text:'INITIAL '+ '目'.repeat(2000),truncated:false},
+    {kind:'user',text:'AMENDMENT reject duplicates',truncated:false},
+    ...Array.from({length:8},()=>({kind:'tool',text:'日志'.repeat(1800),truncated:false})),
+    {kind:'user',text:'LATEST '+ '新'.repeat(2000),truncated:false},
+    {kind:'assistant',text:'Working',truncated:false}];
+  const packed=packObserverInput({...small,messages});
+  expect(packed).toContain('INITIAL');expect(packed).toContain('LATEST');
+  expect(packed).toContain('AMENDMENT');
+  expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16384);
+});
+
+it('rejects contradictory event types and tool pairing on user messages',()=>{
+  for(const event of [{ordinal:0,atMs:0,kind:'tool_result',pairOrdinal:0},
+    {ordinal:0,atMs:0,kind:'user',pairOrdinal:0},
+    {ordinal:0,atMs:0,kind:'user',counterpartMissing:false}]){
+    expect(()=>packObserverInput({...small,messages:[{...small.messages[0],event}]})).toThrow('INVALID_OBSERVER_INPUT');
+  }
+});
+
+it('marks equal-length filtering and remains stable on repacking',()=>{
+  const packed=packObserverInput({...small,messages:[{kind:'user',text:'password=abcdefghij',truncated:false}]});
+  const decoded=JSON.parse(packed);
+  expect(decoded.messages[0]).toMatchObject({text:'password=[REDACTED]',truncated:true});
+  expect(decoded.truncated).toBe(true);
+  expect(packObserverInput(decoded)).toBe(packed);
+});

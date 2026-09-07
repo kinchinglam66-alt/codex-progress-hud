@@ -14,14 +14,14 @@ function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number
     diagnosticLabel:`${observerLabels[observer.state]} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
 }
 
-export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = []) {
+export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = [],displayedSeconds:ReadonlyMap<string,number>=new Map()) {
   return rows.filter(row => row.goal === undefined ||
     (row.goal.status !== 'completed' && row.goal.runtime !== 'stopped')).map(row => {
     const view = row.goal === undefined ? buildHudView({
       revision: 0, selectedTaskId: row.task.id, selectionMode: "follow_activity",
       tasks: [], selected: { task: row.task, eta: row.eta },
       compatibility: { incompatibleClientSeen: false }
-    }) : passivePresentation(row.goal, elapsedSeconds, row.observer);
+    }) : passivePresentation(row.goal, elapsedSeconds, row.observer,displayedSeconds.get(row.conversationKey));
     return {
       key: row.conversationKey, taskId: row.task.id,
       title: row.name.value ?? "聊天名称暂不可用",
@@ -38,8 +38,8 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
 /** Display-only history, scoped to this HUD and goal identity. No inference or work-state writes. */
 export function createConversationViewProjector() {
   const peaks=new Map<string,{taskId:string;generation:number;percent:number|null}>();
-  return (rows:readonly ConversationRow[],elapsedSeconds=0,updatedKeys:readonly string[]=[]) => {
-    const views=buildConversationViews(rows,elapsedSeconds,updatedKeys);
+  return (rows:readonly ConversationRow[],elapsedSeconds=0,updatedKeys:readonly string[]=[],displayedSeconds:ReadonlyMap<string,number>=new Map()) => {
+    const views=buildConversationViews(rows,elapsedSeconds,updatedKeys,displayedSeconds);
     const present=new Set(views.map(view=>view.key));
     for(const key of peaks.keys())if(!present.has(key))peaks.delete(key);
     const byKey=new Map(rows.map(row=>[row.conversationKey,row]));
@@ -70,7 +70,7 @@ export function createConversationViewProjector() {
   };
 }
 
-function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsedSeconds: number,observer?:ObserverDiagnostics):
+function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsedSeconds: number,observer?:ObserverDiagnostics,displayedSeconds?:number):
   Pick<HudView, 'statusLabel'|'tone'|'progressMode'|'progressPercent'|'etaLabel'> {
   const running = goal.runtime === 'running';
   const terminal = goal.runtime === 'interrupted' || goal.runtime === 'failed';
@@ -83,10 +83,14 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
   const countdown = projectCountdown({prediction: goal.prediction,
     activeSeconds: goal.activeSeconds + (running ? delta : 0),
     state: running ? 'running' : goal.runtime === 'paused' ? 'paused' : 'waiting'});
+  const display=goal.prediction&&countdown.status!=='unknown'&&countdown.status!=='overdue'&&
+    displayedSeconds!==undefined&&Number.isFinite(displayedSeconds)&&displayedSeconds>=0
+    ?projectCountdown({prediction:{...goal.prediction,remainingSeconds:displayedSeconds,observedActiveSeconds:0},
+      activeSeconds:0,state:running?'running':'waiting'}):countdown;
   const etaLabel = terminal ? '工作计时已停止'
     : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabels[observer.state]:'剩余时间未知'
     : countdown.status === 'overdue' ? '00:00:00 · 已超出估时，等待更新'
-    : `${countdown.timeText} · 上次估时误差 ${countdown.uncertaintyText}`;
+    : `${display.timeText} · 上次估时误差 ${countdown.uncertaintyText}`;
   return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',
     progressMode: running ? 'indeterminate' : 'paused', progressPercent: null, etaLabel};
 }

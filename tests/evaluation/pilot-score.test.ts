@@ -18,3 +18,10 @@ it('counts unavailable outcomes but excludes stale predictions and unrelated goa
   const more=[...records,{...records[0],estimate:null},{...records[0],accepted:false},{...records[0],key:'other'}];
   expect(scorePilotGoal(more,label)).toMatchObject({attempts:3,predictions:1,availability:1/3});
 });
+it('reads versioned forecast metadata while preserving legacy raw scoring',()=>{
+  const forecast={schemaVersion:1,predictionId:1,generation:1,snapshotActiveSeconds:600,acceptedAt:125000,
+    rawSeconds:2400,shadowSeconds:2100,paceReason:'eligible',calibration:'uncalibrated',
+    versions:{input:'facts-v1',prompt:'prompt-v1',model:'model-v1',algorithm:'pace-v1'}};
+  const score=scorePilotGoal([{...records[0],forecast}],label);
+  expect(score.points[0]).toMatchObject({shadowRemainingSeconds:2100});
+});

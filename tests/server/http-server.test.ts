@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RELEASE_CAPABILITIES } from "../../src/generated/capabilities.js";
 import type { HudHealth } from "../../src/lifecycle/types.js";
-import { createProgressServer } from "../../src/server/http-server.js";
+import { createProgressServer, observerEventForHook } from "../../src/server/http-server.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -93,6 +93,13 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
 describe("local progress HTTP service", () => {
   const taskA = "hud_abcdefghijklmnopqrstuvwxyz0123456789";
   const taskB = "hud_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+  it("promotes only a structured nonzero tool exit code to an observer failure event", () => {
+    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: 7})).toBe("failure");
+    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: -1})).toBe("failure");
+    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: 0})).toBe("activity");
+    expect(observerEventForHook({hook: "PostToolUse"})).toBe("activity");
+  });
 
   function hookEnvelope(
     taskHandle: string,

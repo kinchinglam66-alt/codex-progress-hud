@@ -25,6 +25,7 @@ it('serves the complete built browser module graph over authenticated HTTP', asy
       }
     }
     expect(seen.has('/display-clock.js')).toBe(true);
+    expect(seen.has('/eta-transition.js')).toBe(true);
     expect(seen.has('/countdown.js')).toBe(true);
   } finally {await server.close(); await rm(directory, {recursive: true, force: true});}
 });

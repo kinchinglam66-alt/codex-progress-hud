@@ -72,6 +72,59 @@ Persistence advances to schema version 2 with the same strict summary schema use
 
 The current production entry points do not call these calibration aggregation/lookup/persistence APIs; this is a tested algorithm foundation, not an online migration or a fix for missing GUI observations. Existing sample-count-derived `confidence` and mean-duration-plus-error ranges are still heuristics, not calibrated coverage probabilities. Further work needs per-prediction targets, phase/remaining-time semantics and task-disjoint empirical interval validation.
 
+## Task-balanced interval calibration (offline candidate only)
+
+`src/evaluation/interval-calibration.ts` adds a pure, offline candidate fitter;
+it is not called by the live estimator, scheduler or HUD. `fitIntervals` validates
+each point before filtering it: task keys must use the anonymous `sample_` form,
+versions are bounded safe identifiers, seconds are finite and within one year,
+snapshot indexes are nonnegative safe integers, and each
+`taskKey/predictor/version/snapshotIndex` identity may occur only once. Unverified
+labels are excluded from fitting and remain counted as exclusions in evaluation;
+they are never relabelled as successful duration labels.
+
+Fitting is partitioned by predictor (`raw` or `pace`), version and predicted
+horizon bucket: `<=1800`, `<=7200`, `<=28800` and `>28800` seconds. A bucket
+candidate requires at least 30 distinct verified tasks. Within a bucket, each
+task has total weight 1, so each of its `n` selected snapshots contributes
+`1/n`; absolute residuals are sorted and the smallest residual reaching 80% of
+the total task weight becomes the candidate's absolute half-width. Raw and pace
+variants and versions are never pooled. `applyInterval` keeps that bound in
+seconds, including for near-zero centers; it does not convert it to an inflated
+percentage.
+
+`compareCalibration(training, heldOut, {snapshotIndices, seed})` requires
+disjoint task keys and a fixed, duplicate-free snapshot-index manifest before
+fitting. The manifest is a complete global schedule: every task/predictor pair
+must contain exactly one row for every listed snapshot, including an explicit
+`predictedSeconds: null` row for an abstention. Training accepts these nullable
+attempt rows, but only verified rows with both numeric prediction and actual
+duration are eligible for fitting; omitted rows cannot selectively improve a
+candidate. When raw and pace are both present, each split must use the same task
+universe. Held-out labels are used only after fitting. A comparison accepts at
+most one version per predictor across the split and rejects inconsistent
+verified/actual labels for the same task/prefix. Its `all` reports retain
+attempts, answered prefixes, abstentions and exclusions; availability is the
+mean across tasks of each task's answered/attempt total, independent of whether
+a label is eligible for scoring.
+`matched` reports use only task/prefixes answered by both raw and pace predictors
+with the same consistent verified label, so availability cannot be hidden by
+comparing only successful answers. MAE, p50, p90, coverage and interval width
+use task-macro weighting: snapshots within a task are normalized before
+aggregation, and empty metrics are `null`. Reports also include the four horizon
+buckets. An abstention has no predicted horizon, so it is counted separately as
+`horizonUnknown`; horizon-bucket metrics must not be read as 100% availability
+over those unknown-horizon attempts.
+
+When a held-out predictor/version has at least 30 distinct tasks, its optional
+95% bands use exactly 1,000 seeded task-level bootstrap resamples. Every draw
+selects whole tasks, retaining all selected snapshots together. Each selected
+task cluster receives a unique internal identity for that draw, so repeated
+selection preserves task-macro multiplicity. Fewer than 30 tasks report
+unavailable bands. These are exploratory uncertainty bands, not a
+coverage guarantee or a live promotion rule. No network, model call, persistence
+or installed-plugin integration is performed by this module.
+
 ## Development verification, 2026-09-05
 
 Baseline ETA/calibration tests: 27 passed. New replay tests: 24 passed after test-first failing assertions. Complete isolated-worktree suite: 647 tests in 41 files passed, with no skips. TypeScript type checking and build compilation passed. One independent read-only review found no blocking issues; its two suggested assertion improvements were added and the focused suite rerun.

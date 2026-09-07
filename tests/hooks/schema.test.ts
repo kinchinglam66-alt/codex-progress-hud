@@ -114,6 +114,21 @@ describe("privacy-bounded Hook schema", () => {
     expect(JSON.stringify(second.envelope)).not.toContain("tool-use-2");
   });
 
+  it.each([7,-1,-2147483648])("retains only the bounded structured PostToolUse exit code %s", (code) => {
+    const failed = normalizeHookInput("PostToolUse", {
+      session_id: "session-1", turn_id: "turn-1", tool_use_id: "tool-use-1",
+      tool_response: {stdout: "failed", exit_code: code, secret: "do not retain"}
+    }, 100, hmacKey).envelope;
+    const succeeded = normalizeHookInput("PostToolUse", {
+      session_id: "session-1", turn_id: "turn-1", tool_use_id: "tool-use-2",
+      tool_response: {exit_code: 0}
+    }, 100, hmacKey).envelope;
+    expect(failed).toMatchObject({toolExitCode: code});
+    expect(parseHookEnvelope(failed).toolExitCode).toBe(code);
+    expect(succeeded).not.toHaveProperty("toolExitCode");
+    expect(JSON.stringify(failed)).not.toContain("secret");
+  });
+
   it("parses only the strict wire envelope", () => {
     const envelope = {
       schemaVersion: 2,

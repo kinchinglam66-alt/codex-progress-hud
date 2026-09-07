@@ -12,6 +12,7 @@ export interface PassiveGoalView {
   runtime: Runtime;
   activeSeconds: number;
   prediction: CountdownPrediction | null;
+  changeReason?:'routine'|'scope_change'|'failure'|'unknown';
 }
 interface Goal {
   turnKey: string;
@@ -29,6 +30,9 @@ interface Goal {
   runtime: Runtime;
   status: Status;
   prediction: CountdownPrediction|null;
+  changeReason?:PassiveGoalView['changeReason'];
+  identity: object;
+  predictionIdentity: object|null;
   lastObservedAt: number;
   pending?: object;
 }
@@ -48,6 +52,17 @@ export interface GoalContextSource {
 }
 interface Ticket {sessionKey: string; goal: Goal; epoch: number; activeSeconds: number; requestedAt: number;sourceEpoch?:number;sourceRevision?:number;userFingerprint?:string}
 
+export interface PassiveGoalScheduling {
+  view: PassiveGoalView;
+  goalIdentity: object;
+  predictionIdentity: object|null;
+  sourceAvailable: boolean;
+  ready: boolean;
+  finalAvailable: boolean;
+  revision?: number;
+  currentActionId?: string|null;
+}
+
 /** Owns local identities and active clocks. Does not launch inference or authorize spend.
  * observe consumes only already-authenticated, accepted router deliveries.
  */
@@ -55,6 +70,7 @@ export class PassiveGoals {
   private readonly goals = new Map<string, Goal>();
   private readonly ended = new Set<string>();
   private tickets = new WeakMap<object, Ticket>();
+  private settledAnchors = new WeakMap<object, number>();
   constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource) {}
 
   private sourceContext(key:string,goal:Goal,nowMs:number,inspectOnly?:false):ReturnType<GoalContextSource['read']>;
@@ -65,7 +81,7 @@ export class PassiveGoals {
       const epoch=this.source.epoch(key);
       if(epoch===null)return null;
       if(goal.sourceEpoch!==undefined&&goal.sourceEpoch!==epoch){
-        this.invalidate(goal);goal.summary=null;goal.prediction=null;goal.status='unknown';goal.relationPending=true;
+        this.invalidate(goal);goal.identity={};goal.summary=null;goal.prediction=null;goal.predictionIdentity=null;goal.status='unknown';goal.relationPending=true;
         delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;goal.estimateRevision++;
       }
       goal.sourceEpoch=epoch;
@@ -118,14 +134,14 @@ export class PassiveGoals {
       }
       goal = {turnKey: envelope.turnKey, generation: 0, estimateRevision: 0, epoch: 0, summary: null,
         relationPending: true, elapsed: 0, since: nowMs, candidateBase: 0,
-        runtime: 'running', status: 'unknown', prediction: null, lastObservedAt: nowMs};
+        runtime: 'running', status: 'unknown', prediction: null, identity: {}, predictionIdentity: null, lastObservedAt: nowMs};
       this.goals.set(envelope.sessionKey, goal);
     }
     if (hook === 'UserPromptSubmit') {
       if (goal.turnKey !== envelope.turnKey) goal.candidateBase = this.active(goal, nowMs);
       goal.turnKey = envelope.turnKey;
       goal.relationPending = true;
-      goal.prediction = null;
+      goal.prediction = null; goal.predictionIdentity = null;
       goal.status = 'unknown';
       this.invalidate(goal);
       this.transition(goal, 'running', nowMs);
@@ -146,7 +162,7 @@ export class PassiveGoals {
     if (!goal || !this.clock(nowMs, goal) || goal.turnKey !== turnKey || goal.runtime === 'interrupted' || goal.runtime === 'failed') return;
     this.transition(goal, state, nowMs);
     goal.status = state;
-    if (state === 'interrupted' || state === 'failed' || state === 'stopped') goal.prediction = null;
+    if (state === 'interrupted' || state === 'failed' || state === 'stopped') {goal.prediction = null; goal.predictionIdentity = null;}
     if (state === 'stopped') {goal.summary = null;delete goal.summaryThroughSequence;goal.contextFloorTurnKey=goal.turnKey;}
     goal.lastObservedAt = nowMs;
   }
@@ -170,13 +186,13 @@ export class PassiveGoals {
       runtime: goal.runtime, messages, truncated: context?.truncated ?? false}};
   }
 
-  scheduling(sessionKey: string, nowMs: number) {
+  scheduling(sessionKey: string, nowMs: number): PassiveGoalScheduling|null {
     let view = this.view(sessionKey, nowMs);const goal = this.goals.get(sessionKey);
     if (!view || !goal) return null;
     if(this.source){
       const selected=this.sourceContext(sessionKey,goal,nowMs,true);
       view=this.view(sessionKey,nowMs)!;
-      return {view,ready:selected?.ready??false,
+      return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,sourceAvailable:selected!==null,ready:selected?.ready??false,
         finalAvailable:selected?.finalAvailable??false,revision:selected?.revision??0,
         currentActionId:selected?.currentActionId??null};
     }
@@ -184,7 +200,9 @@ export class PassiveGoals {
     const hasUser = messages.some(entry => entry.content.kind === 'user');
     // Match request(): a current user message is enough for an initial estimate.
     // Whether its meaning supplies an ETA basis belongs to the observer model.
-    return {view, ready: messages.length > 0 && (goal.summary !== null || hasUser),
+    return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,
+      sourceAvailable:true,
+      ready: messages.length > 0 && (goal.summary !== null || hasUser),
       finalAvailable: messages.some(entry => entry.content.kind === 'assistant')};
   }
 
@@ -216,13 +234,17 @@ export class PassiveGoals {
       if(result.estimate===null||result.relation==='unknown'||result.status==='completed'||
         goal.runtime!=='running')return false;
       goal.prediction={...result.estimate,observedActiveSeconds:captured.activeSeconds};
+      delete goal.changeReason;
+      goal.predictionIdentity={};
       goal.estimateRevision++;goal.lastObservedAt=nowMs;
+      this.settledAnchors.set(ticket,captured.activeSeconds);
       return true;
     }
     if (result.relation === 'unknown') {
       goal.estimateRevision++;
-      goal.status = 'unknown'; goal.prediction = null;
+      goal.status = 'unknown'; goal.prediction = null; goal.predictionIdentity = null;
       goal.lastObservedAt = nowMs;
+      this.settledAnchors.set(ticket,captured.activeSeconds);
       return true;
     }
     // First attachment may describe the user's ongoing work as "continue".
@@ -240,6 +262,7 @@ export class PassiveGoals {
       anchor -= base;
       goal.candidateBase = 0;
       goal.generation++;
+      goal.identity = {};
     }
     goal.summary = result.summary ?? goal.summary;
     if(result.relation==='replace')goal.contextFloorTurnKey=goal.turnKey;
@@ -250,16 +273,23 @@ export class PassiveGoals {
       : goal.runtime === 'running' ? (result.status === 'unknown' ? 'unknown' : 'running')
       : result.status === 'waiting' ? 'waiting' : 'unknown';
     goal.prediction = result.estimate === null ? null : {...result.estimate, observedActiveSeconds: anchor};
+    goal.changeReason=result.estimate===null?undefined:result.work?.changeReason;
+    goal.predictionIdentity = result.estimate === null ? null : {};
     goal.estimateRevision++;
     goal.lastObservedAt = nowMs;
+    this.settledAnchors.set(ticket,anchor);
     return true;
   }
+
+  /** Private-to-server settlement metadata; available even when ETA is null. */
+  settledAnchor(ticket:object):number|undefined {return this.settledAnchors.get(ticket);}
 
   view(sessionKey: string, nowMs: number): PassiveGoalView|null {
     const goal = this.goals.get(sessionKey);
     if (!goal || !this.clock(nowMs, goal)) return null;
     return {generation: goal.generation, estimateRevision: goal.estimateRevision, status: goal.status, runtime: goal.runtime,
-      activeSeconds: this.active(goal, nowMs), prediction: goal.prediction && {...goal.prediction}};
+      activeSeconds: this.active(goal, nowMs), prediction: goal.prediction && {...goal.prediction},
+      ...(goal.prediction&&goal.changeReason?{changeReason:goal.changeReason}:{})};
   }
   end(sessionKey: string): void {
     if (!this.goals.delete(sessionKey)) return;
@@ -270,6 +300,6 @@ export class PassiveGoals {
   }
   activeTimeKnown(sessionKey:string):boolean {return this.goals.has(sessionKey)&&this.source===undefined;}
   clear(): void {
-    this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap();
+    this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap(); this.settledAnchors = new WeakMap();
   }
 }

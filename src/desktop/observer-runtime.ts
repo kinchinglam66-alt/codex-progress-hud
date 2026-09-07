@@ -3,6 +3,7 @@ import {createAccountedObserverWorker, type ObserverWorker} from '../estimation/
 import type {ObserverInput} from '../estimation/observer-contract.js';
 import type {Invocation} from '../estimation/owned-process.js';
 import type {ReleaseAccountingOwner} from '../estimation/release-accounting.js';
+import type {ForecastVersions} from '../estimation/forecast-record.js';
 import {requestObserverConsent, type ObserverConsentDialog} from './observer-consent-dialog.js';
 
 const SLOT_COUNT = 2;
@@ -14,6 +15,7 @@ export interface DesktopObserverIdentity {
     accountLabel: string;
     evidence: ObserverAttestation;
     invocation: Invocation;
+    provenance?: ForecastVersions;
   }>;
   disable(): void;
   close(): Promise<void>;
@@ -134,6 +136,12 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         try {return delegates[index]?.close() ?? Promise.resolve();}
         catch {return Promise.reject(new Error('OBSERVER_WORKER_CLOSE_UNCONFIRMED'));}
       },
+      provenance() {
+        const delegate=delegates[index];
+        if (disabled || !ready || !delegate) return null;
+        try {return delegate.provenance?.() ?? null;}
+        catch {return null;}
+      },
     };
   }
 
@@ -143,7 +151,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     if (disabled || signal.aborted || !gate.authorized()) throw new Error('OBSERVER_NOT_READY');
   }
 
-  function prepare(input: ObserverInput, signal: AbortSignal): Promise<Invocation> {
+  function prepare(input: ObserverInput, signal: AbortSignal): ReturnType<DesktopObserverIdentity['prepareEstimate']> {
     const queued = serial(metadataTail, async () => {
       check(signal);
       const prepared = await identity.prepareEstimate(input, signal);
@@ -153,7 +161,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         disable();
         throw new Error('OBSERVER_IDENTITY_CHANGED');
       }
-      return prepared.invocation;
+      return prepared;
     });
     metadataTail = queued.next;
     return queued.result;

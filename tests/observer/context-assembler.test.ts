@@ -1,9 +1,92 @@
 import {it,expect} from 'vitest';
 import {assembleContext} from '../../src/observer/context-assembler.js';
+import {packObserverInput} from '../../src/estimation/observer-input.js';
+import {observerInputSchema} from '../../src/estimation/observer-contract.js';
 
 const base={summary:null,summaryThroughSequence:0,sequence:3,activeSeconds:20,
   activeTimeKnown:false,historyComplete:true,nowMs:30000,previousEstimate:null};
 const user=(id:string,text:string,atMs=0)=>({id,turnId:'turn1',kind:'user' as const,text,atMs});
+
+it('preserves factual event pairs without transmitting source identifiers',()=>{
+  const records=[user('private-user','Build CSV'),
+    {id:'private-start',turnId:'private-turn',kind:'tool_start' as const,actionId:'private-action',atMs:1000,text:'npm test'},
+    {id:'private-result',turnId:'private-turn',kind:'tool_result' as const,actionId:'private-action',atMs:2000,text:'exit_code=1'},
+    {id:'private-other',turnId:'other-turn',kind:'tool_result' as const,actionId:'private-action',atMs:3000,text:'exit_code=0'}];
+  const before=structuredClone(records);
+  const packed=packObserverInput(assembleContext(records,base));
+  const packet=observerInputSchema.parse(JSON.parse(packed));
+  expect(packet.messages[1]?.event).toMatchObject({ordinal:1,kind:'tool_start',atMs:1000,pairOrdinal:0,counterpartMissing:false});
+  expect(packet.messages[2]?.event).toMatchObject({pairOrdinal:0,counterpartMissing:false});
+  expect(packet.messages[3]?.event).toMatchObject({pairOrdinal:1,counterpartMissing:true});
+  expect(packed).not.toContain('private-');
+  expect(packet.packingLoss).toMatchObject({suppliedMessages:4,retainedMessages:4,clippedMessages:0});
+  expect(packObserverInput(JSON.parse(packed))).toBe(packed);
+  expect(records).toEqual(before);
+});
+
+it('uses the same retention through filtering and repeat packing with honest loss counts',()=>{
+  const records=[user('u1','Original objective '+ '目标'.repeat(1500)),
+    ...Array.from({length:140},(_,i)=>({id:`tool${i}`,turnId:'turn1',kind:'tool_result' as const,atMs:i,text:'日志'.repeat(2500)})),
+    user('u2','Newest amendment '+ 'password=x '.repeat(300))];
+  const packed=packObserverInput(assembleContext(records,base));
+  const packet=observerInputSchema.parse(JSON.parse(packed));
+  expect(packet.messages[0]?.text).toContain('Original objective');
+  expect(packet.messages.at(-1)?.text).toContain('Newest amendment');
+  expect(packet.packingLoss!.suppliedMessages).toBe(142);
+  expect(packet.packingLoss!.retainedMessages).toBe(packet.messages.length);
+  expect(Object.values(packet.packingLoss!.droppedByKind).reduce((a,b)=>a+b,0)).toBe(142-packet.messages.length);
+  expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16384);
+  expect(packObserverInput(JSON.parse(packed))).toBe(packed);
+});
+
+it('does not pair anonymous actions or leak associations between conversations',()=>{
+  const records=[user('u','Fix it'),
+    {id:'s',turnId:null,kind:'tool_start' as const,actionId:'same',atMs:1,text:'npm test'},
+    {id:'r',turnId:null,kind:'tool_result' as const,actionId:'same',atMs:2,text:'exit_code=0'}];
+  const first=assembleContext(records,base);
+  expect(first.messages.slice(1).every(m=>m.event?.counterpartMissing)).toBe(true);
+  const other=assembleContext([user('other','Different task'),{...records[2]!,turnId:'turn1'}],{...base,historyComplete:false});
+  expect(other.messages[1]?.event).toMatchObject({pairOrdinal:0,counterpartMissing:true});
+  expect(other.observation.historyComplete).toBe(false);
+  expect(other.packingLoss?.droppedByKind).toEqual({user:0,assistant:0,tool:0});
+});
+
+it('reports removed source messages separately from clipped retained messages',()=>{
+  const packet=assembleContext([user('u','Task'),user('blank','   '),user('long','长'.repeat(5000))],base);
+  expect(packet.packingLoss).toEqual({suppliedMessages:3,retainedMessages:2,
+    droppedByKind:{user:1,assistant:0,tool:0},clippedMessages:1});
+  expect(packet.observation.omittedCategories).toContain('user');
+  expect(packObserverInput(JSON.parse(packObserverInput(packet)))).toBe(packObserverInput(packet));
+});
+
+it('assigns separate pairs to reused tool IDs within one turn',()=>{
+  const records=[user('u','Task'),
+    {id:'s1',turnId:'turn1',kind:'tool_start' as const,actionId:'same',atMs:1,text:'first'},
+    {id:'r1',turnId:'turn1',kind:'tool_result' as const,actionId:'same',atMs:2,text:'first result'},
+    {id:'s2',turnId:'turn1',kind:'tool_start' as const,actionId:'same',atMs:3,text:'second'},
+    {id:'r2',turnId:'turn1',kind:'tool_result' as const,actionId:'same',atMs:4,text:'second result'}];
+  const packet=assembleContext(records,base);
+  expect(packet.messages.slice(1).map(m=>m.event?.pairOrdinal)).toEqual([0,0,1,1]);
+  // Removing one member of each invocation must not produce a false complete pair.
+  const input={...packet,messages:[packet.messages[0]!,packet.messages[1]!,packet.messages[4]!],packingLoss:undefined};
+  expect(JSON.parse(packObserverInput(input)).messages.slice(1).every((m:any)=>m.event.counterpartMissing)).toBe(true);
+});
+
+it('records equal-length credential filtering as omitted content',()=>{
+  const packet=assembleContext([user('u','password=abcdefghij')],base);
+  expect(packet.truncated).toBe(true);
+  expect(packet.messages[0]?.truncated).toBe(true);
+  expect(packet.packingLoss?.clippedMessages).toBe(1);
+  expect(packet.observation.omittedCategories).toContain('user');
+});
+
+it('does not guess a match for overlapping starts with the same action ID',()=>{
+  const records=[user('u','Task'),...(['tool_start','tool_start','tool_result','tool_result'] as const).map((kind,i)=>({
+    id:String(i),turnId:'turn1',kind,actionId:'same',atMs:i,text:`event ${i}`}))];
+  const packet=assembleContext(records,base);
+  expect(packet.messages.slice(1).map(m=>m.event?.pairOrdinal)).toEqual([0,1,2,3]);
+  expect(packet.messages.slice(1).every(m=>m.event?.counterpartMissing)).toBe(true);
+});
 
 it('retains original goal and newest amendment before repetitive tool output',()=>{
   const records=[user('u1','Build CSV import'),...Array.from({length:140},(_,i)=>({id:`r${i}`,

@@ -61,7 +61,7 @@ app.whenReady().then(async()=>{
       prediction:{remainingSeconds:3600,errorPercent:30,observedActiveSeconds:0}};
     const row={conversationKey:'clock',task:{id:'clock'},eta:null,name:{value:'计时测试',freshness:'fresh'},goal};
     clock.accept({revision:1,rows:[row]},true);
-    const draw=()=>{const frame=clock.read();render(project(frame.snapshot.rows,frame.elapsedSeconds));};
+    const draw=()=>{const frame=clock.read();render(project(frame.snapshot.rows,frame.elapsedSeconds,frame.updatedKeys,frame.displayedSeconds));};
     draw();const clockNode=root.children[0];
     if(!clockNode.textContent.includes('01:00:00'))throw Error('initial countdown');
     const stop=startDisplayTicker(draw);
@@ -77,7 +77,17 @@ app.whenReady().then(async()=>{
       clock.accept({revision:3,rows:[]},false);draw();
       if(root.children.length)throw Error('completed row retained');
     } finally {stop();}
-    return {domPassed:true,countdownPassed:true};
+    let simulated=0;const transitions=createHudDisplayClock(()=>simulated);
+    const small={...row,goal:{...goal,prediction:{...goal.prediction,remainingSeconds:100}}};
+    transitions.accept({revision:1,rows:[small]},true);
+    transitions.accept({revision:2,rows:[{...small,goal:{...small.goal,estimateRevision:2,
+      prediction:{...small.goal.prediction,remainingSeconds:104}}}]},false);
+    const drawTransition=()=>{const f=transitions.read();render(project(f.snapshot.rows,f.elapsedSeconds,f.updatedKeys,f.displayedSeconds));};
+    drawTransition();if(!root.textContent.includes('00:01:40'))throw Error('transition start');
+    simulated=1000;drawTransition();if(!root.textContent.includes('00:01:41'))throw Error('transition middle');
+    simulated=2000;drawTransition();if(!root.textContent.includes('00:01:42'))throw Error('transition target');
+    if(!root.textContent.includes('±30%'))throw Error('uncertainty mutated');
+    return {domPassed:true,countdownPassed:true,transitionPassed:true};
   })()`);
   console.log(JSON.stringify(result));window.destroy();clearTimeout(timeout);app.exit(0);
 }).catch(error=>{console.error(error.message);clearTimeout(timeout);app.exit(1);});

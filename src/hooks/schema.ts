@@ -30,12 +30,16 @@ export const hookEnvelopeSchema = z.object({
   hook: z.enum(hookNames),
   source: z.enum(["startup", "resume", "clear", "compact"]).optional(),
   receivedAt: z.number().int().nonnegative().safe(),
+  toolExitCode: z.number().int().safe().refine(code => code !== 0).optional(),
   content: z.object({
     kind: z.enum(['user', 'assistant', 'tool']),
     text: z.string().min(1).max(4096),
     truncated: z.boolean()
   }).strict().optional()
 }).strict().superRefine((value, context) => {
+  if (value.toolExitCode !== undefined && value.hook !== 'PostToolUse') {
+    context.addIssue({code: 'custom', path: ['toolExitCode'], message: 'tool exit code requires PostToolUse'});
+  }
   if (value.content === undefined) return;
   const expected = value.hook === 'UserPromptSubmit' ? 'user'
     : value.hook === 'Stop' ? 'assistant'
@@ -56,6 +60,8 @@ export interface HookEnvelope {
   hook: HookName;
   source?: HookSource;
   receivedAt: number;
+  /** Bounded structured PostToolUse metadata; never inferred from output text. */
+  toolExitCode?: number;
   /** Private Hook-to-companion content; never include in public progress snapshots. */
   content?: PassiveContent;
 }
@@ -74,6 +80,14 @@ export const hookInputSchema = z.object({
 
 function opaqueKey(prefix: string, key: string, value: string): string {
   return `${prefix}${createHmac("sha256", key).update(value).digest("base64url")}`;
+}
+
+function structuredToolExitCode(hook: HookName, input: unknown): number|undefined {
+  if (hook !== 'PostToolUse' || typeof input !== 'object' || input === null || Array.isArray(input)) return undefined;
+  const response = (input as Record<string, unknown>).tool_response;
+  if (typeof response !== 'object' || response === null || Array.isArray(response)) return undefined;
+  const code = (response as Record<string, unknown>).exit_code;
+  return typeof code === 'number' && Number.isSafeInteger(code) && code !== 0 ? code : undefined;
 }
 
 export function createHookEnvelope(
@@ -104,6 +118,7 @@ export function createHookEnvelope(
   const taskHandle = opaqueKey("hud_", hmacKey, parsed.turn_id === undefined
     ? `unscoped-session\u0000${parsed.session_id}`
     : `turn-task\u0000${parsed.session_id}\u0000${parsed.turn_id}`);
+  const toolExitCode = structuredToolExitCode(hook, parsed);
   const eventId = opaqueKey(
     "evt_",
     hmacKey,
@@ -125,7 +140,8 @@ export function createHookEnvelope(
     ...(turnKey === undefined ? {} : { turnKey }),
     hook,
     ...(parsed.source === undefined ? {} : { source: parsed.source }),
-    receivedAt: nowMs
+    receivedAt: nowMs,
+    ...(toolExitCode === undefined ? {} : {toolExitCode})
   }) as HookEnvelope;
 }
 

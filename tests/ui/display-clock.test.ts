@@ -6,6 +6,69 @@ import {buildConversationViews} from '../../src/ui/view-model.js';
 const snapshot = (revision: number): HudSnapshot => ({revision, tasks: [], rows: [], selected: null,
   selectedTaskId: null, selectionMode: 'follow_activity', compatibility: {incompatibleClientSeen: false}});
 afterEach(() => vi.useRealTimers());
+it('transitions only small revisions, preserving raw prediction and uncertainty',()=>{
+  let now=0;const clock=createHudDisplayClock(()=>now);
+  clock.accept(predictionFrame(1,1,100),true);
+  clock.accept(predictionFrame(2,2,104),false);
+  expect(clock.read()?.displayedSeconds.get('a')).toBe(100);
+  now=1000;expect(clock.read()?.displayedSeconds.get('a')).toBe(101);
+  now=2000;expect(clock.read()?.displayedSeconds.get('a')).toBe(102);
+  expect(clock.read()?.snapshot.rows?.[0]?.goal?.prediction?.remainingSeconds).toBe(104);
+  clock.accept(predictionFrame(3,3,600),false);
+  expect(clock.read()?.displayedSeconds.get('a')).toBe(600);
+});
+it('does not restart a transition on same prediction frames and freezes during pause',()=>{
+  let now=0;const clock=createHudDisplayClock(()=>now);
+  clock.accept(predictionFrame(1,1,100),true);clock.accept(predictionFrame(2,2,104),false);
+  now=1000;
+  const frame=predictionFrame(3,2,104);frame.rows![0]!.goal!.activeSeconds=1;
+  clock.accept(frame,false);expect(clock.read()?.displayedSeconds.get('a')).toBe(101);
+  const paused=structuredClone(frame);paused.revision=4;paused.rows![0]!.goal!.runtime='paused';
+  clock.accept(paused,false);now=10000;expect(clock.read()?.displayedSeconds.get('a')).toBe(101);
+  const resumed=structuredClone(frame);resumed.revision=5;clock.accept(resumed,false);
+  now=11000;expect(clock.read()?.displayedSeconds.get('a')).toBe(102);
+});
+it('bypasses small transition for failure, unknown and goal replacement',()=>{
+  const clock=createHudDisplayClock(()=>0);
+  clock.accept(predictionFrame(1,1,100),true);
+  const failed=predictionFrame(2,2,104);
+  Object.assign(failed.rows![0]!.goal!,{changeReason:'failure'});
+  clock.accept(failed,false);expect(clock.read()?.displayedSeconds.get('a')).toBe(104);
+  const replacement=predictionFrame(3,1,106);replacement.rows![0]!.goal!.generation=2;
+  clock.accept(replacement,false);expect(clock.read()?.displayedSeconds.get('a')).toBe(106);
+  const unknown=predictionFrame(4,2,0);unknown.rows![0]!.goal!.prediction=null;
+  clock.accept(unknown,false);expect(clock.read()?.displayedSeconds.has('a')).toBe(false);
+});
+it('retargets from the displayed value and isolates other conversations',()=>{
+  let now=0;const clock=createHudDisplayClock(()=>now);
+  const initial=predictionFrame(1,1,100);
+  const other=structuredClone(initial.rows![0]!);other.conversationKey='b';other.task.id='b';
+  initial.rows!.push(other);clock.accept(initial,true);
+  const changed=predictionFrame(2,2,104);changed.rows!.push(other);clock.accept(changed,false);
+  now=1000;expect(clock.read()?.displayedSeconds.get('a')).toBe(101);
+  expect(clock.read()?.displayedSeconds.get('b')).toBe(99);
+  const again=predictionFrame(3,3,102);again.rows![0]!.goal!.activeSeconds=1;
+  again.rows![0]!.goal!.prediction!.observedActiveSeconds=1;
+  clock.accept(again,false);expect(clock.read()?.displayedSeconds.get('a')).toBe(101);
+  expect(clock.read()?.displayedSeconds.has('b')).toBe(false);
+  now=3000;expect(clock.read()?.displayedSeconds.get('a')).toBe(100);
+});
+it('freezes transitions while disconnected and clears them on reconnect',()=>{
+  let now=0;const clock=createHudDisplayClock(()=>now);
+  clock.accept(predictionFrame(1,1,100),true);clock.accept(predictionFrame(2,2,104),false);
+  now=1000;clock.disconnect();now=9000;
+  expect(clock.read()?.displayedSeconds.get('a')).toBe(101);
+  clock.accept(predictionFrame(0,2,104),true);
+  expect(clock.read()?.displayedSeconds.get('a')).toBe(104);
+});
+it('compares revisions at the same active snapshot rather than their original forecasts',()=>{
+  let now=0;const clock=createHudDisplayClock(()=>now);
+  clock.accept(predictionFrame(1,1,100),true);now=60000;
+  const next=predictionFrame(2,2,44);next.rows![0]!.goal!.activeSeconds=60;
+  next.rows![0]!.goal!.prediction!.observedActiveSeconds=60;
+  clock.accept(next,false);expect(clock.read()?.displayedSeconds.get('a')).toBe(40);
+  now=62000;expect(clock.read()?.displayedSeconds.get('a')).toBe(42);
+});
 function predictionFrame(revision: number, estimateRevision: number, remainingSeconds: number) {
   const store = new TaskStore({goalForConversation: () => ({generation: 1, estimateRevision,
     runtime: 'running', status: 'running', activeSeconds: 0,

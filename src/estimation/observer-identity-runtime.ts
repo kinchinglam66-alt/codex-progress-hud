@@ -10,6 +10,8 @@ import {buildObserverSetupInvocation,buildObserverCodexInvocation} from './codex
 import type {ObserverInput} from './observer-contract.js';
 import {createObserverAccountReader,type AccountReadDiagnostic} from './observer-account-reader.js';
 import type {ObserverAttestation} from './observer-consent.js';
+import type {ForecastVersions} from './forecast-record.js';
+import {OBSERVER_INPUT_FACTS_VERSION} from './observer-input.js';
 import {ObserverAccountTimeout,ObserverPreDispatchTransient} from './observer-call-failure.js';
 
 type PreparationStage='home-prepare'|'runtime-preflight'|'account-read'|'home-recheck'|'binding'|'ready';
@@ -20,7 +22,7 @@ interface Options {
   onDiagnostic?:(value:PreparationDiagnostic)=>void;
 }
 interface Snapshot {accountLabel:string;evidence:ObserverAttestation}
-interface PreparedEstimate extends Snapshot {invocation:Invocation}
+interface PreparedEstimate extends Snapshot {invocation:Invocation;provenance?:ForecastVersions}
 const digest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** Desktop-private composition. Reads only isolated configuration/account metadata;
@@ -65,8 +67,8 @@ export function createObserverIdentityRuntime(options:Options) {
           const profile=await runtimeCache.check(probe.probe);check();
           if(profile.version!==config.version)throw fail();
           emit('passed');stage='account-read';
-          const invocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
-          reader=createObserverAccountReader(()=>spawn(invocation.executable,invocation.args,{cwd:invocation.cwd,env:invocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
+          const setupInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
+          reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
           let account;
           try {account=await reader.read(combined);}
           catch(error) {if(!loginMode || !(error instanceof Error) || error.message!=='OBSERVER_LOGIN_REQUIRED')throw error;}
@@ -82,7 +84,16 @@ export function createObserverIdentityRuntime(options:Options) {
           const snapshot:Snapshot={accountLabel:account.email && account.email.length<=256?account.email:`ChatGPT (${account.planType})`,
             evidence:{accountFingerprint:digest(['observer-account-v1',account.accountId]),routeFingerprint:account.routeFingerprint,
               assetsFingerprint,observedAt,expiresAt:observedAt+300000}};
-          return typeof mode==='object'?{...snapshot,invocation:buildObserverCodexInvocation(profile,mode,env,authHome)}:snapshot;
+          if(typeof mode!=='object')return snapshot;
+          const invocation=buildObserverCodexInvocation(profile,mode,env,authHome);
+          const modelIndex=invocation.args.indexOf('--model');
+          const model=modelIndex>=0?invocation.args[modelIndex+1]:undefined;
+          const effortArg=invocation.args.find(arg=>arg.startsWith('model_reasoning_effort='));
+          let effort:string|undefined;
+          if(effortArg){try{const value=JSON.parse(effortArg.slice('model_reasoning_effort='.length));if(typeof value==='string')effort=value;}catch{/* Missing effort omits research provenance. */}}
+          const modelVersion=typeof model==='string'&&typeof effort==='string'?`${model}-${effort}`:undefined;
+          return {...snapshot,invocation,...(typeof modelVersion==='string'&&modelVersion.length<=128?{provenance:{
+            input:OBSERVER_INPUT_FACTS_VERSION,prompt:files.instructionsSha256,model:modelVersion,algorithm:'pace-v1'}}:{} )};
         } catch(error) {
           runtimeCache.invalidate();
           emit('failed');

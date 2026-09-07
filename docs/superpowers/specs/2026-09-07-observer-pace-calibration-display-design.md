@@ -1,7 +1,10 @@
 # Observer pace, calibration and display design
 
-Status: overall approach approved in conversation; written specification awaits
-user review. This document does not authorize installation or live experiments.
+Status: implemented locally; typecheck/build and 1,541 tests across 129 files passed.
+This document does not authorize installation or live experiments.
+
+Implementation evidence: `../reports/2026-09-07-pace-calibration-display.md`.
+Pace remains shadow-only and calibration offline. Installed HUD is unchanged.
 
 ## Scope and order
 

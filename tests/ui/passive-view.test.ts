@@ -13,6 +13,15 @@ function row(patch: Partial<PassiveGoalView> = {}) {
   return store.conversationRows(0)[0]!;
 }
 
+it('uses display-only countdown overrides without altering progress or uncertainty',()=>{
+  const value=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});
+  const before=structuredClone(value),project=createConversationViewProjector();
+  const view=project([value],0,[],new Map([['chat',104]]))[0]!;
+  expect(view.etaLabel).toBe('00:01:44 · 上次估时误差 ±30%');
+  expect(view.progressPercent).toBe(50);
+  expect(value).toEqual(before);
+});
+
 it('projects elapsed over estimated total and never retreats when ETA increases',()=>{
   const project=createConversationViewProjector();
   const value=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});

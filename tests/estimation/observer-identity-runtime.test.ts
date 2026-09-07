@@ -7,7 +7,7 @@ vi.mock('../../src/estimation/codex-probe.js',()=>({createObserverRuntimeProbe:(
 vi.mock('../../src/estimation/codex-preflight.js',()=>({createRuntimePreflightCache:()=>({
   check:async()=>{state.events.push('preflight');return {version:'0.153.4'};},invalidate(){state.events.push('cache-invalidated');}
 })}));
-vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec'],env:{},cwd:resolve('.'),input:'bounded'})}));
+vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'})}));
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:()=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure)throw Error(state.failure);return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:'b'.repeat(64)};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.failure='';state.active=false;});
@@ -52,7 +52,8 @@ it('prepares isolated login only after runtime and metadata checks',async()=>{
 it('prepares an estimate with fresh identity evidence but never dispatches it',async()=>{
   const runtime=createObserverIdentityRuntime(config());
   const prepared=await runtime.prepareEstimate({goalSummary:null,activeSeconds:20,runtime:'running',messages:[{kind:'user',text:'synthetic goal',truncated:false}],truncated:false},new AbortController().signal);
-  expect(prepared.invocation.args).toEqual(['exec']);
+  expect(prepared.invocation.args).toContain('exec');
+  expect(prepared.provenance).toMatchObject({input:'observer-input-facts-v1',model:'gpt-5.6-luna-medium',algorithm:'pace-v1'});
   expect(prepared.evidence.accountFingerprint).toMatch(/^[a-f0-9]{64}$/);
   expect(state.events).toContain('account');await runtime.close();
 });

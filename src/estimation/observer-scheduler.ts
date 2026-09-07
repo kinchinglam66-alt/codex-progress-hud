@@ -2,35 +2,49 @@ import type {ObserverInput} from './observer-contract.js';
 import type {ObserverSubscriptionResult} from './subscription-session.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
-import {requestBlockReason} from './long-task-policy.js';
+import {decideTrigger, type TriggerReason} from './long-task-policy.js';
 import type {ObserverDiagnostics} from '../core/observer-diagnostics.js';
+import {correctPace} from './pace-correction.js';
+import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
   /** Authenticated local key is accounting metadata, never observer prompt data. */
   observe(input: ObserverInput, signal: AbortSignal, conversationKey: string): Promise<ObserverSubscriptionResult>;
   status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
   disable(): void;
   close(): Promise<void>;
+  provenance?: () => ForecastVersions|null;
 }
 export interface ObserverObservation {
   kind:'runtime'|'request'|'result'|'skip'; at:number; key:string; generation:number; activeSeconds:number;
   runtime:string; version:number; requestId?:number; requestedAt?:number; observedActiveSeconds?:number;
   accepted?:boolean; status?:string; relation?:string;
+  triggerReason?:TriggerReason|string; lastRequestActiveSeconds?:number|null; eligibleActiveSeconds?:number|null;
   activeTimeKnown?:boolean;
   estimate?:{remainingSeconds:number;errorPercent:number}|null;
+  forecast?:Readonly<ForecastRecord>;
+  forecastDiagnostic?:'provenance_unavailable'|'invalid_provenance';
   usage?:ObserverSubscriptionResult['usage'];
   timings?:ObserverSubscriptionResult['timings'];
 }
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers: readonly ObserverWorker[]; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
+  eventSequence: number; consumedEventSequence: number;
   version: number; consumed: number; unknown: number; starts: number[];
   runtime: string; statusEvidence: boolean; flight?: Flight;
-  lastSkip?: string; sourceRevision?: number; sourceFinalAvailable?: boolean; overdueActionId?: string;
+  lastSkip?: string; sourceRevision?: number; sourceFinalAvailable?: boolean; eventReason?:TriggerReason;
   retryVersion?:number;retryUsedVersion?:number;
   lastResultStatus?:ObserverSubscriptionResult['status'];lastEstimateAt?:number;
+  goalIdentity?:object; predictionIdentity?:object|null; lastRequestActiveSeconds?:number;
+  overdueEligibleActiveSeconds?:number; overdueReservedPrediction?:object;
+  sourceClockAvailable?:boolean;
+  sourceActiveSeconds?:number; predictionExcludedSeconds?:number;
+  expiredTimerResults:number;
+  ended:boolean;
 }
 interface Flight {key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
-  generation:number;runtime:string;version:number;done?: Promise<void>}
+  generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
+  lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; done?: Promise<void>}
 
 /** Admission timing is local; durable spend admission belongs to each owned worker.
  * changed never dispatches synchronously on the task Hook/HTTP path.
@@ -76,7 +90,53 @@ export class ObserverScheduler {
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,...extra});
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
   }
-  changed(key: string, event: 'prompt'|'activity'|'final'|'runtime'): void {
+  private markEvent(entry:Entry,now:number,reason:TriggerReason):void {
+    const hadPending=entry.eventSequence>entry.consumedEventSequence;
+    entry.eventSequence++;
+    if(!hadPending){entry.eventAt=now;entry.eventReason=reason;}
+    else if(reason==='status_evidence')entry.eventReason=reason;
+  }
+  private syncGoal(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
+    if(entry.goalIdentity===undefined){
+      entry.goalIdentity=state.goalIdentity;entry.predictionIdentity=state.predictionIdentity;
+      if(state.view.prediction)entry.overdueEligibleActiveSeconds=
+        state.view.prediction.observedActiveSeconds+state.view.prediction.remainingSeconds+15;
+      return;
+    }
+    if(entry.goalIdentity!==state.goalIdentity){
+      entry.sourceActiveSeconds=state.view.activeSeconds;entry.sourceClockAvailable=state.sourceAvailable;
+      entry.predictionExcludedSeconds=0;
+      entry.goalIdentity=state.goalIdentity;entry.predictionIdentity=state.predictionIdentity;
+      entry.unknown=0;entry.expiredTimerResults=0;delete entry.overdueEligibleActiveSeconds;
+      delete entry.overdueReservedPrediction;entry.lastRequestActiveSeconds=state.view.activeSeconds;
+      if(state.view.prediction)entry.overdueEligibleActiveSeconds=
+        state.view.prediction.observedActiveSeconds+state.view.prediction.remainingSeconds+15;
+    } else if(entry.predictionIdentity!==state.predictionIdentity){
+      entry.predictionExcludedSeconds=0;
+      entry.predictionIdentity=state.predictionIdentity;delete entry.overdueReservedPrediction;
+      if(state.predictionIdentity===null){delete entry.overdueEligibleActiveSeconds;}
+      else if(state.view.prediction){
+        entry.overdueEligibleActiveSeconds=state.view.prediction.observedActiveSeconds+
+          state.view.prediction.remainingSeconds+15;
+      }
+    }
+  }
+  private syncSourceClock(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
+    const active=state.view.activeSeconds;
+    // Availability is sampled: conservatively exclude the interval if either
+    // endpoint is unavailable. Shift raw-coordinate anchors, never the HUD clock.
+    const excluded=(state.sourceAvailable===false||entry.sourceClockAvailable===false)
+      ?Math.max(0,active-(entry.sourceActiveSeconds??active)):0;
+    if(excluded>0){
+      if(entry.lastRequestActiveSeconds!==undefined)entry.lastRequestActiveSeconds+=excluded;
+      if(entry.overdueEligibleActiveSeconds!==undefined)entry.overdueEligibleActiveSeconds+=excluded;
+      entry.predictionExcludedSeconds=(entry.predictionExcludedSeconds??0)+excluded;
+      if(entry.flight?.goalIdentity===state.goalIdentity)entry.flight.excludedActiveSeconds+=excluded;
+    }
+    entry.sourceActiveSeconds=active;entry.sourceClockAvailable=state.sourceAvailable;
+  }
+  private expiredBackoffSeconds(count:number):number {return count<=1?300:count===2?600:1800;}
+  changed(key: string, event: 'prompt'|'activity'|'final'|'failure'|'runtime'): void {
     if (this.disabled) return;
     const now = this.time(), state = this.options.goals.scheduling(key, now);
     if (!state) return;
@@ -86,10 +146,16 @@ export class ObserverScheduler {
       this.prune(now);
       if (this.entries.size >= 128) {this.capacityReached = true; return;}
       entry = {born: now, readyAfter: now + 15000, lastStart: null, eventAt: null,
+        eventSequence:0, consumedEventSequence:0,
         version: selectedSource ? 1 : 0, consumed: 0, unknown: 0, starts: [], runtime: state.view.runtime,
-        statusEvidence: false, ...(selectedSource ? {sourceRevision: state.revision, sourceFinalAvailable: state.finalAvailable} : {})};
+        statusEvidence: false, expiredTimerResults:0, ended:false, goalIdentity:state.goalIdentity,
+        predictionIdentity:state.predictionIdentity,
+        sourceClockAvailable:state.sourceAvailable,
+        sourceActiveSeconds:state.view.activeSeconds,
+        ...(selectedSource ? {sourceRevision: state.revision, sourceFinalAvailable: state.finalAvailable} : {})};
       this.entries.set(key, entry);
     }
+    this.syncGoal(entry,state);this.syncSourceClock(entry,state);
     if (selectedSource) {
       this.syncSource(entry, state.revision!);
       if (state.view.runtime === 'waiting' && state.finalAvailable && entry.sourceFinalAvailable !== true) {
@@ -99,10 +165,14 @@ export class ObserverScheduler {
     } else {
       entry.version++;
     }
-    if (event === 'prompt') {entry.readyAfter = now + 15000; entry.unknown = 0;
+    if (event === 'prompt') {entry.unknown = 0;entry.expiredTimerResults=0;delete entry.overdueEligibleActiveSeconds;
       delete entry.lastResultStatus;delete entry.lastEstimateAt;delete entry.lastSkip;delete entry.retryVersion;}
-    if (event !== 'activity' || (entry.runtime !== 'running' && state.view.runtime === 'running')) entry.eventAt = now;
-    if (event === 'final' && state.finalAvailable) entry.statusEvidence = true;
+    const resumed=entry.runtime!=='running'&&state.view.runtime==='running';
+    if(event==='prompt')this.markEvent(entry,now,'important_event');
+    if(event==='final'&&state.finalAvailable){entry.statusEvidence=true;this.markEvent(entry,now,'status_evidence');}
+    if(event==='failure'){entry.unknown=0;entry.expiredTimerResults=0;this.markEvent(entry,now,'important_event');}
+    if(event==='runtime'&&resumed){entry.statusEvidence=false;entry.unknown=0;entry.expiredTimerResults=0;
+      delete entry.overdueEligibleActiveSeconds;this.markEvent(entry,now,'important_event');}
     entry.runtime = state.view.runtime;
     if (['paused', 'stopped', 'failed', 'interrupted'].includes(entry.runtime)) entry.flight?.controller.abort();
     this.record('runtime',key,entry);
@@ -131,6 +201,7 @@ export class ObserverScheduler {
     const now = this.time(); this.prune(now);
     if (this.workers.some(worker => this.workerState(worker).poisoned)) {this.disable(); return;}
     for (const [key, entry] of [...this.entries]) {
+      if(entry.ended)continue;
       const worker = this.workers.find(candidate => {
         const state = this.workerState(candidate);
         return !this.flights.has(candidate) && !state.active && !state.disabled && !state.poisoned;
@@ -141,43 +212,60 @@ export class ObserverScheduler {
       if (selectedSource) {
         this.syncSource(entry, state.revision!);
         if (state.view.runtime === 'waiting' && state.finalAvailable && entry.sourceFinalAvailable !== true) {
-          entry.statusEvidence = true;
+          entry.statusEvidence = true;this.markEvent(entry,now,'status_evidence');
         }
         entry.sourceFinalAvailable = state.finalAvailable;
       }
+      this.syncGoal(entry,state);
+      this.syncSourceClock(entry,state);
       const view = state.view;
       const runtime = view.status === 'completed' || ['stopped', 'failed', 'interrupted'].includes(view.runtime)
         ? 'terminal' : view.runtime === 'paused' ? 'paused' : view.runtime === 'waiting' ? 'waiting' : 'running';
       const prediction = view.prediction;
-      const remaining = prediction ? Math.max(0, prediction.remainingSeconds - (view.activeSeconds - prediction.observedActiveSeconds)) : null;
-      const overdueActionId = selectedSource && state.currentActionId !== null
-        && remaining === 0 && entry.overdueActionId !== state.currentActionId
-        ? state.currentActionId : null;
+      const remaining = prediction ? Math.max(0, prediction.remainingSeconds - Math.max(0,
+        view.activeSeconds - prediction.observedActiveSeconds - (entry.predictionExcludedSeconds??0))) : null;
       if(state.ready && now<entry.readyAfter){this.skip(key,entry,'initial_delay');continue;}
-      const reason=requestBlockReason({elapsedSeconds: (now - entry.born) / 1000,
+      const overdueReady=state.predictionIdentity!==null&&remaining===0&&
+        entry.overdueReservedPrediction!==state.predictionIdentity&&
+        (entry.overdueEligibleActiveSeconds===undefined||view.activeSeconds>=entry.overdueEligibleActiveSeconds);
+      const overdueAlready=state.predictionIdentity!==null&&remaining===0&&
+        entry.overdueReservedPrediction===state.predictionIdentity;
+      const retryBackoff=state.predictionIdentity!==null&&remaining===0&&!overdueReady&&!overdueAlready&&
+        entry.overdueEligibleActiveSeconds!==undefined&&view.activeSeconds<entry.overdueEligibleActiveSeconds;
+      const decision=decideTrigger({elapsedSeconds: (now - entry.born) / 1000,
         lastRequestSeconds: entry.lastStart === null ? null : (entry.lastStart - entry.born) / 1000,
         eventAtSeconds: entry.eventAt === null ? null : (entry.eventAt - entry.born) / 1000,
+        ...(entry.eventReason===undefined?{}:{eventReason:entry.eventReason}),
+        eventSequence:entry.eventSequence,consumedEventSequence:entry.consumedEventSequence,
         remainingSeconds: remaining, unknownResults: entry.unknown, contentReady: state.ready,
-        hasNewInformation: entry.version > entry.consumed, overdueActionRecheck: overdueActionId !== null,
+        hasNewInformation: entry.version > entry.consumed, activeSeconds:view.activeSeconds,
+        lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,
+        overdueActionRecheck: overdueReady,overdueAlreadyChecked:overdueAlready,
+        overdueEligibleActiveSeconds:entry.overdueEligibleActiveSeconds??null,retryBackoff,
         preDispatchRetry:entry.retryVersion===entry.version,
         state: runtime, statusEvidenceArrived: entry.statusEvidence,
         goalInFlight: entry.flight !== undefined, globalInFlight: this.flights.size, conversationStartsLastHour: entry.starts.length});
-      if(reason){this.skip(key,entry,reason);continue;}
+      if(decision.blockReason){this.skip(key,entry,decision.blockReason);continue;}
       if(!worker){this.skip(key,entry,this.workers.some(candidate=>this.workerState(candidate).setupFailed)?'setup_failed':'worker_unavailable');continue;}
       const request = this.options.goals.request(key, now);
       if (!request) {this.skip(key,entry,'request_unavailable');continue;}
       delete entry.lastSkip;
       const flight: Flight = {key, ticket: request.ticket, controller: new AbortController(), worker,
         requestId:++this.requestSequence,requestedAt:now,observedActiveSeconds:request.input.activeSeconds,
-        generation:view.generation,runtime:view.runtime,version:entry.version};
+        generation:view.generation,runtime:view.runtime,version:entry.version,triggerReason:decision.reason!,
+        lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,eligibleActiveSeconds:decision.eligibleActiveSeconds,
+        goalIdentity:state.goalIdentity,excludedActiveSeconds:0};
       entry.flight = flight; entry.lastStart = now; entry.starts.push(now); entry.consumed = entry.version;
+      entry.consumedEventSequence=entry.eventSequence;
+      entry.lastRequestActiveSeconds=request.input.activeSeconds;
       if(entry.retryVersion===entry.version)entry.retryUsedVersion=entry.version;
       delete entry.retryVersion;
-      if (overdueActionId !== null) entry.overdueActionId = overdueActionId;
+      if (overdueReady&&state.predictionIdentity!==null)entry.overdueReservedPrediction=state.predictionIdentity;
       entry.statusEvidence = false; this.flights.set(worker, flight);
       // Rotate for fairness; reserve both local slot and hourly start before provider code.
       this.entries.delete(key); this.entries.set(key, entry);
-      this.record('request',key,entry,{requestId:flight.requestId});
+      this.record('request',key,entry,{requestId:flight.requestId,triggerReason:flight.triggerReason,
+        lastRequestActiveSeconds:flight.lastRequestActiveSeconds,eligibleActiveSeconds:flight.eligibleActiveSeconds});
       this.notify();
       try {
         flight.done = Promise.resolve(worker.observe(request.input, flight.controller.signal, key))
@@ -186,6 +274,9 @@ export class ObserverScheduler {
     }
   }
   private settle(entry: Entry, flight: Flight, result: ObserverSubscriptionResult|null): void {
+    const before=this.options.goals.scheduling(flight.key,this.time());
+    if(before&&before.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity)
+      this.syncSourceClock(entry,before);
     const state = this.workerState(flight.worker);
     if (state.active || state.poisoned) {
       this.options.goals.settle(flight.ticket, null, this.time());
@@ -209,27 +300,78 @@ export class ObserverScheduler {
     // A valid answer is not permission to make another call; goal tickets still reject stale answers.
     const eligible = !this.disabled && !state.disabled && !flight.controller.signal.aborted
       && result?.status === 'interpreted' && (!mustDisable || safeUnknownUsage);
+    const settledAt=this.time();
     const accepted = this.options.goals.settle(flight.ticket,
-      eligible ? result!.interpretation : null, this.time());
+      eligible ? result!.interpretation : null, settledAt);
+    const live=this.options.goals.scheduling(flight.key,settledAt);
+    const sameGoal=live!==null&&live.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity;
+    const localResultAllowed=accepted||sameGoal;
     if(provenTransient && !this.disabled && !state.disabled && !flight.controller.signal.aborted
-      && entry.version===flight.version && entry.retryUsedVersion!==flight.version){
+      && sameGoal && entry.version===flight.version && entry.retryUsedVersion!==flight.version){
       entry.retryVersion=flight.version;
       if(flight.runtime==='waiting')entry.statusEvidence=true;
     }
     if (mustDisable) this.disable();
-    if(entry.version===flight.version)entry.lastResultStatus=result?.status??'process_error';
-    if(accepted&&result?.interpretation?.estimate)entry.lastEstimateAt=flight.requestedAt;
-    if(!noDispatch)entry.unknown = accepted && result?.interpretation?.estimate !== null ? 0 : entry.unknown + 1;
-    this.recordResult(entry,flight,result,accepted);
+    if(entry.version===flight.version&&localResultAllowed)entry.lastResultStatus=result?.status??'process_error';
+    if(accepted&&result?.interpretation?.estimate&&live){
+      entry.sourceActiveSeconds=live.view.activeSeconds;entry.sourceClockAvailable=live.sourceAvailable;
+      entry.predictionExcludedSeconds=flight.excludedActiveSeconds;
+      entry.lastEstimateAt=flight.requestedAt;
+      entry.unknown=0;
+      if(live.goalIdentity!==flight.goalIdentity)entry.lastRequestActiveSeconds=live.view.activeSeconds;
+      entry.goalIdentity=live.goalIdentity;entry.predictionIdentity=live.predictionIdentity;
+      if(result.interpretation.estimate.remainingSeconds===0&&
+        (flight.triggerReason==='overdue'||flight.triggerReason==='periodic')){
+        entry.expiredTimerResults=Math.min(8,entry.expiredTimerResults+1);
+        entry.overdueEligibleActiveSeconds=live.view.activeSeconds+this.expiredBackoffSeconds(entry.expiredTimerResults);
+      }else{
+        entry.expiredTimerResults=0;
+        if(live.view.prediction)entry.overdueEligibleActiveSeconds=
+          live.view.prediction.observedActiveSeconds+live.view.prediction.remainingSeconds+flight.excludedActiveSeconds+15;
+        else delete entry.overdueEligibleActiveSeconds;
+      }
+      delete entry.overdueReservedPrediction;
+    } else if(accepted&&result?.interpretation?.estimate===null&&live){
+      entry.sourceActiveSeconds=live.view.activeSeconds;entry.sourceClockAvailable=live.sourceAvailable;
+      entry.predictionExcludedSeconds=0;
+      if(live.goalIdentity!==flight.goalIdentity)entry.lastRequestActiveSeconds=live.view.activeSeconds;
+      entry.goalIdentity=live.goalIdentity;entry.predictionIdentity=live.predictionIdentity;
+      entry.unknown=Math.min(8,entry.unknown+1);entry.expiredTimerResults=0;
+      delete entry.overdueEligibleActiveSeconds;delete entry.overdueReservedPrediction;
+    }
+    this.recordResult(entry,flight,result,accepted,settledAt,live);
     this.notify();
   }
-  private recordResult(entry:Entry,flight:Flight,result:ObserverSubscriptionResult|null,accepted:boolean):void {
+  private recordResult(entry:Entry,flight:Flight,result:ObserverSubscriptionResult|null,accepted:boolean,
+    acceptedAt=this.time(),live:NonNullable<ReturnType<PassiveGoals['scheduling']>>|null=null):void {
+    let forecast:Readonly<ForecastRecord>|undefined;
+    let forecastDiagnostic:ObserverObservation['forecastDiagnostic'];
+    const snapshotAnchor=accepted?this.options.goals.settledAnchor(flight.ticket):flight.observedActiveSeconds;
+    if(accepted && live){
+      let versions:ForecastVersions|null=null;
+      try {versions=flight.worker.provenance?.() ?? null;} catch {forecastDiagnostic='provenance_unavailable';}
+      if(versions===null)forecastDiagnostic='provenance_unavailable';
+      else if(forecastDiagnostic===undefined) {
+        try {
+          const rawSeconds=result?.interpretation?.estimate?.remainingSeconds ?? null;
+          const pace=rawSeconds===null?{seconds:null,reason:'missing_measurements' as const}:
+            correctPace(rawSeconds,result?.interpretation?.work ?? null,[]);
+          forecast=makeForecastRecord({schemaVersion:1,predictionId:flight.requestId,generation:live.view.generation,
+            snapshotActiveSeconds:snapshotAnchor ?? Number.NaN,
+            acceptedAt,rawSeconds,shadowSeconds:pace.seconds,
+            paceReason:pace.reason,calibration:'uncalibrated',versions});
+        } catch {forecastDiagnostic='invalid_provenance';}
+      }
+    }
     this.record('result',flight.key,entry,{requestId:flight.requestId,requestedAt:flight.requestedAt,
       ...(!accepted?{generation:flight.generation}:{}),
-      observedActiveSeconds:accepted?(this.options.goals.view(flight.key,this.time())?.prediction?.observedActiveSeconds??flight.observedActiveSeconds):flight.observedActiveSeconds,
+      ...(snapshotAnchor===undefined?{}:{observedActiveSeconds:snapshotAnchor}),
+      triggerReason:flight.triggerReason,lastRequestActiveSeconds:flight.lastRequestActiveSeconds,
+      eligibleActiveSeconds:flight.eligibleActiveSeconds,
       accepted,status:result?.status??'process_error',
       ...(result?.interpretation?{relation:result.interpretation.relation}:{}),
       estimate:result?.interpretation?.estimate?{...result.interpretation.estimate}:null,
+      ...(forecast?{forecast}:{}),...(forecastDiagnostic?{forecastDiagnostic}:{}),
       ...(result?.timings?{timings:{...result.timings}}:{}),
       usage:result?.usage?{...result.usage}:null},flight);
   }
@@ -250,6 +392,7 @@ export class ObserverScheduler {
     const entry = this.entries.get(key);
     if (!entry) return;
     entry.consumed = entry.version; entry.statusEvidence = false; entry.flight?.controller.abort();
+    entry.ended=true;
     delete entry.retryVersion;
   }
   disable(): void {

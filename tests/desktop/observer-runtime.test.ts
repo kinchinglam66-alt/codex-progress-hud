@@ -6,6 +6,10 @@ import type {ReleaseAccountingOwner} from '../../src/estimation/release-accounti
 import type {SubscriptionAccounting} from '../../src/estimation/subscription-accounting.js';
 import type {Invocation} from '../../src/estimation/owned-process.js';
 import {createDesktopObserverRuntime} from '../../src/desktop/observer-runtime.js';
+import {ObserverScheduler, type ObserverObservation} from '../../src/estimation/observer-scheduler.js';
+import {PassiveGoals} from '../../src/server/passive-goals.js';
+import {PassiveContextStore} from '../../src/server/passive-context-store.js';
+import {normalizeHookInput} from '../../src/hooks/schema.js';
 
 const input: ObserverInput = {
   goalSummary: 'Build a report',
@@ -28,9 +32,11 @@ const observerOutput = [
   JSON.stringify({type: 'turn.completed', usage: {input_tokens: 20, output_tokens: 3, cached_input_tokens: 5}}),
 ].join('\n') + '\n';
 
+type Provenance = {input:string;prompt:string;model:string;algorithm:string};
+
 interface RuntimeIdentity {
   inspect(signal: AbortSignal): Promise<{accountLabel: string; evidence: ObserverAttestation}>;
-  prepareEstimate(input: ObserverInput, signal: AbortSignal): Promise<{accountLabel: string; evidence: ObserverAttestation; invocation: Invocation}>;
+  prepareEstimate(input: ObserverInput, signal: AbortSignal): Promise<{accountLabel: string; evidence: ObserverAttestation; invocation: Invocation; provenance?: Provenance}>;
   disable(): void;
   close(): Promise<void>;
 }
@@ -91,6 +97,7 @@ function identityFor(clock: () => number, events: string[], options: {
   prepare?: () => Promise<void> | void;
   closeError?: Error;
   invocation?: () => Invocation;
+  provenance?: () => Provenance;
 } = {}): RuntimeIdentity {
   return {
     inspect: async signal => {
@@ -102,7 +109,8 @@ function identityFor(clock: () => number, events: string[], options: {
       if (signal.aborted) throw new Error('ABORTED');
       events.push('prepare');
       await options.prepare?.();
-      return {accountLabel: 'synthetic@example.invalid', evidence: options.inspect?.() ?? evidence(clock()), invocation: options.invocation?.() ?? invocation()};
+      const prepared={accountLabel: 'synthetic@example.invalid', evidence: options.inspect?.() ?? evidence(clock()), invocation: options.invocation?.() ?? invocation()};
+      return options.provenance?{...prepared,provenance:options.provenance()}:prepared;
     },
     disable: () => {events.push('identity-disable');},
     close: async () => {events.push('identity-close'); if (options.closeError) throw options.closeError;},
@@ -155,6 +163,25 @@ describe('desktop observer runtime composition', () => {
     expect(results.every(result => result.status === 'interpreted')).toBe(true);
     expect(events.filter(event => event.startsWith('reserve:'))).toHaveLength(2);
     await runtime.close();
+  });
+
+  it('forwards slot provenance through the scheduler into an accepted forecast record', async () => {
+    let now=0;const events:string[]=[];const contexts=new PassiveContextStore();const goals=new PassiveGoals(contexts);
+    const records:ObserverObservation[]=[];
+    const runtime=createDesktopObserverRuntime({
+      identity:identityFor(()=>now,events,{provenance:()=>({input:'facts-v1',prompt:'prompt-v1',model:'model-v1',algorithm:'pace-v1'})}),
+      dialog:dialogFor(events),openAccounting:async()=>owner(events),now:()=>now,
+    });
+    await runtime.start(new AbortController().signal);
+    const scheduler=new ObserverScheduler({contexts,goals,workers:runtime.workers,now:()=>now,onObservation:row=>records.push(row)});
+    const envelope=normalizeHookInput('UserPromptSubmit',{session_id:'scheduler-runtime',turn_id:'first',tool_use_id:'one'},now,
+      'protected-observer-scheduler-test-token-123456789').envelope;
+    envelope.content={kind:'user',text:'Build the report',truncated:false};
+    goals.observe(envelope,true,now);contexts.ingest(envelope,now);scheduler.changed(envelope.sessionKey,'prompt');
+    now=15000;scheduler.tick();
+    await vi.waitFor(()=>expect(records.find(row=>row.kind==='result')).toBeDefined());
+    await vi.waitFor(()=>expect(records.find(row=>row.kind==='result')?.forecast).toMatchObject({versions:{model:'model-v1'}}));
+    await scheduler.close();await runtime.close();
   });
 
   it('revokes a cancelled consent attempt and ignores its late dialog response', async () => {

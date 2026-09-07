@@ -1,6 +1,7 @@
 # Observer input facts: first-stage design
 
-Status: proposed after inspection; implementation pending design review.
+Status: approved and implemented locally; final regression and scoped review passed.
+Not installed or pushed. See the associated implementation plan for verification.
 
 ## Scope
 

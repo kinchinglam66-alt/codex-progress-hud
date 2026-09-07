@@ -14,8 +14,8 @@ const projectRows = createConversationViewProjector();
 function render(): void {
   const frame = displayClock.read();
   if (frame === null) return;
-  const {snapshot, elapsedSeconds, connected, updatedKeys} = frame;
-  const views = projectRows(snapshot.rows ?? [], elapsedSeconds, updatedKeys);
+  const {snapshot, elapsedSeconds, connected, updatedKeys,displayedSeconds} = frame;
+  const views = projectRows(snapshot.rows ?? [], elapsedSeconds, updatedKeys,displayedSeconds);
   renderRows(views);
   status.textContent = views.length === 0 ? "暂无进行中任务" : String(views.length) + " 个显示任务";
   empty.hidden = views.length !== 0;

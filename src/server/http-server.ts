@@ -6,6 +6,15 @@ import { type ProgressEnvelope } from "../core/schema.js";
 import {controlEnvelopeSchema} from './control-schema.js';
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
 import { parseHookEnvelope, type HookEnvelope } from "../hooks/schema.js";
+
+export type ObserverHookEvent = 'prompt'|'activity'|'final'|'failure';
+
+export function observerEventForHook(envelope: Pick<HookEnvelope, 'hook'|'toolExitCode'>): ObserverHookEvent {
+  if (envelope.hook === 'UserPromptSubmit') return 'prompt';
+  if (envelope.hook === 'Stop') return 'final';
+  if (envelope.hook === 'PostToolUse' && envelope.toolExitCode !== undefined && Number.isSafeInteger(envelope.toolExitCode) && envelope.toolExitCode !== 0) return 'failure';
+  return 'activity';
+}
 import { PROTOCOL_VERSION, type HudCapabilities, type HudHealth } from "../lifecycle/types.js";
 import type { DesiredHudState } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
@@ -181,6 +190,7 @@ async function serveUi(
     "/conversation-renderer.js": { file: "conversation-renderer.js", type: "text/javascript; charset=utf-8" },
     "/view-model.js": { file: "view-model.js", type: "text/javascript; charset=utf-8" },
     "/display-clock.js": { file: "display-clock.js", type: "text/javascript; charset=utf-8" },
+    "/eta-transition.js": { file: "eta-transition.js", type: "text/javascript; charset=utf-8" },
     "/countdown.js": { file: "countdown.js", type: "text/javascript; charset=utf-8" },
     "/task-mutations.js": { file: "task-mutations.js", type: "text/javascript; charset=utf-8" },
     "/task-controls.js": { file: "task-controls.js", type: "text/javascript; charset=utf-8" }
@@ -812,8 +822,7 @@ export function createProgressServer(options: ProgressServerOptions) {
               store.apply({ taskId: envelope.taskHandle, event: { type: 'session_attached', origin: 'late_attach' } }, now(), metadata);
             }
             store.apply(route.envelope, now(), metadata);
-            if (route.follow) passiveObserver?.changed(route.sessionKey,
-              envelope.hook === 'UserPromptSubmit' ? 'prompt' : envelope.hook === 'Stop' ? 'final' : 'activity');
+            if (route.follow) passiveObserver?.changed(route.sessionKey, observerEventForHook(envelope));
             if(envelope.hostThreadId !== undefined && store.has(envelope.taskHandle) &&
                 names.register(route.sessionKey,envelope.hostThreadId)) {
               knownConversations.add(route.sessionKey);

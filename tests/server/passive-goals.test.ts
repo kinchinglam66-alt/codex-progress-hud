@@ -31,6 +31,27 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it('projects only the accepted bounded change reason and clears absent reasons',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0);
+    const withWork={...answer(),work:{composition:'serial',changeReason:'failure',parts:[
+      {workClass:'other',unit:'unknown',remainingUnits:null,priorSeconds:3600}]}};
+    expect(f.goals.settle(f.request(15000).ticket,withWork,16000)).toBe(true);
+    expect(f.goals.view(session,16000)?.changeReason).toBe('failure');
+    expect(JSON.stringify(f.goals.view(session,16000))).not.toContain('parts');
+    expect(f.goals.settle(f.request(17000).ticket,answer('continue'),18000)).toBe(true);
+    expect(f.goals.view(session,18000)?.changeReason).toBeUndefined();
+  });
+  it('does not project work metadata from stale answers into a new goal',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0);
+    const pending=f.request(15000);
+    f.hook('UserPromptSubmit',16000,'second');
+    const stale={...answer(),work:{composition:'serial',changeReason:'scope_change',parts:[
+      {workClass:'other',unit:'unknown',remainingUnits:null,priorSeconds:3600}]}};
+    expect(f.goals.settle(pending.ticket,stale,17000)).toBe(false);
+    expect(f.goals.view(session,17000)?.changeReason).toBeUndefined();
+    expect(f.goals.settle(f.request(18000).ticket,answer(),19000)).toBe(true);
+    expect(f.goals.view(session,19000)?.changeReason).toBeUndefined();
+  });
   it('bootstraps an ongoing goal from a first continuation with a summary', () => {
     const f = fixture(); const session = f.hook('UserPromptSubmit', 0);
     f.hook('PostToolUse', 1000);

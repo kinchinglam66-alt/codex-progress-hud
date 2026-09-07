@@ -1,7 +1,12 @@
 import type {ObserverObservation} from '../estimation/observer-scheduler.js';
+import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
 import {resolve} from 'node:path';
+
+const triggerCodes=new Set(['initial','important_event','status_evidence','overdue','periodic','pre_dispatch_retry']);
+const forecastDiagnosticCodes=new Set(['provenance_unavailable','invalid_provenance']);
+const activeAnchor=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=31_536_000?value:undefined;
 
 /** Local research metadata only. Bounded asynchronous I/O never gates model work.
  * Missing terminal summary means an unclean recording shutdown, not completion. */
@@ -18,16 +23,27 @@ export function createPilotJournal(directory:string){
   return {
     record(value:ObserverObservation):void {
       if(closing || failed || pending>=128){dropped++;return;}
+      let forecast:ReturnType<typeof makeForecastRecord>|undefined;
+      try {if(value.forecast)forecast=makeForecastRecord(value.forecast);} catch { /* Invalid research metadata is omitted. */ }
       // Explicit field projection prevents accidental future context/identity logging.
       const row={schemaVersion:1,session,recordedAt:Date.now(),kind:value.kind,at:value.at,
         key:createHmac('sha256',salt).update(value.key).digest('hex'),generation:value.generation,
         activeSeconds:value.activeSeconds,activeTimeKnown:value.activeTimeKnown,runtime:value.runtime,version:value.version,
         requestId:value.requestId,requestedAt:value.requestedAt,observedActiveSeconds:value.observedActiveSeconds,
+        triggerReason:typeof value.triggerReason==='string'&&triggerCodes.has(value.triggerReason)?value.triggerReason:undefined,
+        lastRequestActiveSeconds:activeAnchor(value.lastRequestActiveSeconds),
+        eligibleActiveSeconds:activeAnchor(value.eligibleActiveSeconds),
         accepted:value.accepted,status:value.status,relation:value.relation,
         timings:value.timings?{preparationMs:value.timings.preparationMs,providerMs:value.timings.providerMs,
           settlementMs:value.timings.settlementMs,deliveryMs:value.timings.deliveryMs,totalMs:value.timings.totalMs}:undefined,
         estimate:value.estimate?{remainingSeconds:value.estimate.remainingSeconds,errorPercent:value.estimate.errorPercent}:value.estimate,
-        usage:value.usage?{kind:value.usage.kind,inputTokens:value.usage.inputTokens,outputTokens:value.usage.outputTokens,cachedInputTokens:value.usage.cachedInputTokens}:value.usage};
+        usage:value.usage?{kind:value.usage.kind,inputTokens:value.usage.inputTokens,outputTokens:value.usage.outputTokens,cachedInputTokens:value.usage.cachedInputTokens}:value.usage,
+        ...(forecast?{forecast:{schemaVersion:forecast.schemaVersion,predictionId:forecast.predictionId,generation:forecast.generation,
+          snapshotActiveSeconds:forecast.snapshotActiveSeconds,acceptedAt:forecast.acceptedAt,rawSeconds:forecast.rawSeconds,
+          shadowSeconds:forecast.shadowSeconds,paceReason:forecast.paceReason,calibration:forecast.calibration,
+          versions:{input:forecast.versions.input,prompt:forecast.versions.prompt,model:forecast.versions.model,algorithm:forecast.versions.algorithm}}}:{}),
+        ...(typeof value.forecastDiagnostic==='string'&&forecastDiagnosticCodes.has(value.forecastDiagnostic)?
+          {forecastDiagnostic:value.forecastDiagnostic}:{} )};
       const line=JSON.stringify(row)+'\n',size=Buffer.byteLength(line);
       if(size>8192 || bytes+size>10*1024*1024){dropped++;return;}
       if(value.requestId!==undefined){

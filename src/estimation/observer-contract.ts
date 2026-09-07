@@ -1,17 +1,35 @@
 import {z} from 'zod';
 
 const seconds = z.number().finite().nonnegative().max(31_536_000);
+const ordinal = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const eventSchema = z.object({ordinal, kind:z.enum(['user','assistant','tool_start','tool_result']),
+  atMs:z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  pairOrdinal:ordinal.optional(), counterpartMissing:z.boolean().optional()}).strict();
+const packingLossSchema = z.object({suppliedMessages:ordinal,retainedMessages:ordinal,
+  droppedByKind:z.object({user:ordinal,assistant:ordinal,tool:ordinal}).strict(),
+  clippedMessages:ordinal}).strict();
+const workPartSchema=z.object({
+  workClass:z.enum(['file_processing','batch_processing','other']),
+  unit:z.enum(['file','batch','unknown']),
+  remainingUnits:z.number().int().positive().max(1_000_000).nullable(),
+  priorSeconds:seconds,
+}).strict();
+const workSchema=z.object({composition:z.enum(['serial','unknown']),
+  changeReason:z.enum(['routine','scope_change','failure','unknown']),
+  parts:z.array(workPartSchema).min(1).max(8)}).strict();
 export const observerResponseSchema = z.object({
   relation: z.enum(['continue', 'replace', 'unknown']),
   status: z.enum(['running', 'waiting', 'completed', 'unknown']),
   summary: z.string().trim().min(1).max(2048).nullable(),
   basis: z.enum(['known_wait','remaining_work','recent_pace','insufficient_context']).nullable().optional(),
   estimate: z.object({remainingSeconds: seconds,
-    errorPercent: z.number().finite().min(0).max(1000)}).strict().nullable()
+    errorPercent: z.number().finite().min(0).max(1000)}).strict().nullable(),
+  work:workSchema.nullable().optional(),
 }).strict().superRefine((value, context) => {
   if ((value.relation === 'replace' && value.summary === null) ||
       (value.relation === 'unknown' && (value.status !== 'unknown' || value.estimate !== null || value.summary !== null)) ||
-      (value.status === 'completed' && value.estimate !== null)) {
+      (value.status === 'completed' && value.estimate !== null) ||
+      ((value.relation === 'unknown' || value.status === 'unknown' || value.status === 'completed') && value.work !== undefined && value.work !== null)) {
     context.addIssue({code: 'custom', message: 'inconsistent observer interpretation'});
   }
 });
@@ -30,10 +48,18 @@ export const observerInputSchema = z.object({
   activeSeconds: seconds,
   runtime: z.enum(['running', 'waiting', 'paused']),
   messages: z.array(z.object({kind: z.enum(['user', 'assistant', 'tool']),
-    text: z.string().min(1).max(4096), truncated: z.boolean()}).strict()).min(1).max(128),
+    text: z.string().min(1).max(4096), truncated: z.boolean(), event:eventSchema.optional()}).strict()
+    .refine(message=>!message.event || (message.kind==='tool'
+      ? message.event.kind==='tool_start'||message.event.kind==='tool_result'
+      : message.event.kind===message.kind && message.event.pairOrdinal===undefined && message.event.counterpartMissing===undefined))).min(1).max(128),
   truncated: z.boolean(),
+  packingLoss:packingLossSchema.optional(),
   observation: observationSchema.optional()
 }).strict().refine(value => value.messages.reduce((total, message) => total + message.text.length, 0) <= 65536)
+  .refine(value => !value.packingLoss || (value.packingLoss.retainedMessages === value.messages.length &&
+    value.packingLoss.clippedMessages === value.messages.filter(m=>m.truncated).length &&
+    value.packingLoss.suppliedMessages === value.packingLoss.retainedMessages +
+      Object.values(value.packingLoss.droppedByKind).reduce((a,b)=>a+b,0)))
   .refine(value => !value.observation ||
     (value.observation.summaryThroughSequence <= value.observation.sequence &&
       (!value.observation.previousEstimate ||

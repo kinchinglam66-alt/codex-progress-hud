@@ -6,6 +6,6 @@ export const estimatorAssetPins=Object.freeze({
 
 /** Rich observer assets; separate from the frozen numeric pilot protocol. */
 export const observerAssetPins=Object.freeze({
-  'observer-instructions.md':'bbd97537b03c92e126074bd47c0f0897bf39ee75c7282062b6568fc537506cf1',
-  'observer.schema.json':'0c6cf59aaa5b0c3f183af91ba296c85d3cbf6b70770ab4e716b1be0b587cf483'
+  'observer-instructions.md':'c3251781081a6dc5da6ca0bef10836862d0062cd06208db75d3f4ce2fe1b17eb',
+  'observer.schema.json':'612c13075cff6053d7277b983cc15bca8c1efaf2bc0e065632eaf33525d099b9'
 });

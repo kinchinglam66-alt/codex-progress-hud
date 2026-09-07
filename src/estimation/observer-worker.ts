@@ -4,12 +4,14 @@ import type {Invocation} from './owned-process.js';
 import {createOwnedProcessRunner} from './owned-process.js';
 import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from './subscription-session.js';
 import type {ReleaseAccountingOwner} from './release-accounting.js';
+import type {ForecastVersions} from './forecast-record.js';
 
 export type {ObserverWorker} from './observer-scheduler.js';
 
 export interface AccountedObserverWorkerOptions {
   accounting: ReleaseAccountingOwner;
-  prepare: (input: ObserverInput, signal: AbortSignal) => Invocation | Promise<Invocation>;
+  prepare: (input: ObserverInput, signal: AbortSignal) => Invocation | {invocation:Invocation;provenance?:ForecastVersions} |
+    Promise<Invocation | {invocation:Invocation;provenance?:ForecastVersions}>;
   authorize: () => boolean;
 }
 
@@ -39,6 +41,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
   let runner: ReturnType<typeof createOwnedProcessRunner> | undefined;
   let unconfirmedRunner: ReturnType<typeof createOwnedProcessRunner> | undefined;
   let closing: Promise<void> | undefined;
+  let preparedProvenance: ForecastVersions|null = null;
 
   const disable = (): void => {
     disabled = true;
@@ -65,7 +68,15 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
     try {
       view = accounting.forConversation(conversationKey);
       localRunner = createOwnedProcessRunner();
-      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare, authorize});
+      const prepareInvocation = async (value:ObserverInput, prepareSignal:AbortSignal):Promise<Invocation> => {
+        const prepared = await prepare(value, prepareSignal);
+        if (typeof prepared === 'object' && prepared !== null && 'invocation' in prepared) {
+          preparedProvenance = prepared.provenance ?? null;
+          return prepared.invocation;
+        }
+        return prepared;
+      };
+      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize});
       runner = localRunner;
       session = localSession;
       let result: ObserverSubscriptionResult;
@@ -120,6 +131,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
       if (active) return Promise.resolve(failure('busy'));
       if (!authorized(authorize)) return Promise.resolve(failure('disabled'));
       active = true;
+      preparedProvenance = null;
       const operation = invoke(input, signal, conversationKey);
       pending = operation;
       operation.finally(() => {
@@ -128,6 +140,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
       return operation;
     },
     status,
+    provenance: () => preparedProvenance,
     disable,
     close(): Promise<void> {
       if (closing) return closing;

@@ -1,7 +1,9 @@
 # Observer re-estimation trigger policy
 
-Status: user approved the proposed rules and defaults; written specification ready
-for review. No scheduling code has been changed by this document.
+Status: implemented locally and uncommitted; not installed. The subsequently
+authorized targeted fix resolved the three deferred defects and passed scoped
+review. See the implementation plan for final regression evidence. This is
+functional scheduling verification, not ETA accuracy evidence.
 
 ## Objective and scope
 
@@ -11,7 +13,7 @@ Keep main-task execution passive, independent model selection unchanged, and
 existing worker authorization, accounting, cancellation and stale-ticket rejection.
 This follows input-facts stage one; preserve its local changes independently.
 
-## Current behavior verified in source
+## Pre-change behavior verified in source
 
 `observer-scheduler.ts` delegates admission to `long-task-policy.ts`. Ordinary
 checks require a source revision/content change. Its overdue exception requires
