@@ -86,7 +86,7 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
   const etaLabel = terminal ? '工作计时已停止'
     : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabels[observer.state]:'剩余时间未知'
     : countdown.status === 'overdue' ? '00:00:00 · 已超出估时，等待更新'
-    : `${countdown.timeText} ${countdown.uncertaintyText}`;
+    : `${countdown.timeText} · 上次估时误差 ${countdown.uncertaintyText}`;
   return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',
     progressMode: running ? 'indeterminate' : 'paused', progressPercent: null, etaLabel};
 }

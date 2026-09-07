@@ -21,7 +21,7 @@ it('marks upward and downward estimate revisions briefly, not initial or ordinar
   now = 1000; clock.accept(predictionFrame(2, 2, 7200), false);
   const changed = clock.read()!;
   expect(changed.updatedKeys).toEqual(['a']);
-  expect(buildConversationViews(changed.snapshot.rows!, 0, changed.updatedKeys)[0]?.etaLabel).toBe('02:00:00 ±30% · 已更新');
+  expect(buildConversationViews(changed.snapshot.rows!, 0, changed.updatedKeys)[0]?.etaLabel).toBe('02:00:00 · 上次估时误差 ±30% · 已更新');
   now = 7000; clock.accept(predictionFrame(3, 2, 7200), false);
   expect(clock.read()?.updatedKeys).toEqual(['a']);
   now = 9000; expect(clock.read()?.updatedKeys).toEqual([]);

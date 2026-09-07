@@ -60,7 +60,6 @@ export function projectCountdown(input: CountdownInput): CountdownProjection {
   if (!Number.isFinite(elapsed) || elapsed < 0) return unknownProjection();
 
   const remaining = prediction.remainingSeconds - elapsed;
-  const absoluteError = prediction.remainingSeconds * prediction.errorPercent / 100;
 
   if (remaining <= 0) {
     return {
@@ -70,11 +69,11 @@ export function projectCountdown(input: CountdownInput): CountdownProjection {
     };
   }
 
-  const uncertaintyPercent = Math.ceil(absoluteError / remaining * 100);
-  if (!Number.isFinite(uncertaintyPercent)) return unknownProjection();
+  // This is the last prediction's relative error, not a live remaining-time interval.
+  // Only a new prediction can revise it; ticking the clock supplies no new evidence.
   return {
     timeText: formatSeconds(remaining),
-    uncertaintyText: `±${uncertaintyPercent}%`,
+    uncertaintyText: `±${prediction.errorPercent}%`,
     status: input.state
   };
 }

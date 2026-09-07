@@ -11,7 +11,7 @@ describe("bounded countdown projection", () => {
   it("formats running time as HH:MM:SS and keeps hours beyond 24", () => {
     expect(projectCountdown({ prediction, activeSeconds: 101, state: "running" })).toEqual({
       timeText: "01:01:00",
-      uncertaintyText: "±11%",
+      uncertaintyText: "±10%",
       status: "running"
     });
     expect(projectCountdown({
@@ -29,12 +29,22 @@ describe("bounded countdown projection", () => {
     }).timeText).toBe("00:00:02");
   });
 
-  it("recomputes percentage conservatively from fixed absolute uncertainty", () => {
-    expect(projectCountdown({
-      prediction: { remainingSeconds: 100, errorPercent: 10, observedActiveSeconds: 0 },
-      activeSeconds: 50,
-      state: "running"
-    }).uncertaintyText).toBe("±20%");
+  it("retains the latest estimate percentage through countdown and overdue", () => {
+    for (const activeSeconds of [0, 1800, 3599, 3599.99, 3600, 4000]) {
+      expect(projectCountdown({
+        prediction: { remainingSeconds: 3600, errorPercent: 30, observedActiveSeconds: 0 },
+        activeSeconds, state: "running"
+      }).uncertaintyText).toBe("±30%");
+    }
+  });
+
+  it("updates uncertainty only from a new prediction", () => {
+    for (const errorPercent of [30, 12.5, 80, 0, 1000]) {
+      expect(projectCountdown({
+        prediction: { remainingSeconds: 600, errorPercent, observedActiveSeconds: 100 },
+        activeSeconds: 699, state: "running"
+      }).uncertaintyText).toBe(`±${errorPercent}%`);
+    }
   });
 
   it.each(["waiting", "paused"] as const)("uses owner-supplied frozen active time while %s", (state) => {

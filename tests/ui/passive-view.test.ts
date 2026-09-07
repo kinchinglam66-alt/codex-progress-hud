@@ -72,7 +72,7 @@ it('retains the peak across same-goal snapshot refreshes and rejects invalid est
 
 it('shows whole-goal time beyond 24 hours without inventing completion percentage', () => {
   const view = buildConversationViews([row()], 1)[0]!;
-  expect(view.etaLabel).toBe('24:59:59 ±31%');
+  expect(view.etaLabel).toBe('24:59:59 · 上次估时误差 ±30%');
   expect(view.statusLabel).toBe('执行中');
   expect(view.progressPercent).toBeNull();
   expect(view.progressMode).toBe('indeterminate');
@@ -89,16 +89,16 @@ it.each([
 it('keeps valid ETA and separately shows freshness and static diagnostics',()=>{
   const value=row();value.observer={state:'call_failed',estimateAgeSeconds:120,callsLastHour:2,retryPending:true};
   const view=buildConversationViews([value],60)[0]!;
-  expect(view.etaLabel).toBe('24:59:00 ±31%');
+  expect(view.etaLabel).toBe('24:59:00 · 上次估时误差 ±30%');
   expect(view.freshnessLabel).toBe('估值更新于 3 分钟前');
   expect(view.diagnosticLabel).toContain('估时调用失败');
   expect(view.diagnosticLabel).toContain('小时内尝试 2 次');
 });
 it.each(['waiting', 'paused'] as const)('freezes %s while another running row counts down', runtime => {
   const views = buildConversationViews([row({runtime, status: runtime}), row()], 3600);
-  expect(views[0]?.etaLabel).toBe('25:00:00 ±30%');
+  expect(views[0]?.etaLabel).toBe('25:00:00 · 上次估时误差 ±30%');
   expect(views[0]?.progressMode).toBe('paused');
-  expect(views[1]?.etaLabel).toBe('24:00:00 ±32%');
+  expect(views[1]?.etaLabel).toBe('24:00:00 · 上次估时误差 ±30%');
 });
 it('shows overdue as pending update, never as task completion', () => {
   const view = buildConversationViews([row()], 90000)[0]!;
