@@ -17,6 +17,7 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Progress HUD",
+    "defaultPrompt": "Show the current Codex Progress HUD status.",
     "shortDescription": "Show task progress, status, and honest ETA ranges.",
     "longDescription": "A local companion for passive task observation and an always-on-top status and ETA overlay.",
     "developerName": "kinchinglam66-alt",
