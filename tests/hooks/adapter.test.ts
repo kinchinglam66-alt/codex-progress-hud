@@ -13,6 +13,20 @@ const hookNames = [
 const secret = "protected-token-for-hook-tests-0123456789";
 
 describe("privacy-bounded Hook adapter", () => {
+  it("gives distinct turns immutable handles within one conversation group", () => {
+    const first = normalizeHookInput("UserPromptSubmit", { session_id: "same", turn_id: "a" }, 100, secret);
+    const second = normalizeHookInput("UserPromptSubmit", { session_id: "same", turn_id: "b" }, 200, secret);
+    expect(first.envelope.taskHandle).not.toBe(second.envelope.taskHandle);
+    expect(first.envelope.sessionKey).toBe(second.envelope.sessionKey);
+    expect(first.result).toEqual({continue: true});
+  });
+
+  it("does not collapse unkeyed invocations or inject a writable turn association", () => {
+    const first = normalizeHookInput("UserPromptSubmit", { session_id: "same" }, 100, secret);
+    const second = normalizeHookInput("UserPromptSubmit", { session_id: "same" }, 100, secret);
+    expect(first.envelope.eventId).not.toBe(second.envelope.eventId);
+    expect(first.result).toEqual({continue: true});
+  });
   it("rejects normalization without an explicit secure HMAC key", () => {
     const callWithoutKey = normalizeHookInput as unknown as (
       hook: "Stop",
@@ -45,7 +59,7 @@ describe("privacy-bounded Hook adapter", () => {
       "eventId", "hook", "receivedAt", "schemaVersion", "sessionKey", "source", "taskHandle", "turnKey"
     ]);
     expect(normalized.envelope).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       hook,
       source: "resume",
       receivedAt: 1_700_000_000_123,
@@ -65,20 +79,15 @@ describe("privacy-bounded Hook adapter", () => {
   });
 
   it.each(["SessionStart", "UserPromptSubmit"] as const)(
-    "returns only a concise nested context for %s",
+    "acknowledges %s without injecting model instructions or handles",
     (hook) => {
       const normalized = normalizeHookInput(hook, {
         session_id: "session-1",
+        turn_id: "turn-1",
         hook_event_name: hook
       }, 100, secret);
 
-      expect(normalized.result.continue).toBe(true);
-      expect(normalized.result.hookSpecificOutput).toEqual({
-        hookEventName: hook,
-        additionalContext: expect.stringContaining(normalized.envelope.taskHandle)
-      });
-      expect(normalized.result).not.toHaveProperty("additionalContext");
-      expect(normalized.result.hookSpecificOutput?.additionalContext.length).toBeLessThan(180);
+      expect(normalized.result).toEqual({continue: true});
     }
   );
 

@@ -4,7 +4,7 @@ import { runHookEvent } from "../../src/hooks/main.js";
 import { TaskStore } from "../../src/server/task-store.js";
 
 describe("automatic tracking integration", () => {
-  it("returns a task handle from SessionStart even before MCP is available", async () => {
+  it("does not inject a writable handle from an unidentified SessionStart", async () => {
     const output: string[] = [];
     await runHookEvent("SessionStart", {
       stdin: Readable.from([JSON.stringify({ session_id: "session-before-mcp", hook_event_name: "SessionStart", source: "startup" })]),
@@ -14,8 +14,7 @@ describe("automatic tracking integration", () => {
       writeStderr: () => undefined
     });
     const result = JSON.parse(output.join(""));
-    expect(result.continue).toBe(true);
-    expect(result.hookSpecificOutput.additionalContext).toMatch(/hud_[A-Za-z0-9_-]{20,96}/u);
+    expect(result).toEqual({continue: true});
   });
 
   it("starts new work automatically and late-attaches without backfilled elapsed time", () => {

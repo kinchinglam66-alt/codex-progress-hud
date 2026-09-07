@@ -16,6 +16,21 @@ const hookNames = [
 const hmacKey = "protected-token-for-schema-tests-0123456789";
 
 describe("privacy-bounded Hook schema", () => {
+  it('accepts bounded private content but rejects mismatched identity, role and extra fields', () => {
+    const envelope = normalizeHookInput('UserPromptSubmit', {
+      session_id: 'session', turn_id: 'turn'
+    }, 100, hmacKey).envelope;
+    const content = {kind: 'user', text: 'Build a report', truncated: false};
+    expect(parseHookEnvelope({...envelope, content})).toHaveProperty('content', content);
+    for (const invalid of [
+      {...envelope, content: {...content, text: 'x'.repeat(4097)}},
+      {...envelope, content: {...content, kind: 'assistant'}},
+      {...envelope, content: {...content, secret: 'extra'}},
+      {...envelope, turnKey: undefined, content},
+      {...envelope, hook: 'Interrupt', content}
+    ]) expect(() => parseHookEnvelope(invalid)).toThrow();
+  });
+
   it.each(hookNames)("normalizes representative %s input without retaining content", (hook) => {
     const normalized = normalizeHookInput(hook, {
       session_id: "session-secret-123",
@@ -31,7 +46,7 @@ describe("privacy-bounded Hook schema", () => {
     }, 1_700_000_000_123, hmacKey);
 
     expect(normalized.envelope).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       hook,
       source: "resume",
       receivedAt: 1_700_000_000_123,
@@ -101,7 +116,7 @@ describe("privacy-bounded Hook schema", () => {
 
   it("parses only the strict wire envelope", () => {
     const envelope = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       taskHandle: "hud_abcdefghijklmnopqrstuvwxyz0123456789",
       eventId: "evt_abcdefghijklmnopqrstuvwxyz0123456789",
       sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",

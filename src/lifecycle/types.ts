@@ -57,7 +57,7 @@ export type HudErrorCode =
   | "VERSION_MISMATCH" | "START_TIMEOUT" | "AUTH_ERROR"
   | "SHUTDOWN_TIMEOUT" | "COMPANION_CRASHED" | "INTERNAL_ERROR";
 
-export type HudWriteReason = "tracking_start" | "progress_report" | "task_outcome";
+export type HudWriteReason = "tracking_start" | "progress_report" | "task_outcome" | "connection";
 
 export interface HudLifecycleSnapshot {
   desiredState?: DesiredHudState;
@@ -71,7 +71,7 @@ export type EnsureResult =
   | { kind: "suppressed"; code: "MANUALLY_DISABLED" }
   | { kind: "error"; code: HudErrorCode; snapshot: HudLifecycleSnapshot };
 
-export interface DiagnosticReport { path: string; }
+export type DiagnosticReport = { path: string } | { exportStatus: "unavailable"; markdown: string };
 
 export interface LifecycleObservation {
   desiredState?: DesiredHudState;

@@ -9,6 +9,12 @@ files:
   - LICENSE
   - NOTICE
 extraResources:
+  - from: src/estimation/assets/observer-instructions.md
+    to: observer-assets/observer-instructions.md
+  - from: src/estimation/assets/observer.schema.json
+    to: observer-assets/observer.schema.json
+  - from: scripts/windows/observer-home.ps1
+    to: observer-home.ps1
   - from: build/stop-companion.ps1
     to: stop-companion.ps1
 win:

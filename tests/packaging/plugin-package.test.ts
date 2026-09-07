@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const root = resolve(import.meta.dirname, "../..");
 const expected = [
   ".codex-plugin/plugin.json", ".mcp.json", "hooks/hooks.json",
-  "skills/progress-reporting/SKILL.md", "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1",
+  "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1",
   "README.md", "LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md"
 ].sort();
 
@@ -34,6 +34,6 @@ describe("release plugin ZIP", () => {
     const zip = await readFile(resolve(root, `release/codex-progress-hud-plugin-${pkg.version}.zip`));
     const names = centralDirectoryNames(zip).sort();
     expect(names).toEqual(expected);
-    expect(names.join("\n")).not.toMatch(/node_modules|\.git\/|\.token|\.map$|tests\//iu);
+    expect(names.join("\n")).not.toMatch(/node_modules|\.git\/|\.token|\.map$|tests\/|skills\//iu);
   });
 });

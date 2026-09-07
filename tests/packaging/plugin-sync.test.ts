@@ -29,7 +29,6 @@ describe("plugin package synchronization", () => {
 
     const copiedFiles = [
       "hooks/hooks.json",
-      "skills/progress-reporting/SKILL.md",
       "LICENSE",
       "NOTICE",
       "PRIVACY.md",

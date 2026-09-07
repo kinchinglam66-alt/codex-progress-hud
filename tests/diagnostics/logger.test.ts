@@ -108,7 +108,7 @@ describe("operational logger", () => {
       level: "warn",
       event: "protocol_mismatch",
       lifecycleState: "incompatible",
-      protocolVersion: 1,
+      protocolVersion: 2,
       httpStatusCategory: "4xx",
       elapsedMs: 27,
       authorization: "Bearer secret",
@@ -131,7 +131,7 @@ describe("operational logger", () => {
       level: "warn",
       event: "protocol_mismatch",
       lifecycleState: "incompatible",
-      protocolVersion: 1,
+      protocolVersion: 2,
       httpStatusCategory: "4xx",
       elapsedMs: 27
     });
@@ -222,7 +222,7 @@ describe("operational logger", () => {
         level: "info",
         event: "startup_requested",
         lifecycleState: "starting",
-        protocolVersion: 1,
+        protocolVersion: 2,
         elapsedMs: index
       });
     }

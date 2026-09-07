@@ -1,0 +1,1 @@
+{"type":"object","properties":{"lowSeconds":{"type":["number","null"]},"highSeconds":{"type":["number","null"]}},"required":["lowSeconds","highSeconds"],"additionalProperties":false}

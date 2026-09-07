@@ -2,6 +2,34 @@
 
 A local, privacy-first overlay for Codex task progress and honest remaining-time ranges. Community project; not affiliated with OpenAI.
 
+> Development status: this checkout contains an unreleased passive-tracking
+> migration. Public model-reporting tools and the reporting skill have been
+> removed from the candidate. Bounded task content can be processed locally; see
+> the [candidate privacy boundary](PRIVACY.md#development-candidate-passive-task-content).
+> Local independent-model activation, numeric ETA delivery and pause freezing have
+> been exercised. Full installed acceptance and long-task accuracy validation are
+> still incomplete. This is a source update, not a new signed or tagged release.
+
+## Current development candidate
+
+- Passive, bounded conversation observation and multiple task rows identified by
+  their Codex chat names; completed and idle goals are excluded from active rows.
+- An isolated, explicitly authorized estimator produces task-state interpretations
+  and remaining-time estimates without asking the main task model to report progress.
+- Countdown and uncertainty display, paused/waiting work-time handling, and static
+  startup/call diagnostics. Model-stated uncertainty is not calibrated confidence.
+- Explicit runtime version/hash validation, isolated authentication and durable
+  usage accounting. Model requests consume the user's selected service allowance.
+
+The latest local regression passed 1,456 tests. This establishes tested behavior,
+not ETA accuracy: representative long-task scoring and complete multi-conversation
+live acceptance remain outstanding. See [development status](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/DEVELOPMENT-STATUS.md).
+
+## Earlier release reference
+
+The following installation and model-reporting sections describe the earlier
+release. Do not use them as the current passive candidate's API contract.
+
 ## One plugin switch
 
 Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. Enablement loads the plugin capabilities; it does not force model progress calls. Task tracking occurs when the model reports, using a supplied opaque handle when available or the MCP-process lease fallback otherwise. After a fallback task reaches a terminal state, an explicitly requested handle-free `tracking_start` creates one fresh fallback task and preserves the old record; ordinary progress and delayed reports never roll over automatically.
@@ -23,6 +51,9 @@ The adapter accepts only `session_id`, optional `turn_id`, optional `tool_use_id
 Operational history is bounded codes and canonical timestamps only. It contains no token, raw session ID/handle, title, prompt, path, Hook payload, or secret. Diagnostics are local and safe to review before sharing.
 
 ## Development
+
+The transactional-accounting candidate requires Node.js 22.13.0 or newer.
+End users of the packaged Windows companion do not need a global Node installation.
 
 ```powershell
 npm test -- --run

@@ -6,7 +6,7 @@ export interface McpLeaseLifecycleDependencies {
   client: LeaseClient;
   ownerNonce: string;
   ttlMs?: number;
-  ensureReady(reason: HudWriteReason): Promise<EnsureResult>;
+  ensureReady(reason: HudWriteReason, options?: { signal: AbortSignal }): Promise<EnsureResult>;
   schedule(callback: () => void, delayMs: number): unknown;
   cancel(handle: unknown): void;
 }
@@ -29,6 +29,7 @@ export function createMcpLeaseLifecycle(
   let lease: SessionLease | undefined;
   let timer: unknown;
   let closed = false;
+  let startController: AbortController | undefined;
   let generation = 0;
   let startFlight: { generation: number; promise: Promise<SessionLease> } | undefined;
 
@@ -63,9 +64,12 @@ export function createMcpLeaseLifecycle(
       dependencies.client.setLease(next);
       scheduleRenewal();
     } catch {
-      // Expiry on the companion is the crash/reachability fallback. Do not
-      // manufacture a replacement lease after the owner is no longer known.
-      timer = undefined;
+      // Only the still-live connection supervisor may reacquire. An old
+      // renewal must never erase a newer lease or revive a closed owner.
+      if (closed || generation !== renewalGeneration || lease?.id !== leaseId) return;
+      generation += 1;
+      lease = undefined;
+      dependencies.client.setLease(undefined);
     }
   };
 
@@ -75,9 +79,11 @@ export function createMcpLeaseLifecycle(
       if (lease !== undefined) return lease;
       if (startFlight !== undefined) return startFlight.promise;
       const startGeneration = generation;
+      const controller = new AbortController();
+      startController = controller;
       const promise = (async (): Promise<SessionLease> => {
         if (closed || generation !== startGeneration) throw cancelled();
-        const ready = await dependencies.ensureReady("tracking_start");
+        const ready = await dependencies.ensureReady("tracking_start", { signal: controller.signal });
         if (closed || generation !== startGeneration) throw cancelled();
         if (ready.kind !== "ready") throw failure(ready);
         const acquired = await dependencies.client.acquireLease(dependencies.ownerNonce, ttlMs);
@@ -102,6 +108,7 @@ export function createMcpLeaseLifecycle(
     async stop(): Promise<void> {
       if (closed) return;
       closed = true;
+      startController?.abort();
       generation += 1;
       startFlight = undefined;
       cancelRenewal();
@@ -114,6 +121,7 @@ export function createMcpLeaseLifecycle(
     invalidate(expectedLeaseId?: string): void {
       if (closed) return;
       if (expectedLeaseId !== undefined && lease !== undefined && lease.id !== expectedLeaseId) return;
+      startController?.abort();
       generation += 1;
       startFlight = undefined;
       cancelRenewal();

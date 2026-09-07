@@ -47,8 +47,8 @@ describe("Windows release source contract", () => {
     const plugin = JSON.parse(await text("plugins/codex-progress-hud/.codex-plugin/plugin.json"));
     expect(plugin).not.toHaveProperty("hooks");
     expect(plugin.version).toBe("0.2.1");
-    expect(plugin.interface.defaultPrompt.join(" ")).not.toMatch(/automatic|must report/iu);
-    expect(plugin.interface.defaultPrompt.join(" ")).toContain("MCP lease");
+    expect(plugin).not.toHaveProperty('skills');
+    expect(plugin.interface).not.toHaveProperty('defaultPrompt');
     expect(Object.keys(rootMcp)).toEqual(["mcpServers"]);
     expect(Object.keys(mcp)).toEqual(["mcpServers"]);
     expect(mcp.mcpServers["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");
@@ -75,11 +75,8 @@ describe("Windows release source contract", () => {
       expect(pkg.scripts[name]).toBeTypeOf("string");
     }
     const mcpMain = await text("src/mcp/main.ts");
-    const hookClient = await text("src/hooks/client.ts");
     expect(mcpMain).toContain("RELEASE_CAPABILITIES.buildVersion");
     expect(mcpMain).not.toContain('const version = "0.1.0"');
-    expect(hookClient).toContain("RELEASE_CAPABILITIES.buildVersion");
-    expect(hookClient).not.toContain('const version = "0.1.0"');
   });
 
   it("requires MCP-first packaged smoke and handle-free installed diagnostics", async () => {
@@ -91,9 +88,7 @@ describe("Windows release source contract", () => {
     expect(smoke).toContain('name: "hud_open"');
     expect(smoke).toContain("/api/health");
     expect(smoke).toContain('observedState !== "running"');
-    expect(smoke).toContain('name: "tracking_start"');
-    expect(smoke).toContain('name: "progress_report"');
-    expect(smoke).toContain('associationSource !== "mcp_lease"');
+    // Control behavior is exercised over real stdio by the shared smoke scenario.
     expect(smoke).toContain('name: "hud_close"');
     expect(smoke).toContain('assertHudCloseStopped,');
     expect(smoke).toContain('assertToolSuccess,');
@@ -104,8 +99,6 @@ describe("Windows release source contract", () => {
     expect(diagnostic).toContain('readFile(resolve(root, "package.json"), "utf8")');
     expect(diagnostic).toContain("plugins/codex-progress-hud/scripts/codex-progress-hud-launcher.exe");
     expect(diagnostic).toContain('name: "hud_open"');
-    expect(diagnostic).toContain('name: "tracking_start"');
-    expect(diagnostic).toContain('name: "progress_report"');
     expect(diagnostic).toContain('name: "hud_close"');
     expect(diagnostic).toContain('assertHudCloseStopped,');
     expect(diagnostic).toContain('assertToolSuccess,');

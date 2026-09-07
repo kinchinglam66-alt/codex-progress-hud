@@ -7,26 +7,15 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main id="hud" data-tone="idle">
+    <main id="hud">
       <header>
         <span class="dot" aria-hidden="true"></span>
-        <span id="status">空闲</span>
-        <h1 id="title">暂无活动任务</h1>
+        <span id="status">连接中</span>
+        <button id="hide-window" type="button" aria-label="隐藏 HUD" title="隐藏窗口，不停止任务">×</button>
       </header>
       <div id="compatibility" class="banner" role="status"></div>
-      <div id="tasks" class="tasks" aria-label="任务列表"></div>
-      <section class="progress-row">
-        <div id="progress" class="progress" data-mode="indeterminate" aria-label="任务进度">
-          <span id="progress-fill"></span>
-        </div>
-        <span id="progress-text" class="progress-text"></span>
-      </section>
-      <p id="eta" class="eta">等待 Codex 上报任务</p>
-      <div class="meta"><span id="origin"></span><span id="confidence"></span><button id="follow" type="button">跟随最新活动</button></div>
-      <footer>
-        <span id="step">启动任务后将在这里显示进度</span>
-        <span id="updated"></span>
-      </footer>
+      <div id="tasks" aria-label="任务列表"></div>
+      <p id="empty">等待伴侣程序连接</p>
     </main>
     <script type="module" src="/renderer.js"></script>
   </body>

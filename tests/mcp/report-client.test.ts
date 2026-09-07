@@ -45,7 +45,7 @@ const health = {
   service: "codex-progress-hud" as const,
   pid: 4312,
   version: "0.2.0",
-  protocolVersion: 1 as const,
+  protocolVersion: 3 as const,
   instanceNonce: "fixture-nonce",
   startedAt: "2026-09-01T01:02:03.000Z",
   visibility: "visible" as const
@@ -89,7 +89,7 @@ describe("CompanionHttpClient", () => {
     await expect(client.selectTask(aggregateSnapshot.selectedTaskId, "pinned", options)).resolves.toEqual(aggregateSnapshot);
     await expect(client.setTaskVisibility(aggregateSnapshot.selectedTaskId, true, options)).resolves.toEqual(aggregateSnapshot);
     await expect(client.submitHook({
-      schemaVersion: 1,
+      schemaVersion: 2,
       taskHandle: aggregateSnapshot.selectedTaskId,
       eventId: "evt_abcdefghijklmnopqrstuvwxyz0123456789",
       sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -106,6 +106,25 @@ describe("CompanionHttpClient", () => {
     expect(seen.slice(1).map(({ revision }) => revision)).toEqual(["3", "3", "3"]);
     expect(JSON.parse(seen[1]!.body)).toEqual({ mode: "pinned" });
     expect(JSON.parse(seen[2]!.body)).toEqual({ hidden: true });
+  });
+
+  it.each([
+    { conversationKey: "" },
+    { turnKey: "x".repeat(161) },
+    { isCurrentTurn: "true" },
+    { conversationKey: 42 }
+  ])("rejects malformed turn summary metadata %j", async (metadata) => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) => json(response, 200, {
+      ...aggregateSnapshot, tasks: [{ ...aggregateSnapshot.tasks[0], ...metadata }]
+    }));
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).status()).rejects.toBeInstanceOf(HudClientError);
+  });
+
+  it("rejects incomplete or unknown tracking diagnostic fields", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) => json(response, 200, {
+      ...aggregateSnapshot, turnTracking: { identityUnavailable: true, arbitrary: true }
+    }));
+    await expect(new CompanionHttpClient(baseUrl, tokenPath).status()).rejects.toBeInstanceOf(HudClientError);
   });
 
   it("reacquires after a companion restart rejects the old lease", async () => {
@@ -358,7 +377,7 @@ describe("CompanionHttpClient", () => {
         capabilities: {
           service: "codex-progress-hud",
           companionVersion: "0.1.0",
-          protocol: { current: 1, minimumClient: 1, maximumClient: 1 },
+          protocol: { current: 3, minimumClient: 3, maximumClient: 3 },
           incompatibleClientSeen: false
         }
       })
@@ -391,12 +410,12 @@ describe("CompanionHttpClient", () => {
     const { baseUrl, tokenPath } = await fixture((request, response) => {
       authorization = request.headers.authorization;
       deadline = request.headers["x-codex-progress-hud-deadline-ms"];
-      json(response, 200, { service: "codex-progress-hud", protocolVersion: 1 });
+      json(response, 200, { service: "codex-progress-hud", protocolVersion: 3 });
     });
 
     const result = await new CompanionHttpClient(baseUrl, tokenPath).identity();
 
-    expect(result).toEqual({ service: "codex-progress-hud", protocolVersion: 1 });
+    expect(result).toEqual({ service: "codex-progress-hud", protocolVersion: 3 });
     expect(authorization).toBeUndefined();
     expect(deadline).toBeUndefined();
   });
@@ -508,8 +527,8 @@ describe("CompanionHttpClient", () => {
         response,
         200,
         incompatible
-          ? { service: "codex-progress-hud", protocolVersion: 2 }
-          : { service: "other-service", protocolVersion: 1 }
+          ? { service: "codex-progress-hud", protocolVersion: 99 }
+          : { service: "other-service", protocolVersion: 3 }
       );
     });
     const client = new CompanionHttpClient(baseUrl, tokenPath);
@@ -523,7 +542,7 @@ describe("CompanionHttpClient", () => {
     const capabilities = {
       service: "codex-progress-hud" as const,
       companionVersion: "0.1.0",
-      protocol: { current: 1, minimumClient: 2, maximumClient: 2 },
+      protocol: { current: 99, minimumClient: 99, maximumClient: 99 },
       incompatibleClientSeen: true
     };
     const { baseUrl, tokenPath } = await fixture((_request, response) =>
@@ -713,7 +732,7 @@ describe("CompanionHttpClient", () => {
     const { baseUrl, tokenPath } = await fixture((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.write(`{"service":"codex-progress-hud","protocolVersion":1,"padding":"${secret}`);
-      response.write("x".repeat(70_000));
+      response.write("x".repeat(600_000));
     });
 
     const error = await new CompanionHttpClient(baseUrl, tokenPath)

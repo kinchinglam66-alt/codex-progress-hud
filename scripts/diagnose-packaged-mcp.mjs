@@ -1,3 +1,4 @@
+import { exercisePassiveControls } from './passive-control-smoke.mjs';
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -32,6 +33,7 @@ const port = 20_000 + Math.floor(Math.random() * 20_000);
 const environment = {
   ...getDefaultEnvironment(),
   APPDATA: appData,
+  CODEX_PROGRESS_HUD_DATA_DIR: manifestDirectory,
   CODEX_PROGRESS_HUD_PORT: String(port),
   CODEX_PROGRESS_HUD_URL: `http://127.0.0.1:${port}`,
   CODEX_PROGRESS_HUD_TOKEN_PATH: join(manifestDirectory, "auth.token")
@@ -68,8 +70,6 @@ async function closeHud() {
 await runPackagedCleanup({
   connect: () => client.connect(transport),
   open: async () => {
-  const tools = await client.listTools();
-  if (tools.tools.length !== 14) throw new Error(`expected 14 MCP tools, received ${tools.tools.length}`);
   const openedResult = await client.callTool({ name: "hud_open", arguments: {} });
   assertToolSuccess(openedResult, "hud_open");
   if (openedResult.structuredContent?.observedState !== "running") {
@@ -77,22 +77,17 @@ await runPackagedCleanup({
   }
   },
   work: async (close) => {
-  const started = await client.callTool({
-    name: "tracking_start",
-    arguments: { title: "Packaged diagnostic" }
-  });
-  assertToolSuccess(started, "tracking_start");
-  if (started.structuredContent?.associationSource !== "mcp_lease") {
-    throw new Error("installed launcher tracking_start did not use the MCP lease association");
+  const diagnosed = await client.callTool({ name: "hud_diagnose", arguments: {} });
+  assertToolSuccess(diagnosed, "hud_diagnose");
+  const diagnostic = diagnosed.structuredContent ?? {};
+  const markdown = typeof diagnostic.reportPath === "string"
+    ? await readFile(diagnostic.reportPath, "utf8")
+    : diagnostic.reportMarkdown;
+  if (typeof markdown !== "string" || !markdown.includes("trust not confirmed")) {
+    throw new Error("packaged diagnostics did not preserve unknown Hook trust");
   }
-  const reported = await client.callTool({
-    name: "progress_report",
-    arguments: { phase: "packaged diagnostic" }
-  });
-  assertToolSuccess(reported, "progress_report");
-  if (reported.structuredContent?.associationSource !== "mcp_lease") {
-    throw new Error("installed launcher progress_report did not use the MCP lease association");
-  }
+  await exercisePassiveControls(client);
+
     await close();
   },
   close: closeHud,
@@ -101,4 +96,4 @@ await runPackagedCleanup({
   cleanup: () => removeTemporaryDirectory(appData)
 });
 
-  process.stdout.write("Packaged MCP installed-launcher path, 14 tools, and handle-free reporting passed.\n");
+  process.stdout.write("Packaged MCP installed-launcher path, passive controls, and handle-free restart passed.\n");

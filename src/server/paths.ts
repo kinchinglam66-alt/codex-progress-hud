@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+/** Main task source, never the independently authenticated observer profile. */
+export function defaultCodexSessionsRoot(environment:NodeJS.ProcessEnv=process.env):string {
+  return join(environment.CODEX_HOME || join(homedir(),'.codex'),'sessions');
+}
+
 export function defaultDataDirectory(environment: NodeJS.ProcessEnv = process.env): string {
   if (environment.CODEX_PROGRESS_HUD_DATA_DIR) {
     return environment.CODEX_PROGRESS_HUD_DATA_DIR;

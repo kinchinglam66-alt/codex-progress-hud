@@ -116,16 +116,19 @@ export function createInitialTask(id: string, title: string, nowMs = Date.now())
   };
 }
 
+export function terminalEventBlocked(status: TaskStatus, event: ProgressEvent): boolean {
+  return AUTHORITATIVE_TERMINAL.has(status) ||
+    (SEMANTIC_TERMINAL.has(status) && !isAuthoritativeEvent(event) &&
+      !(status === "ended_unknown" && isRecoveryEvent(event)));
+}
+
 export function reduceTask(
   state: TaskSnapshot,
   event: ProgressEvent,
   nowMs = Date.now()
 ): TaskSnapshot {
   if (isIdempotentControl(state, event)) return state;
-  if (AUTHORITATIVE_TERMINAL.has(state.status)) return state;
-  if (SEMANTIC_TERMINAL.has(state.status) && !isAuthoritativeEvent(event)) {
-    if (!(state.status === "ended_unknown" && isRecoveryEvent(event))) return state;
-  }
+  if (terminalEventBlocked(state.status, event)) return state;
   if (
     MANUAL_INACTIVE.has(state.status) &&
     !CONTROL_EVENTS.has(event.type) &&

@@ -1,7 +1,10 @@
+import { exercisePassiveControls } from './passive-control-smoke.mjs';
+import { assertHookProcess, assertStoppedTurn } from './hook-smoke-assertions.mjs';
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
@@ -89,11 +92,29 @@ async function closeHud() {
   assertHudCloseStopped(closedResult, "packaged");
 }
 
+async function syntheticHook(name, turn) {
+  const result = spawnSync(executable,
+    [join(installDirectory, "resources/app.asar/dist/main.js"), `--hook-event=${name}`], {
+      cwd: dataDirectory, env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
+      windowsHide: true, encoding: "utf8", timeout: 10000,
+      input: JSON.stringify({ session_id: "packaged-synthetic-session", turn_id: turn, hook_event_name: name })
+    });
+  assertHookProcess(result, name);
+  return localSnapshot();
+}
+
+async function localSnapshot() {
+  const token = (await readFile(tokenPath, "utf8")).trim();
+  const response = await fetch(`${serviceUrl}/api/snapshot`, {
+    headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(2000)
+  });
+  if (!response.ok) throw new Error("packaged snapshot unavailable");
+  return response.json();
+}
+
 await runPackagedCleanup({
   connect: () => client.connect(transport),
   open: async () => {
-  const tools = await client.listTools();
-  if (tools.tools.length !== 14) throw new Error(`expected 14 MCP tools, received ${tools.tools.length}`);
 
   const openedResult = await client.callTool({ name: "hud_open", arguments: {} });
   assertToolSuccess(openedResult, "hud_open");
@@ -105,46 +126,24 @@ await runPackagedCleanup({
   const health = await waitForAuthenticatedHealth();
   if (health.visibility !== "visible") throw new Error("packaged health was not visible");
 
-  const started = await client.callTool({
-    name: "tracking_start",
-    arguments: { title: "Packaged smoke" }
-  });
-  assertToolSuccess(started, "tracking_start");
-  if (started.structuredContent?.associationSource !== "mcp_lease") {
-    throw new Error("packaged tracking_start did not use the MCP lease association");
-  }
-  const reported = await client.callTool({
-    name: "progress_report",
-    arguments: { phase: "packaged smoke" }
-  });
-  assertToolSuccess(reported, "progress_report");
-  if (reported.structuredContent?.associationSource !== "mcp_lease") {
-    throw new Error("packaged progress_report did not use the MCP lease association");
-  }
+  await exercisePassiveControls(client);
 
-  const validation = await client.callTool({ name: "validation_observed", arguments: { result: "passed" } });
-  assertToolSuccess(validation, "validation_observed");
-  const outcome = await client.callTool({ name: "task_outcome", arguments: { outcome: "completed", verified: true } });
-  assertToolSuccess(outcome, "task_outcome");
-  const beforeResult = await client.callTool({ name: "tracking_status", arguments: {} });
-  if (beforeResult.isError) throw new Error("packaged pre-restart status failed");
-  const before = JSON.parse(beforeResult.content.find((item) => item.type === "text").text);
-  if (before.tasks.length !== 1 || before.selected?.task.status !== "succeeded_verified") {
-    throw new Error("packaged first task did not reach verified completion");
+  const previousIds = new Set((await localSnapshot()).tasks.map(task => task.id));
+  const firstTurn = await syntheticHook("UserPromptSubmit", "a");
+  const turnA = firstTurn.selectedTaskId;
+  if (!turnA || previousIds.has(turnA) || firstTurn.selected?.task.status !== "running") {
+    throw new Error("packaged Hook did not start turn A");
   }
-  const completedId = before.selected.task.id;
-  const restarted = await client.callTool({ name: "tracking_start", arguments: { title: "Packaged subsequent task" } });
-  assertToolSuccess(restarted, "tracking_start after completion");
-  const nextReport = await client.callTool({ name: "progress_report", arguments: { phase: "subsequent task" } });
-  assertToolSuccess(nextReport, "progress_report after restart");
-  const afterResult = await client.callTool({ name: "tracking_status", arguments: {} });
-  if (afterResult.isError) throw new Error("packaged post-restart status failed");
-  const after = JSON.parse(afterResult.content.find((item) => item.type === "text").text);
-  if (after.tasks.length !== 2 || after.selected?.task.id === completedId ||
-      after.selected?.task.status !== "running" || after.selected?.task.phase !== "subsequent task" ||
-      after.selected?.task.verificationEvidence !== undefined ||
-      after.tasks.find((task) => task.id === completedId)?.status !== "succeeded_verified") {
-    throw new Error("packaged terminal restart did not preserve history and start fresh running work");
+  assertStoppedTurn(await syntheticHook("Stop", "a"), turnA);
+  const secondTurn = await syntheticHook("UserPromptSubmit", "b");
+  const turnB = secondTurn.selectedTaskId;
+  if (!turnB || turnB === turnA || secondTurn.selected?.task.status !== "running") {
+    throw new Error("packaged Hook did not start a distinct running turn B");
+  }
+  const turns = await syntheticHook("Stop", "a");
+  assertStoppedTurn(turns, turnA);
+  if (turns.selectedTaskId !== turnB || turns.selected?.task.status !== "running") {
+    throw new Error("packaged late Stop changed the current turn");
   }
 
     await close();
@@ -157,4 +156,4 @@ await runPackagedCleanup({
   }
 });
 
-  process.stdout.write("Packaged MCP-first HUD, authenticated health, 14 tools, handle-free reporting, and terminal restart passed.\n");
+  process.stdout.write("Packaged MCP-first HUD, authenticated health, passive controls, restart, and synthetic two-turn Hook isolation passed.\n");

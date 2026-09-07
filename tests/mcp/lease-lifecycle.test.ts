@@ -4,6 +4,42 @@ import type { LeaseClient } from "../../src/mcp/report-client.js";
 import { createMcpLeaseLifecycle } from "../../src/mcp/lease-lifecycle.js";
 
 describe("MCP lease lifecycle", () => {
+  it("aborts in-flight readiness when the connection stops", async () => {
+    let signal: AbortSignal | undefined;
+    let finish!: (value: EnsureResult) => void;
+    const lifecycle = createMcpLeaseLifecycle({
+      client: { acquireLease: async () => { throw new Error("no acquisition"); }, renewLease: async lease => lease, releaseLease: async () => undefined, bindLease: async () => undefined, setLease: () => undefined, setLeaseOwnerNonce: () => undefined },
+      ownerNonce: "owner",
+      ensureReady: async (_reason, options) => { signal = options?.signal; return new Promise(r => { finish = r; }); },
+      schedule: () => 1, cancel: () => undefined
+    });
+    const starting = lifecycle.start();
+    const rejected = expect(starting).rejects.toThrow("stopped");
+    await lifecycle.stop();
+    finish({ kind: "suppressed", code: "MANUALLY_DISABLED" });
+    await rejected;
+    expect(signal?.aborted).toBe(true);
+  });
+  it("clears a failed renewal so a living connection can reacquire", async () => {
+    let timer!: () => void;
+    let acquisitions = 0;
+    const lifecycle = createMcpLeaseLifecycle({
+      client: {
+        acquireLease: async () => ({ id: `lease_${++acquisitions}`, ownerNonce: "a", expiresAt: 60000 }),
+        renewLease: async () => { throw new Error("offline"); },
+        releaseLease: async () => undefined, bindLease: async () => undefined,
+        setLease: () => undefined, setLeaseOwnerNonce: () => undefined
+      },
+      ownerNonce: "a",
+      ensureReady: async () => ({ kind: "ready", generation: 0, snapshot: { observedState: "running" } }),
+      schedule: callback => { timer = callback; return 1; }, cancel: () => undefined
+    });
+    await lifecycle.start(); timer(); await Promise.resolve(); await Promise.resolve();
+    expect(lifecycle.current()).toBeUndefined();
+    await lifecycle.start();
+    expect(acquisitions).toBe(2);
+    await lifecycle.stop();
+  });
   it("acquires after readiness, renews below half TTL, and releases once", async () => {
     let timer: (() => void) | undefined;
     const acquired = { id: "lease_a", ownerNonce: "owner-a", expiresAt: 60_000 };

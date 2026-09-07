@@ -15,6 +15,15 @@ import { HudClientError } from "../../src/mcp/report-client.js";
 import { EventEmitter } from "node:events";
 
 const cleanups: Array<() => Promise<void>> = [];
+
+it('passes private observer slots and recording to the server without making them HTTP data',async()=>{
+  const harness=desktopHarness();
+  const worker={observe:vi.fn(),status:()=>({active:false,disabled:true,poisoned:false}),disable:vi.fn(),close:async()=>{}};
+  harness.dependencies.observerWorkers=[worker];
+  const record=vi.fn();harness.dependencies.onObserverObservation=record;
+  await runDesktop(harness.dependencies);
+  expect(harness.dependencies.createProgressServer).toHaveBeenCalledWith(expect.objectContaining({observerWorkers:[worker],onObserverObservation:record}));
+});
 const removeFixtureDirectory = (path: string) => rm(path, {
   recursive: true,
   force: true,
@@ -58,7 +67,8 @@ function desktopHarness(lockAcquired = true) {
   const taskStore = {
     snapshot: () => taskSnapshot,
     select: vi.fn(),
-    on: (event: "changed", listener: (snapshot: unknown) => void) => storeEvents.on(event, listener)
+    on: (event: "changed", listener: (snapshot: unknown) => void) => storeEvents.on(event, listener),
+    off: (event: "changed", listener: (snapshot: unknown) => void) => storeEvents.off(event, listener)
   };
   const progressServer = {
     listen: vi.fn(async () => undefined),
@@ -77,12 +87,14 @@ function desktopHarness(lockAcquired = true) {
   let hideSelectedTask: ((taskId: string) => void | Promise<void>) | undefined;
   const dependencies: DesktopDependencies = {
     app: {
+      setPath: vi.fn(),
       disableHardwareAcceleration: vi.fn(),
       requestSingleInstanceLock: vi.fn(() => lockAcquired),
       releaseSingleInstanceLock: vi.fn(() => order.push("release-singleton")),
       whenReady: vi.fn(async () => undefined),
       on: vi.fn((event, callback) => listeners.set(event, callback)),
       quit: vi.fn(() => order.push("quit")),
+      isReady: vi.fn(() => false),
       getVersion: vi.fn(() => "0.1.0")
     },
     createWindowController: vi.fn((options) => {
@@ -138,6 +150,7 @@ function desktopHarness(lockAcquired = true) {
     windowController,
     trayController,
     progressServer,
+    storeEvents,
     isQuitting: () => isQuitting(),
     get trayCallbacks() { return trayCallbacks; },
     get serverOptions() { return serverOptions; },
@@ -178,6 +191,123 @@ async function realStateStores() {
 }
 
 describe("desktop lifecycle", () => {
+  it("starts observer setup after releasing readiness and does not await login", async () => {
+    const harness = desktopHarness();
+    const login = deferred<void>();
+    let insideLease = false;
+    let setupSignal: AbortSignal | undefined;
+    vi.mocked(harness.dependencies.stateStore.runIfGeneration).mockImplementation(async (_g, _s, operation) => {
+      insideLease = true;
+      const value = await operation(new AbortController().signal);
+      insideLease = false;
+      return { accepted: true, value };
+    });
+    const setup = {
+      start: vi.fn((signal: AbortSignal) => {
+        expect(insideLease).toBe(false);
+        expect(harness.windowController.create).toHaveBeenCalledOnce();
+        setupSignal = signal;
+        return login.promise;
+      }),
+      disable: vi.fn(() => login.resolve()),
+      close: vi.fn(async () => undefined)
+    };
+    Object.assign(harness.dependencies, { observerSetup: setup });
+    await runDesktop(harness.dependencies);
+    expect(setup.start).toHaveBeenCalledOnce();
+    expect(setupSignal?.aborted).toBe(false);
+    harness.listeners.get("before-quit")?.({ preventDefault: vi.fn() });
+    expect(setupSignal?.aborted).toBe(true);
+    expect(setup.disable).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(setup.close).toHaveBeenCalledOnce());
+    expect(setup.disable.mock.invocationCallOrder[0]).toBeLessThan(harness.progressServer.close.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps HUD running and sanitizes observer setup rejection", async () => {
+    const harness = desktopHarness();
+    Object.assign(harness.dependencies, { observerSetup: {
+      start: async () => { throw Error("secret-auth-response"); },
+      disable() {}, close: async () => undefined
+    } });
+    await runDesktop(harness.dependencies);
+    await vi.waitFor(() => expect(harness.dependencies.reportError).toHaveBeenCalled());
+    const error = vi.mocked(harness.dependencies.reportError).mock.calls[0]![0] as Error;
+    expect(error.message).toBe("OBSERVER_SETUP_FAILED");
+    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+  });
+
+  it("drains observer close before quitting and sanitizes cleanup errors", async () => {
+    const harness = desktopHarness();
+    const drain = deferred<void>();
+    const setup = {
+      start: async () => undefined,
+      disable() { throw Error("private-disable-detail"); },
+      close: vi.fn(async () => { await drain.promise; throw Error("private-close-detail"); })
+    };
+    Object.assign(harness.dependencies, { observerSetup: setup });
+    await runDesktop(harness.dependencies);
+    harness.listeners.get("before-quit")?.({ preventDefault: vi.fn() });
+    await vi.waitFor(() => expect(setup.close).toHaveBeenCalledOnce());
+    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+    drain.resolve();
+    await vi.waitFor(() => expect(harness.dependencies.app.quit).toHaveBeenCalledOnce());
+    const errors = vi.mocked(harness.dependencies.reportError).mock.calls.map(([error]) => (error as Error).message);
+    expect(errors).toEqual(["OBSERVER_SETUP_DISABLE_FAILED", "OBSERVER_SETUP_CLOSE_FAILED"]);
+    expect(harness.windowController.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not start observer setup after failed desktop readiness", async () => {
+    const harness = desktopHarness();
+    const setup = { start: vi.fn(async () => undefined), disable: vi.fn(), close: vi.fn(async () => undefined) };
+    Object.assign(harness.dependencies, { observerSetup: setup });
+    harness.windowController.create.mockRejectedValueOnce(Error("window unavailable"));
+    await expect(runDesktop(harness.dependencies)).rejects.toThrow("window unavailable");
+    expect(setup.start).not.toHaveBeenCalled();
+    expect(setup.disable).toHaveBeenCalledOnce();
+    expect(setup.close).toHaveBeenCalledOnce();
+  });
+
+  it("starts safely when async imports have already allowed Electron to become ready", async () => {
+    const harness = desktopHarness();
+    vi.mocked(harness.dependencies.app.isReady).mockReturnValue(true);
+    vi.mocked(harness.dependencies.app.disableHardwareAcceleration).mockImplementation(() => {
+      throw new Error("disableHardwareAcceleration must be called before ready");
+    });
+    await runDesktop(harness.dependencies);
+    expect(harness.dependencies.app.disableHardwareAcceleration).not.toHaveBeenCalled();
+    expect(harness.dependencies.app.quit).not.toHaveBeenCalled();
+    expect(harness.progressServer.listen).toHaveBeenCalledOnce();
+  });
+  it("isolates the Electron singleton before locking when a data directory is explicitly configured", async () => {
+    const harness = desktopHarness(false);
+    const setPath = vi.fn();
+    Object.assign(harness.dependencies.app, { setPath });
+    const directory = await mkdtemp(join(tmpdir(), "hud-isolated-fixture-"));
+    cleanups.push(() => removeFixtureDirectory(directory));
+    vi.stubEnv("CODEX_PROGRESS_HUD_DATA_DIR", directory);
+    try {
+      await runDesktop(harness.dependencies);
+      expect(setPath).toHaveBeenCalledWith("userData", join(directory, "electron"));
+      expect(setPath.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(harness.dependencies.app.requestSingleInstanceLock).mock.invocationCallOrder[0]!
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("preserves the default Electron directory without an explicit data override", async () => {
+    const harness = desktopHarness(false);
+    const setPath = vi.fn();
+    Object.assign(harness.dependencies.app, { setPath });
+    vi.stubEnv("CODEX_PROGRESS_HUD_DATA_DIR", "");
+    try {
+      await runDesktop(harness.dependencies);
+      expect(setPath).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("finishes module setup before starting the window after readiness", async () => {
     let markReady!: () => void;
     const ready = new Promise<void>((resolve) => {
@@ -488,7 +618,7 @@ describe("desktop lifecycle", () => {
       service: "codex-progress-hud",
       pid: 12_345,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       visibility: "hidden",
       instanceNonce: "instance-nonce",
       startedAt: "2026-09-02T00:00:00.000Z"
@@ -496,7 +626,7 @@ describe("desktop lifecycle", () => {
     const closingManager = createCompanionManager({
       store: closingStore,
       client: {
-        identity: vi.fn(async () => ({ service: "codex-progress-hud" as const, protocolVersion: 1 as const })),
+        identity: vi.fn(async () => ({ service: "codex-progress-hud" as const, protocolVersion: 3 as const })),
         health: vi.fn(async () => {
           if (!online) throw new HudClientError("OFFLINE", "stopped");
           observedCompleteInstance =
@@ -556,7 +686,7 @@ describe("desktop lifecycle", () => {
     expect(harness.dependencies.stateStore.writeRuntime).toHaveBeenCalledWith({
       pid: 12_345,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "instance-nonce",
       startedAt: "2026-09-02T00:00:00.000Z"
     }, 1);
@@ -564,7 +694,7 @@ describe("desktop lifecycle", () => {
       service: "codex-progress-hud",
       pid: 12_345,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "instance-nonce",
       startedAt: "2026-09-02T00:00:00.000Z",
       visibility: "hidden"
@@ -582,14 +712,14 @@ describe("desktop lifecycle", () => {
         level: "info",
         event: "startup_requested",
         lifecycleState: "starting",
-        protocolVersion: 1
+        protocolVersion: 3
       },
       {
         at: "2026-09-02T00:00:00.000Z",
         level: "info",
         event: "startup_ready",
         lifecycleState: "hidden",
-        protocolVersion: 1,
+        protocolVersion: 3,
         elapsedMs: 0
       }
     ]);
@@ -624,7 +754,7 @@ describe("desktop lifecycle", () => {
       level: "info",
       event: "startup_ready",
       lifecycleState: "hidden",
-      protocolVersion: 1,
+      protocolVersion: 3,
       elapsedMs: 275
     });
   });
@@ -950,7 +1080,7 @@ describe("desktop lifecycle", () => {
       observedState: "hidden",
       runtimeAgeMs: 0,
       errors: [],
-      hooks: { expected: true, trusted: true, activitySeen: true, lastEventAt: 1234 },
+      hooks: { expected: true, activitySeen: true, lastEventAt: 1234 },
       lease: { active: true, count: 2 },
       compatibility: { compatible: true, incompatibleClientSeen: true },
       tracking: { taskCount: 1, selectedStatus: "quiescent", lateAttached: true },
@@ -1045,9 +1175,23 @@ describe("desktop lifecycle", () => {
       level: "error",
       event: "startup_failed",
       lifecycleState: "stopped",
-      protocolVersion: 1,
+      protocolVersion: 3,
       elapsedMs: 0
     });
+  });
+
+  it("detaches task observation before teardown and ignores queued notifications", async () => {
+    const harness = desktopHarness();
+    await runDesktop(harness.dependencies);
+    const queued = harness.storeEvents.listeners("changed")[0]!;
+    harness.windowController.dispose.mockImplementation(() => {
+      expect(harness.storeEvents.listenerCount("changed")).toBe(0);
+      queued({...harness.taskSnapshot,revision:99});
+    });
+    harness.listeners.get("before-quit")?.({preventDefault:vi.fn()});
+    await vi.waitFor(()=>expect(harness.dependencies.app.quit).toHaveBeenCalled());
+    expect(harness.storeEvents.listenerCount("changed")).toBe(0);
+    expect(harness.trayController.updateTasks).not.toHaveBeenCalled();
   });
 
   it("continues every cleanup obligation and reports each cleanup failure", async () => {

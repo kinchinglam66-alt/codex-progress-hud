@@ -67,7 +67,6 @@ if (!Array.isArray(mcpServer.args) || typeof mcpServer.args[0] !== "string") {
 }
 
 await access(resolve(pluginRoot, mcpServer.cwd, mcpServer.args[0]));
-await access(resolve(pluginRoot, "skills/progress-reporting/SKILL.md"));
 const hooksConfigPath = resolve(pluginRoot, "hooks/hooks.json");
 const hooksConfig = JSON.parse(await readFile(hooksConfigPath, "utf8"));
 const supportedHookNames = [
@@ -134,7 +133,7 @@ if (releaseServer?.command !== "./scripts/codex-progress-hud-launcher.exe" || re
 if (!Array.isArray(releaseServer.args) || releaseServer.args.some((value) => typeof value !== "string" || value.includes("..")) || /\bnode(?:\.exe)?\b/iu.test(JSON.stringify(releaseServer))) {
   throw new Error("release MCP launcher must be plugin-relative and Node-free");
 }
-for (const relativePath of ["hooks/hooks.json", "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1", "skills/progress-reporting/SKILL.md"]) {
+for (const relativePath of ["hooks/hooks.json", "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1"]) {
   await access(resolve(releaseRoot, relativePath));
 }
 const marketplace = JSON.parse(await readFile(resolve(pluginRoot, ".agents/plugins/marketplace.json"), "utf8"));

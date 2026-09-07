@@ -38,7 +38,7 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
     service: "codex-progress-hud",
     pid: 12_345,
     version: "0.1.0",
-    protocolVersion: 1,
+    protocolVersion: 3,
     instanceNonce: "test-instance",
     startedAt: "2026-09-01T00:00:00.000Z",
     visibility: "visible"
@@ -101,11 +101,11 @@ describe("local progress HTTP service", () => {
     receivedAt = 100
   ) {
     return {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       taskHandle,
       eventId,
-      sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
-      turnKey: "turn_abcdefghijklmnopqrstuvwxyz0123456789",
+      sessionKey: `session_${taskHandle}`,
+      turnKey: `turn_${taskHandle}`,
       hook,
       source: "startup" as const,
       receivedAt
@@ -128,7 +128,7 @@ describe("local progress HTTP service", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       service: "codex-progress-hud",
-      protocolVersion: 1
+      protocolVersion: 3
     });
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
@@ -145,7 +145,7 @@ describe("local progress HTTP service", () => {
 
     expect(unauthorized.status).toBe(401);
     expect(authorized.status).toBe(200);
-    expect(await authorized.json()).toEqual({ protocolVersion: 1, generation: 9 });
+    expect(await authorized.json()).toEqual({ protocolVersion: 3, generation: 9 });
   });
 
   it("does not let UI files shadow reserved health routes", async () => {
@@ -157,7 +157,7 @@ describe("local progress HTTP service", () => {
     expect(identityResponse.status).toBe(200);
     expect(await identityResponse.json()).toEqual({
       service: "codex-progress-hud",
-      protocolVersion: 1
+      protocolVersion: 3
     });
     expect(apiResponse.status).toBe(401);
   });
@@ -325,7 +325,7 @@ describe("local progress HTTP service", () => {
         authorization: `Bearer ${fixture.token}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"))
+      body: JSON.stringify(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit"))
     });
 
     expect(response.status).toBe(426);
@@ -526,6 +526,7 @@ describe("local progress HTTP service", () => {
       selectedTaskId: null,
       selectionMode: "follow_activity",
       tasks: [],
+      rows: [],
       selected: null,
       compatibility: { incompatibleClientSeen: false },
       hooks: { activitySeen: false },
@@ -588,9 +589,7 @@ describe("local progress HTTP service", () => {
   it.each([
     { type: "tracking_paused" },
     { type: "tracking_resumed" },
-    { type: "tracking_stopped" },
-    { type: "validation_observed", result: "passed" },
-    { type: "model_outcome", outcome: "completed", verified: false }
+    { type: "tracking_stopped" }
   ] as const)("rejects unknown non-creating event $type", async (event) => {
     const { baseUrl, token } = await startServer({ withGenerationGuard: true });
     const started = await fetch(`${baseUrl}/api/events`, {
@@ -625,9 +624,7 @@ describe("local progress HTTP service", () => {
   });
 
   it.each([
-    { type: "tracking_started" },
-    { type: "model_progress", phase: "testing" },
-    { type: "waiting", reason: "user" }
+    { type: "tracking_started" }
   ] as const)("creates a new task for creating event $type", async (event) => {
     const { baseUrl, token } = await startServer();
     const response = await fetch(`${baseUrl}/api/events`, {
@@ -645,7 +642,7 @@ describe("local progress HTTP service", () => {
     ]);
   });
 
-  it("preserves established titles unless a semantic report supplies a bounded replacement", async () => {
+  it("preserves established titles during controls and accepts a bounded start title", async () => {
     const { baseUrl, token } = await startServer({ withGenerationGuard: true });
     const post = (revision: number, body: unknown) => fetch(`${baseUrl}/api/events`, {
       method: "POST",
@@ -664,7 +661,7 @@ describe("local progress HTTP service", () => {
     })).status).toBe(202);
     expect((await post(2, {
       taskId: taskA,
-      event: { type: "model_progress", phase: "testing" }
+      event: { type: "tracking_resumed" }
     })).status).toBe(202);
 
     let snapshot = await (await fetch(`${baseUrl}/api/snapshot`, {
@@ -675,7 +672,7 @@ describe("local progress HTTP service", () => {
     expect((await post(snapshot.revision, {
       taskId: taskA,
       title: "Supplied replacement",
-      event: { type: "model_progress", phase: "verification" }
+      event: { type: "tracking_started" }
     })).status).toBe(202);
     snapshot = await (await fetch(`${baseUrl}/api/snapshot`, {
       headers: { authorization: `Bearer ${token}` }
@@ -759,7 +756,7 @@ describe("local progress HTTP service", () => {
 
     expect(response.status).toBe(200);
     expect(new TextDecoder().decode(firstChunk?.value)).toContain(
-      'data: {"revision":0,"selectedTaskId":null,"selectionMode":"follow_activity","tasks":[],"selected":null,"compatibility":{"incompatibleClientSeen":false},"hooks":{"activitySeen":false},"capabilities":'
+      'data: {"revision":0,"selectedTaskId":null,"selectionMode":"follow_activity","tasks":[],"rows":[],"selected":null,"compatibility":{"incompatibleClientSeen":false},"hooks":{"activitySeen":false},"capabilities":'
     );
   });
 
@@ -780,9 +777,9 @@ describe("local progress HTTP service", () => {
       body: JSON.stringify(envelope)
     });
 
-    const first = await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"), 0);
-    const duplicate = await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"), 1);
-    const stale = await postHook(hookEnvelope(taskB, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "SessionStart"), 0);
+    const first = await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit"), 0);
+    const duplicate = await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit"), 1);
+    const stale = await postHook(hookEnvelope(taskB, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "UserPromptSubmit"), 0);
 
     expect(first.status).toBe(202);
     expect((await first.json()).revision).toBe(1);
@@ -800,7 +797,7 @@ describe("local progress HTTP service", () => {
 
   it("does not let duplicate Hook IDs bypass missing or stale revision guards", async () => {
     const fixture = await startServer();
-    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit");
     const post = (revision: number | undefined) => fetch(`${fixture.baseUrl}/api/hooks/events`, {
       method: "POST",
       headers: {
@@ -822,7 +819,7 @@ describe("local progress HTTP service", () => {
 
   it("applies concurrent deliveries of one Hook ID at most once", async () => {
     const fixture = await startServer();
-    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit");
     const post = () => fetch(`${fixture.baseUrl}/api/hooks/events`, {
       method: "POST",
       headers: {
@@ -841,7 +838,7 @@ describe("local progress HTTP service", () => {
 
   it("guards Hook ingestion with authentication, protocol, generation, and bounded bodies", async () => {
     const fixture = await startServer({ withGenerationGuard: true });
-    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const envelope = hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit");
     const unauthenticated = await fetch(`${fixture.baseUrl}/api/hooks/events`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -877,8 +874,8 @@ describe("local progress HTTP service", () => {
       headers: mutationHeaders(fixture.token, revision),
       body: JSON.stringify(envelope)
     });
-    await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart", 100), 0);
-    await postHook(hookEnvelope(taskB, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "SessionStart", 200), 1);
+    await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit", 100), 0);
+    await postHook(hookEnvelope(taskB, "evt_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "UserPromptSubmit", 200), 1);
 
     const selected = await fetch(`${fixture.baseUrl}/api/tasks/${encodeURIComponent(taskA)}/select`, {
       method: "POST",
@@ -913,7 +910,7 @@ describe("local progress HTTP service", () => {
 
   it("rejects raw and encoded task dot-segments or separators before URL normalization", async () => {
     const fixture = await startServer();
-    const seed = hookEnvelope(taskB, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart");
+    const seed = hookEnvelope(taskB, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit");
     await fetch(`${fixture.baseUrl}/api/hooks/events`, {
       method: "POST",
       headers: mutationHeaders(fixture.token, 0),
@@ -952,7 +949,7 @@ describe("local progress HTTP service", () => {
       headers: mutationHeaders(fixture.token, revision),
       body: JSON.stringify(envelope)
     });
-    await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "SessionStart"), 0);
+    await postHook(hookEnvelope(taskA, "evt_abcdefghijklmnopqrstuvwxyz0123456789", "UserPromptSubmit"), 0);
 
     const unchanged = await fetch(`${fixture.baseUrl}/api/snapshot?afterRevision=1`, {
       headers: { authorization: `Bearer ${fixture.token}` }

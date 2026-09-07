@@ -14,7 +14,7 @@ for (let index = 0; index < iterations; index += 1) {
   const identity = {
     pid: process.pid,
     version: "0.2.0-test",
-    protocolVersion: 1,
+    protocolVersion: 3,
     instanceNonce: `worker-${worker}-${index}`,
     startedAt: new Date(1_700_000_000_000 + index).toISOString()
   };

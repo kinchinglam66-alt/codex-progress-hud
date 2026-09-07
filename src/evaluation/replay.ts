@@ -111,6 +111,30 @@ function summarize(rows: readonly EvaluationRow[]) {
   };
 }
 
+/** Each task contributes one mean, regardless of its observation count.
+ * Accuracy is conditional on verified answered prefixes. Refusal/invalid rates
+ * use every attempted task in this view, including tasks without success labels.
+ */
+function summarizeTasks(rows: readonly EvaluationRow[], totalTasks: number) {
+  const groups = new Map<string, EvaluationRow[]>();
+  for (const row of rows) {
+    const group = groups.get(row.sampleKey);
+    if (group) group.push(row); else groups.set(row.sampleKey, [row]);
+  }
+  const tasks = [...groups.values()].map(summarize);
+  const scored = tasks.filter(task => task.scored > 0);
+  return {
+    totalTasks,
+    tasksWithAttempts: tasks.length,
+    scoredTasks: scored.length,
+    maeSeconds: mean(scored.map(task => task.maeSeconds!)),
+    coverage: mean(scored.map(task => task.coverage!)),
+    meanWidthSeconds: mean(scored.map(task => task.meanWidthSeconds!)),
+    meanAbstentionRate: mean(tasks.map(task => task.unavailable / task.attempts)),
+    meanInvalidRate: mean(tasks.map(task => task.invalid / task.attempts))
+  };
+}
+
 /** Pure offline evaluation. No IO, runtime subscriptions, persistence or model calls. */
 export function evaluateTraces(input: readonly unknown[], factory: () => Predictor) {
   const traces = parseTraces(input);
@@ -148,12 +172,17 @@ export function evaluateTraces(input: readonly unknown[], factory: () => Predict
       for (const point of pending) point.row.actualSeconds = activeSeconds - point.activeSeconds;
     }
   }
-  return { rows, metrics: summarize(rows) };
+  const taskOutcomes: Record<Trace["end"]["outcome"], number> = {
+    succeeded_verified: 0, completed_unverified: 0, failed: 0, interrupted: 0, unfinished: 0
+  };
+  for (const trace of traces) taskOutcomes[trace.end.outcome]++;
+  return { rows, metrics: summarize(rows), taskMetrics: summarizeTasks(rows, traces.length), taskOutcomes };
 }
 
 export function comparePredictors(input: readonly unknown[], factories: readonly (() => Predictor)[]): {
   commonScored: number;
-  predictors: { all: ReturnType<typeof evaluateTraces>; matched: ReturnType<typeof summarize> }[];
+  predictors: { all: ReturnType<typeof evaluateTraces>; matched: ReturnType<typeof summarize>;
+    matchedTaskMetrics: ReturnType<typeof summarizeTasks> }[];
 } {
   if (factories.length < 2) throw new Error("Comparison requires at least two predictors");
   const traces = parseTraces(input);
@@ -164,8 +193,9 @@ export function comparePredictors(input: readonly unknown[], factories: readonly
   }));
   return {
     commonScored: common.filter(Boolean).length,
-    predictors: evaluations.map(all => ({
-      all, matched: summarize(all.rows.filter((_row, index) => common[index]))
-    }))
+    predictors: evaluations.map(all => {
+      const matchedRows = all.rows.filter((_row, index) => common[index]);
+      return { all, matched: summarize(matchedRows), matchedTaskMetrics: summarizeTasks(matchedRows, traces.length) };
+    })
   };
 }

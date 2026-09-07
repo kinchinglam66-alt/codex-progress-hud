@@ -90,7 +90,7 @@ function createRunningDeadlineManager(startupTimeoutMs: number): CompanionManage
     service: "codex-progress-hud",
     pid: 4312,
     version: "0.2.0",
-    protocolVersion: 1,
+    protocolVersion: 3,
     visibility: "visible",
     instanceNonce: "deadline-instance",
     startedAt: "2026-09-02T00:00:00.000Z"
@@ -104,7 +104,7 @@ function createRunningDeadlineManager(startupTimeoutMs: number): CompanionManage
     client: {
       identity: vi.fn(async () => ({
         service: "codex-progress-hud" as const,
-        protocolVersion: 1 as const
+        protocolVersion: 3 as const
       })),
       health: vi.fn(async () => health),
       show: vi.fn(async () => undefined),
@@ -327,6 +327,37 @@ describe("MCP progress tool handlers", () => {
     expect(calls[1]?.taskId).toMatch(/^hud_[A-Za-z0-9_-]{20,96}$/u);
     expect(calls[1]?.taskId).not.toBe(fallbackTaskHandle);
     expect(calls[2]?.taskId).toBe(calls[1]?.taskId);
+  });
+
+  it("restarts a terminal fallback after an explicit event rejection", async () => {
+    const calls: string[] = [];
+    const handlers = createHandlers({
+      submit: async (envelope) => {
+        calls.push(envelope.taskId);
+        if (envelope.taskId === fallbackTaskHandle) throw new HudClientError("EVENT_NOT_APPLIED", "terminal");
+        return { task: { id: envelope.taskId, status: "running" }, eta: null };
+      },
+      status: async () => ({ task: { id: fallbackTaskHandle, status: "succeeded_verified" }, eta: null })
+    });
+    const result = await handlers.trackingStart({ title: "Next task" });
+    expect(result.isError).not.toBe(true);
+    await handlers.progressReport({ phase: "new work" });
+    expect(calls).toHaveLength(3);
+    expect(calls[1]).not.toBe(fallbackTaskHandle);
+    expect(calls[2]).toBe(calls[1]);
+  });
+
+  it("does not rotate when rejected work lacks terminal evidence", async () => {
+    const calls: string[] = [];
+    const handlers = createHandlers({
+      submit: async (envelope) => {
+        calls.push(envelope.taskId);
+        throw new HudClientError("EVENT_NOT_APPLIED", "rejected");
+      },
+      status: async () => ({ task: { id: fallbackTaskHandle, status: "running" }, eta: null })
+    });
+    expect((await handlers.trackingStart({})).isError).toBe(true);
+    expect(calls).toEqual([fallbackTaskHandle]);
   });
 
   it("serializes simultaneous handle-free starts without creating duplicate replacement tasks", async () => {
@@ -1027,6 +1058,18 @@ describe("MCP progress tool handlers", () => {
       ok: true,
       reportPath: "C:\\diagnostics\\hud.md"
     });
+  });
+
+  it("returns inline diagnostics with an explicit unavailable-export warning", async () => {
+    const manager = createManager({ diagnose: vi.fn(async () => ({
+      exportStatus: "unavailable" as const, markdown: "# Safe diagnostic\n- Companion process: online"
+    })) });
+    const result = await createHandlers({ submit: vi.fn(), status: vi.fn() }, manager).hudDiagnose();
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ ok: true, exportStatus: "unavailable",
+      reportMarkdown: "# Safe diagnostic\n- Companion process: online" });
+    expect(JSON.stringify(result.content)).toContain("file export unavailable");
+    expect(result.structuredContent).not.toHaveProperty("reportPath");
   });
 
   it("suppresses a progress report successfully while manually disabled", async () => {

@@ -15,14 +15,12 @@ import {
 } from "../server/paths.js";
 import { CompanionHttpClient } from "./report-client.js";
 import { createMcpLeaseLifecycle } from "./lease-lifecycle.js";
+import { createConnectionOwner } from "./connection-owner.js";
 import { RELEASE_CAPABILITIES } from "../generated/capabilities.js";
 import {
   createToolHandlers,
-  progressReportSchema,
-  taskOutcomeSchema,
   trackingStartSchema,
-  taskControlSchema,
-  validationObservedSchema
+  taskControlSchema
 } from "./tools.js";
 import { createFallbackTaskHandle } from "./task-association.js";
 
@@ -57,39 +55,6 @@ export async function runMcpServer(): Promise<void> {
     }
   });
   const handlers = createToolHandlers({ progressClient, companionManager, fallbackTaskHandle });
-
-  server.registerTool(
-    "progress_report",
-    {
-      title: "Report task progress",
-      description:
-        `${taskAssociationDescription} Report a concise task phase, optional measured progress, ETA range, or waiting state to the local Progress HUD. Never include secrets, prompts, source code, reasoning, or command output.`,
-      inputSchema: progressReportSchema
-    },
-    (input) => handlers.progressReport(input)
-  );
-
-  server.registerTool(
-    "task_outcome",
-    {
-      title: "Report task outcome",
-      description:
-        `${taskAssociationDescription} Report a terminal semantic outcome. A verified claim requires a prior validation_observed report that actually passed; runtime failure and interruption remain authoritative.`,
-      inputSchema: taskOutcomeSchema
-    },
-    (input) => handlers.taskOutcome(input)
-  );
-
-  server.registerTool(
-    "validation_observed",
-    {
-      title: "Report validation observation",
-      description:
-        `${taskAssociationDescription} Report only whether bounded validation was observed to pass or fail. This is evidence, not a Codex execution control.`,
-      inputSchema: validationObservedSchema
-    },
-    (input) => handlers.validationObserved(input)
-  );
 
   server.registerTool(
     "task_status",
@@ -192,7 +157,15 @@ export async function runMcpServer(): Promise<void> {
   const leaseLifecycle = createMcpLeaseLifecycle({
     client: progressClient,
     ownerNonce,
-    ensureReady: (reason) => companionManager.ensureForWrite(reason),
+    ensureReady: async (_reason, options) => {
+      // Connection ownership must not override an explicit off setting.
+      const result = await companionManager.executeWrite("connection", async makeOptions => ({
+        kind: "ready" as const,
+        generation: makeOptions().generation,
+        snapshot: { observedState: "running" as const }
+      }), options);
+      return result.kind === "completed" ? result.value : result;
+    },
     schedule: (callback, delayMs) => {
       const timer = setTimeout(callback, delayMs);
       timer.unref();
@@ -201,13 +174,18 @@ export async function runMcpServer(): Promise<void> {
     cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
   });
   progressClient.setLeaseCoordinator(leaseLifecycle);
+  const connectionOwner = createConnectionOwner(leaseLifecycle);
+  server.server.oninitialized = () => { connectionOwner.start(); };
   let released = false;
   const releaseLease = async (): Promise<void> => {
     if (released) return;
     released = true;
-    await leaseLifecycle.stop();
+    await connectionOwner.stop();
   };
-  transport.onclose = () => { void releaseLease(); };
+  transport.onclose = () => { void releaseLease().catch(() => undefined); };
+  process.stdin.once("end", () => {
+    void releaseLease().catch(() => undefined).finally(() => server.close()).catch(() => undefined);
+  });
   await server.connect(transport);
 }
 

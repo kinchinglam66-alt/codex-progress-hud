@@ -2,14 +2,17 @@
 
 - [ ] Use a clean checkout of the release commit.
 - [ ] Confirm package, root plugin, nested plugin, generated capability, and tag versions match.
-- [ ] Run `npm ci --registry=https://registry.npmjs.org` with Node 22 and confirm the lockfile has no alternate registry URLs.
+- [ ] Run `npm ci --registry=https://registry.npmjs.org` with Node 22.13.0 or newer and confirm the lockfile has no alternate registry URLs. Validate the declared minimum separately from the latest Node 22 used by CI.
 - [ ] Run `npm run verify:release` and `npm run diagnose:mcp`.
 - [ ] Run `npm run release:artifacts`, `npm run smoke:packaged`, and `npm run diagnose:mcp:packaged` on Windows x64.
 - [ ] Confirm the installer, plugin ZIP, and `SHA256SUMS.txt` have exact 0.2.1 names.
 - [ ] Verify checksums independently with `Get-FileHash`.
 - [ ] Install per user and confirm `%APPDATA%\codex-progress-hud\install.json` points to the exact installed EXE inside its installation directory.
 - [ ] Confirm the wrapped `mcpServers` `.mcp.json` is parsed by Codex and `--hud`, `--mcp-stdio`, and every packaged Hook mode, including `Interrupt`, work without a global Node installation.
-- [ ] Exercise handle-free `tracking_start`/`progress_report` MCP-lease association, explicit-handle writes, older-conversation reporting after restart without backfill, pin/follow, show/hide, pause/resume/stop, mismatch guidance, final lease expiry, crash recovery, and optional fail-open Hooks.
+- [ ] Exercise handle-free `tracking_start` MCP-lease association, scoped explicit controls, older-conversation passive tracking after restart without backfill, pin/follow, show/hide, pause/resume/stop, mismatch guidance, final lease expiry, crash recovery, and fail-open Hooks. Confirm `progress_report`, `validation_observed`, and `task_outcome` are not registered or accepted as public reporting routes.
+- [ ] Verify protocol 3 rejects mixed-version MCP clients before returning snapshots or accepting controls, and lease-local revisions do not leak other conversations' changes.
+- [ ] Verify the bundled Electron runtime supports the release accounting backend; run real-process owner conflict/crash recovery, bounded long-duration retention, pending settlement and unknown-usage tests. A source-only SQLite probe is not installed acceptance.
+- [ ] Before observer activation, verify user disclosure/consent, account and route binding, revocation cancellation, stale-result rejection, and that no synchronous database work blocks Hook ingestion. Do not infer consent from plugin enablement alone.
 - [ ] Disable/re-enable the plugin and verify both final-lease and optional Hook-started/zero-lease shutdown paths.
 - [ ] Confirm the release workflow force-rebuilds the native bridge from `build/native-launcher.cs` and all Actions are pinned to full commit SHAs.
 - [ ] Uninstall once retaining data and once removing data; confirm only the expected manifest is removed automatically.

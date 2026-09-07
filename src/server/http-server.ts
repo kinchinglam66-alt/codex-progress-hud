@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z, ZodError } from "zod";
-import { parseProgressEnvelope, type ProgressEnvelope } from "../core/schema.js";
+import { type ProgressEnvelope } from "../core/schema.js";
+import {controlEnvelopeSchema} from './control-schema.js';
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
 import { parseHookEnvelope, type HookEnvelope } from "../hooks/schema.js";
 import { PROTOCOL_VERSION, type HudCapabilities, type HudHealth } from "../lifecycle/types.js";
@@ -10,6 +11,16 @@ import type { DesiredHudState } from "../lifecycle/types.js";
 import { loadOrCreateToken, tokensEqual } from "./token-store.js";
 import { TaskStore, type HudSnapshot } from "./task-store.js";
 import { LeaseStore } from "./lease-store.js";
+import { createTurnRouter } from "./turn-router.js";
+import { terminalEventBlocked } from "../core/reducer.js";
+import { createHmac } from 'node:crypto';
+import { createConversationNames } from './conversation-names.js';
+import { PassiveContextStore } from './passive-context-store.js';
+import { PassiveGoals } from './passive-goals.js';
+import { ObserverScheduler, type ObserverWorker, type ObserverObservation } from '../estimation/observer-scheduler.js';
+import {ScopedSnapshots} from './scoped-snapshots.js';
+import {createLocalSessionReader} from '../observer/local-session-reader.js';
+import {createConversationSource} from '../observer/conversation-source.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
@@ -62,10 +73,23 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   uiDirectory?: string;
   leaseStore?: LeaseStore;
   leaseGraceMs?: number;
+  awaitInitialLease?: boolean;
   bootstrap?: () => ProgressServerBootstrap;
   now?: () => number;
+  /** Independent active-work/scheduling clock; never a host event timestamp. */
+  monotonicNow?: () => number;
   scheduleTimer?: (callback: () => void, delayMs: number) => unknown;
   cancelTimer?: (handle: unknown) => void;
+  readConversationName?: (hostId: string, signal: AbortSignal) => Promise<string | null>;
+  closeConversationNames?: () => Promise<void>;
+  /** Private in-process owner shared with the observer, never exposed over HTTP. */
+  passiveContexts?: PassiveContextStore;
+  passiveGoals?: PassiveGoals;
+  /** Owned, authorized workers only. Omission leaves live observation unconfigured. */
+  observerWorkers?: readonly ObserverWorker[];
+  /** Explicit selected local source; omission preserves the legacy test adapter. */
+  observerSessionsRoot?:string;
+  onObserverObservation?: (record:ObserverObservation)=>void;
   runIfGeneration?(
     generation: number,
     desiredState: DesiredHudState,
@@ -154,7 +178,10 @@ async function serveUi(
     "/": { file: "index.html", type: "text/html; charset=utf-8" },
     "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
     "/renderer.js": { file: "renderer.js", type: "text/javascript; charset=utf-8" },
+    "/conversation-renderer.js": { file: "conversation-renderer.js", type: "text/javascript; charset=utf-8" },
     "/view-model.js": { file: "view-model.js", type: "text/javascript; charset=utf-8" },
+    "/display-clock.js": { file: "display-clock.js", type: "text/javascript; charset=utf-8" },
+    "/countdown.js": { file: "countdown.js", type: "text/javascript; charset=utf-8" },
     "/task-mutations.js": { file: "task-mutations.js", type: "text/javascript; charset=utf-8" },
     "/task-controls.js": { file: "task-controls.js", type: "text/javascript; charset=utf-8" }
   };
@@ -279,54 +306,6 @@ function afterRevision(url: URL): number | undefined {
   return revision;
 }
 
-function hookProgressEnvelope(envelope: HookEnvelope): ProgressEnvelope {
-  switch (envelope.hook) {
-    case "SessionStart":
-      return {
-        taskId: envelope.taskHandle,
-        title: "Codex task",
-        event: {
-          type: "session_attached" as const,
-          origin: envelope.source === undefined || envelope.source === "startup"
-            ? "session_start" as const
-            : "late_attach" as const
-        }
-      };
-    case "UserPromptSubmit":
-      return {
-        taskId: envelope.taskHandle,
-        title: "Codex task",
-        event: envelope.turnKey === undefined
-          ? { type: "turn_started" as const }
-          : { type: "turn_started" as const, turnId: envelope.turnKey }
-      };
-    case "PostToolUse":
-      return {
-        taskId: envelope.taskHandle,
-        title: "Codex task",
-        event: { type: "activity_seen" as const, category: "hook" as const }
-      };
-    case "Stop":
-      return {
-        taskId: envelope.taskHandle,
-        title: "Codex task",
-        event: { type: "turn_stopped" as const }
-      };
-    case "Interrupt":
-      return {
-        taskId: envelope.taskHandle,
-        title: "Codex task",
-        event: { type: "runtime_interrupted" as const }
-      };
-    case "SessionEnd":
-      return {
-        taskId: envelope.taskHandle,
-        title: "Codex task",
-        event: { type: "session_ended" as const }
-      };
-  }
-}
-
 export function createProgressServer(options: ProgressServerOptions) {
   const host = options.host ?? "127.0.0.1";
   const requestedPort = options.port ?? 17_837;
@@ -335,13 +314,44 @@ export function createProgressServer(options: ProgressServerOptions) {
   }
 
   const now = options.now ?? Date.now;
-  const store = new TaskStore({ now });
+  const goalNow = options.monotonicNow ?? (() => Math.floor(performance.now()));
+  const names = createConversationNames(options.readConversationName ?? (async () => null), {
+    now, onChange: () => { if(!shuttingDown) store.refreshPresentation(); }
+  });
+  const turnRouter = createTurnRouter();
+  const passiveContexts = options.passiveContexts ?? new PassiveContextStore();
+  if(options.observerSessionsRoot!==undefined&&options.passiveGoals!==undefined)throw Error('CONFLICTING_OBSERVER_SOURCE');
+  let sourceToken:string|undefined;
+  const selectedSource=options.observerSessionsRoot===undefined||options.observerWorkers===undefined?undefined:
+    createConversationSource({source:createLocalSessionReader({root:options.observerSessionsRoot}),now:goalNow,wallNow:now,
+      turnKeyFor:(hostId,turnId)=>{
+        if(sourceToken===undefined)throw Error('SOURCE_IDENTITY_UNAVAILABLE');
+        return `turn_${createHmac('sha256',sourceToken).update(`${hostId}\u0000${turnId}`).digest('base64url')}`;
+      },onChange:key=>{if(!shuttingDown){passiveObserver?.changed(key,'activity');store.refreshPresentation();}}});
+  const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals);
+  const pruneSources=()=>{
+    const at=goalNow();selectedSource?.prune(key=>{
+      const goal=passiveGoals.view(key,at);
+      return goal!==null&&!['completed','failed','interrupted'].includes(goal.status);
+    });
+  };
+  const store = new TaskStore({ now, nameForConversation: key => names.get(key),
+    goalForConversation: key => passiveGoals.view(key, goalNow()),
+    observerForConversation:key=>passiveObserver?.diagnostics(key) });
+  const scopedSnapshots = new ScopedSnapshots(store);
+  const passiveObserver = options.observerWorkers === undefined ? undefined : new ObserverScheduler({
+    contexts: passiveContexts, goals: passiveGoals, workers: options.observerWorkers, now: goalNow,
+    ...(options.onObserverObservation?{onObservation:options.onObserverObservation}:{}),
+    onChange: () => {if (!shuttingDown) {pruneSources();store.refreshPresentation();}}
+  });
+  let observerTimer: ReturnType<typeof setInterval>|undefined;
+  let sourceTimer:ReturnType<typeof setInterval>|undefined;
   const leaseStore = options.leaseStore ?? new LeaseStore();
   const leaseGraceMs = options.leaseGraceMs ?? DEFAULT_LEASE_GRACE_MS;
   if (!Number.isSafeInteger(leaseGraceMs) || leaseGraceMs < 30_000 || leaseGraceMs > 60_000) {
     throw new RangeError("leaseGraceMs must be an integer between 30000 and 60000");
   }
-  const tokenPromise = loadOrCreateToken(options.tokenPath);
+  const tokenPromise = loadOrCreateToken(options.tokenPath).then(token=>{sourceToken=token;return token;});
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
@@ -352,6 +362,19 @@ export function createProgressServer(options: ProgressServerOptions) {
   const hookEventIds = new Set<string>();
   const hookEventOrder: string[] = [];
   let lastHookEventAt: number | undefined;
+  const knownConversations = new Set<string>();
+  const refreshNames = () => {
+    if(shuttingDown) return;
+    const active = new Set(store.conversationRows().map(row => row.conversationKey));
+    for(const key of knownConversations) {
+      if(!store.snapshot().tasks.some(task => task.conversationKey === key && task.isCurrentTurn)) {
+        names.forget(key); knownConversations.delete(key);
+      } else if(active.has(key)) { void names.refresh(key); }
+    }
+  };
+  const nameTimer = setInterval(refreshNames,10000);
+  nameTimer.unref();
+  store.on('changed',refreshNames);
   function capabilities(health: HudHealth): HudCapabilities {
     return {
       service: "codex-progress-hud",
@@ -375,19 +398,13 @@ export function createProgressServer(options: ProgressServerOptions) {
   function mcpSnapshot(request: IncomingMessage, snapshot: HudSnapshot): HudSnapshot {
     if (!isMcpRequest(request)) return snapshot;
     const credentials = leaseCredentials(request);
-    const allowed = credentials === undefined
+    const active = new Set(leaseStore.active().map(lease => lease.id));
+    scopedSnapshots.retain(active);
+    const authorized = credentials !== undefined && leaseStore.has(credentials.id, credentials.ownerNonce);
+    const allowed = !authorized
       ? new Set<string>()
-      : new Set(leaseStore.boundHandles(credentials.id, credentials.ownerNonce));
-    const tasks = snapshot.tasks.filter((task) => allowed.has(task.id));
-    const selected = snapshot.selected !== null && allowed.has(snapshot.selected.task.id)
-      ? snapshot.selected
-      : null;
-    return {
-      ...snapshot,
-      tasks,
-      selectedTaskId: selected?.task.id ?? null,
-      selected
-    };
+      : new Set(leaseStore.boundHandles(credentials!.id, credentials!.ownerNonce));
+    return scopedSnapshots.project(authorized ? credentials!.id : null, snapshot, allowed);
   }
 
   function cancelGrace(clearHandles = true): void {
@@ -547,8 +564,8 @@ export function createProgressServer(options: ProgressServerOptions) {
     }
   }
 
-  function writeStaleRevision(response: ServerResponse): void {
-    const revision = store.snapshot().revision;
+  function writeStaleRevision(response: ServerResponse, request: IncomingMessage): void {
+    const revision = mcpSnapshot(request, store.snapshot()).revision;
     writeJson(response, 409, {
       error: "task revision is stale",
       code: "STALE_REVISION",
@@ -556,11 +573,11 @@ export function createProgressServer(options: ProgressServerOptions) {
     });
   }
 
-  function writeRevisionRequired(response: ServerResponse): void {
+  function writeRevisionRequired(response: ServerResponse, request: IncomingMessage): void {
     writeJson(response, 428, {
       error: "task revision is required",
       code: "REVISION_REQUIRED",
-      revision: store.snapshot().revision
+      revision: mcpSnapshot(request, store.snapshot()).revision
     });
   }
 
@@ -694,8 +711,12 @@ export function createProgressServer(options: ProgressServerOptions) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/snapshot") {
+        if (isMcpRequest(request) && !leaseProtocolAccepted(request)) {
+          writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
+          return;
+        }
         const requestedRevision = afterRevision(url);
-        const snapshot = store.snapshot();
+        const snapshot = mcpSnapshot(request, store.snapshot());
         if (requestedRevision === snapshot.revision) {
           response.writeHead(204, {
             "cache-control": "no-store",
@@ -704,7 +725,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           });
           response.end();
         } else {
-          writeJson(response, 200, snapshotPayload(mcpSnapshot(request, snapshot)));
+          writeJson(response, 200, isMcpRequest(request) ? snapshot : snapshotPayload(snapshot));
         }
         return;
       }
@@ -720,24 +741,105 @@ export function createProgressServer(options: ProgressServerOptions) {
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/events") {
+        if (isMcpRequest(request)) {
+          writeJson(response, 403, { error: "aggregate stream is desktop-only", code: "LEASE_FORBIDDEN" });
+          return;
+        }
         await handleSse(response, afterRevision(url));
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/hooks/events") {
+        if (!leaseProtocolAccepted(request)) {
+          writeJson(response, 426, { error: "client protocol is unsupported", code: "VERSION_MISMATCH" });
+          return;
+        }
         if (!hasJsonMediaType(request)) {
           writeJson(response, 415, { error: "content-type must be application/json" });
           return;
         }
         const envelope = parseHookEnvelope(await readJson(request));
+        if(envelope.hostThreadId !== undefined &&
+          `session_${createHmac('sha256',await tokenPromise).update(envelope.hostThreadId).digest('base64url')}` !== envelope.sessionKey) {
+          throw new SyntaxError('invalid identity binding');
+        }
         const result = await runMutation(request, "on", cancellation.signal, (signal) => {
           if (signal.aborted) throw signal.reason;
           const revision = requestRevision(request);
           if (revision === undefined) return { kind: "revision_required" as const };
-          if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
+          if (revision !== mcpSnapshot(request, store.snapshot()).revision) return { kind: "stale_revision" as const };
           const leaseDecision = taskLeaseAccepted(request, envelope.taskHandle);
           if (leaseDecision !== "accepted") return { kind: leaseDecision };
+          // Store retention must not erase the router's replay fence.
+          if (turnRouter.hasIdentity(envelope.taskHandle) && !store.has(envelope.taskHandle)) {
+            return { kind: 'event_not_applied' as const };
+          }
+          const previousStatus = store.snapshot().tasks.find(task => task.id === envelope.taskHandle)?.status;
+          if (envelope.turnKey !== undefined && previousStatus !== undefined &&
+              envelope.hook !== 'SessionStart' && envelope.hook !== 'SessionEnd') {
+            const event: ProgressEnvelope['event'] = envelope.hook === 'Interrupt'
+              ? { type: 'runtime_interrupted' } : envelope.hook === 'Stop'
+                ? { type: 'turn_stopped' } : envelope.hook === 'UserPromptSubmit'
+                  ? { type: 'turn_started' } : { type: 'activity_seen', category: 'hook' };
+            if (terminalEventBlocked(previousStatus, event)) return { kind: 'event_not_applied' as const };
+          }
           if (hookEventIds.has(envelope.eventId)) return store.snapshot();
-          const snapshot = store.apply(hookProgressEnvelope(envelope), envelope.receivedAt);
+          if (envelope.turnKey !== undefined &&
+              (envelope.hook === 'UserPromptSubmit' || envelope.hook === 'PostToolUse') &&
+              !store.canAdmit(envelope.taskHandle,
+                envelope.hook === 'UserPromptSubmit' ? envelope.sessionKey : undefined)) {
+            store.observeTurnTracking({ capacityReached: true });
+            return { kind: 'event_not_applied' as const };
+          }
+          const route = turnRouter.route(envelope, now());
+          if (route.kind === 'apply') {
+            const metadata = { conversationKey: route.sessionKey, turnKey: route.turnKey, isCurrentTurn: route.follow };
+            // Publish the goal and its current turn together. Reclaim ownership
+            // before ingesting a fresh prompt so a full context store retains it.
+            const observedAt = goalNow();
+            // Host timestamps were authenticated/ordered above. Goal elapsed time
+            // uses local monotonic arrival, not adjustable wall-clock timestamps.
+            passiveGoals.observe({...envelope, receivedAt: observedAt}, route.follow, observedAt);
+            if(selectedSource){
+              pruneSources();
+              if(route.follow&&envelope.hostThreadId!==undefined&&envelope.turnKey!==undefined){
+                try{selectedSource.attach(route.sessionKey,envelope.hostThreadId,envelope.turnKey);}catch{/* source unavailable must not fail the task Hook */}
+              }
+              if(route.follow){selectedSource.changed(route.sessionKey);
+                const runtime=passiveGoals.view(route.sessionKey,observedAt)?.runtime;
+                if(runtime&&['paused','stopped','interrupted','failed'].includes(runtime))selectedSource.setActive(route.sessionKey,false);}
+            }else passiveContexts.ingest(envelope, now());
+            if (!store.has(envelope.taskHandle) && route.lateAttached) {
+              store.apply({ taskId: envelope.taskHandle, event: { type: 'session_attached', origin: 'late_attach' } }, now(), metadata);
+            }
+            store.apply(route.envelope, now(), metadata);
+            if (route.follow) passiveObserver?.changed(route.sessionKey,
+              envelope.hook === 'UserPromptSubmit' ? 'prompt' : envelope.hook === 'Stop' ? 'final' : 'activity');
+            if(envelope.hostThreadId !== undefined && store.has(envelope.taskHandle) &&
+                names.register(route.sessionKey,envelope.hostThreadId)) {
+              knownConversations.add(route.sessionKey);
+              refreshNames();
+            }
+            if (route.orderingUncertain) store.observeTurnTracking({ orderingUncertain: true });
+          } else if (route.kind === 'session' && route.ended) {
+            passiveContexts.ingest(envelope, now());
+            // Lifecycle deletion is unconditional, even if the event fence is full.
+            passiveContexts.remove(route.sessionKey);
+            selectedSource?.remove(route.sessionKey);
+            passiveGoals.end(route.sessionKey);
+            passiveObserver?.end(route.sessionKey);
+            store.refreshPresentation();
+          } else if (route.kind === 'degraded') {
+            store.observeTurnTracking({
+              ...(route.reason === 'turn_identity_unavailable' || route.reason === 'turn_identity_conflict' ? { identityUnavailable: true } : {}),
+              ...(route.reason === 'turn_order_unknown' ? { orderingUncertain: true } : {}),
+              ...(route.reason === 'turn_capacity_reached' ? { capacityReached: true } : {})
+            });
+          }
+          const snapshot = store.snapshot();
+          const status = snapshot.tasks.find(task => task.id === envelope.taskHandle)?.status;
+          if (status !== undefined && ['succeeded_verified', 'completed_unverified', 'failed', 'interrupted'].includes(status)) {
+            turnRouter.observeTerminal(envelope.taskHandle, now());
+          }
           rememberHookEvent(envelope.eventId, envelope.receivedAt);
           if (!isMcpRequest(request)) {
             scheduleGraceShutdown({ taskHandles: [envelope.taskHandle] });
@@ -750,13 +852,18 @@ export function createProgressServer(options: ProgressServerOptions) {
           return;
         }
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "event_not_applied") {
+          writeJson(response, 409, { code: 'EVENT_NOT_APPLIED', error: 'terminal or retained turn does not accept this event' });
+          return;
+        }
+        if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
           "kind" in result.value && result.value.kind === "revision_required") {
-          writeRevisionRequired(response);
+          writeRevisionRequired(response, request);
           return;
         }
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
           "kind" in result.value && result.value.kind === "stale_revision") {
-          writeStaleRevision(response);
+          writeStaleRevision(response, request);
           return;
         }
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
@@ -788,12 +895,16 @@ export function createProgressServer(options: ProgressServerOptions) {
           if (signal.aborted) throw signal.reason;
           const revision = requestRevision(request);
           if (revision === undefined) return { kind: "revision_required" as const };
-          if (revision !== store.snapshot().revision) return { kind: "stale_revision" as const };
+          if (revision !== mcpSnapshot(request, store.snapshot()).revision) return { kind: "stale_revision" as const };
           if (!store.snapshot().tasks.some((task) => task.id === route.taskId)) {
             return { kind: "task_not_found" as const };
           }
           const leaseDecision = taskLeaseAccepted(request, route.taskId, false);
           if (leaseDecision !== "accepted") return { kind: leaseDecision };
+          if (route.action === 'select' && isMcpRequest(request)) {
+            scopedSnapshots.select(leaseCredentials(request)!.id, route.taskId, selectionMode!);
+            return store.snapshot();
+          }
           const snapshot = route.action === "select"
             ? store.select(route.taskId, selectionMode!, now())
             : store.setHidden(route.taskId, visibilityHidden!, now());
@@ -807,11 +918,11 @@ export function createProgressServer(options: ProgressServerOptions) {
         if (result.value !== undefined && typeof result.value === "object" && result.value !== null &&
           "kind" in result.value) {
           if (result.value.kind === "revision_required") {
-            writeRevisionRequired(response);
+            writeRevisionRequired(response, request);
             return;
           }
           if (result.value.kind === "stale_revision") {
-            writeStaleRevision(response);
+            writeStaleRevision(response, request);
             return;
           }
           if (result.value.kind === "task_not_found") {
@@ -835,11 +946,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           writeJson(response, 415, { error: "content-type must be application/json" });
           return;
         }
-        const envelope = parseProgressEnvelope(await readJson(request));
-        const isControl = envelope.event.type === "tracking_paused" ||
-          envelope.event.type === "tracking_resumed" ||
-          envelope.event.type === "tracking_stopped";
-        if (isControl && !leaseProtocolAccepted(request)) {
+        if (!leaseProtocolAccepted(request)) {
           cancellation.complete();
           writeJson(response, 426, {
             error: "client protocol is unsupported",
@@ -847,6 +954,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           });
           return;
         }
+        const envelope = controlEnvelopeSchema.parse(await readJson(request));
         if (eventRequiresExistingTask(envelope.event) && !store.has(envelope.taskId)) {
           cancellation.complete();
           writeJson(response, 404, {
@@ -859,11 +967,51 @@ export function createProgressServer(options: ProgressServerOptions) {
           if (signal.aborted) throw signal.reason;
           const leaseDecision = taskLeaseAccepted(request, envelope.taskId);
           if (leaseDecision !== "accepted") return { kind: leaseDecision };
-          return store.apply(envelope);
+          const previousStatus = store.snapshot().tasks.find(task => task.id === envelope.taskId)?.status;
+          if (turnRouter.hasIdentity(envelope.taskId) && !store.has(envelope.taskId)) {
+            return { kind: 'event_not_applied' as const };
+          }
+          if (previousStatus !== undefined && terminalEventBlocked(previousStatus, envelope.event)) {
+            return { kind: 'event_not_applied' as const };
+          }
+          if (!store.canAdmit(envelope.taskId)) {
+            store.observeTurnTracking({ capacityReached: true });
+            return { kind: 'event_not_applied' as const };
+          }
+          store.publishTogether(() => {
+            const snapshot = store.apply({taskId: envelope.taskId, event: envelope.event,
+              ...(envelope.title === undefined ? {} : {title: envelope.title})});
+            const currentTask = snapshot.tasks.find(task => task.id === envelope.taskId);
+            if (currentTask?.isCurrentTurn && currentTask.conversationKey && currentTask.turnKey && currentTask.status !== previousStatus) {
+              const type = envelope.event.type;
+              const runtime = type === 'tracking_paused' ? 'paused'
+                : type === 'tracking_stopped' ? 'stopped'
+                : type === 'tracking_resumed' || type === 'tracking_started' ? 'running' : undefined;
+              if (runtime) {
+                passiveGoals.runtime(currentTask.conversationKey, currentTask.turnKey, runtime, goalNow());
+                if(runtime==='stopped')selectedSource?.stop(currentTask.conversationKey);
+                else selectedSource?.setActive(currentTask.conversationKey,runtime==='running');
+                passiveObserver?.changed(currentTask.conversationKey, 'runtime');
+                store.refreshPresentation();
+              }
+            }
+            const status = snapshot.tasks.find(task => task.id === envelope.taskId)?.status;
+            if (status !== undefined && ['succeeded_verified', 'completed_unverified', 'failed', 'interrupted'].includes(status)) {
+              turnRouter.observeTerminal(envelope.taskId, now());
+            }
+          });
+          return store.snapshot();
         });
         cancellation.complete();
         if (!result.accepted) {
           writeMutationRejection(response, result);
+          return;
+        }
+        if (
+          result.value !== undefined && typeof result.value === "object" && result.value !== null &&
+          "kind" in result.value && result.value.kind === "event_not_applied"
+        ) {
+          writeJson(response, 409, { code: 'EVENT_NOT_APPLIED', error: 'terminal turn does not accept this event' });
           return;
         }
         if (
@@ -964,16 +1112,49 @@ export function createProgressServer(options: ProgressServerOptions) {
       const bound = server.address();
       if (bound === null || typeof bound === "string") throw new Error("unexpected server address");
       currentAddress = { host, port: bound.port, url: `http://${host}:${bound.port}` };
+      if (passiveObserver) {
+        if(selectedSource){
+          sourceTimer=setInterval(()=>{try{selectedSource.tick();}catch{/* source errors do not authorize model retries */}},250);
+          sourceTimer.unref();
+        }
+        observerTimer = setInterval(() => {
+          try {passiveObserver.tick();} catch {passiveObserver.disable();}
+        }, 1000);
+        observerTimer.unref();
+      }
+      if (options.awaitInitialLease) scheduleGraceShutdown({ taskHandles: [] });
     },
     async close(): Promise<void> {
+      shuttingDown = true;
+      clearInterval(observerTimer);
+      clearInterval(sourceTimer);
+      passiveObserver?.disable();
+      passiveContexts.clear();
+      passiveGoals.clear();
+      clearInterval(nameTimer);
+      names.disable();
+      knownConversations.clear();
+      store.off('changed',refreshNames);
+      // Finish core cleanup even if a title child could not be terminated.
+      let nameCleanupFailed=false;
+      let observerCleanupFailed=false;
+      try {await selectedSource?.close();} catch {observerCleanupFailed=true;}
+      try {await passiveObserver?.close();} catch {observerCleanupFailed=true;}
+      try { await options.closeConversationNames?.(); } catch { nameCleanupFailed=true; }
       cancelGrace();
       disposeLeaseResources();
-      if (server === undefined) return;
+      if (server === undefined) {
+        if(observerCleanupFailed)throw Error('OBSERVER_CLOSE_UNCONFIRMED');
+        if(nameCleanupFailed)throw Error('NAME_TERMINATION_FAILED');
+        return;
+      }
       await new Promise<void>((resolve, reject) =>
         server?.close((error) => (error === undefined ? resolve() : reject(error)))
       );
       server = undefined;
       currentAddress = undefined;
+      if(observerCleanupFailed)throw Error('OBSERVER_CLOSE_UNCONFIRMED');
+      if(nameCleanupFailed)throw Error('NAME_TERMINATION_FAILED');
     },
     address(): ProgressServerAddress {
       if (currentAddress === undefined) throw new Error("progress server is not listening");

@@ -1,9 +1,8 @@
-import { createCompanionManager, type CompanionManager } from "../lifecycle/companion-manager.js";
-import { processLauncher } from "../lifecycle/process-launcher.js";
+import type { CompanionManager } from "../lifecycle/companion-manager.js";
+import type { HudSettings, StateOperationOptions } from "../lifecycle/types.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
-import { defaultDataDirectory, defaultDiagnosticsDirectory, defaultInstallManifestPath, defaultRuntimePath, defaultServiceUrl, defaultSettingsPath } from "../server/paths.js";
+import { defaultInstallManifestPath, defaultRuntimePath, defaultSettingsPath } from "../server/paths.js";
 import { CompanionHttpClient, type HudRequestOptions } from "../mcp/report-client.js";
-import { RELEASE_CAPABILITIES } from "../generated/capabilities.js";
 import type { HookEnvelope } from "./schema.js";
 
 export interface HookProgressClient {
@@ -13,6 +12,13 @@ export interface HookProgressClient {
 
 export interface HookEventClient {
   post(envelope: HookEnvelope, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<void>;
+}
+
+export class HookDeliveryError extends Error {
+  constructor(readonly code: string) {
+    super("Hook delivery did not complete");
+    this.name = "HookDeliveryError";
+  }
 }
 
 export interface HookClientDependencies {
@@ -29,7 +35,7 @@ function errorCode(error: unknown): string | undefined {
 export function createHookClient(dependencies: HookClientDependencies): HookEventClient {
   return {
     async post(envelope, options = {}): Promise<void> {
-      await dependencies.companionManager.executeWrite("progress_report", async (makeRequestOptions) => {
+      const result = await dependencies.companionManager.executeWrite("progress_report", async (makeRequestOptions) => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const requestOptions = makeRequestOptions();
           const current = await dependencies.progressClient.status(requestOptions);
@@ -46,31 +52,38 @@ export function createHookClient(dependencies: HookClientDependencies): HookEven
           }
         }
       }, options);
+      if (result.kind !== "completed") throw new HookDeliveryError(result.code);
     }
   };
 }
 
-export function createDefaultHookClient(): HookEventClient {
-  const version = RELEASE_CAPABILITIES.buildVersion;
-  const progressClient = new CompanionHttpClient();
-  const serviceUrl = new URL(defaultServiceUrl());
-  const companionManager = createCompanionManager({
-    store: createLifecycleStateStore({
-      settingsPath: defaultSettingsPath(),
-      runtimePath: defaultRuntimePath(),
-      installManifestPath: defaultInstallManifestPath()
-    }),
-    client: progressClient,
-    launcher: processLauncher,
-    diagnostics: {
-      directory: defaultDiagnosticsDirectory(),
-      pluginVersion: version,
-      mcpVersion: version,
-      host: serviceUrl.hostname,
-      port: Number(serviceUrl.port || (serviceUrl.protocol === "https:" ? 443 : 80)),
-      installManifestPath: defaultInstallManifestPath(),
-      dataDirectoryPath: defaultDataDirectory()
+export function createConnectedHookClient(dependencies: {
+  progressClient: HookProgressClient;
+  readSettings(options?: StateOperationOptions): Promise<HudSettings>;
+}): HookEventClient {
+  return createHookClient({
+    progressClient: dependencies.progressClient,
+    companionManager: {
+      async executeWrite(_reason, operation, options = {}) {
+        const settings = await dependencies.readSettings(options);
+        if (settings.desiredState === "off") return { kind: "suppressed", code: "MANUALLY_DISABLED" };
+        const signal = options.signal ?? new AbortController().signal;
+        if (signal.aborted) throw signal.reason;
+        const deadline = Date.now() + (options.timeoutMs ?? 2500);
+        const value = await operation(() => ({
+          signal, generation: settings.generation,
+          timeoutMs: Math.max(0, deadline - Date.now())
+        }));
+        return { kind: "completed", value };
+      }
     }
   });
-  return createHookClient({ progressClient, companionManager });
+}
+
+export function createDefaultHookClient(): HookEventClient {
+  const store = createLifecycleStateStore({
+    settingsPath: defaultSettingsPath(), runtimePath: defaultRuntimePath(),
+    installManifestPath: defaultInstallManifestPath()
+  });
+  return createConnectedHookClient({ progressClient: new CompanionHttpClient(), readSettings: store.readSettings });
 }

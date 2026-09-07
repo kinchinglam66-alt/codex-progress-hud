@@ -8,20 +8,14 @@
   },
   "license": "Apache-2.0",
   "keywords": ["codex", "progress", "eta", "overlay", "mcp"],
-  "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Progress HUD",
     "shortDescription": "Show task progress, status, and honest ETA ranges.",
-    "longDescription": "A privacy-first local companion that lets Codex report structured task progress to an always-on-top desktop overlay.",
+    "longDescription": "A local companion for passive task observation and an always-on-top status and ETA overlay.",
     "developerName": "kinchinglam66-alt",
     "category": "Productivity",
     "capabilities": ["Interactive"],
-    "defaultPrompt": [
-      "Report this task's current phase and ETA when useful.",
-      "Show the latest Progress HUD status when requested.",
-      "Use the supplied task handle when present; otherwise use the MCP lease."
-    ],
     "brandColor": "#7C5CFC"
   }
 }

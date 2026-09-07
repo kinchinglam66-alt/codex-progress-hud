@@ -40,7 +40,7 @@ const HUD_CLIENT_ERROR_CODES = [
   "COMPANION_NOT_INSTALLED", "OFFLINE", "VERSION_MISMATCH", "GENERATION_REJECTED",
   "AUTH_ERROR", "START_TIMEOUT", "REQUEST_TIMEOUT", "REQUEST_CANCELLED",
   "PORT_CONFLICT", "SHUTTING_DOWN", "INTERNAL_ERROR", "STALE_REVISION", "REVISION_REQUIRED",
-  "TASK_NOT_FOUND", "LEASE_REQUIRED", "LEASE_FORBIDDEN"
+  "TASK_NOT_FOUND", "LEASE_REQUIRED", "LEASE_FORBIDDEN", "EVENT_NOT_APPLIED"
 ] as const;
 const clientErrorCodeSchema = z.enum(HUD_CLIENT_ERROR_CODES);
 const responseErrorCodeSchema = z.enum([
@@ -122,6 +122,9 @@ const taskSnapshotSchema = z.object({
   }).strict().optional()
 }).strict();
 const taskSummarySchema = z.object({
+  conversationKey: z.string().min(1).max(160).optional(),
+  turnKey: z.string().min(1).max(160).optional(),
+  isCurrentTurn: z.boolean().optional(),
   id: z.string(),
   title: z.string(),
   status: taskStatusSchema,
@@ -136,10 +139,30 @@ const etaSchema = z.object({
   signals: z.array(z.enum(["plan", "model", "calibration"]))
 }).strict();
 const aggregateSnapshotSchema = z.object({
+  turnTracking: z.object({ identityUnavailable: z.boolean(), orderingUncertain: z.boolean(), capacityReached: z.boolean() }).strict().optional(),
   revision: z.number().int().nonnegative(),
   selectedTaskId: z.string().nullable(),
   selectionMode: z.enum(["follow_activity", "pinned"]),
   tasks: z.array(taskSummarySchema),
+  rows: z.array(z.object({
+    conversationKey: z.string().min(1).max(160),
+    task: taskSnapshotSchema,
+    eta: etaSchema.nullable(),
+    name: z.object({value:z.string().max(1024).nullable(),freshness:z.enum(['fresh','stale','unavailable'])}).strict(),
+    observer:z.object({state:z.enum(['pending','history_loading','estimating','insufficient_context','call_failed','setup_failed','rate_limited','disabled','ready']),
+      estimateAgeSeconds:z.number().finite().nonnegative().nullable(),callsLastHour:z.number().int().nonnegative(),retryPending:z.boolean()}).strict().optional(),
+    goal: z.object({
+      generation: z.number().int().nonnegative(),
+      estimateRevision: z.number().int().nonnegative(),
+      sampledAtMs: z.number().int().nonnegative(),
+      status: z.enum(['running','waiting','paused','interrupted','failed','stopped','completed','unknown']),
+      runtime: z.enum(['running','waiting','paused','interrupted','failed','stopped']),
+      activeSeconds: z.number().nonnegative(),
+      prediction: z.object({remainingSeconds: z.number().nonnegative().max(31536000),
+        errorPercent: z.number().nonnegative().max(1000),
+        observedActiveSeconds: z.number().nonnegative().max(31536000)}).strict().nullable()
+    }).strict().optional()
+  }).strict()).max(32).optional(),
   selected: z.object({ task: taskSnapshotSchema, eta: etaSchema.nullable() }).strict().nullable(),
   compatibility: z.object({ incompatibleClientSeen: z.boolean() }).strict(),
   hooks: z.object({
@@ -153,7 +176,8 @@ const legacySnapshotSchema = z.object({
   eta: z.unknown()
 }).strict();
 
-const MAX_RESPONSE_BYTES = 64 * 1024;
+// Bounded aggregate: 32 local chat names plus one legacy selected plan.
+const MAX_RESPONSE_BYTES = 512 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const MAX_REQUEST_TIMEOUT_MS = 60_000;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
@@ -295,7 +319,7 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
           ...(options.revision === undefined
             ? {}
             : { "x-codex-progress-hud-revision": String(options.revision) }),
-          ...(init.method?.toUpperCase() === "POST"
+          ...(init.method?.toUpperCase() === "POST" || (authenticated && path === "/api/snapshot")
             ? {
                 [REQUEST_PROTOCOL_HEADER]: String(
                   options.clientProtocol ?? RELEASE_CAPABILITIES.protocol.current

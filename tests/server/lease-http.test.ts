@@ -14,6 +14,7 @@ afterEach(async () => {
 });
 
 async function fixture(options: {
+  awaitInitialLease?: boolean;
   scheduleTimer?: (callback: () => void, delayMs: number) => unknown;
   cancelTimer?: (handle: unknown) => void;
   leaseStore?: LeaseStore;
@@ -44,6 +45,18 @@ function headers(token: string, leaseId?: string, ownerNonce?: string): Record<s
 }
 
 describe("MCP lease HTTP boundary", () => {
+  it.each([false, true])("cleans an unclaimed managed startup; lease acquired=%s", async acquired => {
+    let grace: (() => void) | undefined;
+    const { server, requestShutdown } = await fixture({
+      awaitInitialLease: true,
+      scheduleTimer: callback => { grace = callback; return 1; }, cancelTimer: () => undefined
+    });
+    expect(grace).toBeTypeOf("function");
+    if (acquired) server.leaseStore.acquire("live-owner");
+    grace!();
+    expect(requestShutdown).toHaveBeenCalledTimes(acquired ? 0 : 1);
+    expect(server.store.snapshot().tasks).toHaveLength(0);
+  });
   it("supports owner-checked acquire, renew, bind, and release", async () => {
     const { server, token } = await fixture();
     const acquiredResponse = await fetch(`${server.address().url}/api/leases/acquire`, {
@@ -107,7 +120,7 @@ describe("MCP lease HTTP boundary", () => {
 
     const eventResponse = await fetch(`${server.address().url}/api/events`, {
       method: "POST", headers: headers(token, first.id, first.ownerNonce),
-      body: JSON.stringify({ taskId: firstHandle, event: { type: "activity_seen", category: "tool" } })
+      body: JSON.stringify({ taskId: firstHandle, event: { type: "tracking_paused" } })
     });
     const eventSnapshot = await eventResponse.json() as { revision: number; tasks: Array<{ id: string }> };
     expect(eventSnapshot.tasks.map(({ id }) => id)).toEqual([firstHandle]);
@@ -124,16 +137,17 @@ describe("MCP lease HTTP boundary", () => {
       method: "POST",
       headers: { ...headers(token, first.id, first.ownerNonce), "x-codex-progress-hud-revision": String(selectionSnapshot.revision) },
       body: JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         taskHandle: "hud_cccccccccccccccccccc",
         eventId: "evt_abcdefghijklmnopqrstuvwxyz0123456789",
         sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
-        hook: "Stop",
+        turnKey: "turn_abcdefghijklmnopqrstuvwxyz0123456789",
+        hook: "UserPromptSubmit",
         receivedAt: 100
       })
     });
     const hookSnapshot = await hookResponse.json() as { tasks: Array<{ id: string }> };
-    expect(hookSnapshot.tasks.map(({ id }) => id)).toEqual([
+    expect(hookSnapshot.tasks.map(({ id }) => id).sort()).toEqual([
       firstHandle,
       "hud_cccccccccccccccccccc"
     ]);
@@ -166,11 +180,14 @@ describe("MCP lease HTTP boundary", () => {
       headers: headers(token)
     })).json();
 
+    const ownView = await (await fetch(`${server.address().url}/api/snapshot`, {
+      headers: headers(token, first.id, first.ownerNonce)
+    })).json();
     const rejected = await fetch(`${server.address().url}/api/hooks/events`, {
       method: "POST",
-      headers: { ...headers(token, first.id, first.ownerNonce), "x-codex-progress-hud-revision": String(before.revision) },
+      headers: { ...headers(token, first.id, first.ownerNonce), "x-codex-progress-hud-revision": String(ownView.revision) },
       body: JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         taskHandle: secondHandle,
         eventId: "evt_crosssessionabcdefghijklmnopqrstuvwx",
         sessionKey: "session_crosssessionabcdefghijklmnopqrst",
@@ -195,10 +212,11 @@ describe("MCP lease HTTP boundary", () => {
       method: "POST",
       headers: { ...headers(token), "x-codex-progress-hud-revision": "0" },
       body: JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         taskHandle,
         eventId: "evt_hookprocessabcdefghijklmnopqrstuvwxyz",
         sessionKey: "session_hookprocessabcdefghijklmnopqrstuv",
+        turnKey: "turn_hookprocessabcdefghijklmnopqrstuv",
         hook: "UserPromptSubmit",
         receivedAt: 100
       })
@@ -223,11 +241,12 @@ describe("MCP lease HTTP boundary", () => {
       method: "POST",
       headers: { ...headers(token), "x-codex-progress-hud-revision": "0" },
       body: JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         taskHandle,
         eventId: "evt_hookwithoutleaseabcdefghijklmnopqrstu",
         sessionKey: "session_hookwithoutleaseabcdefghijklmnop",
-        hook: "SessionStart",
+        turnKey: "turn_hookwithoutleaseabcdefghijklmnop",
+        hook: "UserPromptSubmit",
         source: "resume",
         receivedAt: 100
       })
@@ -259,7 +278,7 @@ describe("MCP lease HTTP boundary", () => {
       method: "POST",
       headers: { ...headers(token), "x-codex-progress-hud-revision": "0" },
       body: JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         taskHandle: "hud_aaaaaaaaaaaaaaaaaaaa",
         eventId: "evt_hookthenleaseabcdefghijklmnopqrstuv",
         sessionKey: "session_hookthenleaseabcdefghijklmnopqr",
@@ -283,9 +302,7 @@ describe("MCP lease HTTP boundary", () => {
   it.each([
     { type: "tracking_paused" },
     { type: "tracking_resumed" },
-    { type: "tracking_stopped" },
-    { type: "validation_observed", result: "passed" },
-    { type: "model_outcome", outcome: "completed", verified: false }
+    { type: "tracking_stopped" }
   ] as const)("does not preclaim an unknown $type handle before TASK_NOT_FOUND", async (event) => {
     const { server, token } = await fixture();
     const acquire = async (ownerNonce: string) => {
@@ -466,7 +483,7 @@ describe("MCP lease HTTP boundary", () => {
     const rejected = await fetch(`${server.address().url}/api/events`, {
       method: "POST",
       headers: headers(token, second.id, second.ownerNonce),
-      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "activity_resumed" } })
+      body: JSON.stringify({ taskId: "hud_aaaaaaaaaaaaaaaaaaaa", event: { type: "tracking_resumed" } })
     });
     expect(rejected.status).toBe(403);
     expect(await rejected.json()).toMatchObject({ code: "LEASE_FORBIDDEN" });
@@ -506,7 +523,7 @@ describe("MCP lease HTTP boundary", () => {
     const stale = await fetch(`${server.address().url}/api/events`, {
       method: "POST",
       headers: headers(token, acquired.id, acquired.ownerNonce),
-      body: JSON.stringify({ taskId: taskHandle, event: { type: "model_progress", phase: "retry" } })
+      body: JSON.stringify({ taskId: taskHandle, event: { type: "tracking_resumed" } })
     });
 
     expect(stale.status).toBe(401);

@@ -19,5 +19,5 @@ export function normalizeHookInput(
   hmacKey: string
 ): { envelope: HookEnvelope; result: HookResult } {
   const envelope = createHookEnvelope(hookName, input, nowMs, hmacKey);
-  return { envelope, result: hookResult(hookName, envelope.taskHandle) };
+  return { envelope, result: hookResult(hookName) };
 }

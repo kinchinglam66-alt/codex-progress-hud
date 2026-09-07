@@ -29,7 +29,6 @@ const generated = new Map([
 ]);
 const copies = new Map([
   ["hooks/hooks.json", "hooks/hooks.json"],
-  ["skills/progress-reporting/SKILL.md", "skills/progress-reporting/SKILL.md"],
   ["scripts/launch-hook.ps1", "scripts/launch-hook.ps1"],
   ["scripts/launch-mcp.ps1", "scripts/launch-mcp.ps1"],
   ["scripts/invoke-node-mode.ps1", "scripts/invoke-node-mode.ps1"],

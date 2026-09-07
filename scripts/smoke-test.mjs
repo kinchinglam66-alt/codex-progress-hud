@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProgressServer } from "../dist/server/http-server.js";
+import { PROTOCOL_VERSION } from "../dist/lifecycle/types.js";
 
 const dataDirectory = await mkdtemp(join(tmpdir(), "codex-progress-hud-smoke-"));
 const tokenPath = join(dataDirectory, "auth.token");
@@ -10,7 +11,7 @@ const health = {
   service: "codex-progress-hud",
   pid: process.pid,
   version: "0.2.0-smoke",
-  protocolVersion: 1,
+  protocolVersion: PROTOCOL_VERSION,
   instanceNonce: "smoke-owned-instance",
   startedAt: new Date().toISOString(),
   visibility: "visible"
@@ -30,7 +31,7 @@ try {
   const headers = {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
-    "x-codex-progress-hud-protocol": "1"
+    "x-codex-progress-hud-protocol": String(PROTOCOL_VERSION)
   };
   const identityResponse = await fetch(`${server.address().url}/health`);
   const identity = await identityResponse.json();
@@ -40,16 +41,10 @@ try {
     method: "POST",
     headers: { ...headers, "x-codex-progress-hud-revision": "0" },
     body: JSON.stringify({
-      schemaVersion: 1,
       taskId: "hud_smoke_task_abcdefghijklmnopqrstuvwxyz",
-      eventId: "evt_smoke_event_abcdefghijklmnopqrstuvwxyz",
       title: "Synthetic verification",
       event: {
-        type: "model_progress",
-        phase: "verification",
-        progress: 0.5,
-        confidence: 0.7,
-        remainingSeconds: 60
+        type: "tracking_started"
       }
     })
   });
@@ -64,14 +59,14 @@ try {
   if (
     identityResponse.status !== 200 ||
     identity.service !== "codex-progress-hud" ||
-    identity.protocolVersion !== 1 ||
+    identity.protocolVersion !== PROTOCOL_VERSION ||
     healthResponse.status !== 200 ||
-    authenticatedHealth.protocolVersion !== 1 ||
+    authenticatedHealth.protocolVersion !== PROTOCOL_VERSION ||
     authenticatedHealth.instanceNonce !== health.instanceNonce ||
     eventResponse.status !== 202 ||
     snapshotResponse.status !== 200 ||
     snapshot.selected?.task?.status !== "running" ||
-    snapshot.selected?.task?.progress !== 0.5 ||
+    snapshot.selected?.task?.progress !== undefined ||
     shutdownResponse.status !== 202 ||
     shutdown.accepted !== true ||
     !shutdownRequested

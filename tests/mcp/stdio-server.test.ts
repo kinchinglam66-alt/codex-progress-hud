@@ -33,9 +33,9 @@ interface JsonRpcResponse {
 }
 
 describe("plugin MCP stdio server", () => {
-  it(
-    "initializes and exposes every tool with protocol-only public child stdout",
-    async () => {
+  it.each(["on", "off"] as const)(
+    "initializes with desired state %s and exposes every tool with protocol-only stdout",
+    async (initialState) => {
       const taskDirectory = await mkdtemp(join(tmpdir(), "codex-progress-hud-task-"));
       const dataDirectory = join(taskDirectory, "isolated-hud-data");
       const stateStore = createLifecycleStateStore({
@@ -43,11 +43,11 @@ describe("plugin MCP stdio server", () => {
         runtimePath: join(dataDirectory, "runtime.json"),
         installManifestPath: join(dataDirectory, "install.json")
       });
-      const settings = await stateStore.setDesiredState("on");
+      const settings = await stateStore.setDesiredState(initialState);
       const runtime = {
         pid: process.pid,
         version: "0.2.0-test",
-        protocolVersion: 1 as const,
+        protocolVersion: 3 as const,
         instanceNonce: randomUUID(),
         startedAt: new Date().toISOString()
       };
@@ -150,15 +150,22 @@ describe("plugin MCP stdio server", () => {
           params: {}
         })}\n`);
         const listed = await request(2, "tools/list", {});
+        if (initialState === "on") {
+          await expect.poll(() => companion.leaseStore.active().length).toBe(1);
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          expect(companion.leaseStore.active()).toHaveLength(0);
+          expect((await stateStore.readSettings()).desiredState).toBe("off");
+        }
+        expect(companion.store.snapshot().tasks).toHaveLength(0);
         expect(listed.error).toBeUndefined();
         const tools = (listed.result as { tools: Array<{ name: string }> }).tools;
 
         expect(tools.map((tool) => tool.name).sort()).toEqual(
           [
             "hud_close", "hud_diagnose", "hud_hide", "hud_open", "hud_status",
-            "progress_report", "task_outcome", "task_status", "tracking_pause",
-            "tracking_resume", "tracking_start", "tracking_status", "tracking_stop",
-            "validation_observed"
+            "task_status", "tracking_pause",
+            "tracking_resume", "tracking_start", "tracking_status", "tracking_stop"
           ].sort()
         );
         const toolByName = new Map(
@@ -168,31 +175,12 @@ describe("plugin MCP stdio server", () => {
         expect(toolByName.get("tracking_status")?.description).toContain("observational");
         expect(toolByName.get("hud_open")?.description).toContain("Deprecated");
         expect(toolByName.get("hud_close")?.description).toContain("Deprecated");
-        expect(toolByName.get("progress_report")?.inputSchema).toMatchObject({
-          required: expect.arrayContaining(["phase"])
-        });
-        expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("required", expect.arrayContaining(["task_handle"]));
-        expect(toolByName.get("progress_report")?.inputSchema).not.toHaveProperty("properties.task_id");
-        for (const [toolName, requiredField] of [
-          ["progress_report", "phase"],
-          ["validation_observed", "result"],
-          ["task_outcome", "outcome"]
-        ] as const) {
-          expect(toolByName.get(toolName)?.inputSchema).toMatchObject({
-            required: expect.arrayContaining([requiredField])
-          });
-          expect(toolByName.get(toolName)?.inputSchema).not.toHaveProperty(
-            "required",
-            expect.arrayContaining(["task_handle"])
-          );
-        }
         expect(toolByName.get("tracking_start")?.inputSchema).not.toHaveProperty(
           "required",
           expect.arrayContaining(["task_handle"])
         );
         for (const toolName of [
-          "tracking_start", "tracking_pause", "tracking_resume", "tracking_stop",
-          "progress_report", "validation_observed", "task_outcome"
+          "tracking_start", "tracking_pause", "tracking_resume", "tracking_stop"
         ]) {
           const description = toolByName.get(toolName)?.description ?? "";
           expect(description).toContain("opaque task_handle");
@@ -225,7 +213,10 @@ describe("plugin MCP stdio server", () => {
           name: "task_outcome",
           arguments: { outcome: "completed", verified: true }
         });
-        for (const response of [trackingStart, progressReport, validationObserved, taskOutcome]) {
+        for (const response of [progressReport, validationObserved, taskOutcome]) {
+          expect(response.error !== undefined || (response.result as {isError?: boolean})?.isError === true).toBe(true);
+        }
+        for (const response of [trackingStart]) {
           expect(response.error).toBeUndefined();
           expect(response.result).toMatchObject({
             structuredContent: { ok: true, associationSource: "mcp_lease" }
@@ -244,6 +235,15 @@ describe("plugin MCP stdio server", () => {
         expect(snapshot.tasks).toHaveLength(1);
         expect((await observer.status()).tasks).toHaveLength(1);
 
+        for (const [id, name, expectedStatus] of [
+          [20, 'tracking_pause', 'paused'], [21, 'tracking_resume', 'running'], [22, 'tracking_stop', 'stopped']
+        ] as const) {
+          const controlled = await request(id, 'tools/call', {name, arguments: {}});
+          expect(controlled.error).toBeUndefined();
+          expect(controlled.result).toMatchObject({structuredContent: {ok: true}});
+          expect((await observer.status()).selected?.task.status).toBe(expectedStatus);
+        }
+
         const secondTrackingStart = await request(9, "tools/call", {
           name: "tracking_start",
           arguments: { title: "Handle-free second stdio task" }
@@ -257,7 +257,8 @@ describe("plugin MCP stdio server", () => {
             eta_high_seconds: 40
           }
         });
-        for (const response of [secondTrackingStart, secondProgressReport]) {
+        expect(secondProgressReport.error !== undefined || (secondProgressReport.result as {isError?: boolean})?.isError === true).toBe(true);
+        for (const response of [secondTrackingStart]) {
           expect(response.error).toBeUndefined();
           expect(response.result).toMatchObject({
             structuredContent: { ok: true, associationSource: "mcp_lease" }
@@ -279,25 +280,41 @@ describe("plugin MCP stdio server", () => {
             verificationEvidence?: unknown;
           } } | null;
         };
-        expect(restartedSnapshot.tasks).toHaveLength(2);
+        expect(restartedSnapshot.tasks).toHaveLength(1);
         expect(restartedSnapshot.tasks.map((task) => task.status)).toEqual(
-          expect.arrayContaining(["succeeded_verified", "running"])
+          expect.arrayContaining(["running"])
         );
         expect(restartedSnapshot.selected?.task).toMatchObject({
-          status: "running",
-          progress: 0.2
+          status: "running"
         });
+        expect(restartedSnapshot.selected?.task.progress).toBeUndefined();
         expect(restartedSnapshot.selected?.task.verificationEvidence).toBeUndefined();
         const restartedObserverSnapshot = await observer.status();
-        expect(restartedObserverSnapshot.tasks).toHaveLength(2);
+        expect(restartedObserverSnapshot.tasks).toHaveLength(1);
         expect(restartedObserverSnapshot.tasks.map((task) => task.status)).toEqual(
-          expect.arrayContaining(["succeeded_verified", "running"])
+          expect.arrayContaining(["running"])
         );
+        const scenarioPath = resolve(pluginRoot, 'scripts/passive-control-smoke.mjs');
+        const { exercisePassiveControls } = await import(scenarioPath);
+        let scenarioId = 100;
+        const scenarioResult = await exercisePassiveControls({
+          listTools: async () => (await request(scenarioId++, 'tools/list', {})).result,
+          callTool: async (params: unknown) => {
+            const response = await request(scenarioId++, 'tools/call', params);
+            if (response.error) throw new Error(JSON.stringify(response.error));
+            return response.result;
+          }
+        });
+        expect(scenarioResult).toEqual({statuses: ['running', 'paused', 'running', 'stopped', 'running']});
+        expect((await observer.status()).selected?.task.status).toBe('running');
         expect(stdoutLines.length).toBeGreaterThanOrEqual(2);
         expect(stdoutLines.every((line) => {
           try { return (JSON.parse(line) as { jsonrpc?: unknown }).jsonrpc === "2.0"; }
           catch { return false; }
         }), `non-protocol stdout: ${stdoutLines.join("\n")}`).toBe(true);
+        child.stdin.end();
+        await exit;
+        await expect.poll(() => companion.leaseStore.active().length).toBe(0);
       } finally {
         child.stdin.end();
         if (child.exitCode === null && child.signalCode === null) child.kill();

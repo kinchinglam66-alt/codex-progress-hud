@@ -1,5 +1,6 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { z } from "zod";
+import type { PassiveContent } from './passive-content.js';
 
 export const hookNames = [
   "SessionStart",
@@ -20,34 +21,47 @@ const sessionKeySchema = z.string().regex(new RegExp(`^session_${opaquePart}{20,
 const turnKeySchema = z.string().regex(new RegExp(`^turn_${opaquePart}{20,128}$`, "u"));
 
 export const hookEnvelopeSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   taskHandle: taskHandleSchema,
   eventId: eventIdSchema,
   sessionKey: sessionKeySchema,
   turnKey: turnKeySchema.optional(),
+  hostThreadId: z.string().min(1).max(256).regex(/^[^\x00-\x1f\x7f]+$/u).optional(),
   hook: z.enum(hookNames),
   source: z.enum(["startup", "resume", "clear", "compact"]).optional(),
-  receivedAt: z.number().int().nonnegative().safe()
-}).strict();
+  receivedAt: z.number().int().nonnegative().safe(),
+  content: z.object({
+    kind: z.enum(['user', 'assistant', 'tool']),
+    text: z.string().min(1).max(4096),
+    truncated: z.boolean()
+  }).strict().optional()
+}).strict().superRefine((value, context) => {
+  if (value.content === undefined) return;
+  const expected = value.hook === 'UserPromptSubmit' ? 'user'
+    : value.hook === 'Stop' ? 'assistant'
+    : value.hook === 'PostToolUse' ? 'tool' : undefined;
+  if (value.turnKey === undefined || value.content.kind !== expected) {
+    context.addIssue({code: 'custom', path: ['content'], message: 'content requires a matching scoped hook'});
+  }
+});
 
 export interface HookEnvelope {
-  schemaVersion: 1;
+  schemaVersion: 2;
   taskHandle: string;
   eventId: string;
   sessionKey: string;
   turnKey?: string;
+  /** Local Hook-to-companion metadata only; never part of progress snapshots. */
+  hostThreadId?: string;
   hook: HookName;
   source?: HookSource;
   receivedAt: number;
+  /** Private Hook-to-companion content; never include in public progress snapshots. */
+  content?: PassiveContent;
 }
 
 export interface HookResult {
   continue?: true;
-  systemMessage?: string;
-  hookSpecificOutput?: {
-    hookEventName: "SessionStart" | "UserPromptSubmit";
-    additionalContext: string;
-  };
 }
 
 export const hookInputSchema = z.object({
@@ -87,20 +101,24 @@ export function createHookEnvelope(
   const turnKey = parsed.turn_id === undefined
     ? undefined
     : opaqueKey("turn_", hmacKey, `${parsed.session_id}\u0000${parsed.turn_id}`);
-  const taskHandle = opaqueKey("hud_", hmacKey, parsed.session_id);
+  const taskHandle = opaqueKey("hud_", hmacKey, parsed.turn_id === undefined
+    ? `unscoped-session\u0000${parsed.session_id}`
+    : `turn-task\u0000${parsed.session_id}\u0000${parsed.turn_id}`);
   const eventId = opaqueKey(
     "evt_",
     hmacKey,
     [
+      "hook-event",
       parsed.session_id,
       parsed.turn_id ?? "",
       hook,
       parsed.source ?? "",
-      parsed.tool_use_id ?? ""
+      parsed.tool_use_id ?? "",
+      parsed.turn_id === undefined ? randomUUID() : ""
     ].join("\u0000")
   );
   return hookEnvelopeSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskHandle,
     eventId,
     sessionKey,
@@ -111,16 +129,8 @@ export function createHookEnvelope(
   }) as HookEnvelope;
 }
 
-export function hookResult(hook: HookName, taskHandle: string): HookResult {
-  if (hook === "Interrupt") return {};
-  const result: HookResult = { continue: true };
-  if (hook === "SessionStart" || hook === "UserPromptSubmit") {
-    result.hookSpecificOutput = {
-      hookEventName: hook,
-      additionalContext: `Use HUD task handle ${taskHandle} with Progress HUD tools for this session.`
-    };
-  }
-  return result;
+export function hookResult(hook: HookName): HookResult {
+  return hook === 'Interrupt' ? {} : {continue: true};
 }
 
 export function normalizeHookInput(
@@ -130,7 +140,7 @@ export function normalizeHookInput(
   hmacKey: string
 ): { envelope: HookEnvelope; result: HookResult } {
   const envelope = createHookEnvelope(hook, input, nowMs, hmacKey);
-  return { envelope, result: hookResult(hook, envelope.taskHandle) };
+  return { envelope, result: hookResult(hook) };
 }
 
 export function parseHookEnvelope(value: unknown): HookEnvelope {

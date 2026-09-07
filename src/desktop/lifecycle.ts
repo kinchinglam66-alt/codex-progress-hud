@@ -1,5 +1,5 @@
 import { randomUUID as nodeRandomUUID } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectEntryIntent, type DesktopLaunchReason } from "../main.js";
@@ -17,6 +17,7 @@ import {
 } from "../lifecycle/types.js";
 import { createProgressServer, type ProgressServerOptions } from "../server/http-server.js";
 import {
+  defaultCodexSessionsRoot,
   defaultInstallManifestPath,
   defaultDataDirectory,
   defaultDiagnosticsDirectory,
@@ -38,6 +39,8 @@ import {
   type BrowserWindowOptionsLike
 } from "./window-controller.js";
 import { createTaskMutationController } from "../ui/task-mutations.js";
+import { createConversationNameService } from '../server/conversation-name-service.js';
+import {loadDesktopObserverPilot} from './observer-pilot.js';
 
 export function scheduleAfterReady(
   ready: Promise<void>,
@@ -48,16 +51,19 @@ export function scheduleAfterReady(
 }
 
 export interface DesktopAppLike {
+  setPath(name: "userData", path: string): void;
   disableHardwareAcceleration(): void;
   requestSingleInstanceLock(): boolean;
   releaseSingleInstanceLock(): void;
   whenReady(): Promise<void>;
   on(event: string, callback: (...args: any[]) => unknown): unknown;
   quit(): void;
+  isReady(): boolean;
   getVersion(): string;
 }
 
 export interface DesktopWindowController {
+  updateRows?(rows: number, revision: number): void;
   create(options: { url: string; token: string }): Promise<void>;
   show(): void;
   hide(): void;
@@ -74,6 +80,7 @@ export interface DesktopProgressServer {
   store?: {
     snapshot(): {
       revision: number;
+      rows?: readonly unknown[];
       selectedTaskId: string | null;
       tasks: Array<{ id: string; title: string; status: string; lastActivityAt: number; hiddenForTask: boolean; selected?: boolean }>;
       selected?: { task: { status: string; trackingOrigin?: string; lastRuntimeEvidenceAt?: number } } | null;
@@ -81,6 +88,7 @@ export interface DesktopProgressServer {
     };
     select(taskId: string, mode: "pinned" | "follow_activity"): unknown;
     on(event: "changed", listener: (snapshot: unknown) => void): unknown;
+    off?(event: "changed", listener: (snapshot: unknown) => void): unknown;
   };
   leaseStore?: { active(): readonly unknown[] };
   hookActivity?: () => { activitySeen: boolean; lastEventAt?: number };
@@ -91,6 +99,13 @@ export interface DesktopTrayImage {
 }
 
 export interface DesktopDependencies {
+  observerWorkers?: ProgressServerOptions['observerWorkers'];
+  onObserverObservation?: ProgressServerOptions['onObserverObservation'];
+  observerSetup?: {
+    start(signal: AbortSignal): Promise<unknown>;
+    disable(): void;
+    close(): Promise<void>;
+  };
   app: DesktopAppLike;
   createWindowController(options: { quitting(): boolean; onHideSelectedTask?(taskId: string): void | Promise<void> }): DesktopWindowController;
   createTrayImage(): DesktopTrayImage;
@@ -175,12 +190,28 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     maxBytes: 1024 * 1024,
     maxFiles: 3
   });
+  const observer = await loadDesktopObserverPilot({dataDirectory,resourcesDirectory:process.resourcesPath,
+    dialog:electron.dialog,environment:process.env}).catch(()=>{
+      console.warn('OBSERVER_PILOT_SETUP_UNAVAILABLE');return null;
+    });
   return {
+    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,onObserverObservation:observer.onObservation}:{}),
     app: electron.app,
       createWindowController: ({ quitting, onHideSelectedTask }) => new WindowController({
         createWindow: (options: BrowserWindowOptionsLike) =>
           new electron.BrowserWindow(options) as unknown as BrowserWindowLike,
         quitting,
+        workAreaFor: bounds => electron.screen.getDisplayMatching(bounds).workArea,
+        watchDisplays: changed => {
+          electron.screen.on("display-metrics-changed", changed);
+          electron.screen.on("display-removed", changed);
+          electron.screen.on("display-added", changed);
+          return () => {
+            electron.screen.off("display-metrics-changed", changed);
+            electron.screen.off("display-removed", changed);
+            electron.screen.off("display-added", changed);
+          };
+        },
         ...(onHideSelectedTask === undefined ? {} : { onHideSelectedTask })
       }),
     createTrayImage: () => electron.nativeImage.createFromDataURL(TRAY_PNG_DATA_URL),
@@ -189,7 +220,12 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
       template as Electron.MenuItemConstructorOptions[]
     ),
     createTrayController,
-    createProgressServer,
+    createProgressServer: options => {
+      const names=createConversationNameService();
+      return createProgressServer({...options,
+        ...(options.observerWorkers?{observerSessionsRoot:defaultCodexSessionsRoot()}:{}),
+        readConversationName:names.read,closeConversationNames:names.close});
+    },
     stateStore,
     readToken: async (path) => (await readFile(path, "utf8")).trim(),
     randomUUID: nodeRandomUUID,
@@ -241,7 +277,16 @@ export async function runDesktop(
   launchReason: DesktopLaunchReason = { kind: "explicit" }
 ): Promise<void> {
   const resolved = dependencies ?? await defaultDesktopDependencies();
-  resolved.app.disableHardwareAcceleration();
+  if (process.env.CODEX_PROGRESS_HUD_DATA_DIR) {
+    // Electron resolves its own profile independently of APPDATA overrides.
+    // Keep isolated companions from sharing the installed app's singleton lock.
+    const userData = resolve(process.env.CODEX_PROGRESS_HUD_DATA_DIR, "electron");
+    await mkdir(userData, { recursive: true });
+    resolved.app.setPath("userData", userData);
+  }
+  // Async module loading and profile setup may finish after Electron's ready
+  // event. This optional rendering preference must never abort startup.
+  if (!resolved.app.isReady()) resolved.app.disableHardwareAcceleration();
   if (!resolved.app.requestSingleInstanceLock()) {
     resolved.app.quit();
     return;
@@ -253,6 +298,8 @@ export async function runDesktop(
   let tray: TrayLike | undefined;
   let progressServer: DesktopProgressServer | undefined;
   let windowController: DesktopWindowController | undefined;
+  let detachTaskObservation: (() => void) | undefined;
+  let taskObservationStopped = false;
   let hideSelectedTaskMutation: ((taskId: string) => Promise<void>) | undefined;
   let startupAt: Date | undefined;
   let runtimeIdentity: RuntimeIdentity | undefined;
@@ -308,7 +355,20 @@ export async function runDesktop(
     }
   };
 
+  const observerSetupAbort = new AbortController();
+  let observerSetupPending: Promise<unknown> | undefined;
   const cleanup = async (recordShutdown: boolean): Promise<void> => {
+    observerSetupAbort.abort();
+    let observerDisableFailed = false;
+    try { resolved.observerSetup?.disable(); }
+    catch {
+      observerDisableFailed = true;
+      reportError(new Error("OBSERVER_SETUP_DISABLE_FAILED"), "observer setup");
+    }
+    taskObservationStopped = true;
+    try { detachTaskObservation?.(); }
+    catch (error) { reportError(error, "desktop cleanup: task listener"); }
+    detachTaskObservation = undefined;
     const shutdownAt = resolved.now();
     if (recordShutdown) {
       record({
@@ -318,7 +378,7 @@ export async function runDesktop(
         protocolVersion: PROTOCOL_VERSION
       }, shutdownAt);
     }
-    let cleanupFailed = false;
+    let cleanupFailed = observerDisableFailed;
     let singletonReleased = false;
     try {
       // Release process ownership before the listener can become unreachable so
@@ -330,6 +390,13 @@ export async function runDesktop(
       reportError(error, "desktop cleanup: singleton release");
     }
     const steps: Array<[string, () => void | Promise<void>]> = [
+      ["observer setup close", async () => {
+        // Start close before waiting for setup: close is responsible for cancelling
+        // native prompts and owned children. Do not expose raw authentication errors.
+        try {
+          await Promise.all([resolved.observerSetup?.close(), observerSetupPending]);
+        } catch { throw new Error("OBSERVER_SETUP_CLOSE_FAILED"); }
+      }],
       // If explicit release failed, keep the listener reachable (and returning
       // SHUTTING_DOWN) until process exit releases both resources atomically.
       ...(singletonReleased
@@ -463,7 +530,10 @@ export async function runDesktop(
         });
         assertStarting();
         progressServer = resolved.createProgressServer({
+          ...(resolved.observerWorkers?{observerWorkers:resolved.observerWorkers}:{}),
+          ...(resolved.onObserverObservation?{onObserverObservation:resolved.onObserverObservation}:{}),
           port: resolved.port,
+          awaitInitialLease: launchReason.kind === "manager",
           tokenPath: resolved.tokenPath,
           uiDirectory: resolved.uiDirectory,
           health,
@@ -492,6 +562,9 @@ export async function runDesktop(
           });
         }
         await publishingWindowController.create({ url: progressServer.address().url, token });
+        if (currentSnapshot?.rows !== undefined) {
+          publishingWindowController.updateRows?.(currentSnapshot.rows.length, currentSnapshot.revision);
+        }
         assertStarting();
         let latestTaskSnapshot = currentSnapshot;
         const mutationController = taskStore === undefined || latestTaskSnapshot === undefined
@@ -533,7 +606,9 @@ export async function runDesktop(
           "ended_unknown", "completed_unverified", "succeeded_verified", "failed", "interrupted"
         ].includes(status);
         const onStoreChanged = (changed: unknown): void => {
+          if (quitting || taskObservationStopped) return;
           const snapshot = changed as ReturnType<NonNullable<DesktopProgressServer["store"]>["snapshot"]>;
+          if (snapshot.rows !== undefined) publishingWindowController.updateRows?.(snapshot.rows.length, snapshot.revision);
           if (latestTaskSnapshot === undefined || snapshot.revision >= latestTaskSnapshot.revision) {
             latestTaskSnapshot = snapshot;
           }
@@ -561,6 +636,7 @@ export async function runDesktop(
           }
         };
         taskStore?.on("changed", onStoreChanged);
+        detachTaskObservation = () => { taskStore?.off?.("changed", onStoreChanged); };
         const trayImage = resolved.createTrayImage();
         if (trayImage.isEmpty()) throw new Error("tray image is empty");
         assertStarting();
@@ -598,7 +674,6 @@ export async function runDesktop(
               errors: [...recentErrors],
               hooks: {
                 expected: true,
-                ...(hookActivity.activitySeen ? { trusted: true } : {}),
                 activitySeen: hookActivity.activitySeen,
                 ...(hookActivity.lastEventAt === undefined
                   ? {}
@@ -639,6 +714,18 @@ export async function runDesktop(
     );
     if (!readiness.accepted) {
       throw new StartupCancelledError("desktop readiness generation is no longer current");
+    }
+    // The readiness generation lease has been released. Browser login may take
+    // minutes, but must not hold that lock or delay HUD startup/disable requests.
+    if (resolved.observerSetup && !quitting && !observerSetupAbort.signal.aborted) {
+      observerSetupPending = Promise.resolve().then(() => {
+        if (quitting || observerSetupAbort.signal.aborted) return;
+        return resolved.observerSetup!.start(observerSetupAbort.signal);
+      }).catch(() => {
+        if (!observerSetupAbort.signal.aborted) {
+          reportError(new Error("OBSERVER_SETUP_FAILED"), "observer setup");
+        }
+      });
     }
   } catch (error) {
     quitting = true;

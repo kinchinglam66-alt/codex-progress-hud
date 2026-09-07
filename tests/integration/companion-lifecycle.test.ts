@@ -72,7 +72,7 @@ const authorized = (request) => request.headers.authorization === "Bearer " + to
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   if (request.method === "GET" && url.pathname === "/health") {
-    sendJson(response, 200, { service: "codex-progress-hud", protocolVersion: 1 });
+    sendJson(response, 200, { service: "codex-progress-hud", protocolVersion: 3 });
     return;
   }
   if (!authorized(request)) {
@@ -108,7 +108,7 @@ const server = createServer((request, response) => {
       service: "codex-progress-hud",
       pid: process.pid,
       version: "0.1.0-test",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: ownerNonce,
       startedAt,
       visibility
@@ -225,7 +225,7 @@ describe("source-mode companion lifecycle", () => {
     const runtime = {
       pid: process.pid,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: new Date().toISOString()
     };
@@ -288,7 +288,7 @@ describe("source-mode companion lifecycle", () => {
     const runtime = {
       pid: process.pid,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: new Date().toISOString()
     };
@@ -367,14 +367,14 @@ describe("source-mode companion lifecycle", () => {
     const oldRuntime = {
       pid: process.pid,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: "2026-09-03T00:00:00.000Z"
     };
     const replacementRuntime = {
       pid: process.pid + 1,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: "2026-09-03T00:00:01.000Z"
     };
@@ -824,7 +824,7 @@ describe("source-mode companion lifecycle", () => {
     const runtime = {
       pid: process.pid,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: new Date().toISOString()
     };
@@ -1031,7 +1031,7 @@ describe("source-mode companion lifecycle", () => {
 
     const opened = await manager.open();
     expect(opened.observedState).toBe("running");
-    expect(opened.health?.protocolVersion).toBe(1);
+    expect(opened.health?.protocolVersion).toBe(3);
     expect((await manager.hide()).observedState).toBe("hidden");
     expect((await manager.open()).observedState).toBe("running");
 
@@ -1134,7 +1134,7 @@ describe("source-mode companion lifecycle", () => {
     const runtime = {
       pid: process.pid,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: new Date().toISOString()
     };
@@ -1254,7 +1254,7 @@ describe("source-mode companion lifecycle", () => {
     const runtime = {
       pid: process.pid,
       version: "0.2.0-test",
-      protocolVersion: 1 as const,
+      protocolVersion: 3 as const,
       instanceNonce: randomUUID(),
       startedAt: new Date().toISOString()
     };
@@ -1311,8 +1311,8 @@ describe("source-mode companion lifecycle", () => {
 
       monotonicNow = 101;
       const recovered = await client.callTool({
-        name: "progress_report",
-        arguments: { task_handle: taskHandle!, phase: "recovered" }
+        name: "tracking_pause",
+        arguments: { task_handle: taskHandle! }
       });
       expect(recovered.structuredContent).toMatchObject({
         ok: true,
@@ -1322,7 +1322,7 @@ describe("source-mode companion lifecycle", () => {
       expect(replacementLease).toBeDefined();
       expect(replacementLease?.id).not.toBe(initialLease?.id);
       expect(companion.leaseStore.active()).toHaveLength(1);
-      expect((await observer.status()).selected?.task.phase).toBe("recovered");
+      expect((await observer.status()).selected?.task.status).toBe("paused");
     } finally {
       await client.close().catch(() => undefined);
     }

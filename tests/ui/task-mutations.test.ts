@@ -33,7 +33,7 @@ describe("renderer task mutations", () => {
       fetch: fetcher,
       getSnapshot: () => current,
       setSnapshot: (next) => { current = next; },
-      loadBootstrap: async () => ({ protocolVersion: 1, generation: 7 })
+      loadBootstrap: async () => ({ protocolVersion: 2, generation: 7 })
     });
 
     await controller.mutate("/api/tasks/task-b/select", { mode: "pinned" });
@@ -48,7 +48,7 @@ describe("renderer task mutations", () => {
     expect(requests.map((request) => (request.init?.headers as Record<string, string>)["x-codex-progress-hud-revision"])).toEqual(["1", "2", "2"]);
     for (const request of requests) {
       expect(request.init?.headers).toMatchObject({
-        "x-codex-progress-hud-protocol": "1",
+        "x-codex-progress-hud-protocol": "2",
         "x-codex-progress-hud-generation": "7",
       });
     }
@@ -73,7 +73,7 @@ describe("renderer task mutations", () => {
         current = next;
         if (shouldRender) rendered.push(next);
       },
-      loadBootstrap: async () => ({ protocolVersion: 1, generation: 7 })
+      loadBootstrap: async () => ({ protocolVersion: 2, generation: 7 })
     });
 
     const first = controller.mutate("/api/tasks/task-a/select", { mode: "pinned" });
@@ -96,7 +96,7 @@ describe("renderer task mutations", () => {
       fetch: fetcher,
       getSnapshot: () => current,
       setSnapshot: (next) => { current = next; },
-      loadBootstrap: async () => ({ protocolVersion: 1, generation: 7 })
+      loadBootstrap: async () => ({ protocolVersion: 2, generation: 7 })
     });
 
     await controller.mutate("/api/tasks/task-b/select", { mode: "pinned" });

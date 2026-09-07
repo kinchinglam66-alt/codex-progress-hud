@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expected = [
   ".codex-plugin/plugin.json", ".mcp.json", "hooks/hooks.json",
-  "skills/progress-reporting/SKILL.md", "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1",
+  "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1",
   "README.md", "LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md"
 ].toSorted();
 const stage = await mkdtemp(join(tmpdir(), "hud-package-contract-"));

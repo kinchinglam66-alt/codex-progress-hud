@@ -7,6 +7,7 @@ import {
 } from "../diagnostics/logger.js";
 import {
   writeDiagnosticReport,
+  renderDiagnosticReport,
   type DiagnosticReportInput
 } from "../diagnostics/report.js";
 import {
@@ -128,7 +129,8 @@ function lifecycleCode(code: ManagerErrorCode): HudErrorCode {
     code === "REVISION_REQUIRED" ||
     code === "TASK_NOT_FOUND" ||
     code === "LEASE_REQUIRED" ||
-    code === "LEASE_FORBIDDEN"
+    code === "LEASE_FORBIDDEN" ||
+    code === "EVENT_NOT_APPLIED"
   ) return "INTERNAL_ERROR";
   return code;
 }
@@ -1056,7 +1058,7 @@ export function createCompanionManager(
       activeWriteCancellations.add(cancelForClose);
       let writeSnapshot: HudLifecycleSnapshot = { observedState: "stopped" };
       try {
-        await migrateLegacyBeforeFirstWrite(deadline, controller.signal);
+        if (reason !== "connection") await migrateLegacyBeforeFirstWrite(deadline, controller.signal);
         if (abortCause !== undefined) {
           return abortCause === "close"
             ? { kind: "suppressed", code: "MANUALLY_DISABLED" }
@@ -1183,7 +1185,7 @@ export function createCompanionManager(
       const incompatibleClientSeen = snapshot.health?.capabilities?.incompatibleClientSeen
         ?? taskSnapshot?.compatibility.incompatibleClientSeen
         ?? snapshot.observedState === "incompatible";
-      return reportWriter({
+      const reportInput: DiagnosticReportInput = {
         directory: dependencies.diagnostics.directory,
         generatedAt: new Date(now()).toISOString(),
         versions: {
@@ -1210,7 +1212,6 @@ export function createCompanionManager(
         errors: [...recentErrors],
         hooks: {
           expected: true,
-          ...(hookActivity.activitySeen ? { trusted: true } : {}),
           activitySeen: hookActivity.activitySeen,
           ...(hookActivity.lastEventAt === undefined
             ? {}
@@ -1227,7 +1228,14 @@ export function createCompanionManager(
           lateAttached: selectedTask?.trackingOrigin === "late_attach"
         },
         operationalEvents: [...recentOperationalEvents]
-      });
+      };
+      // Validate and capture before async export; never expose a raw filesystem error.
+      const markdown = renderDiagnosticReport(reportInput);
+      try {
+        return await reportWriter(reportInput);
+      } catch {
+        return { exportStatus: "unavailable", markdown };
+      }
     }
   };
 }

@@ -17,6 +17,9 @@ class FakeWindow extends EventEmitter {
   });
   readonly loadURL = vi.fn(async () => undefined);
   readonly setAlwaysOnTop = vi.fn();
+  bounds = { x: 900, y: 700, width: 340, height: 146 };
+  getBounds() { return this.bounds; }
+  readonly setBounds = vi.fn((bounds: typeof this.bounds) => { this.bounds = bounds; });
   readonly webContents = {
     on: vi.fn((event: string, listener: (...args: any[]) => void) => {
       this.webContentsListeners.set(event, listener);
@@ -45,6 +48,32 @@ class FakeWindow extends EventEmitter {
 }
 
 describe("WindowController", () => {
+  it("sizes rows without showing, ignores stale updates and detaches display observation", async () => {
+    const window = new FakeWindow();
+    let displayChanged = () => {};
+    const unwatch = vi.fn();
+    const controller = new WindowController({
+      createWindow: () => window, quitting: () => false,
+      workAreaFor: () => ({ x: 0, y: 0, width: 1000, height: 800 }),
+      watchDisplays: callback => { displayChanged = callback; return unwatch; }
+    });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    controller.updateRows(32, 3);
+    expect(window.bounds.height).toBe(560);
+    controller.updateRows(0, 2);
+    expect(window.bounds.height).toBe(560);
+    controller.hide();
+    controller.updateRows(0, 4);
+    expect(window.bounds.height).toBe(82);
+    expect(window.showInactive).not.toHaveBeenCalled();
+    controller.dispose();
+    const count = window.setBounds.mock.calls.length;
+    displayChanged();
+    window.emit("ready-to-show");
+    expect(window.setBounds).toHaveBeenCalledTimes(count);
+    expect(window.showInactive).not.toHaveBeenCalled();
+    expect(unwatch).toHaveBeenCalledOnce();
+  });
   it("creates the overlay with the required Electron security and rendering options", async () => {
     const window = new FakeWindow();
     let options: BrowserWindowOptionsLike | undefined;
@@ -61,8 +90,8 @@ describe("WindowController", () => {
     expect(options).toEqual({
       width: 340,
       height: 146,
-      minWidth: 300,
-      minHeight: 130,
+      minWidth: 1,
+      minHeight: 1,
       frame: false,
       transparent: true,
       alwaysOnTop: true,
@@ -166,7 +195,7 @@ describe("WindowController", () => {
     expect(window.showInactive).not.toHaveBeenCalled();
   });
 
-  it("delegates X-hide to the revisioned visibility mutation handler", async () => {
+  it("X hides globally without mutating a selected task or reopening on activity", async () => {
     const window = new FakeWindow();
     const hideSelectedTask = vi.fn(async () => undefined);
     const controller = new WindowController({
@@ -178,7 +207,12 @@ describe("WindowController", () => {
     controller.selectTask("task-a");
 
     window.emit("close", { preventDefault: vi.fn() });
-    await vi.waitFor(() => expect(hideSelectedTask).toHaveBeenCalledWith("task-a"));
+    controller.onTaskActivity("task-b", { isNewTask: true });
+    window.emit("ready-to-show");
+    expect(hideSelectedTask).not.toHaveBeenCalled();
+    expect(window.showInactive).not.toHaveBeenCalled();
+    controller.show();
+    expect(window.showInactive).toHaveBeenCalledOnce();
   });
 
   it("shows a different new task once without stealing focus for terminal notifications", async () => {
@@ -193,7 +227,7 @@ describe("WindowController", () => {
     expect(window.showInactive).toHaveBeenCalledOnce();
   });
 
-  it("keeps a recreated hidden-current window hidden while allowing one eligible new task", async () => {
+  it("does not let a hidden selected task suppress the aggregate window", async () => {
     const firstWindow = new FakeWindow();
     const secondWindow = new FakeWindow();
     const createWindow = vi.fn()
@@ -208,8 +242,8 @@ describe("WindowController", () => {
     await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
     secondWindow.emit("ready-to-show");
 
-    expect(firstWindow.showInactive).not.toHaveBeenCalled();
-    expect(secondWindow.showInactive).not.toHaveBeenCalled();
+    expect(firstWindow.showInactive).toHaveBeenCalledOnce();
+    expect(secondWindow.showInactive).toHaveBeenCalledOnce();
 
     controller.onTaskActivity("task-b", { isNewTask: true, hiddenForTask: false });
     controller.onTaskActivity("task-b", { hiddenForTask: false });

@@ -6,7 +6,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 const files = [
   ".codex-plugin/plugin.json", ".mcp.json", "hooks/hooks.json",
-  "skills/progress-reporting/SKILL.md", "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1",
+  "scripts/codex-progress-hud-launcher.exe", "scripts/invoke-node-mode.ps1", "scripts/launch-hook.ps1", "scripts/launch-mcp.ps1",
   "README.md", "LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md"
 ].toSorted();
 const epoch = new Date(Number(process.env.SOURCE_DATE_EPOCH ?? 1_788_220_800) * 1000);

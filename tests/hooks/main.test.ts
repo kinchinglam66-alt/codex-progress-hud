@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHookClient } from "../../src/hooks/client.js";
+import { createHookClient, HookDeliveryError } from "../../src/hooks/client.js";
 import { runHookEvent } from "../../src/hooks/main.js";
 import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import { PROTOCOL_VERSION } from "../../src/lifecycle/types.js";
-import { CompanionHttpClient } from "../../src/mcp/report-client.js";
+import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 import type { HookEnvelope } from "../../src/hooks/schema.js";
 
 const secret = "protected-token-for-runtime-tests-0123456789";
@@ -98,6 +98,36 @@ function runtime(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Hook command runtime", () => {
+  it('sends filtered task text only on the private scoped envelope', async () => {
+    const fixture = runtime({stdin: Readable.from([JSON.stringify({
+      session_id: 'private-session', turn_id: 'turn-one',
+      prompt: 'Build a report password=top-secret',
+      transcript_path: 'private-transcript', tool_input: {env: 'private-env'}
+    })])});
+    await runHookEvent('UserPromptSubmit', fixture.dependencies);
+    expect(fixture.posted[0]).toHaveProperty('content', {
+      kind: 'user', text: 'Build a report password=[REDACTED]', truncated: false
+    });
+    const output = fixture.stdout.join('') + fixture.stderr.join('');
+    expect(output).not.toContain('Build a report');
+    expect(JSON.stringify(fixture.posted)).not.toMatch(/top-secret|private-transcript|private-env/);
+  });
+
+  it('does not collect task text without a turn identity', async () => {
+    const fixture = runtime({stdin: Readable.from([JSON.stringify({
+      session_id: 'private-session', prompt: 'Do not attribute this text'
+    })])});
+    await runHookEvent('UserPromptSubmit', fixture.dependencies);
+    expect(fixture.posted[0]).not.toHaveProperty('content');
+  });
+
+  it('sends a scoped local title identity without adding it to model context', async () => {
+    const fixture=runtime({stdin:Readable.from([JSON.stringify({session_id:'host-private-id',turn_id:'turn-one'})])});
+    await runHookEvent('UserPromptSubmit',fixture.dependencies);
+    expect(fixture.posted[0]?.hostThreadId).toBe('host-private-id');
+    expect(fixture.stdout.join('')).not.toContain('host-private-id');
+    expect(fixture.stderr.join('')).not.toContain('host-private-id');
+  });
   it("reads one bounded JSON value and emits exactly one JSON result", async () => {
     const fixture = runtime();
 
@@ -106,11 +136,7 @@ describe("Hook command runtime", () => {
     expect(fixture.posted).toHaveLength(1);
     expect(fixture.stdout).toHaveLength(1);
     expect(JSON.parse(fixture.stdout[0]!)).toEqual({
-      continue: true,
-      hookSpecificOutput: {
-        hookEventName: "SessionStart",
-        additionalContext: expect.stringContaining(fixture.posted[0]!.taskHandle)
-      }
+      continue: true
     });
     expect(fixture.stderr).toEqual([]);
   });
@@ -145,19 +171,55 @@ describe("Hook command runtime", () => {
     }
   });
 
-  it("fails open when the companion is offline and keeps the context result", async () => {
+  it("fails open when the companion is offline without injecting model context", async () => {
     const fixture = runtime({
       postHook: async () => { throw new Error("offline private path and prompt"); }
     });
 
     await expect(runHookEvent("SessionStart", fixture.dependencies)).resolves.toBeUndefined();
 
-    expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({
-      continue: true,
-      hookSpecificOutput: { hookEventName: "SessionStart" }
-    });
+    expect(JSON.parse(fixture.stdout[0]!)).toEqual({continue: true});
     expect(fixture.stderr.join("")).not.toContain("private path");
+    expect(fixture.stderr.join("")).toContain("delivery_unavailable");
     expect(fixture.stderr.join("").length).toBeLessThanOrEqual(2_048);
+  });
+
+  it.each([
+    ["AUTH_ERROR", "delivery_auth_error"],
+    ["OFFLINE", "delivery_offline"],
+    ["REQUEST_TIMEOUT", "delivery_timeout"],
+    ["REQUEST_CANCELLED", "delivery_cancelled"]
+  ] as const)("reports bounded %s delivery failure without error content", async (code, category) => {
+    const fixture = runtime({
+      postHook: async () => { throw new HudClientError(code, "private-prompt-and-token"); }
+    });
+    await runHookEvent("SessionStart", fixture.dependencies);
+    expect(fixture.stderr).toEqual([`Codex Progress HUD Hook skipped: ${category}\n`]);
+    expect(JSON.parse(fixture.stdout[0]!)).toEqual({continue: true});
+    expect(fixture.stderr.join("")).not.toContain("private-prompt-and-token");
+  });
+
+  it("keeps fail-open output when the diagnostic sink throws", async () => {
+    const fixture = runtime({
+      postHook: async () => { throw new Error("offline"); },
+      writeStderr: () => { throw new Error("sink unavailable"); }
+    });
+    await expect(runHookEvent("SessionStart", fixture.dependencies)).resolves.toBeUndefined();
+    expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({ continue: true });
+  });
+
+  it.each([
+    ["START_TIMEOUT", "delivery_start_timeout"],
+    ["MANUALLY_DISABLED", "delivery_disabled"],
+    ["VERSION_MISMATCH", "delivery_version_mismatch"],
+    ["PORT_CONFLICT", "delivery_port_conflict"],
+    ["private-token-as-unknown-code", "delivery_unavailable"]
+  ])("allowlists manager diagnostic %s", async (code, category) => {
+    const fixture = runtime({ postHook: async () => { throw new HookDeliveryError(code!); } });
+    await runHookEvent("SessionStart", fixture.dependencies);
+    expect(fixture.stderr).toEqual([`Codex Progress HUD Hook skipped: ${category}\n`]);
+    expect(fixture.stdout).toHaveLength(1);
+    expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({ continue: true });
   });
 
   it("aborts a hung companion operation at the hard timeout", async () => {
@@ -174,6 +236,7 @@ describe("Hook command runtime", () => {
 
     expect(Date.now() - started).toBeLessThan(500);
     expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({ continue: true });
+    expect(fixture.stderr.join("")).toContain("delivery_timeout");
     expect(fixture.stderr.join("").length).toBeLessThanOrEqual(2_048);
   });
 
@@ -190,9 +253,29 @@ describe("Hook command runtime", () => {
 });
 
 describe("Hook client", () => {
+  it.each(["START_TIMEOUT", "AUTH_ERROR", "MANUALLY_DISABLED"] as const)(
+    "does not silently treat manager %s as a delivered Hook", async (code) => {
+      const fixture = runtime();
+      await runHookEvent("SessionStart", fixture.dependencies);
+      let requested = false;
+      const client = createHookClient({
+        progressClient: {
+          status: async () => { requested = true; return { revision: 0 }; },
+          submitHook: async () => { requested = true; }
+        },
+        companionManager: {
+          executeWrite: async () => code === "MANUALLY_DISABLED"
+            ? { kind: "suppressed", code }
+            : { kind: "error", code, snapshot: { observedState: "stopped", code } }
+        }
+      });
+      await expect(client.post(fixture.posted[0]!)).rejects.toMatchObject({ code });
+      expect(requested).toBe(false);
+    }
+  );
   it("refreshes the revision once after a stale delivery", async () => {
     const envelope = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       taskHandle: "hud_abcdefghijklmnopqrstuvwxyz0123456789",
       eventId: "evt_abcdefghijklmnopqrstuvwxyz0123456789",
       sessionKey: "session_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -305,16 +388,16 @@ describe("Hook client", () => {
         hook_event_name: "Stop"
       })]),
       hmacKey: secret,
-      timeoutMs: 300,
+      // Exercise the production deadline: a 300 ms override can expire during
+      // real filesystem/health setup under parallel load, before HTTP cancellation
+      // is observable. Fast deadline behavior is covered by the unit tests.
       postHook: (envelope, options) => hookClient.post(envelope, options),
       writeStdout: (value) => stdout.push(value),
       writeStderr: () => undefined
     });
     await Promise.race([
       statusEntered,
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new Error("status request was not reached")), 1_000)
-      )
+      running.then(() => { throw new Error("Hook finished before status request was reached"); })
     ]);
 
     await running;

@@ -1,0 +1,1 @@
+{"type":"object","properties":{"lowSeconds":{"type":["number","null"],"minimum":0,"maximum":31536000},"highSeconds":{"type":["number","null"],"minimum":0,"maximum":31536000}},"required":["lowSeconds","highSeconds"],"additionalProperties":false}

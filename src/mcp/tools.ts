@@ -266,11 +266,20 @@ export function createToolHandlers({
     const execution = await executeWrite(
       "tracking_start",
       async (makeRequestOptions) => {
-        const firstSnapshot = await client.submit({
-          taskId: association.taskHandle,
-          title: title_,
-          event: { type: "tracking_started" }
-        }, makeRequestOptions());
+        let firstSnapshot: ProgressClientSnapshot;
+        try {
+          firstSnapshot = await client.submit({
+            taskId: association.taskHandle,
+            title: title_,
+            event: { type: "tracking_started" }
+          }, makeRequestOptions());
+        } catch (error) {
+          if (!(error instanceof HudClientError) || error.code !== "EVENT_NOT_APPLIED") throw error;
+          // Only an explicit handle-free start may roll over, and only after
+          // confirming that this exact association is terminal.
+          firstSnapshot = await client.status(makeRequestOptions());
+          if (!submittedTaskIsTerminal(firstSnapshot, association.taskHandle)) throw error;
+        }
         if (!submittedTaskIsTerminal(firstSnapshot, association.taskHandle)) {
           return {
             result: structuredResult(
@@ -569,6 +578,13 @@ export function createToolHandlers({
     async hudDiagnose(): Promise<ToolResult> {
       try {
         const report = await companionManager.diagnose();
+        if (!("path" in report)) {
+          return structuredResult(`HUD diagnostics available; file export unavailable.\n\n${report.markdown}`, {
+            ok: true,
+            exportStatus: report.exportStatus,
+            reportMarkdown: report.markdown
+          });
+        }
         return structuredResult(`HUD diagnostic report created: ${report.path}`, {
           ok: true,
           reportPath: report.path

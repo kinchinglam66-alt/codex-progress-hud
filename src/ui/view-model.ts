@@ -1,5 +1,61 @@
 import type { HudSnapshot } from "../server/task-store.js";
 import type { TaskStatus } from "../core/types.js";
+import type { ConversationRow } from "../server/conversation-projection.js";
+import {projectCountdown} from './countdown.js';
+import type {ObserverDiagnostics} from '../core/observer-diagnostics.js';
+
+const observerLabels:Record<ObserverDiagnostics['state'],string>={pending:'等待首次估时',history_loading:'正在加载任务历史',
+  estimating:'正在估时',insufficient_context:'依据不足，暂无法估时',call_failed:'估时调用失败',
+  setup_failed:'估时启动失败，请检查运行环境或授权',
+  rate_limited:'估时受限，等待可用额度',disabled:'估时已停用，请查看诊断',ready:'估值可用'};
+function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number){
+  const age=observer.estimateAgeSeconds===null?null:observer.estimateAgeSeconds+(Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
+  return {freshnessLabel:age===null?'':age<60?'估值刚刚更新':age<3600?`估值更新于 ${Math.floor(age/60)} 分钟前`:`估值更新于 ${Math.floor(age/3600)} 小时前`,
+    diagnosticLabel:`${observerLabels[observer.state]} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
+}
+
+export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = []) {
+  return rows.filter(row => row.goal === undefined ||
+    (row.goal.status !== 'completed' && row.goal.runtime !== 'stopped')).map(row => {
+    const view = row.goal === undefined ? buildHudView({
+      revision: 0, selectedTaskId: row.task.id, selectionMode: "follow_activity",
+      tasks: [], selected: { task: row.task, eta: row.eta },
+      compatibility: { incompatibleClientSeen: false }
+    }) : passivePresentation(row.goal, elapsedSeconds, row.observer);
+    return {
+      key: row.conversationKey, taskId: row.task.id,
+      title: row.name.value ?? "聊天名称暂不可用",
+      statusLabel: view.statusLabel, tone: view.tone,
+      progressMode: view.progressMode, progressPercent: view.progressPercent,
+      etaLabel: view.etaLabel + (row.goal?.prediction != null && updatedKeys.includes(row.conversationKey) ? ' · 已更新' : ''),
+      nameFreshness: row.name.freshness,
+      ...(row.observer?observerPresentation(row.observer,elapsedSeconds):{})
+    };
+  });
+}
+
+function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsedSeconds: number,observer?:ObserverDiagnostics):
+  Pick<HudView, 'statusLabel'|'tone'|'progressMode'|'progressPercent'|'etaLabel'> {
+  const running = goal.runtime === 'running';
+  const terminal = goal.runtime === 'interrupted' || goal.runtime === 'failed';
+  const statusLabel = goal.runtime === 'interrupted' ? '任务已中断'
+    : goal.runtime === 'failed' ? '任务失败'
+    : goal.runtime === 'paused' ? '跟踪已暂停'
+    : running ? (goal.status === 'unknown' ? '执行中 · 目标状态待判断' : '执行中')
+    : goal.status === 'waiting' ? '等待用户' : '等待中 · 目标状态待判断';
+  const delta = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
+  const countdown = projectCountdown({prediction: goal.prediction,
+    activeSeconds: goal.activeSeconds + (running ? delta : 0),
+    state: running ? 'running' : goal.runtime === 'paused' ? 'paused' : 'waiting'});
+  const etaLabel = terminal ? '工作计时已停止'
+    : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabels[observer.state]:'剩余时间未知'
+    : countdown.status === 'overdue' ? '00:00:00 · 已超出估时，等待更新'
+    : `${countdown.timeText} ${countdown.uncertaintyText}`;
+  return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',
+    progressMode: running ? 'indeterminate' : 'paused', progressPercent: null, etaLabel};
+}
+
+export type ConversationView = ReturnType<typeof buildConversationViews>[number];
 
 export type HudTone = "idle" | "active" | "waiting" | "warning" | "danger" | "success";
 export type ProgressMode = "determinate" | "indeterminate" | "paused" | "complete";
@@ -32,8 +88,9 @@ const statusPresentation: Record<TaskStatus, { label: string; tone: HudTone }> =
   stalled_suspected: { label: "疑似中断", tone: "warning" },
   disconnected_suspected: { label: "疑似断开", tone: "warning" },
   ended_unknown: { label: "已结束，结果未知", tone: "warning" },
-  completed_unverified: { label: "已结束，未验证", tone: "warning" },
-  succeeded_verified: { label: "已完成并验证", tone: "success" },
+  // Legacy storage names do not represent separate user-facing quality claims.
+  completed_unverified: { label: "已完成", tone: "success" },
+  succeeded_verified: { label: "已完成", tone: "success" },
   failed: { label: "任务失败", tone: "danger" },
   interrupted: { label: "任务已中断", tone: "danger" }
 };
@@ -59,7 +116,7 @@ function etaLabel(snapshot: HudSnapshot): string {
   ) {
     return "任务已停止计时";
   }
-  if (snapshot.selected?.eta === null || snapshot.selected === null) return "正在估算剩余时间";
+  if (snapshot.selected?.eta === null || snapshot.selected === null) return "剩余时间未知";
   return `预计还需 ${minuteLabel(snapshot.selected.eta.lowSeconds)}–${minuteLabel(
     snapshot.selected.eta.highSeconds
   )} 分钟`;
@@ -85,14 +142,26 @@ function trackingOriginLabel(snapshot: HudSnapshot): string | null {
 }
 
 function taskItems(snapshot: HudSnapshot): HudView["taskItems"] {
+  const groups = new Map([...new Set(snapshot.tasks.flatMap(task =>
+    task.conversationKey === undefined ? [] : [task.conversationKey]))].sort().map((key, index) => [key, index + 1]));
   return snapshot.tasks.map((summary) => ({
     id: summary.id,
     title: summary.title,
-    statusLabel: summary.hiddenForTask
+    statusLabel: (summary.conversationKey === undefined ? "" :
+      `对话 ${groups.get(summary.conversationKey)} · ${summary.isCurrentTurn ? "当前轮" : "历史轮"} · `) + (summary.hiddenForTask
       ? `${statusPresentation[summary.status].label}（已隐藏）`
-      : statusPresentation[summary.status].label,
+      : statusPresentation[summary.status].label),
     selected: summary.id === snapshot.selectedTaskId
   }));
+}
+
+function trackingBanner(snapshot: HudSnapshot): string | null {
+  const warnings: string[] = [];
+  if (snapshot.compatibility.incompatibleClientSeen) warnings.push("插件与伴侣版本不匹配；请同时更新两者并重启 Codex");
+  if (snapshot.turnTracking?.identityUnavailable) warnings.push("曾收到缺少可靠轮次身份的事件；这些事件未用于自动追踪");
+  if (snapshot.turnTracking?.orderingUncertain) warnings.push("轮次先后顺序未经宿主确认；当前轮按已接收提示选择");
+  if (snapshot.turnTracking?.capacityReached) warnings.push("自动追踪达到安全容量限制；需重新启动伴侣程序");
+  return warnings.length === 0 ? null : warnings.join("；");
 }
 
 export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView {
@@ -108,9 +177,7 @@ export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView
       updatedLabel: "",
       taskItems: taskItems(snapshot),
       selectedTaskId: null,
-      compatibilityBanner: snapshot.compatibility.incompatibleClientSeen
-        ? "插件与伴侣版本不匹配；请同时更新两者并重启 Codex"
-        : null,
+      compatibilityBanner: trackingBanner(snapshot),
       trackingOriginLabel: null,
       confidenceLabel: null,
       canFollowActivity: snapshot.selectionMode !== "follow_activity"
@@ -139,9 +206,7 @@ export function buildHudView(snapshot: HudSnapshot, nowMs = Date.now()): HudView
     updatedLabel: `${ageSeconds} 秒前更新`,
     taskItems: taskItems(snapshot),
     selectedTaskId: snapshot.selectedTaskId,
-    compatibilityBanner: snapshot.compatibility.incompatibleClientSeen
-      ? "插件与伴侣版本不匹配；请同时更新两者并重启 Codex"
-      : null,
+    compatibilityBanner: trackingBanner(snapshot),
     trackingOriginLabel: trackingOriginLabel(snapshot),
     confidenceLabel: confidenceLabel(snapshot),
     canFollowActivity: snapshot.selectionMode !== "follow_activity"

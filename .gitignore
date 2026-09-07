@@ -14,3 +14,12 @@ release/
 .codex-progress-hud/
 .DS_Store
 Thumbs.db
+
+# Local research, authentication and build scratch data are never release inputs.
+private-notes/
+.superpowers/
+__pycache__/
+*.py[cod]
+observer-auth/
+pilot-observations/
+observer-pilot.json

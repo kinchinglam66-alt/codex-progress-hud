@@ -1,8 +1,11 @@
 import { loadOrCreateToken } from "../server/token-store.js";
 import { defaultTokenPath } from "../server/paths.js";
 import { normalizeHookInput, type HookResult } from "./adapter.js";
-import { createDefaultHookClient, type HookEventClient } from "./client.js";
+import { createDefaultHookClient, HookDeliveryError, type HookEventClient } from "./client.js";
+import { HudClientError } from "../mcp/report-client.js";
 import type { HookEnvelope, HookName } from "./schema.js";
+import { hookInputSchema } from './schema.js';
+import { extractPassiveContent } from './passive-content.js';
 
 export const MAX_HOOK_INPUT_BYTES = 64 * 1024;
 export const MAX_HOOK_STDERR_BYTES = 2 * 1024;
@@ -95,6 +98,24 @@ function writeBoundedStderr(write: (value: string) => void, category: string): v
   try { write(value); } catch { /* diagnostics cannot affect the Hook protocol */ }
 }
 
+function deliveryFailureCategory(error: unknown): string {
+  if (error instanceof HookTimeoutError) return "delivery_timeout";
+  if (error instanceof HookDeliveryError || error instanceof HudClientError) {
+    switch (error.code) {
+      case "START_TIMEOUT": return "delivery_start_timeout";
+      case "AUTH_ERROR": return "delivery_auth_error";
+      case "OFFLINE": return "delivery_offline";
+      case "REQUEST_TIMEOUT": return "delivery_timeout";
+      case "REQUEST_CANCELLED": return "delivery_cancelled";
+      case "MANUALLY_DISABLED": return "delivery_disabled";
+      case "VERSION_MISMATCH": return "delivery_version_mismatch";
+      case "PORT_CONFLICT": return "delivery_port_conflict";
+      default: return "delivery_unavailable";
+    }
+  }
+  return "delivery_unavailable";
+}
+
 async function executeHookEvent(
   hookName: HookName,
   dependencies: HookRuntimeDependencies,
@@ -115,10 +136,16 @@ async function executeHookEvent(
     controller
   );
   const normalized = normalizeHookInput(hookName, input, (dependencies.now ?? Date.now)(), hmacKey);
+  const content = normalized.envelope.turnKey === undefined ? null : extractPassiveContent(hookName, input);
+  if (content !== null && content.text.length > 0) normalized.envelope.content = content;
+  const envelope: HookEnvelope = normalized.envelope.turnKey !== undefined &&
+    (hookName === 'UserPromptSubmit' || hookName === 'PostToolUse')
+    ? {...normalized.envelope,hostThreadId:hookInputSchema.parse(input).session_id}
+    : normalized.envelope;
   try {
     await withDeadline(
       (dependencies.postHook ?? ((envelope, options) => client.post(envelope, options)))
-        (normalized.envelope, {
+        (envelope, {
           signal: controller.signal,
           timeoutMs: Math.max(0, deadlineMs - Date.now())
         }),
@@ -126,8 +153,12 @@ async function executeHookEvent(
       controller.signal,
       controller
     );
-  } catch {
-    // Hook failures are deliberately fail-open; the normalized context remains useful.
+  } catch (error) {
+    // Delivery failures must not block execution or inject instructions into it.
+    writeBoundedStderr(
+      dependencies.writeStderr ?? ((value: string) => process.stderr.write(value)),
+      deliveryFailureCategory(error)
+    );
   }
   return normalized.result;
 }

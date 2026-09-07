@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,8 @@ import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.j
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
 import { createProgressServer } from "../../src/server/http-server.js";
 import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
+import { createDiagnosticReportWriter } from "../../src/diagnostics/report.js";
+import { nodeFileSystemOperations } from "../../src/diagnostics/safe-files.js";
 import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -29,7 +31,7 @@ const compatibleHealth: HudHealth = {
   service: "codex-progress-hud",
   pid: 4312,
   version: "0.2.0",
-  protocolVersion: 1,
+  protocolVersion: 3,
   visibility: "visible",
   instanceNonce: "owned-instance",
   startedAt: "2026-09-01T01:02:03.000Z"
@@ -77,7 +79,7 @@ async function harness(options: {
   const client = {
     identity: vi.fn(async () => {
       if (!online) throw offline();
-      return { service: "codex-progress-hud" as const, protocolVersion: 1 as const };
+      return { service: "codex-progress-hud" as const, protocolVersion: 3 as const };
     }),
     health: vi.fn(async () => {
       if (!online) throw offline();
@@ -285,6 +287,36 @@ async function guardedControlHarness(options: {
 }
 
 describe("companion lifecycle manager", () => {
+  it("keeps canonical-path rejection intact while falling back to an inline report", async () => {
+    const writer = createDiagnosticReportWriter({
+      ...nodeFileSystemOperations,
+      realpath: new Proxy(nodeFileSystemOperations.realpath, {
+        apply: async (target, receiver, args) => {
+          const actual = await Reflect.apply(target, receiver, args);
+          return String(args[0]).endsWith("diagnostics") && typeof actual === "string"
+            ? `${actual}-virtualized` : actual;
+        }
+      })
+    });
+    const fixture = await harness({ online: true, reportWriter: writer });
+    const report = await fixture.manager.diagnose();
+    expect(report).toHaveProperty("exportStatus", "unavailable");
+    expect(report).not.toHaveProperty("path");
+    expect(await readdir(join(fixture.directory, "diagnostics"))).toEqual([]);
+  });
+  it("returns sanitized inline diagnostics when file export is rejected without starting the HUD", async () => {
+    const fixture = await harness({ online: true, reportWriter: async () => {
+      throw new Error("diagnostic output requires a trusted directory path: private-path private-token");
+    } });
+    const report = await fixture.manager.diagnose();
+    expect(report).toMatchObject({ exportStatus: "unavailable" });
+    expect(report).not.toHaveProperty("path");
+    const text = (report as unknown as { markdown: string }).markdown;
+    expect(text).toContain("Companion process: online");
+    expect(text).toContain("trust not confirmed; activity seen");
+    expect(text).not.toMatch(/private-path|private-token|private title|hud_safe_task/);
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+  });
   it("does not start a process while observing status", async () => {
     const { manager, launcher } = await harness();
 
@@ -441,14 +473,14 @@ describe("companion lifecycle manager", () => {
         level: "info",
         event: "startup_requested",
         lifecycleState: "starting",
-        protocolVersion: 1
+        protocolVersion: 3
       },
       {
         at: "1970-01-01T00:00:00.000Z",
         level: "info",
         event: "startup_ready",
         lifecycleState: "running",
-        protocolVersion: 1,
+        protocolVersion: 3,
         elapsedMs: 0
       }
     ]);
@@ -498,7 +530,7 @@ describe("companion lifecycle manager", () => {
         if (clientCode !== "AUTH_ERROR") {
           throw new HudClientError(clientCode, "terminal identity failure");
         }
-        return { service: "codex-progress-hud" as const, protocolVersion: 1 as const };
+        return { service: "codex-progress-hud" as const, protocolVersion: 3 as const };
       });
       client.health.mockImplementation(async () => {
         throw new HudClientError("AUTH_ERROR", "terminal authenticated health failure");
@@ -577,7 +609,7 @@ describe("companion lifecycle manager", () => {
       level: "warn",
       event: "crash_recovery",
       lifecycleState: "crashed",
-      protocolVersion: 1
+      protocolVersion: 3
     });
   });
 
@@ -598,7 +630,7 @@ describe("companion lifecycle manager", () => {
       capabilities: {
         service: "codex-progress-hud",
         companionVersion: "0.2.0",
-        protocol: { current: 1, minimumClient: 1, maximumClient: 1 },
+        protocol: { current: 3, minimumClient: 3, maximumClient: 3 },
         incompatibleClientSeen: true
       }
     });
@@ -608,13 +640,13 @@ describe("companion lifecycle manager", () => {
     expect(reportWriter).toHaveBeenCalledWith({
       directory: fixture.directory + "\\diagnostics",
       generatedAt: "1970-01-01T00:00:00.000Z",
-      versions: { plugin: "0.2.0", mcp: "0.2.0", companion: "0.2.0", protocol: 1 },
+      versions: { plugin: "0.2.0", mcp: "0.2.0", companion: "0.2.0", protocol: 3 },
       lifecycle: { desiredState: "on", observedState: "running" },
       paths: { installManifestExists: true, dataDirectoryExists: true },
       endpoint: { host: "127.0.0.1", port: 17837 },
       runtimeAgeMs: undefined,
       errors: [{ code: "VERSION_MISMATCH", occurredAt: "1970-01-01T00:00:00.000Z" }],
-      hooks: { expected: true, trusted: true, activitySeen: true, lastEventAt: 1234 },
+      hooks: { expected: true, activitySeen: true, lastEventAt: 1234 },
       lease: { active: true, count: 1 },
       compatibility: { compatible: true, incompatibleClientSeen: true },
       tracking: { taskCount: 1, selectedStatus: "quiescent", lateAttached: true },
@@ -1453,7 +1485,7 @@ describe("companion lifecycle manager", () => {
     const successor = {
       pid: 9001,
       version: "0.2.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "successor-open",
       startedAt: "2026-09-01T01:02:03.000Z"
     };
@@ -1521,7 +1553,7 @@ describe("companion lifecycle manager", () => {
     expect(await store.readRuntime()).toEqual({
       pid: 4312,
       version: "0.2.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "owned-instance",
       startedAt: "2026-09-01T01:02:03.000Z"
     });
@@ -1560,7 +1592,7 @@ describe("companion lifecycle manager", () => {
     const successor = {
       pid: 9002,
       version: "0.2.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "successor-close",
       startedAt: "2026-09-01T01:02:03.000Z"
     };
@@ -1600,7 +1632,7 @@ describe("companion lifecycle manager", () => {
     expect(await explicitOpenStore.readRuntime()).toEqual({
       pid: 4312,
       version: "0.2.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "owned-instance",
       startedAt: "2026-09-01T01:02:03.000Z"
     });
@@ -1690,7 +1722,7 @@ describe("companion lifecycle manager", () => {
       level: "error",
       event: "shutdown_timeout",
       lifecycleState: "stopped",
-      protocolVersion: 1,
+      protocolVersion: 3,
       elapsedMs: 5000
     });
   });
@@ -1715,7 +1747,7 @@ describe("companion lifecycle manager", () => {
       level: "error",
       event,
       lifecycleState,
-      protocolVersion: 1
+      protocolVersion: 3
     });
     expect(JSON.stringify(vi.mocked(logger.write).mock.calls)).not.toContain("Bearer secret");
   });
@@ -1730,6 +1762,7 @@ describe("companion lifecycle manager", () => {
 
   it("bounds a matching owned HUD terminate call with the same shutdown deadline", async () => {
     const fixture = await harness({ shutdownStops: false });
+    let clock = 0;
     let terminateStarted = false;
     const terminate = vi.fn(() => {
       terminateStarted = true;
@@ -1745,6 +1778,10 @@ describe("companion lifecycle manager", () => {
       client: fixture.client,
       launcher: fixture.launcher,
       shutdownTimeoutMs: 90,
+      // Advance the lifecycle clock at its polling boundary. Real fixture IO
+      // must not consume this unit test's entire budget before terminate begins.
+      now: () => clock,
+      sleep: async milliseconds => { clock += milliseconds; },
       logger,
       diagnostics: {
         directory: join(fixture.directory, "diagnostics-terminate-timeout"),

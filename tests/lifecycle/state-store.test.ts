@@ -52,6 +52,20 @@ function deferred() {
 
 const realFileSystem = { link, lstat, mkdir, readFile, rename, unlink, writeFile };
 
+it("reads and conditionally clears a protocol-1 runtime after upgrading without permitting legacy writes", async () => {
+  const paths = testPaths();
+  const legacy = { pid: 12345, version: "0.2.1", protocolVersion: 1,
+    instanceNonce: "legacy-fixture", startedAt: "2026-09-05T06:26:22.199Z" };
+  await writeFile(paths.runtimePath, JSON.stringify(legacy));
+  const store = createLifecycleStateStore(paths);
+  await expect(store.readRuntime()).resolves.toEqual(legacy);
+  await expect(store.writeRuntime(legacy)).rejects.toThrow();
+  await store.clearRuntime({ ...legacy, instanceNonce: "different-owner" });
+  await expect(store.readRuntime()).resolves.toEqual(legacy);
+  await store.clearRuntime(legacy);
+  await expect(store.readRuntime()).resolves.toBeNull();
+});
+
 function storeWithFileSystem(
   overrides: Partial<typeof realFileSystem>
 ) {
@@ -59,6 +73,20 @@ function storeWithFileSystem(
     fileSystem: { ...realFileSystem, ...overrides }
   });
 }
+
+it("keeps generation and identity fences when clearing a legacy runtime", async () => {
+  const paths = testPaths();
+  const legacy = { pid: 12345, version: "0.2.1", protocolVersion: 1,
+    instanceNonce: "legacy-generation-fixture", startedAt: "2026-09-05T06:26:22.199Z" };
+  await writeFile(paths.runtimePath, JSON.stringify(legacy));
+  await writeFile(paths.settingsPath, JSON.stringify({ desiredState: "off", generation: 4, startWithWindows: false }));
+  const store = createLifecycleStateStore(paths);
+  await expect(store.clearRuntimeIfGeneration(3, legacy)).resolves.toBe(false);
+  await expect(store.clearRuntimeIfGeneration(4, { ...legacy, instanceNonce: "other" })).resolves.toBe(false);
+  await expect(store.readRuntime()).resolves.toEqual(legacy);
+  await expect(store.clearRuntimeIfGeneration(4, legacy)).resolves.toBe(true);
+  await expect(store.readRuntime()).resolves.toBeNull();
+});
 
 describe("lifecycle state paths", () => {
   it("places lifecycle files and directories under the configured data directory", () => {
@@ -393,7 +421,7 @@ describe("lifecycle state store", () => {
     const successorRuntime = {
       pid: 9002,
       version: "0.2.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "successor-release",
       startedAt: "2026-09-01T01:02:03.000Z"
     };
@@ -420,7 +448,7 @@ describe("lifecycle state store", () => {
       const originalRuntime = {
         pid: 4312,
         version: "0.1.0",
-        protocolVersion: 1,
+        protocolVersion: 3,
         instanceNonce: "runtime-to-clear",
         startedAt: "2026-09-01T01:02:03.000Z"
       };
@@ -611,7 +639,7 @@ describe("lifecycle state store", () => {
     const identity = {
       pid: 4312,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "nonce-123",
       startedAt: "2026-09-01T01:02:03.000Z"
     };
@@ -627,7 +655,7 @@ describe("lifecycle state store", () => {
     const identity = {
       pid: 4312,
       version: "0.2.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "same-process",
       startedAt: "2026-09-01T01:02:03.000Z"
     };
@@ -660,7 +688,7 @@ describe("lifecycle state store", () => {
     const identity = {
       pid: 4312,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "nonce-123",
       startedAt: "2026-02-31T01:02:03.000Z"
     };
@@ -676,7 +704,7 @@ describe("lifecycle state store", () => {
     const identity = {
       pid: 4312,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "nonce-123",
       startedAt: "2028-02-29T01:02:03.000Z"
     };
@@ -690,7 +718,7 @@ describe("lifecycle state store", () => {
     const firstIdentity = {
       pid: 4312,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "first-write",
       startedAt: "2026-09-01T01:02:03.000Z"
     };
@@ -751,12 +779,12 @@ describe("lifecycle state store", () => {
   it.each([
     ["settings extra key", "settingsPath", { startWithWindows: false, extra: true }, "readSettings"],
     ["settings negative generation", "settingsPath", { startWithWindows: false, generation: -1 }, "readSettings"],
-    ["runtime fractional pid", "runtimePath", { pid: 1.5, version: "0.2.0", protocolVersion: 1, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
-    ["runtime empty version", "runtimePath", { pid: 1, version: "", protocolVersion: 1, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
-    ["runtime wrong protocol", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 2, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
-    ["runtime empty nonce", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 1, instanceNonce: "", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
-    ["runtime invalid timestamp", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 1, instanceNonce: "nonce", startedAt: "not-a-date" }, "readRuntime"],
-    ["runtime extra key", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 1, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z", extra: true }, "readRuntime"],
+    ["runtime fractional pid", "runtimePath", { pid: 1.5, version: "0.2.0", protocolVersion: 3, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
+    ["runtime empty version", "runtimePath", { pid: 1, version: "", protocolVersion: 3, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
+    ["runtime wrong protocol", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 99, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
+    ["runtime empty nonce", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 3, instanceNonce: "", startedAt: "2026-09-01T01:02:03.000Z" }, "readRuntime"],
+    ["runtime invalid timestamp", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 3, instanceNonce: "nonce", startedAt: "not-a-date" }, "readRuntime"],
+    ["runtime extra key", "runtimePath", { pid: 1, version: "0.2.0", protocolVersion: 3, instanceNonce: "nonce", startedAt: "2026-09-01T01:02:03.000Z", extra: true }, "readRuntime"],
     ["manifest relative executable", "installManifestPath", { executablePath: "hud.exe", installDirectory: "C:\\HUD", version: "0.2.0" }, "readInstallManifest"],
     ["manifest relative directory", "installManifestPath", { executablePath: "C:\\HUD\\hud.exe", installDirectory: "HUD", version: "0.2.0" }, "readInstallManifest"],
     ["manifest empty version", "installManifestPath", { executablePath: "C:\\HUD\\hud.exe", installDirectory: "C:\\HUD", version: "" }, "readInstallManifest"],
@@ -812,7 +840,7 @@ describe("lifecycle state store", () => {
     await store.writeRuntime({
       pid: 4312,
       version: "0.1.0",
-      protocolVersion: 1,
+      protocolVersion: 3,
       instanceNonce: "nonce-123",
       startedAt: "2026-09-01T01:02:03.000Z"
     });

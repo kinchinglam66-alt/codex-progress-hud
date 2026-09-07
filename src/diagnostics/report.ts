@@ -194,17 +194,7 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
   };
 }
 
-async function writeDiagnosticReportWithFileSystem(
-  input: DiagnosticReportInput,
-  fileSystem: FileSystemOperations
-): Promise<{ path: string }> {
-  const directory = input.directory;
-  if (typeof directory !== "string" || directory.length === 0) {
-    throw new TypeError("directory must be a non-empty path");
-  }
-  const snapshot = snapshotInput(input);
-  const trustedDirectory = await ensureTrustedDirectory(directory, fileSystem);
-  const filename = `codex-progress-hud-${snapshot.generatedAt.replace(/[:.]/g, "-")}.md`;
+function formatSnapshot(snapshot: Omit<DiagnosticReportInput, "directory">): string {
   const errors = snapshot.errors.length === 0
     ? "- None"
     : snapshot.errors.map((error) => line("Code", error.code)).join("\n");
@@ -214,9 +204,9 @@ async function writeDiagnosticReportWithFileSystem(
     : !snapshot.hooks.expected
       ? "not expected by this plugin build"
       : snapshot.hooks.trusted === false
-        ? "not trusted; no activity"
+        ? `not trusted; ${snapshot.hooks.activitySeen ? "activity seen" : "no activity"}`
         : snapshot.hooks.trusted === undefined
-          ? "expected; trust not confirmed; no activity"
+          ? `expected; trust not confirmed; ${snapshot.hooks.activitySeen ? "activity seen" : "no activity"}`
         : !snapshot.hooks.activitySeen ? "trusted; no activity" : "trusted; activity seen";
   const leaseConclusion = snapshot.lease === undefined
     ? "not reported" : snapshot.lease.active ? `connected (${snapshot.lease.count})` : "disconnected";
@@ -289,6 +279,26 @@ async function writeDiagnosticReportWithFileSystem(
     "```",
     ""
   ].join("\n");
+  return markdown;
+}
+
+/** The same allowlisted report is available without filesystem access. */
+export function renderDiagnosticReport(input: DiagnosticReportInput): string {
+  return formatSnapshot(snapshotInput(input));
+}
+
+async function writeDiagnosticReportWithFileSystem(
+  input: DiagnosticReportInput,
+  fileSystem: FileSystemOperations
+): Promise<{ path: string }> {
+  const directory = input.directory;
+  if (typeof directory !== "string" || directory.length === 0) {
+    throw new TypeError("directory must be a non-empty path");
+  }
+  const snapshot = snapshotInput(input);
+  const markdown = formatSnapshot(snapshot);
+  const trustedDirectory = await ensureTrustedDirectory(directory, fileSystem);
+  const filename = `codex-progress-hud-${snapshot.generatedAt.replace(/[:.]/g, "-")}.md`;
   for (let suffix = 0; suffix < 100; suffix += 1) {
     const candidate = join(
       trustedDirectory.path,

@@ -10,14 +10,16 @@ export interface ReleaseCapabilities {
 export const RELEASE_CAPABILITIES: ReleaseCapabilities = {
   "product": "codex-progress-hud",
   "protocol": {
-    "current": 1,
-    "minimumClient": 1,
-    "maximumClient": 1
+    "current": 3,
+    "minimumClient": 3,
+    "maximumClient": 3
   },
   "features": [
-    "progress-reporting",
+    "passive-observation",
+    "lease-local-revisions",
     "tracking",
-    "companion-lifecycle"
+    "companion-lifecycle",
+    "turn-scoped-tracking"
   ],
   "buildVersion": "0.2.1"
 } as const;

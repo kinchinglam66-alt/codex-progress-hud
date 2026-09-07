@@ -134,3 +134,29 @@ footer {
 }
 
 #updated { flex: none; }
+
+#hud { display: flex; flex-direction: column; }
+#hud > header { display: flex; flex: none; }
+#hide-window { margin-left: auto; color: #b8b5c6; background: transparent; border: 0; font-size: 19px; cursor: pointer; -webkit-app-region: no-drag; }
+#tasks { overflow-y: auto; min-height: 0; flex: 1; -webkit-app-region: no-drag; scrollbar-width: thin; }
+.conversation-row { --accent: #8b7cff; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+.conversation-row:last-child { border-bottom: 0; }
+.conversation-row[data-tone="waiting"] { --accent: #f0b44c; }
+.conversation-row[data-tone="warning"] { --accent: #ff8a55; }
+.conversation-row[data-tone="danger"] { --accent: #ff6078; }
+.conversation-title { margin: 0; font-size: 13px; font-weight: 620; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.conversation-status { display: block; color: var(--accent); font-size: 11px; margin-top: 3px; }
+.conversation-row .progress-row { margin-top: 6px; }
+.conversation-row .eta { margin-top: 5px; font-size: 12px; font-weight: 500; }
+.progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .4s; }
+.progress[data-mode="indeterminate"] .progress-fill { animation: drift 1.7s ease-in-out infinite alternate; }
+.progress[data-mode="paused"] .progress-fill { opacity: .55; }
+#empty { font-size: 11px; color: #aaa6b9; margin: 9px 0; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .progress .progress-fill { animation: none; transition: none; }
+}
+/* Diagnostics remain collapsed and keyed, so countdown updates preserve user choice. */
+.estimate-freshness, .observer-diagnostics { font-size: 12px; color: #aaa6bb; margin: 4px 0; }
+.observer-diagnostics summary { cursor: pointer; }
+.observer-diagnostics p { overflow-wrap: anywhere; margin: 6px 0; }

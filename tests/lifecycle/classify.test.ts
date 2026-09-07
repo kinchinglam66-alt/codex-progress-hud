@@ -6,7 +6,7 @@ const compatibleHealth: HudHealth = {
   service: "codex-progress-hud",
   pid: 4312,
   version: "0.1.0",
-  protocolVersion: 1,
+  protocolVersion: 3,
   visibility: "visible",
   instanceNonce: "nonce-123",
   startedAt: "2026-09-01T01:02:03.000Z"
@@ -18,7 +18,7 @@ describe("lifecycle classification", () => {
       {
         desiredState: "off",
         starting: true,
-        identity: { service: "other", protocolVersion: 2 },
+        identity: { service: "other", protocolVersion: 99 },
         hadHealthyRuntime: true
       },
       "stopped"
@@ -27,7 +27,7 @@ describe("lifecycle classification", () => {
       {
         desiredState: "on",
         starting: true,
-        identity: { service: "other", protocolVersion: 2 },
+        identity: { service: "other", protocolVersion: 99 },
         hadHealthyRuntime: true
       },
       "starting"
@@ -36,7 +36,7 @@ describe("lifecycle classification", () => {
       {
         desiredState: "on",
         starting: false,
-        identity: { service: "other", protocolVersion: 1 },
+        identity: { service: "other", protocolVersion: 3 },
         hadHealthyRuntime: false
       },
       "port_conflict"
@@ -45,7 +45,7 @@ describe("lifecycle classification", () => {
       {
         desiredState: "on",
         starting: false,
-        identity: { service: "codex-progress-hud", protocolVersion: 2 },
+        identity: { service: "codex-progress-hud", protocolVersion: 99 },
         hadHealthyRuntime: false
       },
       "incompatible"
@@ -93,7 +93,7 @@ describe("lifecycle classification", () => {
       {
         desiredState: "on",
         starting: false,
-        identity: { service: "other", protocolVersion: 2 },
+        identity: { service: "other", protocolVersion: 99 },
         health: compatibleHealth,
         hadHealthyRuntime: true
       },
@@ -103,7 +103,7 @@ describe("lifecycle classification", () => {
       {
         desiredState: "on",
         starting: false,
-        identity: { service: "codex-progress-hud", protocolVersion: 2 },
+        identity: { service: "codex-progress-hud", protocolVersion: 99 },
         health: compatibleHealth,
         hadHealthyRuntime: true
       },

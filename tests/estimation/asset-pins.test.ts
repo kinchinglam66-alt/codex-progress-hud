@@ -1,0 +1,28 @@
+import { createHash } from "node:crypto";
+import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { expect, it } from "vitest";
+import { estimatorAssetPins, observerAssetPins } from "../../src/estimation/asset-pins.js";
+it("the real build copy preserves numeric and observer pinned asset byte sequences",async()=>{
+  const root=await mkdtemp(join(tmpdir(),"hud-asset-copy-"));
+  try {
+    for(const file of ["src/ui/index.html","src/ui/styles.css","hooks/hooks.json","scripts/launch-hook.ps1"]) {
+      await mkdir(dirname(join(root,file)),{recursive:true});await writeFile(join(root,file),"fixture");
+    }
+    await cp(resolve("src/estimation/assets"),join(root,"src/estimation/assets"),{recursive:true});
+    await promisify(execFile)(process.execPath,[resolve("scripts/copy-assets.mjs")],{cwd:root,windowsHide:true});
+    expect((await readdir(join(root,"dist/estimation/assets"))).sort()).toEqual(["estimate.schema.json","instructions.md","observer-instructions.md","observer.schema.json"]);
+    for(const [file,pin] of Object.entries({...estimatorAssetPins,...observerAssetPins})) {
+      const source=await readFile(resolve("src/estimation/assets",file));
+      const built=await readFile(join(root,"dist/estimation/assets",file));
+      expect(built.equals(source)).toBe(true);
+      expect(createHash("sha256").update(built).digest("hex")).toBe(pin);
+    }
+    await writeFile(join(root,"dist/estimation/assets/stale.txt"),"preserve evidence");
+    await expect(promisify(execFile)(process.execPath,[resolve("scripts/copy-assets.mjs")],{cwd:root,windowsHide:true})).rejects.toThrow();
+    expect(await readFile(join(root,"dist/estimation/assets/stale.txt"),"utf8")).toBe("preserve evidence");
+  } finally {await rm(root,{recursive:true,force:true});}
+});

@@ -56,6 +56,11 @@ const runtimeIdentitySchema = z.object({
   instanceNonce: boundedText,
   startedAt: canonicalTimestamp
 }).strict();
+// Persisted identity is observation/cleanup evidence, not authorization to
+// communicate with an old service. Live HTTP protocol checks remain strict.
+const persistedRuntimeIdentitySchema = runtimeIdentitySchema.extend({
+  protocolVersion: z.union([z.literal(1), z.literal(PROTOCOL_VERSION)])
+});
 const installManifestSchema = z.object({
   executablePath: absolutePath,
   installDirectory: absolutePath,
@@ -264,11 +269,11 @@ export function createLifecycleStateStore(
     }),
     readRuntime: (options) => locked(
       options,
-      async () => readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema, fileSystem)
+      async () => readJsonUnlocked(paths.runtimePath, persistedRuntimeIdentitySchema, fileSystem)
     ),
     clearRuntime: (expected, options) => locked(options, async (signal, enterMutation) => {
       if (expected !== undefined) {
-        const current = await readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema, fileSystem);
+        const current = await readJsonUnlocked(paths.runtimePath, persistedRuntimeIdentitySchema, fileSystem);
         if (
           current === null ||
           current.pid !== expected.pid ||
@@ -282,7 +287,7 @@ export function createLifecycleStateStore(
       async (signal, enterMutation) => {
         const settings = await readSettingsUnlocked();
         if (settings.desiredState !== "off" || settings.generation !== generation) return false;
-        const current = await readJsonUnlocked(paths.runtimePath, runtimeIdentitySchema, fileSystem);
+        const current = await readJsonUnlocked(paths.runtimePath, persistedRuntimeIdentitySchema, fileSystem);
         if (current === null) return true;
         if (expected === null || !runtimeIdentityMatches(current, expected)) return false;
         await clearUnlocked(paths.runtimePath, signal, enterMutation, fileSystem);

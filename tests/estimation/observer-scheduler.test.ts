@@ -1,0 +1,510 @@
+import {expect, it} from 'vitest';
+import {createDesktopObserverRuntime} from '../../src/desktop/observer-runtime.js';
+import {ObserverScheduler, type ObserverWorker, type ObserverObservation} from '../../src/estimation/observer-scheduler.js';
+import {PassiveGoals} from '../../src/server/passive-goals.js';
+import {PassiveContextStore} from '../../src/server/passive-context-store.js';
+import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
+import type {ObserverSubscriptionResult} from '../../src/estimation/subscription-session.js';
+
+const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('surfaces desktop startup failure without opening accounting or dispatching inference',async()=>{
+  const f=fixture(),key=f.hook('UserPromptSubmit');let now=0,contacts=0;
+  const runtime=createDesktopObserverRuntime({
+    identity:{inspect:async()=>{throw Error('runtime preflight failed');},
+      prepareEstimate:async()=>{contacts++;throw Error('must not infer');},disable(){},async close(){}},
+    openAccounting:async()=>{contacts++;throw Error('must not open ledger');},
+    dialog:{showMessageBox:async()=>{contacts++;return {response:0};}}
+  });
+  const scheduler=new ObserverScheduler({goals:f.goals,contexts:f.contexts,workers:runtime.workers,now:()=>now});
+  try {
+    scheduler.changed(key,'prompt');await runtime.start(new AbortController().signal);
+    now=15000;scheduler.tick();
+    expect(scheduler.diagnostics(key).state).toBe('setup_failed');
+    expect(contacts).toBe(0);
+  }finally{await scheduler.close();await runtime.close();await f.scheduler.close();}
+});
+const result = (relation: 'replace'|'continue' = 'replace'): ObserverSubscriptionResult => ({status: 'interpreted',
+  interpretation: {relation, status: 'running', summary: 'current goal', estimate: {remainingSeconds: 600, errorPercent: 30}}, usage});
+const unknownUsageResult = (): ObserverSubscriptionResult => ({...result(),usage:null,
+  outcomes:{prediction:'numeric',call:'success',usage:'unknown',framingValid:true,closureConfirmed:true,dispatch:'started'}});
+const transientResult=():ObserverSubscriptionResult=>({status:'process_error',interpretation:null,usage:null,
+  outcomes:{prediction:'invalid',call:'failed',usage:'unknown',framingValid:false,closureConfirmed:true,dispatch:'not_started',retryable:'pre_dispatch_transient'}});
+const cancelledBeforeDispatch=():ObserverSubscriptionResult=>({status:'aborted',interpretation:null,usage:null,
+  outcomes:{prediction:'invalid',call:'cancelled',usage:'not_dispatched',framingValid:false,closureConfirmed:true,dispatch:'not_started'}});
+it('counts estimate freshness from its input snapshot rather than hiding provider latency',async()=>{
+  const f=fixture();const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(45000);f.calls[0]!.finish(result());await f.flush();
+  expect(f.scheduler.diagnostics(key).estimateAgeSeconds).toBe(30);
+  await f.scheduler.close();
+});
+function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void) {
+  let now = 0, id = 0;
+  const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts);
+  const calls: Array<{signal: AbortSignal; key: string; input: unknown; finish(value: ObserverSubscriptionResult, closed?: boolean): void}> = [];
+  const workers: ObserverWorker[] = Array.from({length: workerCount}, () => {
+    let active = false, disabled = false;
+    return {observe: (input, signal, key) => {active = true; return new Promise(resolve => {
+      calls.push({signal, key, input, finish(value, closed = true) {active = !closed; resolve(value);}});
+    });}, disable() {disabled = true;}, async close() {disabled = true;},
+      status: () => ({active, disabled, poisoned: false})};
+  });
+  const scheduler = new ObserverScheduler({contexts, goals, workers, now: () => now, closeTimeoutMs,...(onObservation?{onObservation}:{})});
+  const hook = (name: HookName, session = 'one', turn = 'first') => {
+    const envelope = normalizeHookInput(name, {session_id: session, turn_id: turn, tool_use_id: String(++id)}, now,
+      'protected-observer-scheduler-test-token-123456789').envelope;
+    const kind = name === 'UserPromptSubmit' ? 'user' : name === 'Stop' ? 'assistant' : 'tool';
+    if (name !== 'Interrupt') envelope.content = {kind, text: 'task data', truncated: false};
+    goals.observe(envelope, true, now); contexts.ingest(envelope, now);
+    scheduler.changed(envelope.sessionKey, name === 'UserPromptSubmit' ? 'prompt' : name === 'Stop' ? 'final' : 'activity');
+    return envelope.sessionKey;
+  };
+  const time = (value: number) => {now = value;};
+  const flush = async () => {await Promise.resolve(); await Promise.resolve();};
+  return {scheduler, goals, contexts, calls, hook, time, flush};
+}
+
+function selectedSourceFixture(workerCount = 1) {
+  let now = 0, id = 0, revision = 1, currentActionId: string|null = 'action', finalAvailable = false;
+  const contexts = new PassiveContextStore();
+  const source = {
+    epoch: () => 0,
+    read: (_key: string, _turnKey: string, query: {activeSeconds: number; runtime: 'running'|'waiting'|'paused'}) => ({
+      epoch: 0, revision, currentActionId, finalAvailable,
+      input: {goalSummary: null, activeSeconds: query.activeSeconds, runtime: query.runtime,
+        messages: [{kind: 'user' as const, text: 'source task', truncated: false}], truncated: false}
+    })
+  };
+  const goals = new PassiveGoals(contexts, source);
+  const calls: Array<{signal: AbortSignal; key: string; finish(value: ObserverSubscriptionResult): void}> = [];
+  const workers: ObserverWorker[] = Array.from({length: workerCount}, () => {
+    let active = false, disabled = false;
+    return {observe: (_input, signal, key) => {active = true; return new Promise(resolve => {
+      calls.push({signal, key, finish(value) {active = false; resolve(value);}});
+    });}, disable() {disabled = true;}, async close() {disabled = true;},
+      status: () => ({active, disabled, poisoned: false})};
+  });
+  const scheduler = new ObserverScheduler({contexts, goals, workers, now: () => now});
+  const hook = (session = 'one', turn = 'first') => {
+    const envelope = normalizeHookInput('UserPromptSubmit',
+      {session_id: session, turn_id: turn, tool_use_id: String(++id)}, now,
+      'protected-observer-scheduler-test-token-123456789').envelope;
+    goals.observe(envelope, true, now);
+    scheduler.changed(envelope.sessionKey, 'prompt');
+    return envelope.sessionKey;
+  };
+  const stop = (session = 'one', turn = 'first') => {
+    const envelope = normalizeHookInput('Stop',
+      {session_id: session, turn_id: turn, tool_use_id: String(++id)}, now,
+      'protected-observer-scheduler-test-token-123456789').envelope;
+    envelope.content = {kind: 'assistant', text: 'final status', truncated: false};
+    goals.observe(envelope, true, now);
+    scheduler.changed(envelope.sessionKey, 'final');
+    return envelope.sessionKey;
+  };
+  return {
+    scheduler, goals, calls, hook, stop,
+    time: (value: number) => {now = value;},
+    flush: async () => {await Promise.resolve(); await Promise.resolve();},
+    setSource: (nextRevision: number, nextActionId: string|null = currentActionId, nextFinalAvailable = finalAvailable) => {
+      revision = nextRevision; currentActionId = nextActionId; finalAvailable = nextFinalAvailable;
+    }
+  };
+}
+
+it('retries a proven transient once after cooldown, not repeatedly on identical input',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish(transientResult());await f.flush();
+  expect(f.scheduler.stats().disabled).toBe(false);
+  expect(f.scheduler.diagnostics(f.calls[0]!.key)).toMatchObject({state:'call_failed',retryPending:true,callsLastHour:1});
+  f.time(74999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(75000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(transientResult());await f.flush();
+  f.time(900000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  await f.scheduler.close();
+});
+it('allows another conversation to estimate after one reservation is cancelled before dispatch',async()=>{
+  const f=fixture(1),first=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.scheduler.end(first);f.calls[0]!.finish(cancelledBeforeDispatch());await f.flush();
+  expect(f.scheduler.stats().disabled).toBe(false);
+  expect(f.goals.view(first,15000)?.prediction).toBeNull();
+  const second=f.hook('UserPromptSubmit','two');f.time(30000);f.scheduler.tick();
+  expect(f.calls).toHaveLength(2);f.calls[1]!.finish(result());await f.flush();
+  expect(f.goals.view(second,30000)?.prediction?.remainingSeconds).toBe(600);
+  await f.scheduler.close();
+});
+it.each(['closure','dispatch','usage','call','status'])('keeps unknown-spend stop when cancellation lacks %s proof',async missing=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  const value=cancelledBeforeDispatch();
+  if(missing==='closure')value.outcomes!.closureConfirmed=false;
+  if(missing==='dispatch')value.outcomes!.dispatch='unknown';
+  if(missing==='usage')value.outcomes!.usage='unknown';
+  if(missing==='call')value.outcomes!.call='failed';
+  if(missing==='status')value.status='process_error';
+  f.calls[0]!.finish(value);await f.flush();expect(f.scheduler.stats().disabled).toBe(true);
+  await f.scheduler.close();
+});
+
+it('projects distinct estimation states and accepted prediction age without task text',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');
+  expect(f.scheduler.diagnostics(key)).toMatchObject({state:'pending',estimateAgeSeconds:null});
+  f.time(15000);f.scheduler.tick();expect(f.scheduler.diagnostics(key).state).toBe('estimating');
+  f.calls[0]!.finish(result());await f.flush();f.time(18000);
+  expect(f.scheduler.diagnostics(key)).toMatchObject({state:'ready',estimateAgeSeconds:3,callsLastHour:1});
+  f.hook('UserPromptSubmit','one','second');expect(f.scheduler.diagnostics(key).estimateAgeSeconds).toBeNull();
+  await f.scheduler.close();
+});
+
+it('does not retry a proven transient when its goal was cancelled',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.scheduler.end(key);f.calls[0]!.finish(transientResult());await f.flush();
+  f.time(900000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  await f.scheduler.close();
+});
+
+it('displays a proven current answer with unknown usage but disables further calls globally',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish(unknownUsageResult());await f.flush();
+  expect(f.goals.view(key,15000)?.prediction?.remainingSeconds).toBe(600);
+  expect(f.scheduler.stats().disabled).toBe(true);
+  f.time(90000);f.hook('UserPromptSubmit','two');f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  await f.scheduler.close();
+});
+
+it.each(['end','disable'])('does not display unknown-usage results after external %s',async action=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  if(action==='disable')f.scheduler.disable();else f.scheduler.end(key);
+  f.calls[0]!.finish(unknownUsageResult());await f.flush();
+  expect(f.goals.view(key,15000)?.prediction).toBeNull();
+  await f.scheduler.close();
+});
+
+it.each(['framing','closure','call','dispatch'])('rejects unknown usage without valid %s proof',async missing=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  const response=unknownUsageResult();
+  if(missing==='framing')response.outcomes!.framingValid=false;
+  if(missing==='closure')response.outcomes!.closureConfirmed=false;
+  if(missing==='call')response.outcomes!.call='failed';
+  if(missing==='dispatch')response.outcomes!.dispatch='unknown';
+  f.calls[0]!.finish(response);await f.flush();
+  expect(f.goals.view(key,15000)?.prediction).toBeNull();expect(f.scheduler.stats().disabled).toBe(true);
+  await f.scheduler.close();
+});
+
+it('records prediction prefixes separately from delivery without raw context or summaries',async()=>{
+  const records:ObserverObservation[]=[];
+  const f=fixture(1,6000,value=>records.push(value));
+  f.hook('UserPromptSubmit');f.hook('PostToolUse');f.time(15000);f.scheduler.tick();
+  f.time(18000);f.calls[0]!.finish({...result('replace'),timings:{preparationMs:100,providerMs:2000,settlementMs:20,deliveryMs:5,totalMs:2125}});await f.flush();
+  expect(records.find(value=>value.kind==='request')).toMatchObject({at:15000,activeSeconds:15,requestId:1});
+  expect(records.find(value=>value.kind==='result')).toMatchObject({at:18000,requestedAt:15000,observedActiveSeconds:15,
+    activeSeconds:18,accepted:true,estimate:{remainingSeconds:600,errorPercent:30},usage,requestId:1,
+    timings:{preparationMs:100,providerMs:2000,settlementMs:20,deliveryMs:5,totalMs:2125}});
+  expect(JSON.stringify(records)).not.toContain('task data');
+  expect(JSON.stringify(records)).not.toContain('current goal');
+  await f.scheduler.close();
+});
+
+it('supports 25 hours of progressing work without wall-time sleeps or extra unchanged calls',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.hook('PostToolUse');
+  for(let hour=0;hour<25;hour++){
+    f.time(hour*3600000+15000);
+    if(hour)f.hook('PostToolUse');
+    f.scheduler.tick();
+    expect(f.calls).toHaveLength(hour+1);
+    const response=result(hour?'continue':'replace');
+    response.interpretation!.estimate={remainingSeconds:(25-hour)*3600,errorPercent:50};
+    f.calls[hour]!.finish(response);await f.flush();
+    f.scheduler.tick();expect(f.calls).toHaveLength(hour+1);
+  }
+  expect(f.goals.view(key,24*3600000+15000)?.activeSeconds).toBe(86415);
+  expect(f.scheduler.stats().disabled).toBe(false);
+  await f.scheduler.close();
+});
+
+it.each(['session-end','server-close'])('retains exactly one cancelled result and usage after %s removes goal state',async kind=>{
+  const records:ObserverObservation[]=[];
+  const f=fixture(1,6000,value=>records.push(value));
+  const key=f.hook('UserPromptSubmit');f.hook('PostToolUse');f.time(15000);f.scheduler.tick();
+  f.time(18000);
+  let closing:Promise<void>|undefined;
+  if(kind==='session-end'){f.goals.end(key);f.scheduler.end(key);}
+  else{f.goals.clear();closing=f.scheduler.close();}
+  f.calls[0]!.finish({...result(),status:'aborted',interpretation:null});await f.flush();
+  if(closing)await closing;
+  const results=records.filter(value=>value.kind==='result');
+  expect(results).toHaveLength(1);
+  expect(results[0]).toMatchObject({key,generation:0,requestId:1,requestedAt:15000,observedActiveSeconds:15,accepted:false,status:'aborted',usage});
+  if(!closing)await f.scheduler.close();
+});
+
+it('does not attribute a removed generation result to the replacement goal clock',async()=>{
+  const records:ObserverObservation[]=[];const f=fixture(1,6000,value=>records.push(value));
+  const key=f.hook('UserPromptSubmit');f.hook('PostToolUse');f.time(15000);f.scheduler.tick();
+  // A separate host lifecycle replaces the goal object while a stale callback is pending.
+  f.goals.clear();f.contexts.clear();f.time(20000);f.hook('UserPromptSubmit','one','second');f.hook('PostToolUse','one','second');
+  const replacement=f.goals.request(key,20000)!;
+  f.goals.settle(replacement.ticket,result().interpretation,20000);
+  f.time(23000);f.calls[0]!.finish(result());await f.flush();
+  expect(records.find(value=>value.kind==='result')).toMatchObject({generation:0,activeSeconds:15,runtime:'running',activeTimeKnown:false,accepted:false});
+  await f.scheduler.close();
+});
+
+it('dispatches from the user goal at 15s before a long tool returns, without unchanged polling', async () => {
+  const f = fixture(); f.hook('UserPromptSubmit');
+  f.time(14000); f.scheduler.tick(); expect(f.calls).toHaveLength(0);
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result()); await f.flush();
+  f.time(900000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+});
+
+it('records distinct skip reasons once per transition without leaking prompt content', async () => {
+  const records:ObserverObservation[]=[];
+  const f=fixture(1,6000,row=>records.push(row));
+  f.hook('PostToolUse');f.time(15000);f.scheduler.tick();f.scheduler.tick();
+  f.hook('UserPromptSubmit');f.scheduler.tick();f.scheduler.tick();
+  f.time(30000);f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+  f.scheduler.tick();f.scheduler.tick();
+  f.calls[0]!.finish(result());await f.flush();
+  f.scheduler.tick();f.scheduler.tick();
+  expect(records.filter(row=>row.kind==='skip').map(row=>row.status)).toEqual([
+    'context_missing','initial_delay','request_in_flight','no_new_information']);
+  expect(JSON.stringify(records)).not.toContain('task data');
+  await f.scheduler.close();
+});
+
+it('uses an existing summary on continue without requiring another tool result', async () => {
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result());await f.flush();
+  f.time(80000);f.hook('UserPromptSubmit','one','second');
+  f.time(95000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  expect(f.calls[1]!.input).toMatchObject({goalSummary:'current goal'});
+  f.calls[1]!.finish(result('continue'));await f.flush();
+  expect(f.goals.view(key,95000)?.prediction).not.toBeNull();
+  await f.scheduler.close();
+});
+
+it('holds at most two global slots for user-only goals and gives another conversation the freed slot', async () => {
+  const f = fixture();
+  for (const session of ['one', 'two', 'three']) {f.hook('UserPromptSubmit', session);}
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.calls[0]!.finish(result()); await f.flush(); f.scheduler.tick(); expect(f.calls).toHaveLength(3);
+  expect(f.scheduler.stats().inFlight).toBe(2);
+});
+
+it.each(['paused','interrupted','stopped','failed'] as const)('does not start an initial user-only estimate while %s', state=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');
+  const turn=f.contexts.read(key)!.entries[0]!.turnKey;
+  f.time(10000);f.goals.runtime(key,turn,state,10000);f.scheduler.changed(key,'runtime');
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(0);
+});
+
+it('keeps a model-reported unknown valid without retrying unchanged input',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  const response=result();response.interpretation!.estimate=null;
+  f.calls[0]!.finish(response);await f.flush();
+  expect(f.goals.view(key,15000)?.prediction).toBeNull();
+  f.time(900000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  await f.scheduler.close();
+});
+
+it('keeps authenticated conversation identity outside model input across slot reuse', async () => {
+  const f = fixture(1);
+  const first = f.hook('UserPromptSubmit', 'one'); f.hook('PostToolUse', 'one');
+  const second = f.hook('UserPromptSubmit', 'two'); f.hook('PostToolUse', 'two');
+  f.time(15000); f.scheduler.tick();
+  expect(f.calls[0]!.key).toBe(first);
+  expect(JSON.stringify(f.calls[0]!.input)).not.toContain(first);
+  f.calls[0]!.finish(result()); await f.flush(); f.scheduler.tick();
+  expect(f.calls[1]!.key).toBe(second);
+  expect(second).not.toBe(first);
+  expect(JSON.stringify(f.calls[1]!.input)).not.toContain(second);
+  f.calls[1]!.finish(result()); await f.flush();
+  await f.scheduler.close();
+});
+
+it('rejects stale prompt results without freeing a still-running conversation slot early', async () => {
+  const f = fixture(); const session = f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+  f.time(15000); f.scheduler.tick();
+  f.time(20000); f.hook('UserPromptSubmit', 'one', 'second'); f.hook('PostToolUse', 'one', 'second');
+  f.time(90000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result()); await f.flush();
+  expect(f.goals.view(session, 90000)?.prediction).toBeNull();
+  f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+});
+
+it('allows a coalesced final-status judgment in waiting but no repeated waiting polls', async () => {
+  const f = fixture(); const session = f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+  f.time(15000); f.scheduler.tick(); f.calls[0]!.finish(result()); await f.flush();
+  f.time(20000); f.hook('Stop');
+  f.time(74000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(75000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish({...result('continue'), interpretation: {relation: 'continue', status: 'waiting', summary: null, estimate: null}});
+  await f.flush(); f.time(900000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  expect(f.goals.view(session, 900000)?.activeSeconds).toBe(20);
+});
+
+it('cancels an in-flight call on pause and resumes only after event coalescing', async () => {
+  const f = fixture(); const session = f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+  const turn = f.contexts.read(session)!.entries[0]!.turnKey;
+  f.time(15000); f.scheduler.tick();
+  f.time(20000); f.goals.runtime(session, turn, 'paused', 20000); f.scheduler.changed(session, 'runtime');
+  expect(f.calls[0]!.signal.aborted).toBe(true);
+  f.calls[0]!.finish({status: 'aborted', interpretation: null, usage}); await f.flush();
+  f.time(100000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.goals.runtime(session, turn, 'running', 100000); f.scheduler.changed(session, 'runtime');
+  f.time(109999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(110000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+});
+
+it('retains its original worker ownership when the caller mutates the configuration array', async () => {
+  const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts); let closed = false;
+  const workers: ObserverWorker[] = [{observe: async () => result(), disable() {},
+    status: () => ({active: false, disabled: false, poisoned: false}), async close() {closed = true;}}];
+  const scheduler = new ObserverScheduler({contexts, goals, workers, now: () => 0});
+  workers.length = 0;
+  await scheduler.close();
+  expect(closed).toBe(true);
+});
+
+it('does not reuse a slot after unconfirmed process closure', async () => {
+  const f = fixture(); f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+  f.time(15000); f.scheduler.tick();
+  f.calls[0]!.finish(result(), false); await f.flush();
+  expect(f.scheduler.stats()).toMatchObject({disabled: true, inFlight: 1});
+  f.time(100000); f.hook('UserPromptSubmit', 'two'); f.hook('PostToolUse', 'two');
+  f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  await expect(f.scheduler.close()).rejects.toThrow('OBSERVER_CLOSE_UNCONFIRMED');
+});
+
+it('disables further admission after unknown usage even if a child has closed', async () => {
+  const f = fixture(); f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+  f.time(15000); f.scheduler.tick();
+  f.calls[0]!.finish({status: 'process_error', interpretation: null, usage: null}); await f.flush();
+  expect(f.scheduler.stats()).toMatchObject({disabled: true, inFlight: 0});
+});
+
+it('bounds shutdown when an owned worker never acknowledges cancellation', async () => {
+  const f = fixture(1, 25); f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+  f.time(15000); f.scheduler.tick();
+  await expect(f.scheduler.close()).rejects.toThrow('OBSERVER_CLOSE_UNCONFIRMED');
+  expect(f.calls[0]!.signal.aborted).toBe(true);
+  expect(f.scheduler.stats().inFlight).toBe(1);
+  f.calls[0]!.finish({status: 'aborted', interpretation: null, usage: null}); await f.flush();
+});
+
+it('attempts every worker cleanup even if another worker close throws synchronously', async () => {
+  const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts); let secondClosed = false;
+  const base = {observe: async () => result(), status: () => ({active: false, disabled: false, poisoned: false}), disable() {}};
+  const scheduler = new ObserverScheduler({contexts, goals, now: () => 0, workers: [
+    {...base, close() {throw new Error('private failure');}},
+    {...base, async close() {secondClosed = true;}}
+  ]});
+  await expect(scheduler.close()).rejects.toThrow('OBSERVER_CLOSE_UNCONFIRMED');
+  expect(secondClosed).toBe(true);
+});
+
+it('keeps the twelve-start hourly quota across replacements', async () => {
+  const f = fixture(1);
+  for (let index = 0; index < 13; index++) {
+    f.time(index * 70000); f.hook('UserPromptSubmit', 'one', `turn-${index}`); f.hook('PostToolUse', 'one', `turn-${index}`);
+    f.time(index * 70000 + 15000); f.scheduler.tick();
+    if (index < 12) {expect(f.calls).toHaveLength(index + 1); f.calls[index]!.finish(result()); await f.flush();}
+  }
+  expect(f.calls).toHaveLength(12);
+  f.time(3615000); f.scheduler.tick(); expect(f.calls).toHaveLength(13);
+});
+
+it('dispatches selected-source changes only when the source revision changes', async () => {
+  const f = selectedSourceFixture();
+  const key = f.hook(); f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result()); await f.flush();
+
+  f.time(100000); f.setSource(1); f.scheduler.changed(key, 'activity'); f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+
+  f.setSource(2); f.scheduler.tick();
+  f.time(135000); f.scheduler.tick();
+  expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result()); await f.flush();
+  await f.scheduler.close();
+});
+
+it('permits exactly one overdue recheck for a selected-source action', async () => {
+  const f = selectedSourceFixture();
+  f.hook(); f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  const overdue = result(); overdue.interpretation!.estimate = {remainingSeconds: 0, errorPercent: 30};
+  f.calls[0]!.finish(overdue); await f.flush();
+
+  f.time(74000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(75000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result()); await f.flush();
+
+  f.time(135000); f.scheduler.tick();
+  expect(f.calls).toHaveLength(2);
+  await f.scheduler.close();
+});
+
+it('does not schedule an overdue retry when the selected source has no current action', async () => {
+  const f = selectedSourceFixture();
+  f.hook(); f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  const overdue = result(); overdue.interpretation!.estimate = {remainingSeconds: 0, errorPercent: 30};
+  f.calls[0]!.finish(overdue); await f.flush();
+  f.setSource(2, null);
+
+  f.time(75000); f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+  await f.scheduler.close();
+});
+
+it('keeps overdue rechecks isolated by conversation and preserves the global limit', async () => {
+  const f = selectedSourceFixture(2);
+  const first = f.hook('one'); const second = f.hook('two');
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  for (const call of f.calls) {
+    const overdue = result(); overdue.interpretation!.estimate = {remainingSeconds: 0, errorPercent: 30};
+    call.finish(overdue);
+  }
+  await f.flush();
+
+  f.time(75000); f.scheduler.tick();
+  expect(f.calls.filter(call => call.key === first)).toHaveLength(2);
+  expect(f.calls.filter(call => call.key === second)).toHaveLength(2);
+  expect(f.scheduler.stats().inFlight).toBe(2);
+  expect(f.calls[2]!.key).toBe(first);
+  expect(f.calls[3]!.key).toBe(second);
+  f.calls[2]!.finish(result()); f.calls[3]!.finish(result()); await f.flush();
+  await f.scheduler.close();
+});
+
+it('does not let continuous source reconciliation starve the initial estimate', async () => {
+  const f = selectedSourceFixture();
+  f.hook();
+  for (const time of [5000, 10000, 15000]) {
+    f.time(time); f.setSource(time / 5000 + 1); f.scheduler.tick();
+  }
+  expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result()); await f.flush();
+  await f.scheduler.close();
+});
+
+it('attaches delayed persisted final evidence once when a waiting source revision arrives', async () => {
+  const f = selectedSourceFixture();
+  const key = f.hook();
+  f.time(10000); f.stop();
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(0);
+
+  f.time(20000); f.setSource(2, 'action', true); f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result('continue')); await f.flush();
+
+  f.time(80000); f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+  expect(f.goals.view(key, 80000)?.runtime).toBe('waiting');
+  await f.scheduler.close();
+});

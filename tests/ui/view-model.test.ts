@@ -43,6 +43,28 @@ function snapshot(taskValue: TaskSnapshot | null, eta: EtaEstimate | null, tasks
 }
 
 describe("HUD view model", () => {
+  it("labels grouped current and prior turns without displaying opaque identities", () => {
+    const value = snapshot(task(), null);
+    value.tasks = [
+      { ...value.tasks[0]!, conversationKey: "secret-group", turnKey: "secret-turn", isCurrentTurn: true },
+      { ...value.tasks[0]!, id: "old", conversationKey: "secret-group", turnKey: "old-turn", isCurrentTurn: false }
+    ];
+    const view = buildHudView(value);
+    expect(view.taskItems[0]?.statusLabel).toContain("对话 1 · 当前轮");
+    expect(view.taskItems[1]?.statusLabel).toContain("对话 1 · 历史轮");
+    expect(JSON.stringify(view)).not.toContain("secret-");
+  });
+
+  it.each([null, task()])("shows degraded tracking even without a selected task", (selected) => {
+    const value = snapshot(selected, null);
+    value.turnTracking = { identityUnavailable: true, orderingUncertain: true, capacityReached: true };
+    const view = buildHudView(value);
+    expect(view.compatibilityBanner).toContain("轮次身份");
+    expect(view.compatibilityBanner).toContain("顺序");
+    expect(view.compatibilityBanner).toContain("容量");
+    expect(view.progressPercent).not.toBe(100);
+  });
+
   it("formats determinate progress and an ETA range without false precision", () => {
     const hudSnapshot = snapshot(task(), {
         lowSeconds: 360,
@@ -69,7 +91,7 @@ describe("HUD view model", () => {
 
     expect(view.progressMode).toBe("indeterminate");
     expect(view.progressPercent).toBeNull();
-    expect(view.etaLabel).toBe("正在估算剩余时间");
+    expect(view.etaLabel).toBe("剩余时间未知");
   });
 
   it("pauses active ETA while waiting for approval", () => {
@@ -115,16 +137,16 @@ describe("HUD view model", () => {
     expect(view.etaLabel).toBe(label);
   });
 
-  it("distinguishes failure from verified completion", () => {
+  it.each(['succeeded_verified', 'completed_unverified'] as const)("presents legacy %s as completion without a quality-verification category", status => {
     const failed = buildHudView(snapshot(task({ status: "failed" }), null), 100_000);
     const completed = buildHudView(
-      snapshot(task({ status: "succeeded_verified", progress: 1 }), null),
+      snapshot(task({ status, progress: 1 }), null),
       100_000
     );
 
     expect(failed).toMatchObject({ statusLabel: "任务失败", tone: "danger" });
     expect(completed).toMatchObject({
-      statusLabel: "已完成并验证",
+      statusLabel: "已完成",
       tone: "success",
       progressMode: "complete",
       progressPercent: 100

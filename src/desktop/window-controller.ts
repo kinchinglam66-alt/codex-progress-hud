@@ -1,3 +1,5 @@
+import { hudBounds, type HudRectangle } from "./hud-layout.js";
+
 export interface BrowserWindowOptionsLike {
   width: number;
   height: number;
@@ -55,11 +57,15 @@ export interface BrowserWindowLike {
   isVisible(): boolean;
   isDestroyed(): boolean;
   destroy(): void;
+  getBounds?(): HudRectangle;
+  setBounds?(bounds: HudRectangle): void;
 }
 
 export interface WindowControllerDependencies {
   createWindow(options: BrowserWindowOptionsLike): BrowserWindowLike;
   quitting(): boolean;
+  workAreaFor?(bounds: HudRectangle): HudRectangle;
+  watchDisplays?(changed: () => void): () => void;
   onHideSelectedTask?(taskId: string): void | Promise<void>;
 }
 
@@ -75,8 +81,8 @@ export interface SelectedTaskVisibility {
 const WINDOW_OPTIONS: BrowserWindowOptionsLike = {
   width: 340,
   height: 146,
-  minWidth: 300,
-  minHeight: 130,
+  minWidth: 1,
+  minHeight: 1,
   frame: false,
   transparent: true,
   alwaysOnTop: true,
@@ -98,7 +104,10 @@ export class WindowController {
   private authorizationRequest: BrowserWindowLike["webContents"]["session"]["webRequest"] | undefined;
   private authorizationRegistered = false;
   private selectedTaskId: string | null = null;
-  private selectedTaskHidden = false;
+  private manuallyHidden = false;
+  private rows = 0;
+  private layoutRevision = -1;
+  private unwatchDisplays: (() => void) | undefined;
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -150,7 +159,7 @@ export class WindowController {
       window.on("close", (event) => {
         if (this.dependencies.quitting()) return;
         event.preventDefault();
-        this.hideSelectedTask();
+        this.hide();
       });
       window.on("closed", () => {
         if (this.window !== window) return;
@@ -159,8 +168,12 @@ export class WindowController {
       });
       window.setAlwaysOnTop(true, "floating");
       window.once("ready-to-show", () => {
-        if (!this.selectedTaskHidden) this.show();
+        if (this.window !== window || this.dependencies.quitting()) return;
+        this.fitWindow();
+        if (!this.manuallyHidden) this.show();
       });
+      this.unwatchDisplays = this.dependencies.watchDisplays?.(() => this.fitWindow());
+      this.fitWindow();
       await window.loadURL(options.url);
     } catch (error) {
       this.release(window);
@@ -169,18 +182,20 @@ export class WindowController {
   }
 
   show(): void {
+    if (this.dependencies.quitting()) return;
+    this.manuallyHidden = false;
     if (this.window === undefined || this.window.isDestroyed() || this.window.isVisible()) return;
     this.window.showInactive();
   }
 
   hide(): void {
-    if (this.window === undefined || this.window.isDestroyed() || !this.window.isVisible()) return;
+    this.manuallyHidden = true;
+    if (this.window === undefined || this.window.isDestroyed()) return;
     this.window.hide();
   }
 
   selectTask(taskId: string | null, options: SelectedTaskVisibility = {}): void {
     this.selectedTaskId = taskId;
-    this.selectedTaskHidden = taskId !== null && options.hiddenForTask === true;
   }
 
   hideSelectedTask(): void {
@@ -197,8 +212,26 @@ export class WindowController {
   onTaskActivity(taskId: string, options: { isNewTask?: boolean; terminal?: boolean; hiddenForTask?: boolean } = {}): void {
     if (options.terminal || !options.isNewTask || options.hiddenForTask || this.selectedTaskId === taskId) return;
     this.selectedTaskId = taskId;
-    this.selectedTaskHidden = false;
-    this.show();
+    if (!this.manuallyHidden) this.show();
+  }
+
+  updateRows(rows: number, revision: number): void {
+    if (!Number.isInteger(rows) || rows < 0 || rows > 32 ||
+        !Number.isSafeInteger(revision) || revision < this.layoutRevision) return;
+    this.rows = rows;
+    this.layoutRevision = revision;
+    this.fitWindow();
+  }
+
+  private fitWindow(): void {
+    const window = this.window;
+    if (!window || window.isDestroyed() || this.dependencies.quitting() ||
+        !window.getBounds || !window.setBounds || !this.dependencies.workAreaFor) return;
+    const current = window.getBounds();
+    const bounds = hudBounds(current, this.dependencies.workAreaFor(current), this.rows);
+    if (Object.keys(bounds).some(key => bounds[key as keyof HudRectangle] !== current[key as keyof HudRectangle])) {
+      window.setBounds(bounds);
+    }
   }
 
   visibility(): "visible" | "hidden" {
@@ -213,6 +246,8 @@ export class WindowController {
   }
 
   private detachAuthorization(): void {
+    this.unwatchDisplays?.();
+    this.unwatchDisplays = undefined;
     const webRequest = this.authorizationRequest;
     this.authorizationRequest = undefined;
     if (!this.authorizationRegistered) return;
