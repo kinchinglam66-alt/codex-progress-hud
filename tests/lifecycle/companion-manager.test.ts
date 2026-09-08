@@ -1849,7 +1849,7 @@ describe("process launcher", () => {
 
     expect(spawnProcess).toHaveBeenCalledWith(
       "C:\\Program Files\\HUD\\hud.exe",
-      ["--hud", "--manager-generation=7"],
+      ["--hud", "--manager-generation=7", "--disable-gpu"],
       expect.objectContaining({
         env: {
           CODEX_PROGRESS_HUD_DATA_DIR: "C:\\isolated-data",
@@ -1860,7 +1860,7 @@ describe("process launcher", () => {
     expect(parentEnvironment.ELECTRON_RUN_AS_NODE).toBe("1");
   });
 
-  it("spawns the exact executable without a shell and detaches stdio", async () => {
+  it("disables GPU before Electron startup while preserving manager ownership and shell-free spawning", async () => {
     const child = {
       pid: 9123,
       unref: vi.fn<() => void>(),
@@ -1873,7 +1873,7 @@ describe("process launcher", () => {
 
     const spawned = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
 
-    expect(spawn).toHaveBeenCalledWith("C:\\Program Files\\HUD\\hud.exe", ["--hud", "--manager-generation=7"], {
+    expect(spawn).toHaveBeenCalledWith("C:\\Program Files\\HUD\\hud.exe", ["--hud", "--manager-generation=7", "--disable-gpu"], {
       detached: true,
       env: {
         HUD_SENTINEL: "preserved"

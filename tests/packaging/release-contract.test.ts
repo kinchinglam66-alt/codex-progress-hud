@@ -48,7 +48,11 @@ describe("Windows release source contract", () => {
     expect(plugin).not.toHaveProperty("hooks");
     expect(plugin.version).toBe("0.2.1");
     expect(plugin).not.toHaveProperty('skills');
-    expect(plugin.interface).not.toHaveProperty('defaultPrompt');
+    // The host validator requires a starter prompt; passive tracking still has no skill.
+    const prompts = plugin.interface.defaultPrompt ?? plugin.interface.default_prompt;
+    expect(typeof prompts === "string"
+      ? prompts.trim().length > 0
+      : Array.isArray(prompts) && prompts.length > 0 && prompts.every(prompt => typeof prompt === "string" && prompt.trim().length > 0)).toBe(true);
     expect(Object.keys(rootMcp)).toEqual(["mcpServers"]);
     expect(Object.keys(mcp)).toEqual(["mcpServers"]);
     expect(mcp.mcpServers["codex-progress-hud"].command).toBe("./scripts/codex-progress-hud-launcher.exe");

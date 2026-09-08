@@ -25,7 +25,9 @@ export function createProcessLauncher(
       delete childEnvironment.ELECTRON_RUN_AS_NODE;
       const child = spawnProcess(
         executablePath,
-        ["--hud", `--manager-generation=${options.generation}`],
+        // Apply the transparent-window rendering workaround before Electron
+        // initializes; async desktop setup can miss the pre-ready API window.
+        ["--hud", `--manager-generation=${options.generation}`, "--disable-gpu"],
         {
           detached: true,
           env: childEnvironment,
