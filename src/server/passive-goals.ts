@@ -2,6 +2,9 @@ import type {HookEnvelope} from '../hooks/schema.js';
 import type {PassiveContextStore} from './passive-context-store.js';
 import {observerResponseSchema, type ObserverInput} from '../estimation/observer-contract.js';
 import type {CountdownPrediction} from '../ui/countdown.js';
+import {PaceMeasurements, type PaceContinuity, type PaceEvidence, type PaceGroup} from '../estimation/pace-measurements.js';
+import type {PaceInterval, WorkBreakdown} from '../estimation/pace-correction.js';
+import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
@@ -33,6 +36,8 @@ interface Goal {
   changeReason?:PassiveGoalView['changeReason'];
   identity: object;
   predictionIdentity: object|null;
+  measurementScope: object;
+  measurementEpoch?:number;
   lastObservedAt: number;
   pending?: object;
 }
@@ -40,6 +45,7 @@ export interface GoalContextQuery {
   goalSummary:string|null;activeSeconds:number;runtime:ObserverInput['runtime'];
   previousEstimate:CountdownPrediction|null;
   summaryThroughSequence?:number;contextFloorTurnKey?:string;
+  paceScope?:object;
 }
 export interface GoalContextSource {
   epoch(key:string):number|null;
@@ -48,9 +54,13 @@ export interface GoalContextSource {
   }|null;
   read(key:string,turnKey:string,query:GoalContextQuery):{
     epoch:number;revision:number;userFingerprint?:string;currentActionId:string|null;finalAvailable:boolean;input:ObserverInput
+    paceEvidence?:PaceEvidence|readonly PaceEvidence[];paceContinuity?:PaceContinuity;
+    paceBatches?:readonly {evidence:PaceEvidence;continuity:PaceContinuity}[];measurementEpoch?:number;
   }|null;
+  measurementEpoch?(key:string):number|null;
 }
-interface Ticket {sessionKey: string; goal: Goal; epoch: number; activeSeconds: number; requestedAt: number;sourceEpoch?:number;sourceRevision?:number;userFingerprint?:string}
+interface Ticket {sessionKey: string; goal: Goal; goalIdentity: object; measurementScope:object; epoch: number; activeSeconds: number; requestedAt: number;sourceEpoch?:number;sourceRevision?:number;sourceMeasurementEpoch?:number;userFingerprint?:string;paceLookup:ReadonlyMap<string,readonly PaceInterval[]>}
+interface SettledPace {sessionKey:string;goal:Goal;goalIdentity:object;measurementScope:object;epoch:number;sourceEpoch?:number;sourceMeasurementEpoch?:number;intervals:ReadonlyMap<string,readonly PaceInterval[]>}
 
 export interface PassiveGoalScheduling {
   view: PassiveGoalView;
@@ -71,7 +81,25 @@ export class PassiveGoals {
   private readonly ended = new Set<string>();
   private tickets = new WeakMap<object, Ticket>();
   private settledAnchors = new WeakMap<object, number>();
+  private settledPace = new WeakMap<object, SettledPace>();
+  private readonly paceMeasurements = new PaceMeasurements();
   constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource) {}
+
+  private rotateMeasurementScope(goal:Goal):void {
+    this.paceMeasurements.clear(goal.measurementScope);
+    goal.measurementScope={};
+  }
+
+  private ingestPace(goal:Goal,capture:ReturnType<GoalContextSource['read']>|null,epochChanged=false):void {
+    if(epochChanged||capture===null){this.rotateMeasurementScope(goal);return;}
+    if(capture.paceBatches!==undefined){
+      for(const batch of capture.paceBatches)this.paceMeasurements.ingest(goal.measurementScope,batch.evidence,batch.continuity);
+    } else if(capture.paceEvidence!==undefined&&capture.paceContinuity!==undefined){
+      const evidence=Array.isArray(capture.paceEvidence)?capture.paceEvidence:[capture.paceEvidence];
+      for(const item of evidence)this.paceMeasurements.ingest(goal.measurementScope,item,capture.paceContinuity);
+    }
+    else if(capture.paceContinuity?.historyComplete===false)this.rotateMeasurementScope(goal);
+  }
 
   private sourceContext(key:string,goal:Goal,nowMs:number,inspectOnly?:false):ReturnType<GoalContextSource['read']>;
   private sourceContext(key:string,goal:Goal,nowMs:number,inspectOnly:true):ReturnType<NonNullable<GoalContextSource['inspect']>>;
@@ -79,19 +107,27 @@ export class PassiveGoals {
     if(!this.source || !['running','waiting','paused'].includes(goal.runtime))return null;
     try{
       const epoch=this.source.epoch(key);
-      if(epoch===null)return null;
+      if(epoch===null){if(!inspectOnly)this.rotateMeasurementScope(goal);return null;}
+      const measurementEpoch=this.source.measurementEpoch?.(key)??null;
+      if(measurementEpoch!==null&&goal.measurementEpoch!==undefined&&goal.measurementEpoch!==measurementEpoch)
+        this.rotateMeasurementScope(goal);
+      if(measurementEpoch!==null)goal.measurementEpoch=measurementEpoch;
+      let epochChanged=false;
       if(goal.sourceEpoch!==undefined&&goal.sourceEpoch!==epoch){
         this.invalidate(goal);goal.identity={};goal.summary=null;goal.prediction=null;goal.predictionIdentity=null;goal.status='unknown';goal.relationPending=true;
         delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;goal.estimateRevision++;
+        this.rotateMeasurementScope(goal);epochChanged=true;
       }
       goal.sourceEpoch=epoch;
       const query:GoalContextQuery={goalSummary:goal.summary,activeSeconds:this.active(goal,nowMs),
       runtime:goal.runtime as ObserverInput['runtime'],previousEstimate:goal.prediction,
+      paceScope:goal.measurementScope,
       ...(goal.summaryThroughSequence===undefined?{}:{summaryThroughSequence:goal.summaryThroughSequence}),
       ...(goal.contextFloorTurnKey===undefined?{}:{contextFloorTurnKey:goal.contextFloorTurnKey})};
       if(inspectOnly&&this.source.inspect)return this.source.inspect(key,goal.turnKey,query);
       const capture=this.source.read(key,goal.turnKey,query);
-      if(!inspectOnly||!capture)return capture;
+      if(!inspectOnly){this.ingestPace(goal,capture,epochChanged);return capture;}
+      if(!capture)return capture;
       return {revision:capture.revision,userFingerprint:capture.userFingerprint,currentActionId:capture.currentActionId,finalAvailable:capture.finalAvailable,
         ready:capture.input.messages.length>0&&(goal.summary!==null||capture.input.messages.some(m=>m.kind==='user'))};}
     catch{return null;}
@@ -113,6 +149,7 @@ export class PassiveGoals {
     goal.since = now;
     goal.runtime = runtime;
     this.invalidate(goal);
+    this.rotateMeasurementScope(goal);
   }
 
   observe(envelope: HookEnvelope, follow: boolean, nowMs: number): void {
@@ -129,12 +166,14 @@ export class PassiveGoals {
         if (!inactive) return;
         // Retain a small terminal display window, but never reserve an active slot
         // forever. Captured tickets refer to the removed object and cannot revive it.
+        this.paceMeasurements.clear(inactive[1].measurementScope);
         this.goals.delete(inactive[0]);
         this.contexts.remove(inactive[0]);
       }
       goal = {turnKey: envelope.turnKey, generation: 0, estimateRevision: 0, epoch: 0, summary: null,
         relationPending: true, elapsed: 0, since: nowMs, candidateBase: 0,
-        runtime: 'running', status: 'unknown', prediction: null, identity: {}, predictionIdentity: null, lastObservedAt: nowMs};
+        runtime: 'running', status: 'unknown', prediction: null, identity: {}, predictionIdentity: null,
+        measurementScope: {}, lastObservedAt: nowMs};
       this.goals.set(envelope.sessionKey, goal);
     }
     if (hook === 'UserPromptSubmit') {
@@ -144,6 +183,7 @@ export class PassiveGoals {
       goal.prediction = null; goal.predictionIdentity = null;
       goal.status = 'unknown';
       this.invalidate(goal);
+      this.rotateMeasurementScope(goal);
       this.transition(goal, 'running', nowMs);
     } else if (goal.turnKey === envelope.turnKey) {
       if (hook === 'Interrupt') {
@@ -178,12 +218,17 @@ export class PassiveGoals {
       .map(entry => ({...entry.content})) ?? [];
     if (!messages.length || (goal.summary === null && !messages.some(message => message.kind === 'user'))) return null;
     const activeSeconds = this.active(goal, nowMs);
+    const baseInput=selected?.input ?? {goalSummary: goal.summary, activeSeconds,
+      runtime: goal.runtime, messages, truncated: context?.truncated ?? false};
+    const frozen=freezePaceRequest(baseInput,this.paceMeasurements.snapshot(goal.measurementScope));
     const ticket = Object.freeze({});
     goal.pending = ticket;
-    this.tickets.set(ticket, {sessionKey, goal, epoch: goal.epoch, activeSeconds, requestedAt: nowMs,
-      ...(selected?{sourceEpoch:selected.epoch,sourceRevision:selected.revision,userFingerprint:selected.userFingerprint}:{})});
-    return {ticket, input: selected?.input ?? {goalSummary: goal.summary, activeSeconds,
-      runtime: goal.runtime, messages, truncated: context?.truncated ?? false}};
+    this.tickets.set(ticket, {sessionKey, goal, goalIdentity:goal.identity, measurementScope:goal.measurementScope, epoch: goal.epoch, activeSeconds, requestedAt: nowMs,
+      paceLookup:frozen.intervals,
+      ...(selected?{sourceEpoch:selected.epoch,sourceRevision:selected.revision,
+        ...(goal.measurementEpoch===undefined?{}:{sourceMeasurementEpoch:goal.measurementEpoch}),
+        userFingerprint:selected.userFingerprint}: {})});
+    return {ticket, input:frozen.input};
   }
 
   scheduling(sessionKey: string, nowMs: number): PassiveGoalScheduling|null {
@@ -216,6 +261,10 @@ export class PassiveGoals {
       try{if(this.source?.epoch(captured.sessionKey)!==captured.sourceEpoch)return false;}
       catch{return false;}
     }
+    if(captured.sourceMeasurementEpoch!==undefined){
+      try{if(this.source?.measurementEpoch?.(captured.sessionKey)!==captured.sourceMeasurementEpoch)return false;}
+      catch{return false;}
+    }
     if (!this.clock(nowMs, goal) || nowMs < captured.requestedAt || goal !== captured.goal || goal.epoch !== captured.epoch ||
         goal.runtime === 'interrupted' || goal.runtime === 'failed' || goal.runtime === 'stopped') return false;
     let aged=false;
@@ -238,6 +287,7 @@ export class PassiveGoals {
       goal.predictionIdentity={};
       goal.estimateRevision++;goal.lastObservedAt=nowMs;
       this.settledAnchors.set(ticket,captured.activeSeconds);
+      this.acceptSettledPace(ticket,captured,goal);
       return true;
     }
     if (result.relation === 'unknown') {
@@ -245,6 +295,7 @@ export class PassiveGoals {
       goal.status = 'unknown'; goal.prediction = null; goal.predictionIdentity = null;
       goal.lastObservedAt = nowMs;
       this.settledAnchors.set(ticket,captured.activeSeconds);
+      this.acceptSettledPace(ticket,captured,goal);
       return true;
     }
     // First attachment may describe the user's ongoing work as "continue".
@@ -263,6 +314,7 @@ export class PassiveGoals {
       goal.candidateBase = 0;
       goal.generation++;
       goal.identity = {};
+      this.rotateMeasurementScope(goal);
     }
     goal.summary = result.summary ?? goal.summary;
     if(result.relation==='replace')goal.contextFloorTurnKey=goal.turnKey;
@@ -278,7 +330,36 @@ export class PassiveGoals {
     goal.estimateRevision++;
     goal.lastObservedAt = nowMs;
     this.settledAnchors.set(ticket,anchor);
+    this.acceptSettledPace(ticket,captured,goal);
+    if(result.status==='completed')this.rotateMeasurementScope(goal);
     return true;
+  }
+
+  private acceptSettledPace(ticket:object,captured:Ticket,goal:Goal):void {
+    if(goal!==captured.goal||goal.identity!==captured.goalIdentity||goal.epoch!==captured.epoch)return;
+    this.settledPace.set(ticket,{sessionKey:captured.sessionKey,goal,goalIdentity:goal.identity,measurementScope:captured.measurementScope,epoch:goal.epoch,
+      ...(captured.sourceEpoch===undefined?{}:{sourceEpoch:captured.sourceEpoch}),
+      ...(captured.sourceMeasurementEpoch===undefined?{}:{sourceMeasurementEpoch:captured.sourceMeasurementEpoch}),
+      intervals:captured.paceLookup});
+  }
+
+  paceIntervals(ticket:object,work:WorkBreakdown|null):readonly PaceInterval[] {
+    const settled=this.settledPace.get(ticket);
+    if(!settled||this.goals.get(settled.sessionKey)!==settled.goal||settled.goal.identity!==settled.goalIdentity||
+      settled.goal.measurementScope!==settled.measurementScope||
+      settled.goal.epoch!==settled.epoch||settled.goal.status==='completed'||!work||work.composition!=='serial'||work.changeReason!=='routine')return [];
+    if(settled.sourceEpoch!==undefined){
+      try{if(this.source?.epoch(settled.sessionKey)!==settled.sourceEpoch)return [];}catch{return [];}
+    }
+    if(settled.sourceMeasurementEpoch!==undefined){
+      try{if(this.source?.measurementEpoch?.(settled.sessionKey)!==settled.sourceMeasurementEpoch)return [];}catch{return [];}
+    }
+    let target:WorkBreakdown['parts'][number]|undefined;
+    for(const part of work.parts){
+      if(part.remainingUnits!==null){if(target!==undefined)return [];target=part;}
+    }
+    if(!target||target.workClass!=='file_processing'||target.unit!=='file'||!target.measurementRef)return [];
+    return settled.intervals.get(target.measurementRef)??[];
   }
 
   /** Private-to-server settlement metadata; available even when ETA is null. */
@@ -292,7 +373,9 @@ export class PassiveGoals {
       ...(goal.prediction&&goal.changeReason?{changeReason:goal.changeReason}:{})};
   }
   end(sessionKey: string): void {
-    if (!this.goals.delete(sessionKey)) return;
+    const goal=this.goals.get(sessionKey);if (!goal) return;
+    this.paceMeasurements.clear(goal.measurementScope);
+    this.goals.delete(sessionKey);
     // This is an additional recent-session fence, not the authoritative Hook replay
     // registry. The authenticated router/context owner must reject expired events.
     this.ended.add(sessionKey);
@@ -300,6 +383,7 @@ export class PassiveGoals {
   }
   activeTimeKnown(sessionKey:string):boolean {return this.goals.has(sessionKey)&&this.source===undefined;}
   clear(): void {
-    this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap(); this.settledAnchors = new WeakMap();
+    for(const goal of this.goals.values())this.paceMeasurements.clear(goal.measurementScope);
+    this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap(); this.settledAnchors = new WeakMap(); this.settledPace = new WeakMap();
   }
 }

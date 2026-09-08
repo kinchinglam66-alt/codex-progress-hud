@@ -81,3 +81,35 @@ it('releases completed attachments so later tasks do not exhaust source capacity
   expect(f.source.goals.epoch('key-0')).toBeNull();
   expect(f.source.goals.epoch('key-39')).not.toBeNull();await f.source.close();
 });
+
+it('returns every distinct completed invocation after a fresh wall-time cutoff',async()=>{
+  let monotonic=0,wall=20_000;
+  let contents:ReadBatch={records:[
+    {id:'u',turnId:'current',atMs:20_000,kind:'user',text:'Run tests'},
+    {id:'running',turnId:'current',atMs:20_000,kind:'runtime',runtime:'running'},
+  ],caughtUp:true,partialLine:false,reset:false};
+  const source=createConversationSource({source:{read:async()=>contents,remove:()=>{},close:async()=>{}},
+    now:()=>monotonic,wallNow:()=>wall,turnKeyFor:(_host,turn)=>`opaque-${turn}`});
+  const scope={};source.attach('key','host','opaque-current');monotonic=500;source.tick();await new Promise<void>(resolve=>setImmediate(resolve));
+  const query={...queryBase(),paceScope:scope};
+  expect(source.goals.read('key','opaque-current',query)?.paceBatches).toEqual([]);
+  const commandFor=(names:string[])=>`node node_modules/vitest/vitest.mjs run ${names.join(' ')} --reporter=json --maxWorkers=1 --no-file-parallelism`;
+  const report=(names:string[],start:number,end:number)=>JSON.stringify({success:true,numTotalTestSuites:3,numPassedTestSuites:3,
+    numFailedTestSuites:0,numPendingTestSuites:0,numTotalTests:3,numPassedTests:3,numFailedTests:0,numPendingTests:0,
+    testResults:names.map((name,index)=>({name,status:'passed',message:'',startTime:start+index*500,endTime:start+index*500+200,assertionResults:[{status:'passed',failureMessages:[]}]}))});
+  const tool=(id:string,start:number,end:number,names:string[])=>{
+    const command=commandFor(names);return [
+    {id:`${id}-start`,turnId:'current',atMs:start,kind:'tool_start' as const,actionId:id,toolName:'CommandExecution',cwd:'C:/project',command,startedAtMs:start},
+    {id:`${id}-result`,turnId:'current',atMs:end,kind:'tool_result' as const,actionId:id,toolName:'CommandExecution',cwd:'C:/project',command,
+      complete:true,exitCode:0,endedAtMs:end,output:report(names,start+100,end-100),outputComplete:true},
+  ];};
+  contents={records:[...tool('one',21_000,24_000,['tests/a.test.ts','tests/b.test.ts','tests/c.test.ts']),
+    ...tool('two',25_000,28_000,['tests/d.test.ts','tests/e.test.ts','tests/f.test.ts'])],caughtUp:true,partialLine:false,reset:false};
+  wall=30_000;monotonic=5_500;source.changed('key');source.tick();await new Promise<void>(resolve=>setImmediate(resolve));
+  const batches=source.goals.read('key','opaque-current',{...queryBase(),paceScope:scope})?.paceBatches??[];
+  expect(batches).toHaveLength(2);
+  expect(batches.map(batch=>batch.evidence.actionId)).toEqual(['one','two']);
+  await source.close();
+});
+
+function queryBase(){return {goalSummary:null,activeSeconds:15,runtime:'running' as const,previousEstimate:null};}

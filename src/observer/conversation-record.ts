@@ -14,6 +14,15 @@ export interface ConversationRecord {
   kind: ConversationRecordKind;
   text?: string;
   actionId?: string;
+  toolName?: string;
+  cwd?: string;
+  command?: string;
+  complete?: boolean;
+  exitCode?: number | null;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  output?: string;
+  outputComplete?: boolean;
   assistantPhase?: 'commentary' | 'final';
   runtime?: RuntimeState;
 }

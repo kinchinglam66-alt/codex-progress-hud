@@ -43,6 +43,13 @@ export function retainObserverInput(packet:ObserverInput):ObserverInput {
   const encode=()=>{refresh(packet);return JSON.stringify(packet);};
   while(Buffer.byteLength(encode(),'utf8')>16384||messages.length>128||
     messages.reduce((n,m)=>n+m.text.length,0)>65536){
+    if(packet.paceMeasurements&&packet.paceMeasurements.length>0){
+      const index=packet.paceMeasurements.reduce((selected,current,index,array)=>
+        current.sampleCount<array[selected]!.sampleCount?index:selected,0);
+      packet.paceMeasurements.splice(index,1);
+      noteObserverOmission(packet,'summary');
+      continue;
+    }
     // Preserve amendments ahead of tool logs and old assistant statements.
     let index=messages.findIndex(m=>m.kind==='tool');
     if(index<0)index=messages.findIndex(m=>m.kind==='assistant'&&!protectedMessages.has(m));

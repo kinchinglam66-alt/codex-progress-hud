@@ -2,6 +2,7 @@ import {appendFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile} from "node
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, describe, expect, it} from "vitest";
+import {pairCompletedToolCapture} from "../../src/estimation/vitest-pace-adapter.js";
 import {createLocalSessionReader} from "../../src/observer/local-session-reader.js";
 
 const THREAD_A = "11111111-1111-4111-8111-111111111111";
@@ -51,11 +52,11 @@ function assistant(text: string, id: string, turnId: string, atMs = 1_700_000_00
   }, atMs);
 }
 
-function commandStarted(actionId: string, turnId: string, command = "sleep 100"): string {
+function commandStarted(actionId: string, turnId: string, command = "sleep 100", cwd?: string): string {
   return line("event_msg", {
     type: "item_started",
     turn_id: turnId,
-    item: {type: "CommandExecution", id: actionId, command}
+    item: {type: "CommandExecution", id: actionId, command, ...(cwd === undefined ? {} : {cwd})}
   }, 1_700_000_003_000);
 }
 
@@ -140,6 +141,50 @@ describe("bounded local session reader", () => {
     }));
     expect(started?.id).not.toBe(completed?.id);
     expect(completed?.actionId).toBe(started?.actionId);
+    await reader.close();
+  });
+
+  it("preserves authentic command provenance and pairs only the same turn", async () => {
+    const f = await fixture(THREAD_A, meta(THREAD_A) + taskStarted("turn-provenance") +
+      commandStarted("action-provenance", "turn-provenance", "node node_modules/vitest/vitest.mjs run tests/a.test.ts", "C:\\repo") +
+      commandCompleted("action-provenance", "turn-provenance", '{"success":true}'));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(THREAD_A, signal())).records;
+    const start = records.find(record => record.kind === "tool_start");
+    const result = records.find(record => record.kind === "tool_result");
+    expect(start).toMatchObject({
+      actionId: "action-provenance", turnId: "turn-provenance", command: "node node_modules/vitest/vitest.mjs run tests/a.test.ts",
+      cwd: "C:\\repo", startedAtMs: 1_700_000_003_000
+    });
+    expect(start).not.toHaveProperty("complete");
+    expect(start).not.toHaveProperty("exitCode");
+    expect(result).toMatchObject({
+      actionId: "action-provenance", turnId: "turn-provenance", complete: true,
+      exitCode: 0, output: '{"success":true}', endedAtMs: 1_700_000_004_000
+    });
+    expect(pairCompletedToolCapture(records)).toMatchObject({
+      actionId: "action-provenance", turnId: "turn-provenance", cwd: "C:\\repo", command: "node node_modules/vitest/vitest.mjs run tests/a.test.ts",
+      complete: true, exitCode: 0, startedAtMs: 1_700_000_003_000, endedAtMs: 1_700_000_004_000
+    });
+    await reader.close();
+  });
+
+  it("does not promote assistant JSON or clipped command output into trusted capture", async () => {
+    const quoted = JSON.stringify({cwd: "C:\\quoted", command: "node fake", exitCode: 0});
+    const hugeOutput = `{"success":true}${"x".repeat(70 * 1024)}`;
+    const f = await fixture(THREAD_A, meta(THREAD_A) + assistant(quoted, "assistant-json", "turn-json") +
+      commandStarted("action-clipped", "turn-clipped", "node node_modules/vitest/vitest.mjs run tests/a.test.ts", "C:\\repo") +
+      commandCompleted("action-clipped", "turn-clipped", hugeOutput));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(THREAD_A, signal())).records;
+    const assistantRecord = records.find(record => record.kind === "assistant");
+    const result = records.find(record => record.actionId === "action-clipped" && record.kind === "tool_result");
+    expect(assistantRecord).not.toHaveProperty("cwd");
+    expect(assistantRecord).not.toHaveProperty("command");
+    expect(result).toMatchObject({complete: true, outputComplete: false});
+    expect(pairCompletedToolCapture(records)).toBeNull();
     await reader.close();
   });
 

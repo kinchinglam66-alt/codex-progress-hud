@@ -9,6 +9,7 @@ export interface WorkPart {
   unit:'file'|'batch'|'unknown';
   remainingUnits:number|null;
   priorSeconds:number;
+  measurementRef?:string|undefined;
 }
 export interface WorkBreakdown {
   composition:'serial'|'unknown';

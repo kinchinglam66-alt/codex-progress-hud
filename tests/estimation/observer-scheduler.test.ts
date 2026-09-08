@@ -65,6 +65,18 @@ function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:
   return {scheduler, goals, contexts, calls, hook, time, flush};
 }
 
+function paceFixture(onObservation?:(record:ObserverObservation)=>void) {
+  const f=fixture(1,6000,onObservation,true);
+  const measurementRef='pm_0123456789abcdef0123456789abcdef';
+  const intervals=[10,20,30].map((startActiveSeconds,index)=>({workClass:'file_processing' as const,unit:'file' as const,
+    startActiveSeconds,endActiveSeconds:startActiveSeconds+10,completedUnits:1,complete:true,serial:true}));
+  f.goals.paceIntervals=(_ticket,work)=>{
+    const target=work?.parts.find(part=>part.remainingUnits!==null);
+    return work?.composition==='serial'&&work.changeReason==='routine'&&target?.measurementRef===measurementRef?intervals:[];
+  };
+  return {...f,measurementRef};
+}
+
 it('records accepted raw and shadow forecast provenance without changing the HUD prediction',async()=>{
   const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row),true);const key=f.hook('UserPromptSubmit');
   f.time(15000);f.scheduler.tick();
@@ -75,6 +87,40 @@ it('records accepted raw and shadow forecast provenance without changing the HUD
     versions:{input:'facts-v1',prompt:'prompt-v1',model:'model-v1',algorithm:'pace-v1'}});
   expect(f.goals.view(key,15000)?.prediction?.remainingSeconds).toBe(600);
   await f.scheduler.close();
+});
+
+it('uses only accepted frozen file intervals for an eligible shadow forecast',async()=>{
+  const records:ObserverObservation[]=[];const f=paceFixture(row=>records.push(row));const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  const measurementRef=f.measurementRef;
+  f.calls[0]!.finish({...result(),interpretation:{...result().interpretation!,estimate:{remainingSeconds:100,errorPercent:30},work:{
+    composition:'serial',changeReason:'routine',parts:[
+      {workClass:'other',unit:'unknown',remainingUnits:null,priorSeconds:20},
+      {workClass:'file_processing',unit:'file',remainingUnits:2,priorSeconds:80,measurementRef}]}}});
+  await f.flush();
+  const forecast=records.find(row=>row.kind==='result')?.forecast;
+  expect(forecast).toMatchObject({rawSeconds:100,shadowSeconds:40,paceReason:'eligible',calibration:'uncalibrated',
+    measurement:{source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3}});
+  expect(f.goals.view(key,15000)?.prediction?.remainingSeconds).toBe(100);
+  expect(f.calls).toHaveLength(1);
+  await f.scheduler.close();
+});
+
+it('abstains when the accepted shadow reference is stale, mismatched, scope-changed, or absent',async()=>{
+  for(const mode of ['stale','mismatch','scope','missing'] as const){
+    const records:ObserverObservation[]=[];const f=paceFixture(row=>records.push(row));const key=f.hook('UserPromptSubmit');
+    f.time(15000);f.scheduler.tick();
+    const measurementRef=mode==='missing'?'pm_00000000000000000000000000000000':mode==='stale'?'pm_ffffffffffffffffffffffffffffffff':mode==='mismatch'?'pm_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee':f.measurementRef;
+    const work={composition:'serial' as const,changeReason:(mode==='scope'?'scope_change':'routine') as 'scope_change'|'routine',parts:[
+      {workClass:'other' as const,unit:'unknown' as const,remainingUnits:null,priorSeconds:20},
+      {workClass:'file_processing' as const,unit:'file' as const,remainingUnits:2,priorSeconds:80,measurementRef}]};
+    f.calls[0]!.finish({...result(),interpretation:{...result().interpretation!,estimate:{remainingSeconds:100,errorPercent:30},work}});
+    await f.flush();
+    expect(records.find(row=>row.kind==='result')?.forecast).toMatchObject({rawSeconds:100,shadowSeconds:null,
+      paceReason:mode==='scope'?'invalid_composition':'missing_measurements'});
+    expect(f.goals.view(key,15000)?.prediction?.remainingSeconds).toBe(100);
+    await f.scheduler.close();
+  }
 });
 
 it('does not emit a forecast for a stale ticket or without provenance',async()=>{

@@ -25,3 +25,16 @@ it('rejects non-finite, unbounded, unsafe and extra forecast fields',()=>{
     {...value,versions:{...value.versions,extra:'not allowed'}},
   ]) expect(()=>makeForecastRecord(bad as ForecastRecord)).toThrow();
 });
+
+it('freezes and validates the admitted measurement projection',()=>{
+  const row=makeForecastRecord({...value,shadowSeconds:40,paceReason:'eligible',measurement:{
+    source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3}});
+  expect(row.measurement).toEqual({source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3});
+  expect(Object.isFrozen(row.measurement)).toBe(true);
+  for(const bad of [
+    {...value,shadowSeconds:40,paceReason:'eligible',measurement:{source:'other'}},
+    {...value,shadowSeconds:40,paceReason:'eligible',measurement:{source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:2}},
+    {...value,shadowSeconds:null,paceReason:'missing_measurements',measurement:{source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3}},
+    {...value,shadowSeconds:40,paceReason:'missing_measurements',measurement:{source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3}},
+  ]) expect(()=>makeForecastRecord(bad as ForecastRecord)).toThrow();
+});

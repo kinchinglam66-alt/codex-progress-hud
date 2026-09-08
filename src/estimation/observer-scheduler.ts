@@ -354,12 +354,16 @@ export class ObserverScheduler {
       else if(forecastDiagnostic===undefined) {
         try {
           const rawSeconds=result?.interpretation?.estimate?.remainingSeconds ?? null;
+          const work=result?.interpretation?.work ?? null;
+          const intervals=this.options.goals.paceIntervals(flight.ticket,work);
           const pace=rawSeconds===null?{seconds:null,reason:'missing_measurements' as const}:
-            correctPace(rawSeconds,result?.interpretation?.work ?? null,[]);
+            correctPace(rawSeconds,work,intervals);
           forecast=makeForecastRecord({schemaVersion:1,predictionId:flight.requestId,generation:live.view.generation,
             snapshotActiveSeconds:snapshotAnchor ?? Number.NaN,
             acceptedAt,rawSeconds,shadowSeconds:pace.seconds,
-            paceReason:pace.reason,calibration:'uncalibrated',versions});
+            paceReason:pace.reason,calibration:'uncalibrated',
+            ...(pace.reason==='eligible'&&pace.seconds!==null?{measurement:{source:'vitest_json' as const,clock:'tool_execution' as const,
+              remainingUnitsProvenance:'model_hypothesis' as const,sampleCount:Math.min(intervals.length,5)}}:{}),versions});
         } catch {forecastDiagnostic='invalid_provenance';}
       }
     }

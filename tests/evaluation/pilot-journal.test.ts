@@ -76,3 +76,20 @@ it('does not project an unrecognized forecast diagnostic',async()=>{
     expect(JSON.parse(raw.split('\n')[0]!)).not.toHaveProperty('forecastDiagnostic');
   }finally{await rm(directory,{recursive:true,force:true});}
 });
+
+it('projects only the allowlisted admitted measurement metadata',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-measurement-'));
+  try {
+    const journal=createPilotJournal(directory);
+    journal.record({kind:'result',at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1,
+      forecast:{schemaVersion:1,predictionId:1,generation:1,snapshotActiveSeconds:1,acceptedAt:1,rawSeconds:100,shadowSeconds:40,
+        paceReason:'eligible',calibration:'uncalibrated',measurement:{source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3},
+        versions:{input:'facts-v1',prompt:'prompt-v1',model:'model-v1',algorithm:'pace-v1'}}});
+    await journal.close();
+    const names=await readdir(directory);
+    const raw=await readFile(resolve(directory,names[0]!),'utf8');
+    const row=JSON.parse(raw.split('\n')[0]!);
+    expect(row.forecast.measurement).toEqual({source:'vitest_json',clock:'tool_execution',remainingUnitsProvenance:'model_hypothesis',sampleCount:3});
+    expect(raw).not.toMatch(/measurementRef|path|signature/);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});

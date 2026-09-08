@@ -97,14 +97,17 @@ interface Item {
   type: string;
   id?: unknown;
   call_id?: unknown;
+  name?: unknown;
   turn_id?: unknown;
   role?: unknown;
   content?: unknown;
   message?: unknown;
   command?: unknown;
+  cwd?: unknown;
   input?: unknown;
   output?: unknown;
   aggregated_output?: unknown;
+  exit_code?: unknown;
 }
 
 function errorCode(error: unknown): LocalSessionSourceErrorCode {
@@ -168,6 +171,27 @@ function boundedText(value: string): string {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength <= MAX_TEXT_BYTES) return value;
   return new TextDecoder("utf-8").decode(bytes.subarray(0, MAX_TEXT_BYTES));
+}
+
+function boundedTextWithCompleteness(value: string): {text: string; complete: boolean} {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= MAX_TEXT_BYTES) return {text: value, complete: true};
+  return {
+    text: new TextDecoder("utf-8").decode(bytes.subarray(0, MAX_TEXT_BYTES)),
+    complete: false
+  };
+}
+
+function dataTextWithCompleteness(value: unknown): {text: string; complete: boolean} | undefined {
+  if (typeof value === "string") return boundedTextWithCompleteness(value);
+  if (value !== null && typeof value === "object") {
+    try {
+      return boundedTextWithCompleteness(JSON.stringify(value));
+    } catch {
+      throw new LocalSessionSourceError("source_malformed");
+    }
+  }
+  return undefined;
 }
 
 function dataText(value: unknown): string | undefined {
@@ -304,7 +328,22 @@ function normalizeTool(
     kind: result ? "tool_result" : "tool_start",
     actionId
   };
+  const toolName = stringValue(value.name);
+  if (toolName !== undefined) record.toolName = toolName;
+  if (result) {
+    record.complete = true;
+    record.endedAtMs = atMs;
+  } else {
+    record.startedAtMs = atMs;
+  }
   if (textValue !== undefined) record.text = textValue;
+  if (result) {
+    const bounded = dataTextWithCompleteness(value.output ?? value.aggregated_output);
+    if (bounded !== undefined) {
+      record.output = bounded.text;
+      record.outputComplete = bounded.complete;
+    }
+  }
   return addRecord(context, record, `${record.kind}:${actionId}`);
 }
 
@@ -328,8 +367,36 @@ function normalizeCommand(
     kind: result ? "tool_result" : "tool_start",
     actionId
   };
+  record.toolName = value.type;
+  if (result) {
+    record.complete = true;
+    record.endedAtMs = atMs;
+  } else {
+    record.startedAtMs = atMs;
+  }
+  const cwd = stringValue(value.cwd);
+  if (cwd !== undefined) record.cwd = cwd;
+  const command = stringValue(value.command);
+  if (command !== undefined) record.command = command;
+  if (result && value.exit_code === null) record.exitCode = null;
+  if (result && typeof value.exit_code === "number" && Number.isFinite(value.exit_code)) {
+    record.exitCode = value.exit_code;
+  }
   const textValue = dataText(rawText);
   if (textValue !== undefined) record.text = textValue;
+  if (result && rawText !== undefined) {
+    if (typeof rawText === "string") {
+      const bounded = boundedTextWithCompleteness(rawText);
+      record.output = bounded.text;
+      record.outputComplete = bounded.complete;
+    } else {
+      const bounded = dataTextWithCompleteness(rawText);
+      if (bounded !== undefined) {
+        record.output = bounded.text;
+        record.outputComplete = bounded.complete;
+      }
+    }
+  }
   return addRecord(context, record, `${record.kind}:${actionId}`);
 }
 

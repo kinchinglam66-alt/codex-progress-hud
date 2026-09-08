@@ -67,3 +67,5 @@ or other/unknown; remainingUnits is positive or null and priorSeconds is bounded
 active seconds. changeReason is routine, scope_change, failure, or unknown. Work is
 descriptive shadow metadata only: do not return reasoning, tool output, or completed-
 unit evidence, and never provide actionable work for unknown or completed status.
+ 
+Measurements describe test execution only, excluding launch/collection and other work. Reference a group only for matching serial test execution. Remaining units are your hypothesis, not observed truth. Omit the reference when workload compatibility is uncertain. Never apply file timings to implementation or debugging.

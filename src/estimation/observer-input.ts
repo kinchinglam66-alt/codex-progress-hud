@@ -3,7 +3,7 @@ import {extractPassiveContent} from '../hooks/passive-content.js';
 import {retainObserverInput,noteObserverDrop,noteObserverOmission} from './observer-retention.js';
 
 /** Version of the local facts assembly and bounded-retention implementation. */
-export const OBSERVER_INPUT_FACTS_VERSION='observer-input-facts-v1';
+export const OBSERVER_INPUT_FACTS_VERSION='observer-input-facts-v2';
 
 /** The packet is private stdin, not a diagnostic or public snapshot. Filter before
  * any clipping; this is basic credential filtering, not a full DLP guarantee.

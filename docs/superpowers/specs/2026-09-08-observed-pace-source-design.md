@@ -1,6 +1,8 @@
 # Verified observed pace: shadow integration design
 
-Status: proposed architecture for review; no implementation or live promotion.
+Status: architecture accepted on 2026-09-08; implementation verified on 2026-09-09
+and integrated into the main working directory for the authorized commit/push.
+Shadow-only; not installed or promoted to live ETA. See the implementation report.
 
 ## Objective and boundaries
 

@@ -41,6 +41,8 @@ export function createPilotJournal(directory:string){
         ...(forecast?{forecast:{schemaVersion:forecast.schemaVersion,predictionId:forecast.predictionId,generation:forecast.generation,
           snapshotActiveSeconds:forecast.snapshotActiveSeconds,acceptedAt:forecast.acceptedAt,rawSeconds:forecast.rawSeconds,
           shadowSeconds:forecast.shadowSeconds,paceReason:forecast.paceReason,calibration:forecast.calibration,
+          ...(forecast.measurement?{measurement:{source:forecast.measurement.source,clock:forecast.measurement.clock,
+            remainingUnitsProvenance:forecast.measurement.remainingUnitsProvenance,sampleCount:forecast.measurement.sampleCount}}:{}),
           versions:{input:forecast.versions.input,prompt:forecast.versions.prompt,model:forecast.versions.model,algorithm:forecast.versions.algorithm}}}:{}),
         ...(typeof value.forecastDiagnostic==='string'&&forecastDiagnosticCodes.has(value.forecastDiagnostic)?
           {forecastDiagnostic:value.forecastDiagnostic}:{} )};

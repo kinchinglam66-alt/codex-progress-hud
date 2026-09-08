@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {forecastMeasurementSchema} from '../estimation/forecast-record.js';
 const seconds=z.number().finite().nonnegative().max(31536000);
 const identity={session:z.string().min(1),key:z.string().min(1),generation:z.number().int().nonnegative(),confirmedBy:z.literal('user')};
 const labelSchema=z.discriminatedUnion('outcome',[
@@ -9,7 +10,8 @@ const labelSchema=z.discriminatedUnion('outcome',[
 const forecastSchema=z.object({schemaVersion:z.literal(1),predictionId:z.number().int().nonnegative(),generation:z.number().int().nonnegative(),
   snapshotActiveSeconds:seconds,acceptedAt:z.number().finite().nonnegative(),rawSeconds:seconds.nullable(),shadowSeconds:seconds.nullable(),
   paceReason:z.enum(['eligible','missing_measurements','insufficient_intervals','incompatible_units','unknown_clock','parallel_work','invalid_composition']),
-  calibration:z.literal('uncalibrated'),versions:z.object({input:z.string(),prompt:z.string(),model:z.string(),algorithm:z.string()}).strict()}).strict();
+  calibration:z.literal('uncalibrated'),measurement:forecastMeasurementSchema.optional(),
+  versions:z.object({input:z.string(),prompt:z.string(),model:z.string(),algorithm:z.string()}).strict()}).strict();
 const resultSchema=z.object({session:z.string(),key:z.string(),generation:z.number().int().nonnegative(),kind:z.literal('result'),
   accepted:z.boolean(),status:z.string(),at:z.number().finite().nonnegative(),requestedAt:z.number().finite().nonnegative(),
   observedActiveSeconds:seconds,activeSeconds:seconds,

@@ -2,6 +2,7 @@ import {z} from 'zod';
 
 const seconds = z.number().finite().nonnegative().max(31_536_000);
 const ordinal = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const measurementRef = z.string().regex(/^pm_[a-f0-9]{32}$/u);
 const eventSchema = z.object({ordinal, kind:z.enum(['user','assistant','tool_start','tool_result']),
   atMs:z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER),
   pairOrdinal:ordinal.optional(), counterpartMissing:z.boolean().optional()}).strict();
@@ -13,6 +14,7 @@ const workPartSchema=z.object({
   unit:z.enum(['file','batch','unknown']),
   remainingUnits:z.number().int().positive().max(1_000_000).nullable(),
   priorSeconds:seconds,
+  measurementRef:measurementRef.optional(),
 }).strict();
 const workSchema=z.object({composition:z.enum(['serial','unknown']),
   changeReason:z.enum(['routine','scope_change','failure','unknown']),
@@ -53,6 +55,14 @@ export const observerInputSchema = z.object({
       ? message.event.kind==='tool_start'||message.event.kind==='tool_result'
       : message.event.kind===message.kind && message.event.pairOrdinal===undefined && message.event.counterpartMissing===undefined))).min(1).max(128),
   truncated: z.boolean(),
+  paceMeasurements:z.array(z.object({
+    measurementRef,
+    workClass:z.literal('file_processing'),
+    unit:z.literal('file'),
+    sampleCount:z.number().int().min(3).max(5),
+    medianSecondsPerUnit:seconds,
+    clock:z.literal('tool_execution'),
+  }).strict()).max(8).optional(),
   packingLoss:packingLossSchema.optional(),
   observation: observationSchema.optional()
 }).strict().refine(value => value.messages.reduce((total, message) => total + message.text.length, 0) <= 65536)
