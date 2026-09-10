@@ -6,6 +6,7 @@ export type ConversationRecordKind =
   | "runtime";
 
 export type RuntimeState = "running" | "waiting" | "interrupted" | "failed";
+export type RuntimeOutcome = "completed" | "interrupted" | "failed";
 
 export interface ConversationRecord {
   id: string;
@@ -25,6 +26,7 @@ export interface ConversationRecord {
   outputComplete?: boolean;
   assistantPhase?: 'commentary' | 'final';
   runtime?: RuntimeState;
+  outcome?: RuntimeOutcome;
 }
 
 export interface ReadBatch {

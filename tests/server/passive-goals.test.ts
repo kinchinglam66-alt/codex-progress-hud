@@ -49,6 +49,36 @@ describe('passive goal interpretation owner', () => {
     f.goals.reconcileSource(session,500);
     expect(f.goals.view(session,5000)).toMatchObject({runtime:'waiting',runtimeUncertain:true,timingUncertain:true,activeSeconds:0});
   });
+  it('marks an explicitly completed persisted turn complete without observer inference',()=>{
+    const f=fixture({epoch:()=>1,read:()=>null,execution:()=>({state:'waiting',outcome:'completed',boundaryMs:1000,identity:'completed'}) as never});
+    const session=f.hook('UserPromptSubmit',0);
+    f.goals.reconcileSource(session,3000);
+    expect(f.goals.view(session,4000)).toMatchObject({status:'completed',runtime:'waiting',activeSeconds:1});
+    expect(f.goals.request(session,4000)).toBeNull();
+  });
+  it.each(['paused','stopped'] as const)('does not let an in-flight source result undo manual %s', state=>{
+    let attempts=0;
+    const f=fixture({epoch:()=>1,read:()=>null,
+      execution:()=>({state:'running',identity:'next-source'}),
+      takeover:()=>{attempts++;return {turnKey:'turn-two',startedAtMs:2000,identity:'next-source'};}});
+    const session=f.hook('UserPromptSubmit',0);
+    const turnKey=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'one'},0,key).envelope.turnKey!;
+    f.goals.runtime(session,turnKey,state,1000);
+    expect(f.goals.reconcileSource(session,3000)).toBeNull();
+    expect(attempts).toBe(0);
+    expect(f.goals.currentTurnKey(session)).toBe(turnKey);
+    expect(f.goals.view(session,4000)).toMatchObject({runtime:state,activeSeconds:1});
+  });
+  it.each(['failed','interrupted'] as const)('allows verified next-turn takeover after a %s prior turn', state=>{
+    let takeover:null|{turnKey:string;startedAtMs:number;identity:string} = null;
+    const f=fixture({epoch:()=>1,read:()=>null,execution:()=>({state,identity:`${state}-source`}),takeover:()=>takeover});
+    const session=f.hook('UserPromptSubmit',0);
+    const turnKey=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'one'},0,key).envelope.turnKey!;
+    f.goals.runtime(session,turnKey,state,1000);
+    takeover={turnKey:'turn-two',startedAtMs:2000,identity:'next-source'};
+    expect(f.goals.reconcileSource(session,3000)).toMatchObject({previousTurnKey:turnKey,turnKey:'turn-two'});
+    expect(f.goals.view(session,4000)).toMatchObject({runtime:'running',status:'unknown',activeSeconds:1});
+  });
   it('reconciles missing Stop from source without allowing stale source activity to undo a hook Stop', () => {
     let evidence:ExecutionEvidence={state:'waiting',boundaryMs:1000,identity:'final'};
     const f=fixture({epoch:()=>1,read:()=>null,execution:()=>evidence});
@@ -64,6 +94,9 @@ describe('passive goal interpretation owner', () => {
     evidence={state:'running',boundaryMs:7000,identity:'late'};
     f.goals.reconcileSource(session,7000);
     expect(f.goals.view(session,8000)).toMatchObject({runtime:'waiting',activeSeconds:2});
+    evidence={state:'waiting',outcome:'completed',boundaryMs:7500,identity:'explicit-complete'};
+    f.goals.reconcileSource(session,8000);
+    expect(f.goals.view(session,9000)).toMatchObject({status:'completed',runtime:'waiting',activeSeconds:2});
   });
   it('freezes uncertain timing but never times out a silent running action', () => {
     let evidence:ExecutionEvidence={state:'running',boundaryMs:0,identity:'long-tool'};
@@ -88,7 +121,7 @@ describe('passive goal interpretation owner', () => {
     expect(f.goals.view(session,5000)).toMatchObject({runtime:'waiting',activeSeconds:1});
     expect(f.goals.settle(stale.ticket,answer(),5000)).toBe(false);
     f.hook('UserPromptSubmit',6000,'two');
-    expect(f.goals.view(session,7000)).toMatchObject({runtime:'running',activeSeconds:2});
+    expect(f.goals.view(session,7000)).toMatchObject({runtime:'running',activeSeconds:1});
   });
   it('keeps stop fences conversation-local and permits an explicit verified resume',()=>{
     const f=fixture(),a=f.hook('UserPromptSubmit',0,'one',true,'a');
@@ -226,7 +259,7 @@ describe('passive goal interpretation owner', () => {
     expect(JSON.stringify(view)).not.toContain('PRIVATE');
   });
 
-  it('counts active work across continuation but resets it on replacement', () => {
+  it('resets active work and summary scope at every new turn', () => {
     const f = fixture(); const session = f.hook('UserPromptSubmit', 0);
     f.hook('PostToolUse', 1000);
     expect(f.goals.settle(f.request(5000).ticket, answer(), 5000)).toBe(true);
@@ -234,12 +267,12 @@ describe('passive goal interpretation owner', () => {
     expect(f.goals.view(session, 25000)?.activeSeconds).toBe(10);
     f.hook('UserPromptSubmit', 30000, 'two');
     const continuing = f.request(35000);
-    expect(continuing.input.goalSummary).toBe('PRIVATE current goal');
+    expect(continuing.input.goalSummary).toBeNull();
     expect(f.goals.settle(continuing.ticket, answer('continue'), 35000)).toBe(true);
-    expect(f.goals.view(session, 35000)).toMatchObject({generation: 1, activeSeconds: 15});
+    expect(f.goals.view(session, 35000)).toMatchObject({generation: 2, activeSeconds: 5});
     f.hook('UserPromptSubmit', 40000, 'three');
     expect(f.goals.settle(f.request(45000).ticket, {...answer(), summary: 'NEW goal'}, 45000)).toBe(true);
-    expect(f.goals.view(session, 45000)).toMatchObject({generation: 2, activeSeconds: 5});
+    expect(f.goals.view(session, 45000)).toMatchObject({generation: 3, activeSeconds: 5});
     expect(f.request(46000).input.goalSummary).toBe('NEW goal');
   });
 

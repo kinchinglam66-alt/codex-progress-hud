@@ -43,6 +43,38 @@ it('stops charging active time at a persisted end even when later output evicts 
     expect(goals.view(envelope.sessionKey,3600000)).toMatchObject({runtime:'waiting',activeSeconds:3});
   }finally{await source.close();}
 });
+
+it('takes over a newer persisted task start on an attached conversation and resets the turn clock',async()=>{
+  let monotonic=0;
+  const oldTurn=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'old'},0,
+    'protected-round-takeover-token-1234567890').envelope;
+  const newTurn=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'new'},0,
+    'protected-round-takeover-token-1234567890').envelope;
+  let contents:ReadBatch={records:[
+    {id:'old-start',turnId:'old',atMs:1_000,kind:'runtime',runtime:'running'},
+    {id:'old-user',turnId:'old',atMs:1_100,kind:'user',text:'old turn'},
+    {id:'old-complete',turnId:'old',atMs:2_000,kind:'runtime',runtime:'waiting',outcome:'completed'},
+  ],caughtUp:true,partialLine:false,reset:false};
+  const source=createConversationSource({source:{read:async()=>contents,remove:()=>{},close:async()=>{}},
+    now:()=>monotonic,wallNow:()=>monotonic,turnKeyFor:(_host,turn)=>turn==='old'?oldTurn.turnKey!:newTurn.turnKey!});
+  const goals=new PassiveGoals(new PassiveContextStore(),source.goals);
+  goals.observe(oldTurn,true,0);source.attach(oldTurn.sessionKey,'host',oldTurn.turnKey!);
+  try{
+    monotonic=1_000;source.tick();await new Promise<void>(resolve=>setImmediate(resolve));
+    goals.reconcileSource(oldTurn.sessionKey,1_000);
+    contents={records:[...contents.records,
+      {id:'new-start',turnId:'new',atMs:3_000,kind:'runtime',runtime:'running'},
+      {id:'new-user',turnId:'new',atMs:3_100,kind:'user',text:'new turn'}],
+      caughtUp:true,partialLine:false,reset:false};
+    monotonic=6_000;source.changed(oldTurn.sessionKey);source.tick();await new Promise<void>(resolve=>setImmediate(resolve));
+    goals.reconcileSource(oldTurn.sessionKey,6_000);
+    expect(goals.view(oldTurn.sessionKey,6_000)).toMatchObject({runtime:'running',status:'unknown',activeSeconds:0,prediction:null});
+    expect(goals.request(oldTurn.sessionKey,6_000)?.input.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({kind:'user',text:'old turn',scope:'background'}),
+      expect.objectContaining({kind:'user',text:'new turn',scope:'current'})
+    ]));
+  }finally{await source.close();}
+});
 it('rejects a new answer based on superseded source input without erasing the previous estimate',()=>{
   const f=setup();f.available();const first=f.goals.request(f.envelope.sessionKey,15000)!;
   expect(f.goals.settle(first.ticket,answer,16000)).toBe(true);

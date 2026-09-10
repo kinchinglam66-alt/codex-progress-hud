@@ -10,6 +10,7 @@ interface Binding {hostId:string;turnKey:string;epoch:number;sourceEpoch:number}
 /** One selected source per authenticated attachment. Raw identities stay local. */
 export function createConversationSource(options:OwnerOptions & {
   wallNow:()=>number;turnKeyFor:(hostId:string,turnId:string)=>string;
+  taskHandleFor?:(hostId:string,turnId:string)=>string;
 }) {
   const bindings=new Map<string,Binding>(),scopesByKey=new Map<string,object>();
   const measurementStates=new WeakMap<object,{sourceEpoch:number;cutoffMs:number}>();
@@ -66,7 +67,8 @@ export function createConversationSource(options:OwnerOptions & {
     const userFingerprint=createHash('sha256').update(JSON.stringify(snapshot.records.filter(r=>r.kind==='user')
       .map(r=>[r.id,r.turnId,r.text??'']))).digest('hex');
     const nextTurn=snapshot.records[end];
-    return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,actions,finalAvailable,userFingerprint,nextTurn};
+    return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,
+      currentTurnId:current[0]?.turnId??null,actions,finalAvailable,userFingerprint,nextTurn};
   };
   const paceContinuity=(selected:NonNullable<ReturnType<typeof select>>,evidence:ReturnType<typeof parsePaceEvidence>):PaceContinuity=>{
     const endMs=options.wallNow();
@@ -106,6 +108,23 @@ export function createConversationSource(options:OwnerOptions & {
   };
   const measurementEpoch=(key:string):number|null=>bindings.has(key)?observeHealth(key):null;
   const executionCache=new Map<string,{identity:string;boundaryMs:number;trustedAt:number}>();
+  const takeover=(key:string,turnKey:string)=>{
+    const binding=bindings.get(key),snapshot=owner.snapshot(key);
+    if(!binding||binding.turnKey!==turnKey||!snapshot||snapshot.health!=='ready'||
+      !snapshot.historyComplete||snapshot.partialLine)return null;
+    const selected=select(key,turnKey,{goalSummary:null,activeSeconds:0,runtime:'running',previousEstimate:null});
+    if(!selected?.nextTurn||selected.nextTurn.kind!=='runtime'||selected.nextTurn.runtime!=='running')return null;
+    const previousRuntime=selected.current.filter(record=>record.kind==='runtime').at(-1);
+    if(!previousRuntime||previousRuntime.runtime==='running'||selected.nextTurn.atMs<previousRuntime.atMs)return null;
+    const nextTurnId=selected.nextTurn.turnId;
+    if(nextTurnId===null)return null;
+    const nextTurnKey=options.turnKeyFor(binding.hostId,nextTurnId);
+    const identity=`${selected.currentEpoch}:${snapshot.revision}:${selected.nextTurn.id}:${nextTurnKey}`;
+    binding.turnKey=nextTurnKey;binding.epoch=allocate();executionCache.delete(key);invalidateScopes(key);
+    owner.attach(key,binding.hostId,nextTurnKey);
+    return {turnKey:nextTurnKey,startedAtMs:selected.nextTurn.atMs,identity,
+      ...(options.taskHandleFor===undefined?{}:{taskHandle:options.taskHandleFor(binding.hostId,nextTurnId)})};
+  };
   const goals:GoalContextSource={epoch,measurementEpoch,health:owner.health,execution(key,turnKey){
     const snapshot=owner.snapshot(key),binding=bindings.get(key);
     if(!binding||binding.turnKey!==turnKey||!snapshot)return null;
@@ -122,8 +141,11 @@ export function createConversationSource(options:OwnerOptions & {
     let record=selected.current.filter(r=>r.kind==='runtime'||r.kind==='user'||r.kind==='tool_start'||
       (r.kind==='assistant'&&r.assistantPhase==='final')).at(-1);
     if(!record)return null;
+    const latestRuntime=selected.current.filter(r=>r.kind==='runtime').at(-1);
+    if(latestRuntime&&latestRuntime.runtime!=='running')record=latestRuntime;
     let state:NonNullable<ReturnType<NonNullable<GoalContextSource['execution']>>>['state']=record.kind==='runtime'?(record.runtime??'unknown'):
       record.kind==='assistant'?(selected.actions.size===0?'waiting':'unknown'):'running';
+    const outcome=record.kind==='runtime'?record.outcome:undefined;
     // A new persisted start fences the old clock even if its Hook is delayed.
     // It does not authorize importing the new turn or claiming goal completion.
     const next=selected.nextTurn;
@@ -134,8 +156,8 @@ export function createConversationSource(options:OwnerOptions & {
     const boundaryMs=previous?.identity===identity?previous.boundaryMs:
       Math.max(0,Math.floor(now-Math.max(0,options.wallNow()-record.atMs)));
     executionCache.set(key,{identity,boundaryMs,trustedAt:now});
-    return {state,identity,boundaryMs};
-  },inspect(key,turnKey,query){
+    return {state,identity,boundaryMs,...(outcome===undefined?{}:{outcome})};
+  },takeover,inspect(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
     return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,currentActionId:[...selected.actions.keys()].at(-1)??null,
       finalAvailable:selected.finalAvailable,
@@ -149,7 +171,7 @@ export function createConversationSource(options:OwnerOptions & {
         summaryThroughSequence:Math.min(query.summaryThroughSequence??0,snapshot.revision),
         sequence:snapshot.revision,activeSeconds:query.activeSeconds,activeTimeKnown:false,
         historyComplete:snapshot.historyComplete&&floor>=0,nowMs:options.wallNow(),previousEstimate:query.previousEstimate,
-        runtime:query.runtime});
+        runtime:query.runtime,currentTurnId:selected.currentTurnId});
       return {epoch:currentEpoch,revision:snapshot.revision,userFingerprint:selected.userFingerprint,input,
         currentActionId:[...actions.keys()].at(-1)??null,
         finalAvailable,...paceFor(key,selected,query)};
@@ -165,6 +187,7 @@ export function createConversationSource(options:OwnerOptions & {
       else existing.turnKey=turnKey;
     },
     changed:owner.changed,setActive:owner.setActive,tick:owner.tick,snapshot:owner.snapshot,
+    turnKey(key:string):string|null {return bindings.get(key)?.turnKey??null;},
     stop(key:string):void {
       const binding=bindings.get(key);if(!binding)return;
       executionCache.delete(key);

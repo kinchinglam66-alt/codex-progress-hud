@@ -7,7 +7,7 @@ type Estimate={remainingSeconds:number;errorPercent:number;observedActiveSeconds
 export interface AssemblyOptions {
   summary:string|null;summaryThroughSequence:number;sequence:number;
   activeSeconds:number;activeTimeKnown:boolean;historyComplete:boolean;nowMs:number;
-  previousEstimate:Estimate|null;runtime?:ObserverInput['runtime'];
+  previousEstimate:Estimate|null;runtime?:ObserverInput['runtime'];currentTurnId?:string|null;
 }
 export interface ObservationMetadata {
   sequence:number;summaryThroughSequence:number;activeTimeKnown:boolean;historyComplete:boolean;
@@ -59,7 +59,8 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
       }
     }
     if(!Number.isFinite(record.atMs)||record.atMs<0||record.atMs>Number.MAX_SAFE_INTEGER)throw Error('INVALID_CONTEXT_CLOCK');
-    if(text)messages.push({kind,text,truncated:text!==record.text,event:{
+    if(text)messages.push({kind,text,truncated:text!==record.text,
+      ...(options.currentTurnId===undefined||record.turnId===options.currentTurnId?{scope:'current' as const}:{scope:'background' as const}),event:{
       ordinal,kind:record.kind,atMs:record.atMs,...(pairOrdinal===undefined?{}:{pairOrdinal})}});
     else loss.droppedByKind[kind]++;
     if(record.kind==='tool_start'&&record.actionId&&text)actions.set(record.actionId,{text,atMs:record.atMs});

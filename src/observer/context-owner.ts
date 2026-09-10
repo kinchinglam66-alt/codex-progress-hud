@@ -99,6 +99,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
         if(!protectedRecords.has(record)||protectedUsers.has(record))return record;
         const compact:ConversationRecord={id:record.id,turnId:record.turnId,atMs:record.atMs,kind:record.kind,
           ...(record.runtime===undefined?{}:{runtime:record.runtime}),
+          ...(record.outcome===undefined?{}:{outcome:record.outcome}),
           ...(record.assistantPhase===undefined?{}:{assistantPhase:record.assistantPhase}),
           ...(record.actionId===undefined?{}:{actionId:record.actionId})};
         const size=Buffer.byteLength(JSON.stringify(compact));

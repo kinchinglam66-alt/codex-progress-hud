@@ -144,6 +144,30 @@ describe("bounded local session reader", () => {
     await reader.close();
   });
 
+  it("preserves explicit normal completion provenance separately from waiting", async () => {
+    const f = await fixture(THREAD_A, meta(THREAD_A) + taskStarted("turn-complete") +
+      taskComplete("turn-complete"));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(THREAD_A, signal())).records;
+    expect(records).toContainEqual(expect.objectContaining({
+      kind: "runtime", turnId: "turn-complete", runtime: "waiting", outcome: "completed"
+    }));
+    await reader.close();
+  });
+
+  it("keeps a newer active attribution when an older turn terminates", async () => {
+    const f = await fixture(THREAD_A, meta(THREAD_A) + taskStarted("new-turn") +
+      taskComplete("old-turn") + line("response_item", {type: "message", id: "new-user", role: "user",
+        content: [{type: "input_text", text: "new instruction"}]}));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(THREAD_A, signal())).records;
+    expect(records).toContainEqual(expect.objectContaining({kind: "runtime", turnId: "old-turn", outcome: "completed"}));
+    expect(records).toContainEqual(expect.objectContaining({kind: "user", turnId: "new-turn", text: "new instruction"}));
+    await reader.close();
+  });
+
   it("preserves authentic command provenance and pairs only the same turn", async () => {
     const f = await fixture(THREAD_A, meta(THREAD_A) + taskStarted("turn-provenance") +
       commandStarted("action-provenance", "turn-provenance", "node node_modules/vitest/vitest.mjs run tests/a.test.ts", "C:\\repo") +

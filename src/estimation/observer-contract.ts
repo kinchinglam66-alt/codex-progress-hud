@@ -50,7 +50,7 @@ export const observerInputSchema = z.object({
   activeSeconds: seconds,
   runtime: z.enum(['running', 'waiting', 'paused']),
   messages: z.array(z.object({kind: z.enum(['user', 'assistant', 'tool']),
-    text: z.string().min(1).max(4096), truncated: z.boolean(), event:eventSchema.optional()}).strict()
+    text: z.string().min(1).max(4096), truncated: z.boolean(), scope:z.enum(['current','background']).optional(), event:eventSchema.optional()}).strict()
     .refine(message=>!message.event || (message.kind==='tool'
       ? message.event.kind==='tool_start'||message.event.kind==='tool_result'
       : message.event.kind===message.kind && message.event.pairOrdinal===undefined && message.event.counterpartMissing===undefined))).min(1).max(128),

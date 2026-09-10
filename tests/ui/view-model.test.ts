@@ -71,7 +71,7 @@ describe("HUD view model", () => {
     expect(conversationActivityLabel(buildConversationViews([waiting,uncertain]))).toBe('暂无执行中任务 · 2 个待处理');
     expect(conversationActivityLabel(buildConversationViews([waiting,running]))).toBe('1 个执行中 · 1 个待处理');
     expect(conversationActivityLabel([])).toBe('暂无进行中任务');
-    expect(buildConversationViews([uncertain])[0]?.statusLabel).toBe('状态待确认');
+    expect(buildConversationViews([uncertain])[0]?.statusLabel).toBe('本轮状态待确认');
   });
   it.each([
     ["estimating", "已超出预计时间 · 正在重新估时"],

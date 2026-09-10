@@ -76,12 +76,12 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
   Pick<HudView, 'statusLabel'|'tone'|'progressMode'|'progressPercent'|'etaLabel'> {
   const running = goal.runtime === 'running';
   const terminal = goal.runtime === 'interrupted' || goal.runtime === 'failed';
-  const statusLabel = goal.runtimeUncertain ? '状态待确认'
-    : goal.runtime === 'interrupted' ? '任务已中断'
-    : goal.runtime === 'failed' ? '任务失败'
-    : goal.runtime === 'paused' ? '跟踪已暂停'
-    : running ? (goal.status === 'unknown' ? '执行中 · 目标状态待判断' : '执行中')
-    : goal.status === 'waiting' ? '等待用户' : '等待中 · 目标状态待判断';
+  const statusLabel = goal.runtimeUncertain ? '本轮状态待确认'
+    : goal.runtime === 'interrupted' ? '本轮已中断'
+    : goal.runtime === 'failed' ? '本轮失败'
+    : goal.runtime === 'paused' ? '本轮跟踪已暂停'
+    : running ? (goal.status === 'unknown' ? '本轮执行中 · 状态待判断' : '本轮执行中')
+    : goal.status === 'waiting' ? '本轮等待用户' : '本轮等待中 · 状态待判断';
   const delta = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
   const countdown = projectCountdown({prediction: goal.prediction,
     activeSeconds: goal.activeSeconds + (running ? delta : 0),

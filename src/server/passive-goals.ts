@@ -8,6 +8,7 @@ import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
+export interface SourceTurnTakeover {turnKey:string;startedAtMs:number;identity:string;taskHandle?:string;previousTurnKey?:string}
 export interface PassiveGoalView {
   timingUncertain?: boolean;
   runtimeUncertain?: boolean;
@@ -47,6 +48,7 @@ interface Goal {
   measurementEpoch?:number;
   lastObservedAt: number;
   pending?: object;
+  terminalSince?: number;
 }
 export interface GoalContextQuery {
   goalSummary:string|null;activeSeconds:number;runtime:ObserverInput['runtime'];
@@ -57,8 +59,9 @@ export interface GoalContextQuery {
 export interface GoalContextSource {
   health?(key:string):'loading'|'ready'|'error'|'missing';
   execution?(key:string,turnKey:string):{
-    state:'running'|'waiting'|'interrupted'|'failed'|'unknown';boundaryMs?:number;identity:string
+    state:'running'|'waiting'|'interrupted'|'failed'|'unknown';outcome?:'completed'|'interrupted'|'failed';boundaryMs?:number;identity:string
   }|null;
+  takeover?(key:string,turnKey:string):SourceTurnTakeover|null;
   epoch(key:string):number|null;
   inspect?(key:string,turnKey:string,query:GoalContextQuery):{
     ready:boolean;revision:number;userFingerprint?:string;currentActionId:string|null;finalAvailable:boolean
@@ -167,6 +170,14 @@ export class PassiveGoals {
     this.rotateMeasurementScope(goal);
   }
 
+  private startTurn(goal:Goal,turnKey:string,nowMs:number):void {
+    delete goal.terminalHook;delete goal.sourceStopped;delete goal.executionIdentity;delete goal.runtimeUncertain;delete goal.terminalSince;
+    goal.turnKey=turnKey;goal.elapsed=0;goal.since=nowMs;goal.candidateBase=0;
+    goal.relationPending=true;goal.summary=null;delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;
+    goal.prediction=null;goal.predictionIdentity=null;goal.identity={};goal.status='unknown';goal.runtime='running';
+    goal.timingUncertain=false;goal.lastObservedAt=nowMs;this.invalidate(goal);this.rotateMeasurementScope(goal);
+  }
+
   observe(envelope: HookEnvelope, follow: boolean, nowMs: number): void {
     let goal = this.goals.get(envelope.sessionKey);
     if (!this.clock(nowMs, goal) || !follow || envelope.turnKey === undefined ||
@@ -194,17 +205,7 @@ export class PassiveGoals {
     if (goal.turnKey === envelope.turnKey && (goal.terminalHook||goal.sourceStopped) &&
         (hook === 'PostToolUse' || hook === 'UserPromptSubmit')) return;
     if (hook === 'UserPromptSubmit') {
-      delete goal.terminalHook;
-      delete goal.sourceStopped;
-      delete goal.executionIdentity;delete goal.runtimeUncertain;
-      if (goal.turnKey !== envelope.turnKey) goal.candidateBase = this.active(goal, nowMs);
-      goal.turnKey = envelope.turnKey;
-      goal.relationPending = true;
-      goal.prediction = null; goal.predictionIdentity = null;
-      goal.status = 'unknown';
-      this.invalidate(goal);
-      this.rotateMeasurementScope(goal);
-      this.transition(goal, 'running', nowMs);
+      if (goal.turnKey !== envelope.turnKey) this.startTurn(goal,envelope.turnKey,nowMs);
     } else if (goal.turnKey === envelope.turnKey) {
       if (hook === 'Stop' || hook === 'Interrupt') {goal.terminalHook = true;delete goal.runtimeUncertain;}
       if (hook === 'Interrupt') {
@@ -226,18 +227,35 @@ export class PassiveGoals {
     this.transition(goal, state, nowMs);
     goal.status = state;
     if (state === 'interrupted' || state === 'failed' || state === 'stopped') {goal.prediction = null; goal.predictionIdentity = null;}
+    if (state === 'interrupted' || state === 'failed') goal.terminalSince = nowMs;
+    else delete goal.terminalSince;
     if (state === 'stopped') {goal.summary = null;delete goal.summaryThroughSequence;goal.contextFloorTurnKey=goal.turnKey;}
     goal.lastObservedAt = nowMs;
   }
 
   /** Independent of inference eligibility; never infer completion from silence. */
-  reconcileSource(sessionKey:string,nowMs:number):void {
+  reconcileSource(sessionKey:string,nowMs:number):SourceTurnTakeover|null {
     const goal=this.goals.get(sessionKey);
-    if(!goal||!this.clock(nowMs,goal)||!this.source?.execution||goal.terminalHook||
-      ['paused','stopped','interrupted','failed'].includes(goal.runtime))return;
+    if(!goal||!this.clock(nowMs,goal)||!this.source?.execution)return null;
+    // A read already in flight may finish after manual pause/stop. Never let
+    // its takeover mutate source ownership or restart the active clock.
+    if(goal.runtime==='paused'||goal.runtime==='stopped')return null;
+    if(this.source.takeover){
+      try{
+        const takeover=this.source.takeover(sessionKey,goal.turnKey);
+        if(takeover){const previousTurnKey=goal.turnKey;this.startTurn(goal,takeover.turnKey,nowMs);return {...takeover,previousTurnKey};}
+      }catch{/* source evidence is advisory until a verified snapshot is available */}
+    }
+    // A terminal runtime remains authoritative for the old turn; only the
+    // verified takeover above may establish a new running turn after it.
+    if(goal.runtime==='interrupted'||goal.runtime==='failed')return null;
     let evidence:ReturnType<NonNullable<GoalContextSource['execution']>>;
     try{evidence=this.source.execution(sessionKey,goal.turnKey);}catch{evidence={state:'unknown',identity:'source-error'};}
-    if(!evidence||goal.executionIdentity===evidence.identity)return;
+    // A manual Stop remains a user pause unless the source supplies explicit
+    // terminal provenance for this turn. A later verified next-turn takeover
+    // was handled above and is allowed to establish the new turn.
+    if(goal.terminalHook&&evidence?.outcome===undefined)return null;
+    if(!evidence||goal.executionIdentity===evidence.identity)return null;
     goal.executionIdentity=evidence.identity;
     const priorRuntime=goal.runtime,priorUncertain=goal.runtimeUncertain;
     const uncertain=evidence.state==='unknown';
@@ -251,10 +269,24 @@ export class PassiveGoals {
     this.transition(goal,uncertain?'waiting':evidence.state as Runtime,at);
     // Host quiescence is not semantic "waiting for user" or goal completion.
     if(uncertain)goal.status='unknown';
+    else if(evidence.outcome==='completed')goal.status='completed';
     else if(evidence.state==='interrupted'||evidence.state==='failed')goal.status=evidence.state;
     else if(priorRuntime!==goal.runtime||priorUncertain)goal.status='unknown';
+    if (goal.status === 'completed' || goal.status === 'failed' || goal.status === 'interrupted') goal.terminalSince = nowMs;
+    else delete goal.terminalSince;
     goal.lastObservedAt=nowMs;
+    return null;
   }
+
+  /** Keep a terminal source briefly so a missing Hook can still be recovered from local history. */
+  retainSource(sessionKey:string,nowMs:number):boolean {
+    const goal=this.goals.get(sessionKey);
+    if(!goal||!this.clock(nowMs,goal))return false;
+    if(!['completed','failed','interrupted'].includes(goal.status))return true;
+    return goal.terminalSince!==undefined && nowMs-goal.terminalSince<15*60*1000;
+  }
+
+  currentTurnKey(sessionKey:string):string|undefined {return this.goals.get(sessionKey)?.turnKey;}
 
   request(sessionKey: string, nowMs: number): {ticket: object; input: ObserverInput}|null {
     const goal = this.goals.get(sessionKey);
@@ -390,7 +422,8 @@ export class PassiveGoals {
     goal.lastObservedAt = nowMs;
     this.settledAnchors.set(ticket,anchor);
     this.acceptSettledPace(ticket,captured,goal);
-    if(result.status==='completed')this.rotateMeasurementScope(goal);
+    if(result.status==='completed'){goal.terminalSince=nowMs;this.rotateMeasurementScope(goal);}
+    else delete goal.terminalSince;
     return true;
   }
 

@@ -85,6 +85,27 @@ describe('turn-scoped routing', () => {
       envelope: { taskId: `hud_${'a'.repeat(24)}`, event: { type: 'turn_stopped' } } });
   });
 
+  it('durably fences a source-superseded turn while accepting a genuinely fresh prompt', () => {
+    const router=createTurnRouter();
+    const old=event('UserPromptSubmit','a',100);
+    const next=event('UserPromptSubmit','b',200);
+    router.route(old,100);
+    router.takeover(old.sessionKey,old.turnKey!,next.turnKey!,next.taskHandle,300);
+    expect(router.route(event('PostToolUse','a',400),400)).toEqual({kind:'ignored',reason:'expired_turn'});
+    expect(router.route(next,400)).toMatchObject({kind:'apply',follow:true});
+    expect(router.route(event('UserPromptSubmit','c',500),500)).toMatchObject({kind:'apply',follow:true});
+  });
+
+  it('does not bypass the identity cap during source takeover', () => {
+    const router=createTurnRouter({maxTurns:1});
+    const old=event('UserPromptSubmit','a',100);
+    const next=event('UserPromptSubmit','b',200);
+    router.route(old,100);
+    router.takeover(old.sessionKey,old.turnKey!,next.turnKey!,next.taskHandle,300);
+    expect(router.route(event('PostToolUse','a',400),400)).toEqual({kind:'ignored',reason:'expired_turn'});
+    expect(router.route(next,400)).toEqual({kind:'degraded',reason:'turn_capacity_reached'});
+  });
+
   it('ignores a repeated prompt even when its receipt time changes', () => {
     const router = createTurnRouter();
     const prompt = event('UserPromptSubmit');

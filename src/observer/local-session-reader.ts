@@ -2,7 +2,7 @@ import {createHash} from "node:crypto";
 import {lstat, open, opendir, realpath, type FileHandle} from "node:fs/promises";
 import type {Dirent, Stats} from "node:fs";
 import {isAbsolute, relative, resolve} from "node:path";
-import type {ConversationRecord, ReadBatch, RuntimeState} from "./conversation-record.js";
+import type {ConversationRecord, ReadBatch, RuntimeOutcome, RuntimeState} from "./conversation-record.js";
 
 const PASS_BYTES = 4 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -437,15 +437,19 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     const runtime: RuntimeState = eventType === "task_complete"
       ? "waiting"
       : eventType === "task_failed" ? "failed" : "interrupted";
+    const outcome: RuntimeOutcome = eventType === "task_complete"
+      ? "completed"
+      : eventType === "task_failed" ? "failed" : "interrupted";
     const record: ConversationRecord = {
       id: sourceId(context.threadId, context.offset, payload.id) + `:${runtime}`,
       turnId,
       atMs,
       kind: "runtime",
-      runtime
+      runtime,
+      outcome
     };
     const output = addRecord(context, record, `runtime:${runtime}:${turnId ?? context.offset}`);
-    context.activeTurnId = null;
+    if (turnId === context.activeTurnId) context.activeTurnId = null;
     return output;
   }
   if (eventType !== "item_started" && eventType !== "item_completed") return [];

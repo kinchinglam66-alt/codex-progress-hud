@@ -340,13 +340,23 @@ export function createProgressServer(options: ProgressServerOptions) {
       turnKeyFor:(hostId,turnId)=>{
         if(sourceToken===undefined)throw Error('SOURCE_IDENTITY_UNAVAILABLE');
         return `turn_${createHmac('sha256',sourceToken).update(`${hostId}\u0000${turnId}`).digest('base64url')}`;
-      },onChange:key=>{if(!shuttingDown){passiveGoals.reconcileSource(key,goalNow());passiveObserver?.changed(key,'activity');store.refreshPresentation();}}});
+      },taskHandleFor:(hostId,turnId)=>{
+        if(sourceToken===undefined)throw Error('SOURCE_IDENTITY_UNAVAILABLE');
+        return `hud_${createHmac('sha256',sourceToken).update(`turn-task\u0000${hostId}\u0000${turnId}`).digest('base64url')}`;
+      },onChange:key=>{if(!shuttingDown){
+        const takeover=passiveGoals.reconcileSource(key,goalNow());
+        if(takeover?.taskHandle!==undefined){
+          if(takeover.previousTurnKey!==undefined){
+            turnRouter.takeover(key,takeover.previousTurnKey,takeover.turnKey,takeover.taskHandle,now());
+          }
+          store.apply({taskId:takeover.taskHandle,event:{type:'session_attached',origin:'late_attach'}},now(),
+            {conversationKey:key,turnKey:takeover.turnKey,isCurrentTurn:true});
+        }
+        passiveObserver?.changed(key,takeover===null?'activity':'prompt');store.refreshPresentation();
+      }}});
   const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals);
   const pruneSources=()=>{
-    const at=goalNow();selectedSource?.prune(key=>{
-      const goal=passiveGoals.view(key,at);
-      return goal!==null&&!['completed','failed','interrupted'].includes(goal.status);
-    });
+    const at=goalNow();selectedSource?.prune(key=>passiveGoals.retainSource(key,at));
   };
   const store = new TaskStore({ now, nameForConversation: key => names.get(key),
     goalForConversation: key => passiveGoals.view(key, goalNow()),
@@ -809,27 +819,29 @@ export function createProgressServer(options: ProgressServerOptions) {
           }
           const route = turnRouter.route(envelope, now());
           if (route.kind === 'apply') {
-            const metadata = { conversationKey: route.sessionKey, turnKey: route.turnKey, isCurrentTurn: route.follow };
+            const ownedTurn = passiveGoals.currentTurnKey(route.sessionKey);
+            const follow = route.follow || (ownedTurn !== undefined && ownedTurn === route.turnKey);
+            const metadata = { conversationKey: route.sessionKey, turnKey: route.turnKey, isCurrentTurn: follow };
             // Publish the goal and its current turn together. Reclaim ownership
             // before ingesting a fresh prompt so a full context store retains it.
             const observedAt = goalNow();
             // Host timestamps were authenticated/ordered above. Goal elapsed time
             // uses local monotonic arrival, not adjustable wall-clock timestamps.
-            passiveGoals.observe({...envelope, receivedAt: observedAt}, route.follow, observedAt);
+            passiveGoals.observe({...envelope, receivedAt: observedAt}, follow, observedAt);
             if(selectedSource){
               pruneSources();
-              if(route.follow&&envelope.hostThreadId!==undefined&&envelope.turnKey!==undefined){
+              if(follow&&envelope.hostThreadId!==undefined&&envelope.turnKey!==undefined){
                 try{selectedSource.attach(route.sessionKey,envelope.hostThreadId,envelope.turnKey);}catch{/* source unavailable must not fail the task Hook */}
               }
-              if(route.follow){selectedSource.changed(route.sessionKey);
+              if(follow){selectedSource.changed(route.sessionKey);
                 const runtime=passiveGoals.view(route.sessionKey,observedAt)?.runtime;
-                if(runtime&&['paused','stopped','interrupted','failed'].includes(runtime))selectedSource.setActive(route.sessionKey,false);}
+                if(runtime&&['paused','stopped'].includes(runtime))selectedSource.setActive(route.sessionKey,false);}
             }else passiveContexts.ingest(envelope, now());
             if (!store.has(envelope.taskHandle) && route.lateAttached) {
               store.apply({ taskId: envelope.taskHandle, event: { type: 'session_attached', origin: 'late_attach' } }, now(), metadata);
             }
             store.apply(route.envelope, now(), metadata);
-            if (route.follow) passiveObserver?.changed(route.sessionKey, observerEventForHook(envelope));
+            if (follow) passiveObserver?.changed(route.sessionKey, observerEventForHook(envelope));
             if(envelope.hostThreadId !== undefined && store.has(envelope.taskHandle) &&
                 names.register(route.sessionKey,envelope.hostThreadId)) {
               knownConversations.add(route.sessionKey);

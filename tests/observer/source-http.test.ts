@@ -41,15 +41,41 @@ it('dispatches from a persisted source user message before the long tool finishe
     expect(calls[0]?.observation?.currentAction?.text).toBe('sleep 100');
     expect(observations.find(record=>record.kind==='request')?.activeTimeKnown).toBe(false);
     expect(calls[0]?.messages.some(message=>message.text.includes('hook body'))).toBe(false);
-    // No Stop hook is delivered: the source callback must still correct the HUD
-    // even when model dispatch is not involved in determining execution state.
+    // An abort must not deactivate the attached source: a verified persisted
+    // next turn still needs to be discoverable without a new Hook.
+    const interrupt=normalizeHookInput('Interrupt',{session_id:id,turn_id:turn},0,token).envelope;
+    interrupt.hostThreadId=id;
+    await client.submitHook(interrupt,{revision:(await client.status() as HudSnapshot).revision});
     now=20000;
     await appendFile(join(day,`rollout-2026-09-06T00-00-00-${id}.jsonl`),
       JSON.stringify({timestamp:new Date(18000).toISOString(),type:'event_msg',
         payload:{type:'task_complete',turn_id:turn}})+'\n');
-    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.goal?.runtime,{timeout:3000}).toBe('waiting');
-    const frozen=((await client.status()) as HudSnapshot).rows?.[0]?.goal?.activeSeconds;
-    now=25000;
-    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal?.activeSeconds).toBe(frozen);
+    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.goal?.runtime,{timeout:3000}).toBe('interrupted');
+    const next=normalizeHookInput('UserPromptSubmit',{session_id:id,turn_id:'next'},0,token).envelope;
+    await appendFile(join(day,`rollout-2026-09-06T00-00-00-${id}.jsonl`),[
+      JSON.stringify({timestamp:new Date(21000).toISOString(),type:'event_msg',payload:{type:'task_started',turn_id:'next'}}),
+      JSON.stringify({timestamp:new Date(21100).toISOString(),type:'response_item',payload:{type:'message',id:'next-user',role:'user',turn_id:'next',content:[{type:'input_text',text:'continue with the next round'}]}})
+    ].join('\n')+'\n');
+    now=30000;
+    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.task.id,{timeout:3000}).toBe(next.taskHandle);
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:0});
+    // The new turn resets local scope immediately, while shared admission
+    // cooldown still protects provider/accounting budgets.
+    now=80000;
+    await expect.poll(()=>calls.length,{timeout:3000}).toBe(2);
+    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.task.id,{timeout:3000}).toBe(next.taskHandle);
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:50});
+    const oldLate=normalizeHookInput('PostToolUse',{session_id:id,turn_id:turn,tool_use_id:'late-old'},0,token).envelope;
+    oldLate.hostThreadId=id;
+    oldLate.content={kind:'tool',text:'late old activity',truncated:false};
+    await expect(client.submitHook(oldLate,{revision:(await client.status() as HudSnapshot).revision})).rejects.toBeDefined();
+    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.task.id,{timeout:3000}).toBe(next.taskHandle);
+    // A genuinely fresh Hook turn remains router-authorized even though the
+    // source binding already owns the recovered turn.
+    const fresh=normalizeHookInput('UserPromptSubmit',{session_id:id,turn_id:'fresh'},0,token).envelope;
+    fresh.hostThreadId=id;
+    await client.submitHook(fresh,{revision:(await client.status() as HudSnapshot).revision});
+    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.task.id,{timeout:3000}).toBe(fresh.taskHandle);
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:0});
   }finally{await server.close();await rm(directory,{recursive:true,force:true});}
 },10000);

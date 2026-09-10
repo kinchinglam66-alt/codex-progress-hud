@@ -24,6 +24,7 @@ interface TurnRecord {
 
 export function createTurnRouter(options: { maxTurns?: number; retentionMs?: number } = {}): {
   route(envelope: HookEnvelope, observedAt: number): TurnRoute
+  takeover(sessionKey:string, previousTurnKey:string, turnKey:string, taskHandle:string, observedAt:number): void
   observeTerminal(taskHandle: string, observedAt: number): void
   hasIdentity(taskHandle: string): boolean
 } {
@@ -35,8 +36,32 @@ export function createTurnRouter(options: { maxTurns?: number; retentionMs?: num
   // cap, new identities degrade rather than making forgotten old turns current.
   const records = new Map<string, TurnRecord>();
   const current = new Map<string, string>();
+  const superseded = new Map<string, Set<string>>();
   return {
     hasIdentity(taskHandle) { return records.has(taskHandle); },
+    takeover(sessionKey, previousTurnKey, turnKey, taskHandle, observedAt) {
+      if (!Number.isSafeInteger(observedAt) || observedAt < 0 || !sessionKey || !previousTurnKey || !turnKey || !taskHandle) {
+        throw new RangeError('invalid takeover');
+      }
+      let fence = superseded.get(sessionKey);
+      if (!fence) { fence = new Set(); superseded.set(sessionKey, fence); }
+      fence.add(previousTurnKey);
+      while (fence.size > maxTurns) fence.delete(fence.values().next().value!);
+      for (const record of records.values()) {
+        if (record.sessionKey === sessionKey && record.turnKey === previousTurnKey) record.expired = true;
+      }
+      const existing = records.get(taskHandle);
+      if (existing && (existing.sessionKey !== sessionKey || existing.turnKey !== turnKey)) throw new Error('takeover identity conflict');
+      current.set(sessionKey,taskHandle);
+      // A source takeover synchronizes ownership, but must not bypass the
+      // router's identity cap. At capacity the new Hook degrades normally;
+      // the durable superseded fence and expired old record still reject old
+      // activity without forgetting an existing identity.
+      if (existing || records.size < maxTurns) {
+        records.set(taskHandle, existing ?? {sessionKey,turnKey,lastReceipt:0,events:new Set(),terminals:new Set(),expired:false,
+          lateAttached:true,orderingUncertain:false,promptSeen:false,promptAnchor:current.get(sessionKey)});
+      }
+    },
     observeTerminal(taskHandle, observedAt) {
       if (!Number.isSafeInteger(observedAt) || observedAt < 0) throw new RangeError('invalid terminal clock');
       const record = records.get(taskHandle);
@@ -52,6 +77,7 @@ export function createTurnRouter(options: { maxTurns?: number; retentionMs?: num
         return { kind: 'session', sessionKey, ended: hook === 'SessionEnd' };
       }
       if (turnKey === undefined) return { kind: 'degraded', reason: 'turn_identity_unavailable' };
+      if (superseded.get(sessionKey)?.has(turnKey)) return {kind:'ignored',reason:'expired_turn'};
       let record = records.get(taskHandle);
       if (record !== undefined && (record.sessionKey !== sessionKey || record.turnKey !== turnKey)) {
         return { kind: 'degraded', reason: 'turn_identity_conflict' };

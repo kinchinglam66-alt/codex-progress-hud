@@ -506,13 +506,13 @@ it('records distinct skip reasons once per transition without leaking prompt con
   await f.scheduler.close();
 });
 
-it('uses an existing summary on continue without requiring another tool result', async () => {
+it('resets the summary for a new turn without requiring another tool result', async () => {
   const f=fixture(1);const key=f.hook('UserPromptSubmit');
   f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   f.calls[0]!.finish(result());await f.flush();
   f.time(80000);f.hook('UserPromptSubmit','one','second');
   f.time(95000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
-  expect(f.calls[1]!.input).toMatchObject({goalSummary:'current goal'});
+  expect(f.calls[1]!.input).toMatchObject({goalSummary:null,activeSeconds:15});
   f.calls[1]!.finish(result('continue'));await f.flush();
   expect(f.goals.view(key,95000)?.prediction).not.toBeNull();
   await f.scheduler.close();

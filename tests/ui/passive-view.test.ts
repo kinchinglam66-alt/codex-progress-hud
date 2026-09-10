@@ -82,7 +82,7 @@ it('retains the peak across same-goal snapshot refreshes and rejects invalid est
 it('shows whole-goal time beyond 24 hours without inventing completion percentage', () => {
   const view = buildConversationViews([row()], 1)[0]!;
   expect(view.etaLabel).toBe('24:59:59 · 上次估时误差 ±30%');
-  expect(view.statusLabel).toBe('执行中');
+  expect(view.statusLabel).toBe('本轮执行中');
   expect(view.progressPercent).toBeNull();
   expect(view.progressMode).toBe('indeterminate');
 });
@@ -113,15 +113,20 @@ it.each(['waiting', 'paused'] as const)('freezes %s while another running row co
 it('shows overdue as pending update, never as task completion', () => {
   const view = buildConversationViews([row()], 90000)[0]!;
   expect(view.etaLabel).toBe('已超出预计时间 · 等待重新估时');
-  expect(view.statusLabel).toBe('执行中');
+  expect(view.statusLabel).toBe('本轮执行中');
   expect(view.progressPercent).toBeNull();
 });
 it('keeps unknown and explicit interruptions distinct from completion', () => {
   const unknown = row({status: 'unknown', prediction: null});
-  expect(buildConversationViews([unknown])[0]).toMatchObject({etaLabel: '剩余时间未知', statusLabel: '执行中 · 目标状态待判断'});
+  expect(buildConversationViews([unknown])[0]).toMatchObject({etaLabel: '剩余时间未知', statusLabel: '本轮执行中 · 状态待判断'});
   const interrupted = row({runtime: 'interrupted', status: 'interrupted', prediction: null});
-  expect(buildConversationViews([interrupted])[0]).toMatchObject({statusLabel: '任务已中断', etaLabel: '工作计时已停止'});
+  expect(buildConversationViews([interrupted])[0]).toMatchObject({statusLabel: '本轮已中断', etaLabel: '工作计时已停止'});
   const completed = row(); completed.goal!.status = 'completed';
   const stopped = row(); stopped.goal!.runtime = 'stopped';
   expect(buildConversationViews([completed, stopped])).toEqual([]);
+});
+it.each([
+  ['failed','本轮失败'],['waiting','本轮等待用户'],['paused','本轮跟踪已暂停']
+] as const)('labels %s as the current turn', (runtime,label)=>{
+  expect(buildConversationViews([row({runtime,status:runtime})])[0]?.statusLabel).toBe(label);
 });
