@@ -13,6 +13,7 @@ export const SETTINGS_CHANNELS = Object.freeze({
   providerCheck: 'codex-progress-hud:settings:provider:check',
   providerTrial: 'codex-progress-hud:settings:provider:trial',
   providerActivate: 'codex-progress-hud:settings:provider:activate',
+  providerStart: 'codex-progress-hud:settings:provider:start',
   providerCancel: 'codex-progress-hud:settings:provider:cancel',
 });
 
@@ -64,6 +65,7 @@ interface ProviderSettingsActions {
   checkProvider(payload: unknown): Promise<unknown>;
   trialProvider(payload: unknown): Promise<unknown>;
   activateProvider(payload: unknown): Promise<unknown>;
+  startProvider(payload: unknown): Promise<unknown>;
   cancelProviderAction(): Promise<unknown>;
   providerConsentRequired?(payload: unknown): Promise<boolean>;
 }
@@ -103,10 +105,12 @@ export function createObserverSettingsController(options: {
   let registered = false;
   let disposing = false;
   let windowGeneration = 0;
+  let providerCancellation: Promise<void> | undefined;
   let challenge: {value: string; sender: unknown; generation: number; revision: number; binding: string; expiresAt: number; consuming: boolean} | undefined;
   const now = options.now ?? Date.now;
   const providerMutation = z.object({generation: z.number().int().nonnegative().safe(), revision: z.number().int().nonnegative().safe()}).passthrough();
   const providerAccountPayload = z.object({generation: z.number().int().nonnegative().safe(), revision: z.number().int().nonnegative().safe(), action: z.enum(['login', 'device-auth', 'logout'] as const)}).strict();
+  const providerStartPayload = z.object({generation: z.number().int().nonnegative().safe(), revision: z.number().int().nonnegative().safe(), selected: z.enum(['subscription', 'api'] as const), consent: z.literal(true), draft: z.unknown().optional(), secret: z.string().max(8192).optional()}).strict();
 
   function invalidateChallenge(): void { challenge = undefined; }
   function activeChallenge(value: string, revision: number, sender: unknown): NonNullable<typeof challenge> {
@@ -207,6 +211,12 @@ export function createObserverSettingsController(options: {
       confirmedProviderAction(SETTINGS_CHANNELS.providerCheck, provider.checkProvider, '是否检查 API 提供方？', '将向以下地址发送配置的 API 密钥以检查连接，不运行推理。', true);
       confirmedProviderAction(SETTINGS_CHANNELS.providerTrial, provider.trialProvider, '是否进行一次合成试探？', '这会暂时停止当前估时，但任务追踪仍会继续；会向所选提供方发送固定合成输入，可能产生费用；', true);
       confirmedProviderAction(SETTINGS_CHANNELS.providerActivate, provider.activateProvider, '是否启用所选提供方？', '启用后估时数据会发送给所示接收方；API 调用可能产生费用。保存草稿本身不会启用。', true);
+      options.ipcMain.handle(SETTINGS_CHANNELS.providerStart, async (event, payload) => {
+        trusted(event);
+        const parsed = providerStartPayload.safeParse(payload);
+        if (!parsed.success) throw new Error('SETTINGS_INVALID_REQUEST');
+        return provider.startProvider(parsed.data);
+      });
       options.ipcMain.handle(SETTINGS_CHANNELS.providerCancel, async event => { trusted(event); return provider.cancelProviderAction(); });
     }
   }
@@ -214,6 +224,11 @@ export function createObserverSettingsController(options: {
     if (!registered) return;
     registered = false;
     for (const channel of Object.values(SETTINGS_CHANNELS)) options.ipcMain.removeHandler(channel);
+  }
+  function cancelProviderActionSafely(): Promise<void> {
+    if (providerCancellation) return providerCancellation;
+    providerCancellation = Promise.resolve(options.provider?.cancelProviderAction?.()).then(() => undefined, () => undefined).finally(() => { providerCancellation = undefined; });
+    return providerCancellation;
   }
 
   return {
@@ -230,11 +245,13 @@ export function createObserverSettingsController(options: {
       created.webContents.setWindowOpenHandler(() => ({action: 'deny'}));
       created.on('close', event => {
         if (disposing || options.quitting()) return;
+        void cancelProviderActionSafely();
         event?.preventDefault();
         created.hide();
       });
       created.on('closed', () => {
         if (window !== created) return;
+        void cancelProviderActionSafely();
         window = undefined;
         invalidateChallenge();
         removeHandlers();
@@ -251,6 +268,7 @@ export function createObserverSettingsController(options: {
     },
     async dispose(): Promise<void> {
       disposing = true;
+      await cancelProviderActionSafely();
       removeHandlers();
       const current = window;
       window = undefined;

@@ -128,6 +128,20 @@ function dialogFor(events: string[], response = 0) {
 describe('desktop observer runtime composition', () => {
   afterEach(() => {vi.useRealTimers();});
 
+  it('accepts only a matching inline account binding and does not open the legacy consent dialog', async () => {
+    const events: string[] = [];
+    const runtime = createDesktopObserverRuntime({
+      identity: identityFor(() => 0, events),
+      dialog: dialogFor(events),
+      openAccounting: async () => owner(events),
+      now: () => 0,
+    });
+    await runtime.start(new AbortController().signal, {kind: 'inline', accountFingerprint: 'a'.repeat(64), generation: 1, revision: 1});
+    expect(events).not.toContain('dialog');
+    expect(runtime.workers.every(worker => !worker.status().disabled)).toBe(true);
+    await runtime.close();
+  });
+
   it('captures sanitized exit and HTTP details through the actual recovery runner',async()=>{
     const events:string[]=[];
     const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),

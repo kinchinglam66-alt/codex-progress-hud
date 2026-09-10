@@ -45,6 +45,7 @@ export interface ProviderSettingsPublic {
   proxyUrl?: string;
 }
 export interface ProviderMutation {generation: number; revision: number}
+export interface ProviderInlineConsent {kind: 'inline'; generation: number; revision: number}
 export interface ProviderSettingsHost {
   workers: readonly ObserverWorker[];
   status(): ProviderSettingsPublic;
@@ -55,6 +56,7 @@ export interface ProviderSettingsHost {
   activateProvider(input: ProviderMutation & {selected?: ProviderConfig['selected']}): Promise<ProviderSettingsPublic>;
   cancelProviderAction(): Promise<ProviderSettingsPublic>;
   providerConsentRequired(input: ProviderMutation & {selected?: ProviderConfig['selected']}): Promise<boolean>;
+  startProvider(input: ProviderMutation & {selected: ProviderConfig['selected']; consent: true; draft?: unknown; secret?: string}): Promise<ProviderSettingsPublic>;
   replaceSubscriptionAccount(input: ProviderMutation & {action: 'login' | 'device-auth' | 'logout'}, signal?: AbortSignal): Promise<{outcome: string; account: ProviderAccountMetadata | null}>;
   start(signal: AbortSignal): Promise<void>;
   disable(): void;
@@ -64,7 +66,7 @@ export interface ProviderSettingsHost {
 export interface ObserverProviderHostOptions {
   dataDirectory: string;
   consentProtection: ConsentProtection;
-  openSubscription(signal: AbortSignal): Promise<ProviderWorkerOwner>;
+  openSubscription(signal: AbortSignal, consent?: ProviderInlineConsent): Promise<ProviderWorkerOwner>;
   openApi?: (config: ApiConfig, readKey: () => Promise<string | null>, signal: AbortSignal, generation: number) => Promise<ProviderWorkerOwner>;
   readSubscriptionAccount?: (signal: AbortSignal) => Promise<ProviderAccountMetadata>;
   subscriptionAccount?: ObserverAccountSettings;
@@ -115,18 +117,22 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   let action: Promise<unknown> | undefined;
   let actionToken: object | undefined;
   let actionController: AbortController | undefined;
+  let composedStartBusy = false;
+  let composedStartController: AbortController | undefined;
+  let composedStartPromise: Promise<ProviderSettingsPublic> | undefined;
   let closing: Promise<void> | undefined;
   let closed = false;
   let releasePending: (() => void) | undefined;
   const retained = new Set<ProviderWorkerOwner>();
   let current: ProviderWorkerOwner | null = null;
+  let inlineSubscriptionConsent: ProviderInlineConsent | undefined;
   let dispatchGeneration = generation;
   const apiConsentStore: ObserverConsentStore = createObserverConsentStore(join(options.dataDirectory,'observer-api-consent.json'),options.consentProtection);
   const secretStore = createObserverSecretStore(secretPath(options.dataDirectory), options.consentProtection);
 
   const makeSelection = () => createProviderSelection({
     open: async (config, signal) => config.selected === 'subscription'
-      ? options.openSubscription(signal)
+      ? options.openSubscription(signal, inlineSubscriptionConsent)
       : options.openApi === undefined ? Promise.reject(fixedFailure('PROVIDER_API_UNAVAILABLE')) : options.openApi(config.api!, async () => {
         const value = await secretStore.read(config.api!.keyRef);
         return value;
@@ -176,10 +182,10 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     };
   }
 
-  function checkMutation(input: ProviderMutation): void {
+  function checkMutation(input: ProviderMutation, internalComposedStart = false): void {
     if (closed) throw fixedFailure('PROVIDER_CLOSED');
     if (retained.size) throw fixedFailure('PROVIDER_CLEANUP_FAILED');
-    if (!mutation.safeParse(input).success || input.generation !== generation || input.revision !== revision || actionToken !== undefined) throw fixedFailure(actionToken === undefined ? 'PROVIDER_STALE_REVISION' : 'PROVIDER_ACTION_BUSY');
+    if (!mutation.safeParse(input).success || input.generation !== generation || input.revision !== revision || actionToken !== undefined || (composedStartBusy && !internalComposedStart)) throw fixedFailure(actionToken === undefined && (!composedStartBusy || internalComposedStart) ? 'PROVIDER_STALE_REVISION' : 'PROVIDER_ACTION_BUSY');
   }
 
   function acquireAction(): {controller: AbortController; token: object} {
@@ -266,8 +272,8 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     } finally { releaseAction(token); }
   }
 
-  async function saveProviderSettings(input: ProviderMutation & {draft: unknown; secret?: string}): Promise<ProviderSettingsPublic> {
-    checkMutation(input);
+  async function saveProviderSettings(input: ProviderMutation & {draft: unknown; secret?: string}, internalComposedStart = false): Promise<ProviderSettingsPublic> {
+    checkMutation(input, internalComposedStart);
     const {token}=acquireAction();
     try {
     const parsed = providerDraft.safeParse(input.draft);
@@ -293,8 +299,8 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     } finally { releaseAction(token); }
   }
 
-  async function activateProvider(input: ProviderMutation & {selected?: ProviderConfig['selected']}): Promise<ProviderSettingsPublic> {
-    checkMutation(input);
+  async function activateProvider(input: ProviderMutation & {selected?: ProviderConfig['selected']}, internalComposedStart = false): Promise<ProviderSettingsPublic> {
+    checkMutation(input, internalComposedStart);
     const next = input.selected === 'subscription' ? initialConfig : draft;
     const {controller,token}=acquireAction();
     const nextGeneration = ++generation;
@@ -331,6 +337,63 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     return publicStatus();
   }
 
+  function startProvider(input: ProviderMutation & {selected: ProviderConfig['selected']; consent: true; draft?: unknown; secret?: string}): Promise<ProviderSettingsPublic> {
+    checkMutation(input);
+    if (input.consent !== true) throw fixedFailure('PROVIDER_INLINE_CONSENT_REQUIRED');
+    if (composedStartPromise !== undefined) throw fixedFailure('PROVIDER_ACTION_BUSY');
+    composedStartBusy = true;
+    const controller = new AbortController();
+    composedStartController = controller;
+    let owned!: Promise<ProviderSettingsPublic>;
+    const operation = (async () => {
+      if (input.selected === 'api') {
+        controller.signal.throwIfAborted();
+        const saved = await saveProviderSettings({generation: input.generation, revision: input.revision, draft: input.draft, ...(input.secret === undefined ? {} : {secret: input.secret})}, true);
+        controller.signal.throwIfAborted();
+        const result = await activateProvider({generation: saved.generation, revision: saved.revision, selected: 'api'}, true);
+        controller.signal.throwIfAborted();
+        return result;
+      }
+      const settings = options.subscriptionAccount;
+      if (!settings) throw fixedFailure('OBSERVER_SUBSCRIPTION_ACCOUNT_UNAVAILABLE');
+      let loginRequired = false;
+      try { await settings.inspect(controller.signal); }
+      catch (error) {
+        if (!(error instanceof Error) || error.message !== 'OBSERVER_LOGIN_REQUIRED') throw error;
+        loginRequired = true;
+      }
+      controller.signal.throwIfAborted();
+      if (loginRequired) {
+        // A credential replacement must never overlap an active observer.
+        if (current !== null) {
+          const previous = current;
+          dispatchGeneration = ++generation; state = 'inactive'; current = null;
+          for (const worker of previous.workers) worker.disable();
+          await drainSelection();
+          controller.signal.throwIfAborted();
+          await writeState({version: 1, generation, revision, state: 'inactive', selected: active.selected});
+        }
+        const outcome = await settings.login(controller.signal);
+        controller.signal.throwIfAborted();
+        if (outcome !== 'process_exited') throw fixedFailure('OBSERVER_LOGIN_FAILED');
+      }
+      controller.signal.throwIfAborted();
+      const currentStatus = {generation, revision};
+      inlineSubscriptionConsent = {kind: 'inline', generation: currentStatus.generation, revision: currentStatus.revision};
+      const result = await activateProvider({generation: currentStatus.generation, revision: currentStatus.revision, selected: 'subscription'}, true);
+      controller.signal.throwIfAborted();
+      return result;
+    })();
+    owned = operation.finally(() => {
+      inlineSubscriptionConsent = undefined;
+      if (composedStartController === controller) composedStartController = undefined;
+      if (composedStartPromise === owned) composedStartPromise = undefined;
+      composedStartBusy = false;
+    });
+    composedStartPromise = owned;
+    return owned;
+  }
+
   async function checkProvider(input: ProviderMutation): Promise<{ok: boolean; stage: 'local' | 'network'; message: string}> {
     checkMutation(input);
     const {controller,token}=acquireAction(); let owner:ProviderWorkerOwner|undefined;
@@ -359,7 +422,12 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     finally { try { await closeAuxiliary(owner); } finally { releaseAction(token); } }
   }
 
-  async function cancelProviderAction(): Promise<ProviderSettingsPublic> { actionController?.abort(); await action?.catch(() => undefined); action = undefined; return publicStatus(); }
+  async function cancelProviderAction(): Promise<ProviderSettingsPublic> {
+    composedStartController?.abort(); actionController?.abort();
+    await Promise.all([action?.catch(() => undefined), composedStartPromise?.catch(() => undefined)]);
+    action = undefined;
+    return publicStatus();
+  }
 
   async function replaceSubscriptionAccount(input: ProviderMutation & {action:'login'|'device-auth'|'logout'}, signal = new AbortController().signal): Promise<{outcome: string; account: ProviderAccountMetadata | null}> {
     checkMutation(input);
@@ -386,13 +454,13 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     const previous=current;
     dispatchGeneration=++generation; state='inactive';
     for(const worker of previous?.workers??[])worker.disable();
-    actionController?.abort();
-    closing = (async () => { await action?.catch(() => undefined); await selection.close(); for (const owner of retained) await closeAuxiliary(owner); current = null; })().finally(() => { closing = undefined; });
+    composedStartController?.abort(); actionController?.abort();
+    closing = (async () => { await Promise.all([action?.catch(() => undefined), composedStartPromise?.catch(() => undefined)]); await selection.close(); for (const owner of retained) await closeAuxiliary(owner); current = null; })().finally(() => { closing = undefined; });
     return closing;
   }
   return {workers, status: () => ({
     generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account,
     recipient: draft.selected==='api'&&draft.api?`${new URL(draft.api.baseUrl).origin}${new URL(draft.api.baseUrl).pathname} · ${draft.api.model}`:(options.recipient ?? 'Codex Progress HUD observer'), ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
-  }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
-    disable: () => {dispatchGeneration = ++generation; state = 'inactive'; actionController?.abort(); for(const worker of current?.workers??[]) worker.disable();}, close};
+  }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
+    disable: () => {dispatchGeneration = ++generation; state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of current?.workers??[]) worker.disable();}, close};
 }

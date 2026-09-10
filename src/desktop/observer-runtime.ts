@@ -42,6 +42,13 @@ export interface DesktopObserverRuntimeOptions {
   consentStore?: ObserverConsentStore;
 }
 
+export interface ObserverInlineConsent {
+  kind: 'inline';
+  accountFingerprint: string;
+  generation: number;
+  revision: number;
+}
+
 type SchedulerRecoveryHandle = Pick<ObserverScheduler, 'prepareRecovery' | 'restoreRecovery'>;
 
 type ObserverResult = Awaited<ReturnType<ObserverWorker['observe']>>;
@@ -329,7 +336,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     timer.unref?.();
   }
 
-  async function start(signal: AbortSignal): Promise<void> {
+  async function start(signal: AbortSignal, inlineConsent?: ObserverInlineConsent): Promise<void> {
     if (disabled || closing || setup) return setup ?? Promise.resolve();
     externalSignal = signal;
     externalAbort = () => disable();
@@ -346,7 +353,10 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         authorizedBinding = binding(snapshot.evidence);
         const stored = await readConsent();
         const restored = stored !== null && gate.restore(stored);
-        const consent = restored ? true : await waitForSignal(requestObserverConsent(gate, dialog, snapshot.accountLabel), combined);
+        const inline = inlineConsent !== undefined && inlineConsent.accountFingerprint === snapshot.evidence.accountFingerprint
+          ? (() => { const offer = gate.offer(); return offer !== null && gate.accept(offer); })()
+          : false;
+        const consent = restored ? true : inlineConsent !== undefined ? inline : await waitForSignal(requestObserverConsent(gate, dialog, snapshot.accountLabel), combined);
         if (!consent || !gate.authorized()) throw new Error('OBSERVER_CONSENT_REQUIRED');
         if (!restored) await consentStore?.grant(observerConsentScope(snapshot.evidence), now());
 

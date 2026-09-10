@@ -5,7 +5,7 @@ interface ProviderSettings {generation:number;revision:number;selected:'subscrip
 interface SettingsApi {
   getStatus(): Promise<SettingsStatus>; preflight(): Promise<SettingsStatus & {allowed: boolean; challenge?: string}>; confirm(revision: number, challenge: string): Promise<SettingsStatus>; revokeConsent(): Promise<SettingsStatus & {consentRevoked:boolean}>;
   readProviderSettings?(): Promise<ProviderSettings>; saveProviderSettings?(payload: unknown): Promise<ProviderSettings>; replaceSubscriptionAccount?(payload: unknown): Promise<{outcome:string}>;
-  checkProvider?(payload: unknown): Promise<{ok:boolean;stage:string;message:string}>; trialProvider?(payload: unknown): Promise<ProviderSettings>; activateProvider?(payload: unknown): Promise<ProviderSettings>; cancelProviderAction?(): Promise<ProviderSettings>;
+  checkProvider?(payload: unknown): Promise<{ok:boolean;stage:string;message:string}>; trialProvider?(payload: unknown): Promise<ProviderSettings>; activateProvider?(payload: unknown): Promise<ProviderSettings>; startProvider?(payload: unknown): Promise<ProviderSettings>; cancelProviderAction?(): Promise<ProviderSettings>;
 }
 declare global { interface Window {codexProgressHudSettings?: SettingsApi} }
 
@@ -101,7 +101,11 @@ const dirty = document.querySelector<HTMLElement>('#provider-dirty');
 const account = document.querySelector<HTMLElement>('#provider-account');
 const accountTime = document.querySelector<HTMLElement>('#provider-account-time');
 const recipient = document.querySelector<HTMLElement>('#provider-recipient');
+const providerUsageNotice = document.querySelector<HTMLElement>('#provider-usage-notice');
+const providerApiFields = document.querySelector<HTMLElement>('#provider-api-fields');
 const providerSave = document.querySelector<HTMLButtonElement>('#provider-save');
+const providerStart = document.querySelector<HTMLButtonElement>('#provider-start');
+const providerConsent = document.querySelector<HTMLInputElement>('#provider-consent');
 const providerCheck = document.querySelector<HTMLButtonElement>('#provider-check');
 const providerTrial = document.querySelector<HTMLButtonElement>('#provider-trial');
 const providerActivate = document.querySelector<HTMLButtonElement>('#provider-activate');
@@ -111,22 +115,45 @@ const deviceLogin = document.querySelector<HTMLButtonElement>('#subscription-dev
 const logout = document.querySelector<HTMLButtonElement>('#subscription-logout');
 let providerSnapshot: ProviderSettings | undefined;
 let providerBusy = false;
+const DEFAULT_PROFILE_ID = 'default';
+const DEFAULT_PROVIDER_NAME = 'OpenAI API';
+const DEFAULT_REASONING_EFFORT = 'medium';
+const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
+const DEFAULT_DAILY_CALL_LIMIT = 24;
+const SUBSCRIPTION_RECIPIENT = 'OpenAI / ChatGPT 订阅账户';
 
 function providerDraftFromInputs(): ProviderDraft {
   if (providerSource?.value === 'subscription') return {selected: 'subscription', api: null};
-  const effort=reasoningEffort?.value;
-  return {selected: 'api', api: {profileId: profileId?.value.trim() ?? '', name: providerName?.value.trim() ?? '', baseUrl: baseUrl?.value.trim() ?? '', protocol: protocol?.value ?? '', model: model?.value.trim() ?? '', ...(effort ? {reasoningEffort: effort} : {}),
-    maxOutputTokens: Number(maxOutputTokens?.value ?? 2048), dailyCallLimit: Number(dailyCallLimit?.value ?? 24)}};
+  const effort=reasoningEffort?.value || DEFAULT_REASONING_EFFORT;
+  const maxTokens=Number(maxOutputTokens?.value || DEFAULT_MAX_OUTPUT_TOKENS);
+  const callLimit=Number(dailyCallLimit?.value || DEFAULT_DAILY_CALL_LIMIT);
+  return {selected: 'api', api: {profileId: profileId?.value.trim() || DEFAULT_PROFILE_ID, name: providerName?.value.trim() || DEFAULT_PROVIDER_NAME, baseUrl: baseUrl?.value.trim() ?? '', protocol: protocol?.value || 'responses', model: model?.value.trim() ?? '', ...(effort ? {reasoningEffort: effort} : {}),
+    maxOutputTokens: Number.isSafeInteger(maxTokens) && maxTokens > 0 ? maxTokens : DEFAULT_MAX_OUTPUT_TOKENS, dailyCallLimit: Number.isSafeInteger(callLimit) && callLimit > 0 ? callLimit : DEFAULT_DAILY_CALL_LIMIT}};
 }
 function setProviderBusy(value: boolean): void {
   providerBusy = value;
-  for (const control of [providerSave, providerCheck, providerTrial, providerActivate, login, deviceLogin, logout]) if (control) control.disabled = value;
+  for (const control of [providerStart, providerSave, providerCheck, providerTrial, providerActivate, login, deviceLogin, logout, providerConsent]) if (control) control.disabled = value;
   if (providerCancel) providerCancel.disabled = !value;
+}
+function liveApiRecipient(): string {
+  const endpoint=baseUrl?.value.trim() ?? '';
+  const selectedModel=model?.value.trim() ?? '';
+  if (!endpoint) return selectedModel ? `API 提供方 · ${selectedModel}` : 'API 提供方';
+  try { const url=new URL(endpoint); return `${url.origin}${url.pathname} · ${selectedModel || '未填写模型'}`; }
+  catch { return `${endpoint} · ${selectedModel || '未填写模型'}`; }
+}
+function renderProviderView(): void {
+  const source=providerSource?.value === 'api' ? 'api' : 'subscription';
+  if (providerApiFields) providerApiFields.hidden = source !== 'api';
+  if (recipient) recipient.textContent = source === 'api' ? liveApiRecipient() : SUBSCRIPTION_RECIPIENT;
+  if (providerUsageNotice) providerUsageNotice.textContent = source === 'api'
+    ? `API 估时会向 ${recipient?.textContent ?? '所示提供方'} 发送任务摘要，调用可能产生费用。`
+    : '订阅估时会消耗所示账户的订阅额度；不会复制主 Codex 凭据。';
+  if (providerStart) providerStart.textContent = source === 'api' ? '保存并开始' : providerSnapshot?.account ? '开始估时' : '登录并开始';
 }
 function renderProvider(value: ProviderSettings): void {
   providerSnapshot = value;
-  const source = value.draft.selected;
-  if (providerSource) providerSource.value = source;
+  if (providerSource) providerSource.value = value.draft.selected;
   const draft = value.draft.api;
   if (draft) {
     if (profileId) profileId.value = draft.profileId; if (providerName) providerName.value = draft.name; if (baseUrl) baseUrl.value = draft.baseUrl;
@@ -137,19 +164,21 @@ function renderProvider(value: ProviderSettings): void {
   if (keyState) keyState.textContent = (draft?.keyConfigured ?? false) ? '已配置（密钥不会显示）' : '未配置密钥';
   if (account) account.textContent = value.account?.label ?? '未登录订阅账户';
   if (accountTime) accountTime.textContent = value.account ? `观察时间：${new Date(value.account.observedAt).toLocaleString('zh-CN')}；有效至：${new Date(value.account.expiresAt).toLocaleString('zh-CN')}` : '—';
-  if (recipient) recipient.textContent = value.recipient ?? '接收方待读取';
   if (dirty) dirty.textContent = '已保存';
+  renderProviderView();
 }
 function providerEnvelope(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {generation: providerSnapshot?.generation ?? 0, revision: providerSnapshot?.revision ?? 0, ...extra};
 }
 function markDirty(): void {
+  if (providerConsent) providerConsent.checked = false;
   if (dirty && providerSnapshot) {
     const original = providerSnapshot.draft;
     const fields = original.api ? (({keyConfigured: _metadata, ...rest}) => rest)(original.api) : null;
     dirty.textContent = JSON.stringify(providerDraftFromInputs()) === JSON.stringify({selected:original.selected, api:fields}) ? '已保存' : '有未保存更改';
   }
 }
+function providerInputChanged(): void { markDirty(); renderProviderView(); }
 async function refreshProvider(): Promise<void> {
   if (!providerApi?.readProviderSettings) return;
   try { renderProvider(await providerApi.readProviderSettings()); } catch { message.textContent = '无法读取提供方设置'; }
@@ -160,10 +189,21 @@ async function providerAction(operation: () => Promise<unknown>, success: string
   if (providerBusy) return; setProviderBusy(true);
   const generation = ++providerActionGeneration;
   try { await operation(); if (generation !== providerActionGeneration) return; await refreshProvider(); if (generation === providerActionGeneration) message.textContent = success; }
-  catch (error) { if (generation !== providerActionGeneration) return; const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : '提供方操作失败；估时保持停用。'; message.textContent = text; }
+  catch (error) { if (generation !== providerActionGeneration) return; const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : error instanceof Error && error.message === 'PROVIDER_INLINE_CONSENT_REQUIRED' ? '请先同意接收方和用量说明。' : '提供方操作失败；估时保持停用。'; message.textContent = text; }
   finally { if (generation === providerActionGeneration) setProviderBusy(false); }
 }
-for (const control of [providerSource, profileId, providerName, baseUrl, model, protocol, reasoningEffort, maxOutputTokens, dailyCallLimit]) control?.addEventListener('input', markDirty);
+for (const control of [profileId, providerName, baseUrl, model, protocol, reasoningEffort, maxOutputTokens, dailyCallLimit]) control?.addEventListener('input', providerInputChanged);
+providerSource?.addEventListener('input', providerInputChanged);
+providerSource?.addEventListener('change', providerInputChanged);
+apiKey?.addEventListener('input', () => { if (providerConsent) providerConsent.checked = false; });
+providerStart?.addEventListener('click', () => void providerAction(async () => {
+  if (!providerApi?.startProvider) return;
+  if (!providerConsent?.checked) { message.textContent = '请先同意接收方和用量说明。'; throw new Error('PROVIDER_INLINE_CONSENT_REQUIRED'); }
+  const selected = providerSource?.value === 'api' ? 'api' : 'subscription';
+  const extra = selected === 'api' ? {draft: providerDraftFromInputs(), ...(apiKey?.value ? {secret: apiKey.value} : {})} : {};
+  if (apiKey) apiKey.value = '';
+  await providerApi.startProvider(providerEnvelope({selected, consent: true, ...extra}));
+}, '已准备估时；尚未证明模型推理可用。'));
 providerSave?.addEventListener('click', () => void providerAction(async () => {
   if (!providerApi?.saveProviderSettings) return;
   const secret = apiKey?.value ?? ''; apiKey && (apiKey.value = '');

@@ -22,6 +22,12 @@ function owner(label: string): ProviderWorkerOwner {
   return {workers, close: vi.fn(async () => undefined), inspect: vi.fn(async () => ({label, fingerprint: `${label}-fingerprint`}))};
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(nextResolve => {resolve = nextResolve;});
+  return {promise, resolve};
+}
+
 describe('desktop observer provider composition', () => {
   it('never reuses an API secret after changing its endpoint or profile', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
@@ -198,6 +204,110 @@ describe('desktop observer provider composition', () => {
     expect(result.outcome).toBe('cancelled');
     expect(events).toEqual(['close', 'login']);
     expect(JSON.parse(await readFile(join(directory, 'observer-provider-state.json'), 'utf8'))).toMatchObject({state: 'inactive'});
+    await host.close();
+  });
+
+  it('composes subscription account verification and activation with a one-shot inline consent marker', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
+    const subscription = owner('subscription');
+    const openSubscription = vi.fn(async (_signal: AbortSignal, consent: unknown) => {
+      expect(consent).toMatchObject({kind: 'inline'});
+      return subscription;
+    });
+    const accountSettings = {
+      inspect: vi.fn(async () => ({accountLabel: 'person@example.invalid', evidence: {
+        accountFingerprint: 'a'.repeat(64), routeFingerprint: 'b'.repeat(64), assetsFingerprint: 'c'.repeat(64), observedAt: 0, expiresAt: 300000,
+      }})),
+      login: vi.fn(async () => 'process_exited' as const), deviceAuth: vi.fn(), logout: vi.fn(), status: vi.fn(), providerOwner: vi.fn(), close: vi.fn(async () => undefined),
+    } as any;
+    const host = await createObserverProviderHost({
+      dataDirectory: directory,
+      consentProtection: {protect: (value: string) => value, unprotect: (value: string) => value},
+      openSubscription,
+      subscriptionAccount: accountSettings,
+      readSubscriptionAccount: async () => ({label: 'person@example.invalid', observedAt: 0, expiresAt: 300000}),
+      now: () => 0,
+    });
+    const before = host.status();
+    await host.startProvider({generation: before.generation, revision: before.revision, selected: 'subscription', consent: true});
+    expect(accountSettings.inspect).toHaveBeenCalled();
+    expect(accountSettings.login).not.toHaveBeenCalled();
+    expect(openSubscription).toHaveBeenCalledOnce();
+    expect(host.status().state).toBe('ready');
+    await host.close();
+  });
+
+  it('opens the official login only after draining an active subscription runtime when attestation says login is required', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
+    const events: string[] = [];
+    const first = owner('old-subscription'); first.close = vi.fn(async () => {events.push('close-old');});
+    const second = owner('new-subscription');
+    const snapshot = {accountLabel: 'person@example.invalid', evidence: {accountFingerprint: 'a'.repeat(64), routeFingerprint: 'b'.repeat(64), assetsFingerprint: 'c'.repeat(64), observedAt: 0, expiresAt: 300000}};
+    const inspect = vi.fn(async () => snapshot);
+    const accountSettings = {
+      inspect,
+      login: vi.fn(async () => {events.push('login'); return 'process_exited' as const;}), deviceAuth: vi.fn(), logout: vi.fn(), status: vi.fn(), providerOwner: vi.fn(), close: vi.fn(async () => undefined),
+    } as any;
+    const openSubscription = vi.fn(async (_signal: AbortSignal, consent: unknown) => {events.push(consent ? 'open-inline' : 'open-old'); return openSubscription.mock.calls.length === 1 ? first : second;});
+    const host = await createObserverProviderHost({dataDirectory: directory, consentProtection: {protect: (value: string) => value, unprotect: (value: string) => value}, openSubscription, subscriptionAccount: accountSettings, readSubscriptionAccount: async () => ({label: snapshot.accountLabel, observedAt: 0, expiresAt: 300000}), now: () => 0});
+    const initial = host.status();
+    await host.startProvider({generation: initial.generation, revision: initial.revision, selected: 'subscription', consent: true});
+    inspect.mockRejectedValueOnce(new Error('OBSERVER_LOGIN_REQUIRED'));
+    const beforeLogin = host.status();
+    await host.startProvider({generation: beforeLogin.generation, revision: beforeLogin.revision, selected: 'subscription', consent: true});
+    expect(events.indexOf('close-old')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('close-old')).toBeLessThan(events.indexOf('login'));
+    expect(events.filter(event => event === 'open-inline')).toHaveLength(2);
+    await host.close();
+  });
+
+  it('saves and activates an API in one step', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
+    const openApi = vi.fn(async () => owner('api'));
+    const host = await createObserverProviderHost({dataDirectory: directory, consentProtection: {protect: (value: string) => value, unprotect: (value: string) => value}, openSubscription: async () => owner('subscription'), openApi});
+    const before = host.status();
+    const result = await host.startProvider({generation: before.generation, revision: before.revision, selected: 'api', consent: true, draft: apiDraft, secret: 'one-shot-key'});
+    expect(result.state).toBe('ready');
+    expect(result.active.selected).toBe('api');
+    expect((await host.readProviderSettings()).draft.api?.keyConfigured).toBe(true);
+    expect(openApi).toHaveBeenCalledOnce();
+    await host.close();
+  });
+
+  it('aborting an API one-step action drains the composed promise before returning and never activates the saved draft', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
+    const pending = deferred<ProviderWorkerOwner>();
+    const openApi = vi.fn(() => pending.promise);
+    const host = await createObserverProviderHost({dataDirectory: directory, consentProtection: {protect: (value: string) => value, unprotect: (value: string) => value}, openSubscription: async () => owner('subscription'), openApi});
+    const before = host.status();
+    const starting = host.startProvider({generation: before.generation, revision: before.revision, selected: 'api', consent: true, draft: apiDraft, secret: 'one-shot-key'});
+    await vi.waitFor(() => expect(openApi).toHaveBeenCalledOnce());
+    expect(() => host.startProvider({generation: before.generation, revision: before.revision, selected: 'api', consent: true, draft: apiDraft, secret: 'second-key'})).toThrow('PROVIDER_ACTION_BUSY');
+    const canceling = host.cancelProviderAction();
+    pending.resolve(owner('late-api'));
+    await canceling;
+    await expect(starting).rejects.toThrow();
+    expect(host.status().active.selected).toBe('subscription');
+    expect(host.status().state).toBe('inactive');
+    await host.close();
+  });
+
+  it('cancelling while the write-only API key is being saved does not continue into activation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
+    let saving = false;
+    let release!: (value: string) => void;
+    const protection = {protect: vi.fn(async (value: string) => {saving = true; return new Promise<string>(resolve => {release = () => resolve(value);});}), unprotect: (value: string) => value};
+    const openApi = vi.fn(async () => owner('api'));
+    const host = await createObserverProviderHost({dataDirectory: directory, consentProtection: protection, openSubscription: async () => owner('subscription'), openApi});
+    const before = host.status();
+    const starting = host.startProvider({generation: before.generation, revision: before.revision, selected: 'api', consent: true, draft: apiDraft, secret: 'one-shot-key'});
+    await vi.waitFor(() => expect(saving).toBe(true));
+    const canceling = host.cancelProviderAction();
+    release('sealed-key');
+    await canceling;
+    await expect(starting).rejects.toThrow();
+    expect(openApi).not.toHaveBeenCalled();
+    expect(host.status().active.selected).toBe('subscription');
     await host.close();
   });
 });

@@ -5,12 +5,12 @@ import {z} from 'zod';
 import {readObserverPilotConfig,observerPilotEnvironment} from './observer-pilot-config.js';
 import {createObserverIdentityRuntime} from '../estimation/observer-identity-runtime.js';
 import {openThreadedReleaseAccounting} from '../estimation/accounting-worker-owner.js';
-import {createDesktopObserverRuntime} from './observer-runtime.js';
+import {createDesktopObserverRuntime, type ObserverInlineConsent} from './observer-runtime.js';
 import {createPilotJournal} from '../evaluation/pilot-journal.js';
 import type {ObserverConsentDialog} from './observer-consent-dialog.js';
 import {createObserverConsentStore,type ConsentProtection} from '../estimation/observer-consent-store.js';
 import {createObserverAccountSettings} from './observer-account-settings.js';
-import {createObserverProviderHost, type ProviderWorkerOwner} from './observer-provider-host.js';
+import {createObserverProviderHost, type ProviderInlineConsent, type ProviderWorkerOwner} from './observer-provider-host.js';
 import type {ObserverScheduler} from '../estimation/observer-scheduler.js';
 import {createObserverApiProvider} from '../estimation/observer-api-provider.js';
 import {createObserverApiTransport} from './observer-api-transport.js';
@@ -86,7 +86,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
   const runtimes=new Set<ReturnType<typeof createDesktopObserverRuntime>>();
   let attachedScheduler: Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>|undefined;
   let currentRuntime: ReturnType<typeof createDesktopObserverRuntime>|undefined;
-  const openSubscription=async(signal:AbortSignal):Promise<ProviderWorkerOwner>=>{
+  const openSubscription=async(signal:AbortSignal, inlineConsent?:ProviderInlineConsent):Promise<ProviderWorkerOwner>=>{
     if(identityOptions===undefined||accountSettings===undefined)throw Error('OBSERVER_SUBSCRIPTION_UNAVAILABLE');
     const rootOwnerFingerprint=await ensureSubscriptionRootOwner(options.dataDirectory,()=>consentStore.read());
     const account=await accountSettings.inspect(signal);
@@ -95,7 +95,10 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore});
     runtimes.add(runtime);
     try{
-      await runtime.start(signal);
+      await runtime.start(signal, inlineConsent === undefined ? undefined : {
+        kind: 'inline', accountFingerprint: account.evidence.accountFingerprint,
+        generation: inlineConsent.generation, revision: inlineConsent.revision,
+      } satisfies ObserverInlineConsent);
       if(attachedScheduler)runtime.schedulerRecovery.attachScheduler(attachedScheduler);
       currentRuntime=runtime;
       return {workers:runtime.workers,close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime)currentRuntime=undefined;},

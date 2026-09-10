@@ -1,6 +1,82 @@
 import {afterEach,expect,it,vi} from 'vitest';
+import {readFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
 
 afterEach(()=>{vi.unstubAllGlobals();vi.resetModules();});
+
+it('keeps one-step actions visible while legacy recovery and provider controls start collapsed', async()=>{
+  const html=await readFile(resolve('src/ui/settings.html'),'utf8');
+  expect(html).toContain('<button id="provider-start"');
+  expect(html).toContain('<details id="recovery-advanced">');
+  expect(html).toContain('<details id="provider-advanced">');
+  expect(html).not.toContain('<details id="recovery-advanced" open');
+  expect(html).not.toContain('<details id="provider-advanced" open');
+  expect(html.indexOf('id="provider-heading"')).toBeLessThan(html.indexOf('id="status-heading"'));
+  expect(html.indexOf('id="provider-cancel"')).toBeLessThan(html.indexOf('<details id="provider-advanced">'));
+  expect(html).toContain('id="api-max-output-tokens" type="number" min="1" value="2048"');
+  expect(html).toContain('id="api-daily-call-limit" type="number" min="1" value="24"');
+});
+
+it('renders the live API disclosure and produces a valid fresh API start from URL/model/key only', async()=>{
+  const listeners=new Map<string,(event?:unknown)=>void>();
+  const elements=new Map<string,any>();
+  const selectors=['#state','#known-tokens','#unknown-count','#message','#diagnostic','#check','#recover','#revoke','#provider-source','#api-profile-id','#api-name','#api-base-url','#api-model','#api-protocol','#api-reasoning-effort','#api-max-output-tokens','#api-daily-call-limit','#api-key','#api-key-state','#provider-dirty','#provider-account','#provider-account-time','#provider-recipient','#provider-usage-notice','#provider-api-fields','#provider-start','#provider-consent','#provider-save','#provider-check','#provider-trial','#provider-activate','#provider-cancel','#subscription-login','#subscription-device-login','#subscription-logout'];
+  for(const selector of selectors){
+    const defaults:Record<string,string>={'#provider-source':'subscription','#api-profile-id':'default','#api-name':'','#api-base-url':'','#api-model':'','#api-protocol':'responses','#api-reasoning-effort':'medium','#api-max-output-tokens':'','#api-daily-call-limit':'','#api-key':''};
+    elements.set(selector,{textContent:'',disabled:false,value:defaults[selector]??'',hidden:false,checked:false,addEventListener:(type:string,listener:(event?:unknown)=>void)=>listeners.set(`${selector}:${type}`,listener)});
+  }
+  const snapshot={generation:2,revision:3,selected:'subscription',state:'inactive',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},keyConfigured:false,account:null,recipient:'Codex Progress HUD observer'};
+  const api={getStatus:async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:vi.fn(async()=>snapshot),startProvider:vi.fn(async()=>snapshot),saveProviderSettings:vi.fn(async()=>snapshot)};
+  vi.stubGlobal('document',{querySelector:(selector:string)=>elements.get(selector)});
+  vi.stubGlobal('window',{codexProgressHudSettings:api});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(api.readProviderSettings).toHaveBeenCalled());
+  const source=elements.get('#provider-source'); source.value='api'; listeners.get('#provider-source:change')!({target:source});
+  expect(elements.get('#provider-api-fields').hidden).toBe(false);
+  expect(elements.get('#provider-start').textContent).toBe('保存并开始');
+  const base=elements.get('#api-base-url'); base.value='https://fresh.example.test/v1'; listeners.get('#api-base-url:input')!({target:base});
+  const model=elements.get('#api-model'); model.value='fresh-model'; listeners.get('#api-model:input')!({target:model});
+  expect(elements.get('#provider-recipient').textContent).toContain('fresh.example.test/v1 · fresh-model');
+  expect(elements.get('#provider-usage-notice').textContent).toContain('可能产生费用');
+  elements.get('#provider-consent').checked=true;
+  const key=elements.get('#api-key'); key.value='write-only-key'; listeners.get('#api-key:input')!({target:key});
+  expect(elements.get('#provider-consent').checked).toBe(false);
+  elements.get('#provider-consent').checked=true; listeners.get('#provider-start:click')!();
+  await vi.waitFor(()=>expect(api.startProvider).toHaveBeenCalledOnce());
+  const payload=(api.startProvider as any).mock.calls[0][0] as any;
+  expect(payload.draft).toMatchObject({selected:'api',api:{profileId:'default',name:'OpenAI API',baseUrl:'https://fresh.example.test/v1',protocol:'responses',model:'fresh-model',reasoningEffort:'medium',maxOutputTokens:2048,dailyCallLimit:24}});
+  expect(payload.secret).toBe('write-only-key');
+});
+
+it('derives subscription disclosure independently when leaving a saved API draft', async()=>{
+  const listeners=new Map<string,(event?:unknown)=>void>();
+  const elements=new Map<string,any>();
+  const selectors=['#state','#known-tokens','#unknown-count','#message','#diagnostic','#check','#recover','#revoke','#provider-source','#api-profile-id','#api-name','#api-base-url','#api-model','#api-protocol','#api-reasoning-effort','#api-max-output-tokens','#api-daily-call-limit','#api-key','#api-key-state','#provider-dirty','#provider-account','#provider-account-time','#provider-recipient','#provider-usage-notice','#provider-api-fields','#provider-start','#provider-consent','#provider-save','#provider-check','#provider-trial','#provider-activate','#provider-cancel','#subscription-login','#subscription-device-login','#subscription-logout'];
+  for(const selector of selectors){
+    const defaults:Record<string,string>={'#provider-source':'subscription','#api-profile-id':'default','#api-name':'','#api-base-url':'','#api-model':'','#api-protocol':'responses','#api-reasoning-effort':'medium','#api-max-output-tokens':'','#api-daily-call-limit':'','#api-key':''};
+    elements.set(selector,{textContent:'',disabled:false,value:defaults[selector]??'',hidden:false,checked:false,addEventListener:(type:string,listener:(event?:unknown)=>void)=>listeners.set(`${selector}:${type}`,listener)});
+  }
+  const snapshot={generation:4,revision:5,selected:'api',state:'ready',active:{selected:'api',api:null},draft:{selected:'api',api:{profileId:'saved',name:'Saved API',baseUrl:'https://saved.example.test/v1',protocol:'responses',model:'saved-model',reasoningEffort:'medium',maxOutputTokens:2048,dailyCallLimit:24,keyConfigured:true}},keyConfigured:true,account:null,recipient:'https://saved.example.test/v1 · saved-model'};
+  const api={getStatus:async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:vi.fn(async()=>snapshot),startProvider:vi.fn(async()=>snapshot)};
+  vi.stubGlobal('document',{querySelector:(selector:string)=>elements.get(selector)});
+  vi.stubGlobal('window',{codexProgressHudSettings:api});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(api.readProviderSettings).toHaveBeenCalled());
+  const source=elements.get('#provider-source');
+  const consent=elements.get('#provider-consent');
+  consent.checked=true;
+  source.value='subscription'; listeners.get('#provider-source:change')!({target:source});
+  expect(elements.get('#provider-recipient').textContent).toBe('OpenAI / ChatGPT 订阅账户');
+  expect(elements.get('#provider-usage-notice').textContent).toContain('订阅估时会消耗');
+  expect(elements.get('#provider-usage-notice').textContent).not.toContain('saved.example.test');
+  expect(elements.get('#provider-start').textContent).toBe('登录并开始');
+  expect(elements.get('#provider-api-fields').hidden).toBe(true);
+  expect(consent.checked).toBe(false);
+  consent.checked=true; listeners.get('#provider-start:click')!();
+  await vi.waitFor(()=>expect(api.startProvider).toHaveBeenCalledOnce());
+  expect((api.startProvider as any).mock.calls[0][0]).toMatchObject({selected:'subscription',consent:true});
+});
+
 it('allows Cancel during a pending provider action and does not overwrite its result', async () => {
   const listeners = new Map<string, () => void>();
   const elements = new Map<string, {textContent:string; disabled:boolean; value:string; addEventListener:(type:string,callback:()=>void)=>void}>();

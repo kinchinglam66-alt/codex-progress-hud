@@ -170,7 +170,7 @@ it('routes provider settings only through a trusted sender and keeps save inert'
     preflight: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
     binding: () => 'binding', confirm: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
     provider: {readProviderSettings, saveProviderSettings,
-      replaceSubscriptionAccount: vi.fn(), checkProvider, trialProvider: vi.fn(), activateProvider: vi.fn(), cancelProviderAction: vi.fn()},
+      replaceSubscriptionAccount: vi.fn(), checkProvider, trialProvider: vi.fn(), activateProvider: vi.fn(), startProvider: vi.fn(), cancelProviderAction: vi.fn()},
   });
   await controller.open();
   const channel = 'codex-progress-hud:settings:provider:read';
@@ -189,4 +189,60 @@ it('routes provider settings only through a trusted sender and keeps save inert'
   expect(providerDialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({detail:expect.stringContaining('API 密钥')}));
   expect(checkProvider).not.toHaveBeenCalled();
   await controller.dispose();
+});
+
+it('routes the primary one-step provider action without stacking a native confirmation', async () => {
+  const fixture = windowFixture();
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const startProvider = vi.fn(async () => ({state: 'ready'}));
+  const dialog = {showMessageBox: vi.fn(async () => ({response: 0}))};
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog, uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
+    readStatus: () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    preflight: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
+    binding: () => 'binding', confirm: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    provider: {
+      readProviderSettings: async () => ({}), saveProviderSettings: async () => ({}), replaceSubscriptionAccount: async () => ({}),
+      checkProvider: async () => ({ok: true}), trialProvider: async () => ({}), activateProvider: async () => ({}), cancelProviderAction: async () => ({}), startProvider,
+    },
+  });
+  await controller.open();
+  const invoke = handlers.get(SETTINGS_CHANNELS.providerStart)!;
+  await expect(invoke({sender: {}} as any, {generation: 7, revision: 3, selected: 'subscription', consent: true})).rejects.toThrow('SETTINGS_UNTRUSTED_SENDER');
+  await expect(invoke({sender: fixture.window.webContents}, {generation: 7, revision: 3, selected: 'subscription', consent: true})).resolves.toMatchObject({state: 'ready'});
+  expect(startProvider).toHaveBeenCalledWith({generation: 7, revision: 3, selected: 'subscription', consent: true});
+  expect(dialog.showMessageBox).not.toHaveBeenCalled();
+  await controller.dispose();
+});
+
+it('cancels provider work on hide and dispose while retaining handlers until disposal', async () => {
+  const fixture = windowFixture();
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  let releaseCancellation!: () => void;
+  const cancellation = new Promise<void>((resolve) => { releaseCancellation = resolve; });
+  const cancelProviderAction = vi.fn(() => cancellation);
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog: {showMessageBox: vi.fn(async () => ({response: 0}))},
+    uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
+    readStatus: () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    preflight: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
+    binding: () => 'binding', confirm: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    provider: {readProviderSettings: async () => ({}), saveProviderSettings: async () => ({}), replaceSubscriptionAccount: async () => ({}), checkProvider: async () => ({ok: true}), trialProvider: async () => ({}), activateProvider: async () => ({}), startProvider: async () => ({}), cancelProviderAction},
+  });
+  await controller.open();
+  fixture.listeners.get('close')!({preventDefault: vi.fn()});
+  await vi.waitFor(()=>expect(cancelProviderAction).toHaveBeenCalledOnce());
+  expect(handlers.has(SETTINGS_CHANNELS.providerStart)).toBe(true);
+  let disposed = false;
+  const disposing = controller.dispose().then(() => { disposed = true; });
+  await Promise.resolve();
+  expect(disposed).toBe(false);
+  releaseCancellation();
+  await disposing;
+  expect(disposed).toBe(true);
+  expect(cancelProviderAction).toHaveBeenCalledOnce();
 });

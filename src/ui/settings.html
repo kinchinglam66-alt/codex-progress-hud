@@ -9,6 +9,50 @@
   <body>
     <main>
       <h1>Codex Progress HUD 设置</h1>
+      <section aria-labelledby="provider-heading">
+        <h2 id="provider-heading">估时提供方</h2>
+        <p id="provider-account" role="status">读取中</p>
+        <p id="provider-account-time" role="status">—</p>
+        <p>数据接收方：<span id="provider-recipient">接收方待读取</span></p>
+        <p id="provider-usage-notice" class="note">订阅估时会消耗所示账户的订阅额度；API 估时按所选提供方计费，可能产生费用。</p>
+        <label>来源
+          <select id="provider-source"><option value="subscription">订阅账户</option><option value="api">API</option></select>
+        </label>
+        <fieldset id="provider-api-fields">
+          <legend>API 草稿</legend>
+          <label hidden>Profile ID <input id="api-profile-id" value="default" autocomplete="off" /></label>
+          <label hidden>协议 <select id="api-protocol"><option value="responses">Responses</option><option value="chat">不支持</option></select></label>
+          <label>Base URL <input id="api-base-url" autocomplete="off" /></label>
+          <label>模型 <input id="api-model" autocomplete="off" /></label>
+          <label>新密钥（仅写入，不会回显） <input id="api-key" type="password" autocomplete="new-password" /></label>
+          <p id="api-key-state" role="status">未配置密钥</p>
+        </fieldset>
+        <div class="actions">
+          <button id="provider-start" type="button">登录并开始</button>
+          <button id="provider-cancel" type="button" disabled>取消当前操作</button>
+          <label><input id="provider-consent" type="checkbox" /> 我同意按上述接收方和用量说明开始估时</label>
+        </div>
+        <details id="provider-advanced">
+          <summary>高级提供方控制</summary>
+          <label>名称 <input id="api-name" value="OpenAI API" autocomplete="off" /></label>
+          <label>推理强度 <select id="api-reasoning-effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select></label>
+          <label>最大输出 token <input id="api-max-output-tokens" type="number" min="1" value="2048" /></label>
+          <label>每日调用上限 <input id="api-daily-call-limit" type="number" min="1" value="24" /></label>
+          <p id="provider-dirty" role="status">读取中</p>
+          <div class="actions">
+            <button id="provider-save" type="button">保存草稿</button>
+            <button id="provider-check" type="button">检查连接</button>
+            <button id="provider-trial" type="button">合成试探（暂止当前估时）</button>
+            <button id="provider-activate" type="button">启用提供方</button>
+          </div>
+          <div class="actions">
+            <button id="subscription-login" type="button">订阅登录</button>
+            <button id="subscription-device-login" type="button">设备登录</button>
+            <button id="subscription-logout" type="button">订阅退出</button>
+          </div>
+          <p class="note">保存只保存草稿，不会运行模型，也不会自动启用；合成试探会暂时停止当前估时，但任务追踪仍会继续，完成后仍需显式启用。启用或试探前会明确显示接收方和可能费用。密钥只可写入，读取状态由受保护密钥存储确认。</p>
+        </details>
+      </section>
       <section aria-labelledby="status-heading">
         <h2 id="status-heading">估时状态</h2>
         <p id="state" role="status">读取中</p>
@@ -19,48 +63,15 @@
       </section>
       <p id="message" role="status"></p>
       <p id="diagnostic" role="status"></p>
-      <div class="actions">
-        <button id="check" type="button">本地检查</button>
-        <button id="recover" type="button" disabled>确认并试探一次</button>
-        <button id="revoke" type="button">撤销估时授权</button>
-      </div>
-      <p class="note">本地检查不会运行推理。恢复试探只使用固定合成输入，最多调用一次模型；未知用量历史不会被删除。</p>
-      <section aria-labelledby="provider-heading">
-        <h2 id="provider-heading">估时提供方</h2>
-        <p id="provider-account" role="status">读取中</p>
-        <p id="provider-account-time" role="status">—</p>
-        <p>数据接收方：<span id="provider-recipient">接收方待读取</span></p>
-        <label>来源
-          <select id="provider-source"><option value="subscription">订阅账户</option><option value="api">API</option></select>
-        </label>
-        <fieldset>
-          <legend>API 草稿</legend>
-          <label>Profile ID <input id="api-profile-id" autocomplete="off" /></label>
-          <label>名称 <input id="api-name" autocomplete="off" /></label>
-          <label>Base URL <input id="api-base-url" autocomplete="off" /></label>
-          <label>协议 <select id="api-protocol"><option value="responses">Responses</option><option value="chat">不支持</option></select></label>
-          <label>模型 <input id="api-model" autocomplete="off" /></label>
-          <label>推理强度 <select id="api-reasoning-effort"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
-          <label>最大输出 token <input id="api-max-output-tokens" type="number" min="1" /></label>
-          <label>每日调用上限 <input id="api-daily-call-limit" type="number" min="1" /></label>
-          <label>新密钥（仅写入，不会回显） <input id="api-key" type="password" autocomplete="new-password" /></label>
-          <p id="api-key-state" role="status">未配置密钥</p>
-        </fieldset>
-        <p id="provider-dirty" role="status">读取中</p>
+      <details id="recovery-advanced">
+        <summary>高级恢复控制</summary>
         <div class="actions">
-          <button id="provider-save" type="button">保存草稿</button>
-          <button id="provider-check" type="button">检查连接</button>
-          <button id="provider-trial" type="button">合成试探（暂止当前估时）</button>
-          <button id="provider-activate" type="button">启用提供方</button>
-          <button id="provider-cancel" type="button" disabled>取消当前操作</button>
+          <button id="check" type="button">本地检查</button>
+          <button id="recover" type="button" disabled>确认并试探一次</button>
+          <button id="revoke" type="button">撤销估时授权</button>
         </div>
-        <div class="actions">
-          <button id="subscription-login" type="button">订阅登录</button>
-          <button id="subscription-device-login" type="button">设备登录</button>
-          <button id="subscription-logout" type="button">订阅退出</button>
-        </div>
-        <p class="note">保存只保存草稿，不会运行模型，也不会自动启用；合成试探会暂时停止当前估时，但任务追踪仍会继续，完成后仍需显式启用。启用或试探前会明确显示接收方和可能费用。密钥只可写入，读取状态由受保护密钥存储确认。</p>
-      </section>
+        <p class="note">本地检查不会运行推理。恢复试探只使用固定合成输入，最多调用一次模型；未知用量历史不会被删除。</p>
+      </details>
     </main>
     <script type="module" src="settings-renderer.js"></script>
   </body>

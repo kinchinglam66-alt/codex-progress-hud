@@ -18,9 +18,36 @@ from a failed API request to a subscription account. Both sources use the same
 observer input and interpretation schema; choosing a source does not by itself
 improve ETA accuracy.
 
-## Save, check, trial, activate
+## Quick start
 
-Saving a draft must not send a model request or replace the active configuration,
+Enable the plugin and open HUD settings. Choose one source and accept the inline
+recipient/usage notice before starting:
+
+- **ChatGPT subscription:** choose **登录并开始** and finish the official browser
+  authorization. HUD verifies its independent account before starting estimation.
+  An already authenticated HUD account can use **开始估时** without another login.
+- **Responses-compatible API:** enter the HTTPS base URL, model, and key, then
+  choose **保存并开始**. Review the recipient and billing notice beside the action.
+  A retained key need not be entered again for the same saved profile and endpoint.
+
+These primary actions explicitly authorize starting estimates; they are not
+draft saves. No synthetic model trial is required. Ready means the source is
+configured for estimation, not that a real model call has already succeeded.
+Normal restarts reuse the saved active configuration and valid authorization.
+Credentials can expire or be revoked, so a later login may occasionally be needed.
+
+Cancel remains available beside the main action while connecting. Closing the
+settings window cancels an unfinished connection/start operation; it does not
+log out an account or erase a saved draft. Configuration edits clear the inline
+acceptance so a changed recipient cannot inherit consent to the previous form.
+
+Signing in to the ChatGPT website alone does not authorize HUD. Start the login
+from HUD so the official browser flow can return credentials to its independent
+login slot. HUD does not read browser cookies or copy the main Codex account.
+
+## Advanced: save, check, trial, activate
+
+The advanced **save draft** action must not send a model request or replace the active configuration,
 including after restart. Local validation checks configuration shape only.
 An authentication check is not an ETA test. A trial is a real synthetic model
 request and may consume subscription allowance or API credit. Activation is the

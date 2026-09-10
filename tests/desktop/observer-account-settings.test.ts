@@ -43,6 +43,15 @@ describe("observer account settings", () => {
     expect(settings.status().state).toBe("inactive");
   });
 
+  it("preserves the verified login-required signal for the primary flow", async () => {
+    const settings = createObserverAccountSettings({
+      identity: identity(vi.fn(async () => { throw new Error("OBSERVER_LOGIN_REQUIRED"); })),
+      loginOwner: loginOwner(),
+    });
+    await expect(settings.inspect(new AbortController().signal)).rejects.toThrow("OBSERVER_LOGIN_REQUIRED");
+    expect(settings.status()).toMatchObject({state: "inactive", accountLabel: null});
+  });
+
   it("uses the official logout action and clears the attested account immediately", async () => {
     const inspect = vi.fn(async () => ({accountLabel: "person@example.invalid", evidence}));
     const owner = loginOwner();
