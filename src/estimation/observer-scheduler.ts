@@ -3,7 +3,7 @@ import type {ObserverResult} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
-import type {ObserverDiagnostics} from '../core/observer-diagnostics.js';
+import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
@@ -36,6 +36,7 @@ interface Entry {
   lastSkip?: string; sourceRevision?: number; sourceFinalAvailable?: boolean; eventReason?:TriggerReason;
   retryVersion?:number;retryUsedVersion?:number;
   lastResultStatus?:ObserverResult['status'];lastEstimateAt?:number;
+  lastAdmissionReason?:AdmissionReason;
   goalIdentity?:object; predictionIdentity?:object|null; lastRequestActiveSeconds?:number;
   overdueEligibleActiveSeconds?:number; overdueReservedPrediction?:object;
   nearExpiryReservedPrediction?:object;
@@ -173,7 +174,7 @@ export class ObserverScheduler {
       entry.version++;
     }
     if (event === 'prompt') {entry.unknown = 0;entry.expiredTimerResults=0;delete entry.overdueEligibleActiveSeconds;
-      delete entry.lastResultStatus;delete entry.lastEstimateAt;delete entry.lastSkip;delete entry.retryVersion;}
+      delete entry.lastResultStatus;delete entry.lastAdmissionReason;delete entry.lastEstimateAt;delete entry.lastSkip;delete entry.retryVersion;}
     const resumed=entry.runtime!=='running'&&state.view.runtime==='running';
     if(event==='prompt')this.markEvent(entry,now,'important_event');
     if(event==='final'&&state.finalAvailable){entry.statusEvidence=true;this.markEvent(entry,now,'status_evidence');}
@@ -350,7 +351,11 @@ export class ObserverScheduler {
       if(flight.runtime==='waiting')entry.statusEvidence=true;
     }
     if (mustDisable) this.disable();
-    if(entry.version===flight.version&&localResultAllowed)entry.lastResultStatus=result?.status??'process_error';
+    if(entry.version===flight.version&&localResultAllowed){
+      entry.lastResultStatus=result?.status??'process_error';
+      if(result?.status==='admission_denied')entry.lastAdmissionReason=normalizeAdmissionReason(result.admissionReason);
+      else delete entry.lastAdmissionReason;
+    }
     if(accepted&&result?.interpretation?.estimate&&live){
       entry.timerFailures=0;
       entry.sourceActiveSeconds=live.view.activeSeconds;entry.sourceClockAvailable=live.sourceAvailable;
@@ -455,12 +460,14 @@ export class ObserverScheduler {
     const health=this.options.goals.contextHealth(key);
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':entry?.flight?'estimating':
       this.workers.some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
-      ['hourly_limit','global_concurrency_limit'].includes(entry?.lastSkip??'')||entry?.lastResultStatus==='admission_denied'?'rate_limited':
+      entry?.lastResultStatus==='admission_denied'?'admission_blocked':
+      ['hourly_limit','global_concurrency_limit'].includes(entry?.lastSkip??'')?'rate_limited':
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
       entry?.lastResultStatus==='process_error'?'call_failed':
       view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending';
-    return {state,estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,
+    return {state,...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+      estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,
       callsLastHour:entry?.starts.filter(start=>at-start<3600000).length??0,
       retryPending:entry?.retryVersion!==undefined&&entry.retryVersion===entry.version};
   }

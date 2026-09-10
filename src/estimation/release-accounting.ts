@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {z} from 'zod';
 import type {AccountedUsage, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import {parseRecoveryBootBoundaryProof, RECOVERY_BOOT_BOUNDARY_MARGIN_MS, RECOVERY_BOOT_PROOF_MAX_AGE_MS, type RecoveryBootBoundaryProof} from './recovery-boot-boundary.js';
 
 const HOUR_MS = 3_600_000;
 const MAX_IN_FLIGHT = 2;
@@ -29,16 +30,18 @@ type Usage = z.infer<typeof usageSchema>;
 type Database = import('node:sqlite').DatabaseSync;
 interface PendingReservation {id: string; conversation: string}
 export type ReleaseRecoveryState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed';
+export type ReleaseRecoveryReason = 'unresolved_previous_call' | 'unsafe_unknown';
 export interface ReleaseRecoveryStatus {
   state: ReleaseRecoveryState;
   revision: number;
   knownTokens: number;
   unknown: number;
   recoveryAllowed: boolean;
+  reason?: ReleaseRecoveryReason | undefined;
   nextEligibleAt?: number | null | undefined;
   cooldownUntil?: number | null | undefined;
 }
-export interface ReleaseRecoveryAdmission {allowed: boolean; kind: 'ordinary' | 'retry' | 'half_open'; nextEligibleAt: number | null; reason?: 'cooldown' | 'retry_backoff' | 'no_eligible_task' | 'half_open_busy' | 'unsafe_unknown' | undefined}
+export interface ReleaseRecoveryAdmission {allowed: boolean; kind: 'ordinary' | 'retry' | 'half_open'; nextEligibleAt: number | null; reason?: ReleaseRecoveryReason | 'cooldown' | 'retry_backoff' | 'no_eligible_task' | 'half_open_busy' | 'unsafe_unknown' | undefined}
 export type ReleaseRecoveryEvent = {kind: 'recoverable_failure' | 'unknown_usage' | 'known_success' | 'half_open_reserved' | 'half_open_failure' | 'half_open_success'; at: number};
 export interface ReleaseRecoveryPreflight extends ReleaseRecoveryStatus {
   allowed: boolean;
@@ -69,6 +72,7 @@ export interface ReleaseAccountingOwner {
   cancelRecoveryTrial?(attemptId: string, reservationId: string): Promise<void>;
   cancelRecovery?(attemptId: string): Promise<void>;
   recoveryAdmission?(now: number, eligibleTask: boolean, conversationKey?: string): Promise<ReleaseRecoveryAdmission>;
+  reconcileRecoveredPending?(proof: RecoveryBootBoundaryProof): Promise<number>;
   releaseRecoveryAdmission?(conversationKey: string): Promise<void>;
   recordRecoveryEvent?(event: ReleaseRecoveryEvent): Promise<void>;
   close(): Promise<void>;
@@ -83,6 +87,7 @@ export interface ReleaseAccountingRecoveryOwner extends ReleaseAccountingOwner {
   cancelRecoveryTrial(attemptId: string, reservationId: string): Promise<void>;
   cancelRecovery(attemptId: string): Promise<void>;
   recoveryAdmission(now: number, eligibleTask: boolean, conversationKey?: string): Promise<ReleaseRecoveryAdmission>;
+  reconcileRecoveredPending(proof: RecoveryBootBoundaryProof): Promise<number>;
   releaseRecoveryAdmission(conversationKey: string): Promise<void>;
   recordRecoveryEvent(event: ReleaseRecoveryEvent): Promise<void>;
 }
@@ -555,7 +560,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     const active = latest !== undefined && latest.revision === revision && ['confirmed', 'trial_reserved', 'trial_settled'].includes(String(latest.status));
     const failed = latest !== undefined && latest.revision === revision && latest.status === 'failed';
     const inCooldown = cooldownUntil !== null && lastClock < cooldownUntil;
-    const needsRecovery = (safeInteger(stored.unknown_count) > 0 && covered < revision) || active || failed;
+    const needsRecovery = recoveredPending.size > 0 || (safeInteger(stored.unknown_count) > 0 && covered < revision) || active || failed;
     const state: ReleaseRecoveryState = unsafeUnknown ? 'blocked' : active
       ? (latest?.status === 'confirmed' ? 'awaiting_confirmation' : 'probing')
       : failed ? 'failed'
@@ -569,6 +574,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
       knownTokens: safeInteger(stored.known_tokens),
       unknown: safeInteger(stored.unknown_count),
       recoveryAllowed: state === 'warning' || state === 'blocked' || state === 'failed',
+      ...(recoveredPending.size > 0 ? {reason: 'unresolved_previous_call' as const} : unsafeUnknown ? {reason: 'unsafe_unknown' as const} : {}),
       nextEligibleAt: inCooldown ? cooldownUntil : nextEligibleAt,
       cooldownUntil,
     };
@@ -910,6 +916,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
       if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
       try {
         return transaction(database, () => {
+          if (recoveredPending.size > 0) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'unresolved_previous_call' as const};
           const safety = database.prepare('SELECT unsafe_unknown FROM recovery_safety WHERE id = 1').get() as Row;
           if (safeInteger(safety.unsafe_unknown) === 1) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'unsafe_unknown'};
           const policy = database.prepare('SELECT failure_count, next_eligible, cooldown_until, cooldown_level, half_open FROM recovery_policy WHERE id = 1').get() as Row;
@@ -929,6 +936,36 @@ export async function openReleaseAccounting(directory: string, now: () => number
           return {allowed: true, kind: safeInteger(policy.failure_count) > 0 ? 'retry' : 'ordinary', nextEligibleAt: null};
         });
       } catch (error) { return markPersistenceFailure(error); }
+    });
+  }
+  async function reconcileRecoveredPending(inputProof: RecoveryBootBoundaryProof): Promise<number> {
+    const proof = parseRecoveryBootBoundaryProof(inputProof);
+    return serial(async () => {
+      if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
+      try {
+        const current = time();
+        const reconciled = transaction(database, () => {
+          if (proof.observedAt > current || current - proof.observedAt > RECOVERY_BOOT_PROOF_MAX_AGE_MS) fail('RELEASE_RECOVERY_INVALID');
+          if (recoveredPending.size === 0) return 0;
+          const ids = [...recoveredPending];
+          const rows = database.prepare(`SELECT id, admitted_at, state FROM admissions WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) as Row[];
+          if (rows.length !== ids.length || rows.some(row => typeof row.id !== 'string' || row.state !== 'pending' || !recoveredPending.has(row.id))) fail('RELEASE_RECOVERY_INVALID');
+          if (rows.some(row => !Number.isSafeInteger(row.admitted_at) || Number(row.admitted_at) >= proof.bootAt - RECOVERY_BOOT_BOUNDARY_MARGIN_MS)) fail('RELEASE_RECOVERY_INVALID');
+          const stored = metadata();
+          const unknown = safeInteger(stored.unknown_count), revision = safeInteger(stored.recovery_revision), starts = safeInteger(stored.cumulative_starts);
+          if (unknown > MAX_SAFE - rows.length || revision > MAX_SAFE - rows.length) fail('RELEASE_COUNTER_OVERFLOW');
+          for (const row of rows) database.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = 'safe_unknown', recovery_attempt_id = NULL WHERE id = ?").run(String(row.id));
+          database.prepare('UPDATE metadata SET unknown_count = ?, recovery_revision = ?, unknown_admission_ceiling = ? WHERE id = 1')
+            .run(unknown + rows.length, revision + rows.length, starts);
+          database.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();
+          return rows.length;
+        });
+        if (reconciled > 0) for (const id of recoveredPending) recoveredPending.delete(id);
+        return reconciled;
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('RELEASE_RECOVERY_')) throw error;
+        return markPersistenceFailure(error);
+      }
     });
   }
   async function recordRecoveryEvent(event: ReleaseRecoveryEvent): Promise<void> {
@@ -968,6 +1005,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     cancelRecoveryTrial,
     cancelRecovery,
     recoveryAdmission,
+    reconcileRecoveredPending,
     releaseRecoveryAdmission(conversationKeyValue: string): Promise<void> {
       const parsed = conversationKey.safeParse(conversationKeyValue);
       if (!parsed.success || parsed.data === '__recovery_trial__') fail('RELEASE_CONVERSATION_KEY_INVALID');

@@ -8,6 +8,7 @@ import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {ForecastVersions} from './forecast-record.js';
 import type {ReleaseRecoveryEvent} from './release-accounting.js';
 import type {AdmissionKind} from './subscription-accounting.js';
+import {normalizeAdmissionReason} from '../core/observer-diagnostics.js';
 
 export type {ObserverWorker} from './observer-scheduler.js';
 
@@ -102,7 +103,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       const admission = accounting.recoveryAdmission
         ? await accounting.recoveryAdmission(now(), true, conversationKey)
         : {allowed: true, kind: 'ordinary' as const};
-      if (!admission.allowed) return failure('admission_denied');
+      if (!admission.allowed) return {...failure('admission_denied'),admissionReason:normalizeAdmissionReason('reason' in admission ? admission.reason : undefined)};
       admittedKind = admission.kind;
       localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize, admissionKind: admittedKind});
       runner = localRunner;

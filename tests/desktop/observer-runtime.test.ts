@@ -165,6 +165,29 @@ describe('desktop observer runtime composition', () => {
     }finally{await runtime.close();}
   });
 
+  it('obtains reboot proof inside the authorized runtime boundary before reconciliation', async () => {
+    const events: string[] = [];
+    const proof = {source: 'windows-win32-operating-system' as const, bootAt: 10_001, observedAt: 20_000};
+    const accounting = owner(events) as ReleaseAccountingOwner & {
+      recoveryStatus: () => {state: 'blocked'; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean; reason: 'unresolved_previous_call'};
+      reconcileRecoveredPending: (value: typeof proof) => Promise<number>;
+    };
+    accounting.recoveryStatus = () => ({state: 'blocked', revision: 0, knownTokens: 0, unknown: 0, recoveryAllowed: true, reason: 'unresolved_previous_call'});
+    accounting.reconcileRecoveredPending = vi.fn(async value => {expect(value).toEqual(proof); return 1;});
+    const runtime = createDesktopObserverRuntime({
+      identity: identityFor(() => 20_000, events),
+      dialog: dialogFor(events),
+      openAccounting: async () => accounting,
+      now: () => 20_000,
+      inspectRecoveryBootBoundary: async () => proof,
+    });
+    try {
+      await runtime.start(new AbortController().signal);
+      await expect(runtime.recoveryBoundary().check(new AbortController().signal)).resolves.toMatchObject({binding: expect.any(String), closureConfirmed: true});
+      expect(accounting.reconcileRecoveredPending).toHaveBeenCalledOnce();
+    } finally { await runtime.close(); }
+  });
+
   it('cancels authorized dispatch before waiting for a consent deletion that fails',async()=>{
     const events:string[]=[];
     const deletion=deferred<void>();

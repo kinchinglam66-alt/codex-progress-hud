@@ -3,6 +3,7 @@ import {mkdir} from 'node:fs/promises';
 import {Worker} from 'node:worker_threads';
 import type {AccountedUsage, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import type {ReleaseAccountingOwner, ReleaseAccountingSnapshot, ReleaseRecoveryEvent} from './release-accounting.js';
+import type {RecoveryBootBoundaryProof} from './recovery-boot-boundary.js';
 import {
   ACCOUNTING_OPERATION_TIMEOUT_MS,
   ACCOUNTING_PROTOCOL_VERSION,
@@ -274,6 +275,9 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
     },
     cancelRecovery(attemptId: string): Promise<void> {
       return recoverySend('recovery_cancel', {attemptId}).then(() => undefined);
+    },
+    reconcileRecoveredPending(proof: RecoveryBootBoundaryProof): Promise<number> {
+      return recoverySend('recovery_reconcile_pending', {proof}) as Promise<number>;
     },
     recoveryAdmission(_current: number, eligibleTask: boolean, conversationKey?: string) {
       if (!conversationKey) return Promise.resolve({allowed: false, kind: 'ordinary' as const, nextEligibleAt: null, reason: 'no_eligible_task' as const});

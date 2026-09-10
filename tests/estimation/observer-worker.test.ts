@@ -22,6 +22,38 @@ const interpretation = {
   summary: 'Build a report',
   estimate: {remainingSeconds: 7200, errorPercent: 40},
 };
+it('preserves the local recovery cooldown reason without preparing a model invocation', async()=>{
+  const accounting=await owner(await directory());
+  for(const key of ['a','b','c']){
+    const view=accounting.forConversation(key), id=await view.reserve();
+    await view.settle(id!,null,'safe_unknown');
+    await view.close();
+  }
+  let prepared=false;
+  const subject=createAccountedObserverWorker({accounting,authorize:()=>true,now:()=>0,
+    prepare:()=>{prepared=true;throw new Error('must not prepare');}});
+  try{
+    expect(await subject.observe(input,new AbortController().signal,'denied')).toMatchObject({
+      status:'admission_denied',admissionReason:'cooldown',usage:null,
+    });
+    expect(prepared).toBe(false);
+    expect(accounting.snapshot().starts).toBe(3);
+  }finally{await subject.close();}
+});
+it('surfaces an unresolved previous call from a reopened ledger without another dispatch',async()=>{
+  const path=await directory(), first=await owner(path);
+  await first.forConversation('previous').reserve();
+  await first.close();
+  const reopened=await owner(path);
+  const subject=createAccountedObserverWorker({accounting:reopened,authorize:()=>true,now:()=>0,
+    prepare:()=>{throw new Error('unexpected preparation');}});
+  try{
+    expect(await subject.observe(input,new AbortController().signal,'new')).toMatchObject({
+      status:'admission_denied',admissionReason:'unresolved_previous_call',usage:null,
+    });
+    expect(reopened.snapshot()).toMatchObject({starts:1,inFlight:1,unknown:0});
+  }finally{await subject.close();}
+});
 const stream = (includeUsage = true) => [
   {type: 'turn.started'},
   {type: 'item.completed', item: {id: 'item_1', type: 'agent_message', text: JSON.stringify(interpretation)}},

@@ -1,5 +1,5 @@
 type SettingsState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'checking' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' | 'unconfigured' | 'unauthorized' | 'repair_environment';
-interface SettingsStatus {state: SettingsState; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
+interface SettingsStatus {state: SettingsState; reason?:string; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
 interface ProviderDraft {selected: 'subscription'|'api'; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
 interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';recipient?:string}
 interface SettingsApi {
@@ -30,7 +30,8 @@ function render(value: SettingsStatus): void {
   revision = value.revision;
   state.textContent = value.state==='cooldown'?'冷却中':value.state==='warning'?'用量警告（有未知记录）':value.state;
   const next=value.nextEligibleAt??value.cooldownUntil;
-  message.textContent=value.state==='cooldown'?
+  message.textContent=value.reason==='unresolved_previous_call'?
+    '旧估时调用尚未确认结束。请保存工作并重启电脑，再进行本地检查与恢复；未知用量会保留。':value.state==='cooldown'?
     typeof next==='number'&&Number.isSafeInteger(next)&&next>=0&&next<=8640000000000000?
       `下次可尝试：${new Date(next).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'})}（仅在有任务时）`:
       '等待满足恢复条件；空闲时不会发起试探。':
@@ -60,7 +61,7 @@ check.addEventListener('click', () => {
     if (!api) return;
     message.textContent = '正在进行本地检查…';
     try { const result = await api.preflight(); challenge = result.challenge; render(result);
-      if(result.state!=='cooldown'&&result.state!=='warning')message.textContent = result.allowed ? '检查完成，可以进行一次显式试探。'
+      if(result.reason!=='unresolved_previous_call'&&result.state!=='cooldown'&&result.state!=='warning')message.textContent = result.allowed ? '检查完成，可以进行一次显式试探。'
         : result.state==='normal'||result.state==='recovered' ? '当前无需恢复试探；此检查不验证模型推理。'
         : `当前不能进行恢复试探（${result.state}）；请查看提供方与授权状态。`; }
     catch { challenge=undefined;recover.disabled=true;message.textContent = '无法完成恢复检查；这不代表当前估时已停用。'; }

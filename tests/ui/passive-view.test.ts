@@ -104,6 +104,16 @@ it('keeps valid ETA and separately shows freshness and static diagnostics',()=>{
   expect(view.diagnosticLabel).toContain('估时调用失败');
   expect(view.diagnosticLabel).toContain('小时内尝试 2 次');
 });
+it('shows recovery guidance for an old pending call without claiming quota exhaustion',()=>{
+  const value=row({prediction:null});
+  value.observer={state:'admission_blocked',admissionReason:'unresolved_previous_call',estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
+  const view=buildConversationViews([value])[0]!;
+  expect(view.etaLabel).toContain('旧估时调用');
+  expect(view.diagnosticLabel).toContain('恢复');
+  expect(view.etaLabel).not.toContain('额度');
+  value.goal!.prediction={remainingSeconds:1,observedActiveSeconds:0,errorPercent:30};
+  expect(buildConversationViews([value])[0]?.etaLabel).toContain('恢复');
+});
 it.each(['waiting', 'paused'] as const)('freezes %s while another running row counts down', runtime => {
   const views = buildConversationViews([row({runtime, status: runtime}), row()], 3600);
   expect(views[0]?.etaLabel).toBe('25:00:00 · 上次估时误差 ±30%');

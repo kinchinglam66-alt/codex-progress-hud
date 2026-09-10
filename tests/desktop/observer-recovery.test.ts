@@ -24,6 +24,7 @@ function accounting(): ReleaseAccountingRecoveryOwner {
     cancelRecoveryTrial: vi.fn(async () => { state = 'failed'; }),
     cancelRecovery: vi.fn(async () => { state = 'failed'; }),
     recoveryAdmission: vi.fn(async () => ({allowed: true, kind: 'ordinary' as const, nextEligibleAt: null})),
+    reconcileRecoveredPending: vi.fn(async () => 0),
     releaseRecoveryAdmission: vi.fn(async () => undefined),
     recordRecoveryEvent: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
@@ -109,6 +110,21 @@ it('preflight never calls the model and concurrent confirmation consumes one tri
   expect(model.calls).toBe(1);
   expect(owner.reserveRecoveryTrial).toHaveBeenCalledOnce();
   expect(controller.status()).toMatchObject({state: 'recovered'});
+});
+
+it('returns a blocked reboot-guidance preflight when trusted closure evidence is unavailable', async () => {
+  const boundary: RecoveryRuntimeBoundary = {
+    enabled: () => true,
+    check: async () => ({binding: 'account:route:assets', closureConfirmed: false, reason: 'unresolved_previous_call' as const}),
+    runTrial: vi.fn(async () => ({usage, success: true, closureConfirmed: true})),
+    rebuild: vi.fn(async () => undefined),
+  };
+  const controller = createObserverRecoveryController({accounting: accounting(), runtime: boundary});
+
+  await expect(controller.preflight()).resolves.toMatchObject({
+    state: 'blocked', allowed: false, reason: 'unresolved_previous_call',
+  });
+  expect(boundary.runTrial).not.toHaveBeenCalled();
 });
 
 it('cancellation or disabled plugin cannot enter the model boundary', async () => {

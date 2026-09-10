@@ -195,6 +195,7 @@ async function serveUi(
     "/display-clock.js": { file: "display-clock.js", type: "text/javascript; charset=utf-8" },
     "/eta-transition.js": { file: "eta-transition.js", type: "text/javascript; charset=utf-8" },
     "/countdown.js": { file: "countdown.js", type: "text/javascript; charset=utf-8" },
+    "/core/observer-diagnostics.js": { file: "../core/observer-diagnostics.js", type: "text/javascript; charset=utf-8" },
     "/task-mutations.js": { file: "task-mutations.js", type: "text/javascript; charset=utf-8" },
     "/task-controls.js": { file: "task-controls.js", type: "text/javascript; charset=utf-8" }
   };

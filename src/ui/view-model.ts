@@ -2,17 +2,26 @@ import type { HudSnapshot } from "../server/task-store.js";
 import type { TaskStatus } from "../core/types.js";
 import type { ConversationRow } from "../server/conversation-projection.js";
 import {projectCountdown} from './countdown.js';
-import type {ObserverDiagnostics} from '../core/observer-diagnostics.js';
+import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics} from '../core/observer-diagnostics.js';
 
 const observerLabels:Record<ObserverDiagnostics['state'],string>={pending:'等待首次估时',history_loading:'正在加载任务历史',
   history_unavailable:'任务历史暂不可用，正在重试读取',
   estimating:'正在估时',insufficient_context:'依据不足，暂无法估时',call_failed:'估时调用失败',
   setup_failed:'估时启动失败，请检查运行环境或授权',
-  rate_limited:'估时受限，等待可用额度',disabled:'估时已停用，请查看诊断',ready:'估值可用'};
+  rate_limited:'估时受限，等待可用额度',admission_blocked:'本地估时暂受限，请查看诊断',disabled:'估时已停用，请查看诊断',ready:'估值可用'};
+const admissionLabels:Record<AdmissionReason,string>={
+  unresolved_previous_call:'旧估时调用尚未确认结束，请在设置中恢复',
+  cooldown:'估时正在本地冷却，稍后重试',retry_backoff:'估时正在退避等待，稍后重试',
+  no_eligible_task:'暂无可估时的任务',half_open_busy:'正在进行恢复试探，请稍候',
+  unsafe_unknown:'上次估时未安全结算，请在设置中恢复',local_policy:'本地估时暂受限，请查看设置中的恢复状态',
+};
+function observerLabel(observer:ObserverDiagnostics):string{
+  return observer.state==='admission_blocked'?admissionLabels[normalizeAdmissionReason(observer.admissionReason)]:observerLabels[observer.state];
+}
 function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number){
   const age=observer.estimateAgeSeconds===null?null:observer.estimateAgeSeconds+(Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
   return {freshnessLabel:age===null?'':age<60?'估值刚刚更新':age<3600?`估值更新于 ${Math.floor(age/60)} 分钟前`:`估值更新于 ${Math.floor(age/3600)} 小时前`,
-    diagnosticLabel:`${observerLabels[observer.state]} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
+    diagnosticLabel:`${observerLabel(observer)} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
 }
 
 export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = [],displayedSeconds:ReadonlyMap<string,number>=new Map()) {
@@ -95,11 +104,12 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
     const action = observer?.state === 'estimating' ? '正在重新估时'
       : observer?.state === 'call_failed' || observer?.state === 'setup_failed' || observer?.state === 'disabled'
         ? '估时暂不可用'
+        : observer?.state === 'admission_blocked' ? observerLabel(observer)
         : observer?.state === 'rate_limited' ? '重估受限，等待额度' : '等待重新估时';
     return `已超出预计时间 · ${action}`;
   };
   const etaLabel = terminal ? '工作计时已停止'
-    : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabels[observer.state]:'剩余时间未知'
+    : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabel(observer):'剩余时间未知'
     : countdown.status === 'overdue' ? overdueLabel()
     : `${display.timeText} · 上次估时误差 ${countdown.uncertaintyText}`;
   return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',

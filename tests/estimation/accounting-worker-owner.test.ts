@@ -205,6 +205,21 @@ it('carries revision-bound recovery commands through the worker and rejects stal
   expect(recoveryOwner.recoveryStatus()).toMatchObject({state: 'recovered', unknown: 1});
 });
 
+it('carries trusted reboot reconciliation through the real worker and preserves the recovery gate', async () => {
+  const path = await directory();
+  let now = 0;
+  let owner = await openCompiled(path, () => now) as ReleaseAccountingRecoveryOwner;
+  await owner.forConversation('old-call').reserve();
+  await owner.close();
+  owners.pop();
+
+  now = 20_000;
+  owner = await openCompiled(path, () => now) as ReleaseAccountingRecoveryOwner;
+  await expect(owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', bootAt: 10_001, observedAt: now})).resolves.toBe(1);
+  expect(owner.snapshot()).toMatchObject({inFlight: 0, unknown: 1});
+  expect(await owner.forConversation('new-call').reserve()).toBeNull();
+});
+
 it('serializes durable half-open admission and persists the post-failure cooldown through the worker', async () => {
   let now = 0;
   const path = await directory();

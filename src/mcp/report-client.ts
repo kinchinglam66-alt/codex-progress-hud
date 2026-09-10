@@ -8,6 +8,7 @@ import { windowDiagnosticsSchema } from "../diagnostics/window-state.js";
 import type { HudSnapshot } from "../server/task-store.js";
 import type { SessionLease } from "../server/lease-store.js";
 import { defaultServiceUrl, defaultTokenPath } from "../server/paths.js";
+import {admissionReasons} from '../core/observer-diagnostics.js';
 
 export interface HudRequestOptions {
   timeoutMs?: number;
@@ -151,7 +152,8 @@ const aggregateSnapshotSchema = z.object({
     task: taskSnapshotSchema,
     eta: etaSchema.nullable(),
     name: z.object({value:z.string().max(1024).nullable(),freshness:z.enum(['fresh','stale','unavailable'])}).strict(),
-    observer:z.object({state:z.enum(['pending','history_loading','history_unavailable','estimating','insufficient_context','call_failed','setup_failed','rate_limited','disabled','ready']),
+    observer:z.object({state:z.enum(['pending','history_loading','history_unavailable','estimating','insufficient_context','call_failed','setup_failed','rate_limited','admission_blocked','disabled','ready']),
+      admissionReason:z.enum(admissionReasons).optional(),
       estimateAgeSeconds:z.number().finite().nonnegative().nullable(),callsLastHour:z.number().int().nonnegative(),retryPending:z.boolean()}).strict().optional(),
     goal: z.object({
       generation: z.number().int().nonnegative(),

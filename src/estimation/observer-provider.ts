@@ -2,6 +2,7 @@ import type {ObserverResponse} from './observer-contract.js';
 import type {OwnedProcessResult} from './owned-process.js';
 import type {SubscriptionUsage} from './codex-output.js';
 import type {AdmissionKind} from './subscription-accounting.js';
+import type {AdmissionReason} from '../core/observer-diagnostics.js';
 
 export type ProviderBinding = {
   kind: 'subscription' | 'api';
@@ -50,6 +51,7 @@ export interface ObserverResult {
   interpretation: ObserverResponse | null;
   usage: ObserverUsage | null;
   admissionKind?: AdmissionKind;
+  admissionReason?: AdmissionReason;
   outcomes?: ObserverCallOutcomes;
   timings?: ObserverCallTimings;
 }

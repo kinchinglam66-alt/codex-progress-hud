@@ -4,6 +4,22 @@ import {resolve} from 'node:path';
 
 afterEach(()=>{vi.unstubAllGlobals();vi.resetModules();});
 
+it('explains unresolved previous calls before and after a denied recovery check',async()=>{
+  const listeners=new Map<string,()=>void>(), elements=new Map<string,any>();
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke'])
+    elements.set(id,{textContent:'',disabled:false,addEventListener:(_type:string,listener:()=>void)=>listeners.set(id,listener)});
+  const status={state:'blocked',reason:'unresolved_previous_call',revision:0,knownTokens:12,unknown:0,recoveryAllowed:false};
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>status,preflight:async()=>({...status,allowed:false})}});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#message').textContent).toContain('重启'));
+  expect(elements.get('#message').textContent).not.toContain('额度');
+  listeners.get('#check')!();
+  await Promise.resolve();await Promise.resolve();
+  expect(elements.get('#message').textContent).toContain('重启');
+  expect(elements.get('#recover').disabled).toBe(true);
+});
+
 it.each([['unknown','尚未检查'],['unavailable','检查失败'],['signed_out','未登录']])('renders account status %s without inferring sign-out from missing metadata',async(accountStatus,expected)=>{
   const elements=new Map<string,any>();
   for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-start'])elements.set(id,{textContent:'',disabled:false,addEventListener:()=>{}});

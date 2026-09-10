@@ -11,6 +11,7 @@ import {createObserverDiagnosticRunner, type ObserverDiagnostic} from '../estima
 import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from '../estimation/subscription-session.js';
 import type {AccountedUsage} from '../estimation/subscription-accounting.js';
 import type {ObserverScheduler} from '../estimation/observer-scheduler.js';
+import {inspectRecoveryBootBoundary, type RecoveryBootBoundaryProof} from '../estimation/recovery-boot-boundary.js';
 
 const SLOT_COUNT = 2;
 const REFRESH_MS = 120000;
@@ -40,6 +41,7 @@ export interface DesktopObserverRuntimeOptions {
   dialog: ObserverConsentDialog;
   now?: () => number;
   consentStore?: ObserverConsentStore;
+  inspectRecoveryBootBoundary?: () => Promise<RecoveryBootBoundaryProof>;
 }
 
 export interface ObserverInlineConsent {
@@ -92,7 +94,7 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * exposes two stable, initially unavailable slots so the scheduler can be
  * wired before first-use setup without creating an admission path early.
  */
-export function createDesktopObserverRuntime({identity, openAccounting, dialog, now = Date.now, consentStore}: DesktopObserverRuntimeOptions) {
+export function createDesktopObserverRuntime({identity, openAccounting, dialog, now = Date.now, consentStore, inspectRecoveryBootBoundary: inspectBootBoundary}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
   let setupFailed = false;
@@ -252,7 +254,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
   function recoveryBoundary(): RecoveryRuntimeBoundary {
     return {
       enabled: () => !disabled && ready && gate.authorized(),
-      async check(signal: AbortSignal): Promise<{binding: string; closureConfirmed: boolean}> {
+      async check(signal: AbortSignal): Promise<{binding: string; closureConfirmed: boolean; reason?: 'unresolved_previous_call'}> {
       check(signal);
         if (schedulerRecovery !== undefined && preparedSchedulerGeneration === undefined) {
           preparedSchedulerGeneration = await schedulerRecovery.prepareRecovery();
@@ -270,7 +272,18 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
           try { return delegate?.status() ?? {active: false, poisoned: false}; }
           catch { return {active: true, poisoned: true}; }
         });
-        return {binding: current, closureConfirmed: states.every(state => !state.active && !state.poisoned)};
+        const closureConfirmed = states.every(state => !state.active && !state.poisoned);
+        if (!closureConfirmed) return {binding: current, closureConfirmed: false, reason: 'unresolved_previous_call'};
+        if (accounting?.recoveryStatus?.()?.reason === 'unresolved_previous_call') {
+          if (typeof accounting.reconcileRecoveredPending !== 'function') return {binding: current, closureConfirmed: false, reason: 'unresolved_previous_call'};
+          try {
+            const proof = await (inspectBootBoundary ?? (() => inspectRecoveryBootBoundary({now})))();
+            await accounting.reconcileRecoveredPending(proof);
+          } catch {
+            return {binding: current, closureConfirmed: false, reason: 'unresolved_previous_call'};
+          }
+        }
+        return {binding: current, closureConfirmed: true};
       },
       async runTrial(reservationId: string, signal: AbortSignal) {
         if (!accounting || disabled || !ready || !gate.authorized()) throw new Error('OBSERVER_RECOVERY_DISABLED');

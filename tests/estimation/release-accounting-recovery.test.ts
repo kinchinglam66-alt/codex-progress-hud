@@ -65,6 +65,123 @@ it('keeps unknown history while allowing ordinary admission within the bounded a
   expect(await view.reserve()).toMatch(/^[0-9a-f-]{36}$/);
 });
 
+it('reports a recovered pending admission as blocked instead of normal', async () => {
+  const path = await directory();
+  let owner = await open(path, () => 0);
+  const first = owner.forConversation('fixture');
+  await first.reserve();
+  await owner.close();
+  owners.pop();
+
+  owner = await open(path, () => 1);
+  expect(await owner.forConversation('other').reserve()).toBeNull();
+  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', reason: 'unresolved_previous_call'});
+  expect(await owner.recoveryAdmission(1, true, 'other')).toMatchObject({allowed: false, reason: 'unresolved_previous_call'});
+});
+
+it('reports generic unsafe unknown status without unresolved prior-call guidance', async () => {
+  const owner = await open(await directory(), () => 0);
+  const view = owner.forConversation('unsafe-current-call');
+  const reservation = await view.reserve();
+  await view.settle(reservation!, null, 'unsafe_unknown');
+
+  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', reason: 'unsafe_unknown'});
+  expect(await owner.recoveryAdmission(0, true, 'another-call')).toMatchObject({allowed: false, reason: 'unsafe_unknown'});
+});
+
+it('reconciles only previous-owner pending calls after a verified reboot and is idempotent', async () => {
+  const path = await directory();
+  let now = 0;
+  let owner = await open(path, () => now);
+  await owner.forConversation('old-call').reserve();
+  await owner.close();
+  owners.pop();
+
+  now = 20_000;
+  owner = await open(path, () => now);
+  const proof = {source: 'windows-win32-operating-system' as const, bootAt: 10_001, observedAt: now};
+  await expect(owner.reconcileRecoveredPending(proof)).resolves.toBe(1);
+  expect(owner.snapshot()).toMatchObject({starts: 1, inFlight: 0, unresolved: 0, unknown: 1, knownTokens: 0});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', recoveryAllowed: true});
+  expect(await owner.forConversation('new-call').reserve()).toBeNull();
+  await expect(owner.reconcileRecoveredPending(proof)).resolves.toBe(0);
+
+  await owner.close();
+  owners.pop();
+  owner = await open(path, () => now);
+  expect(owner.snapshot()).toMatchObject({starts: 1, inFlight: 0, unknown: 1});
+});
+
+it.each([
+  ['same boot', {bootAt: 0, observedAt: 20_000}],
+  ['future boot', {bootAt: 30_000, observedAt: 20_000}],
+  ['stale observation', {bootAt: 10_001, observedAt: 0}],
+] as const)('keeps recovered pending blocked for %s boot evidence', async (_label, values) => {
+  const path = await directory();
+  let owner = await open(path, () => 0);
+  await owner.forConversation('old-call').reserve();
+  await owner.close();
+  owners.pop();
+  owner = await open(path, () => 60_001);
+  await expect(owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', ...values})).rejects.toThrow('RELEASE_RECOVERY_INVALID');
+  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', reason: 'unresolved_previous_call'});
+  expect(owner.snapshot()).toMatchObject({inFlight: 1, unknown: 0});
+});
+
+it('reconciles two recovered pending calls in one operation without granting a trial', async () => {
+  const path = await directory();
+  let owner = await open(path, () => 0);
+  await owner.forConversation('old-one').reserve();
+  await owner.forConversation('old-two').reserve();
+  await owner.close();
+  owners.pop();
+  owner = await open(path, () => 20_000);
+
+  await expect(owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', bootAt: 10_001, observedAt: 20_000})).resolves.toBe(2);
+  expect(owner.snapshot()).toMatchObject({starts: 2, inFlight: 0, unknown: 2, knownTokens: 0});
+  expect(await owner.recoveryAdmission(20_000, true, 'new-call')).toMatchObject({allowed: false});
+  expect(await owner.forConversation('new-call').reserve()).toBeNull();
+});
+
+it('requires the existing bounded trial after reboot reconciliation and preserves unknown usage after success', async () => {
+  const path = await directory();
+  let owner = await open(path, () => 0);
+  await owner.forConversation('old-call').reserve();
+  await owner.close();
+  owners.pop();
+
+  owner = await open(path, () => 20_000);
+  await owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', bootAt: 10_001, observedAt: 20_000});
+  expect(await owner.forConversation('new-call').reserve()).toBeNull();
+  const preflight = await owner.preflightRecovery('account:route:assets');
+  expect(preflight).toMatchObject({allowed: true, state: 'blocked'});
+  const confirmation = await owner.confirmRecovery({revision: preflight.revision, binding: 'account:route:assets'});
+  const trial = await owner.reserveRecoveryTrial(confirmation);
+  expect(trial).toMatch(/^[0-9a-f-]{36}$/);
+  await owner.settleRecoveryTrial(confirmation.attemptId, trial!, usage);
+  await owner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: true});
+  expect(owner.snapshot()).toMatchObject({starts: 2, unknown: 1, knownTokens: 10, inFlight: 0});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'recovered', recoveryAllowed: false});
+  const ordinary = await owner.forConversation('new-call').reserve();
+  expect(ordinary).toMatch(/^[0-9a-f-]{36}$/);
+  await owner.forConversation('new-call').cancelBeforeDispatch(ordinary!);
+
+  await owner.close();
+  owners.pop();
+  owner = await open(path, () => 20_000);
+  expect(owner.snapshot()).toMatchObject({unknown: 1, knownTokens: 10});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'recovered', recoveryAllowed: false});
+});
+
+it('never reconciles a current-owner pending call even with a future boot claim', async () => {
+  let now = 0;
+  const owner = await open(await directory(), () => now);
+  await owner.forConversation('current-call').reserve();
+  now = 20_000;
+  await expect(owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', bootAt: 10_001, observedAt: now})).resolves.toBe(0);
+  expect(owner.snapshot()).toMatchObject({inFlight: 1, unknown: 0});
+});
+
 it('persists a five-minute cooldown after three rolling unknown-usage events', async () => {
   let now = 0;
   const owner = await open(await directory(), () => now);

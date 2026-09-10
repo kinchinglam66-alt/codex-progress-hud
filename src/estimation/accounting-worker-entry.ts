@@ -90,6 +90,7 @@ async function run(request: AccountingRequest): Promise<void> {
     else if (request.operation === 'recovery_finish') await recoveryOwner().finishRecovery(request.attemptId, {success: request.success, closureConfirmed: request.closureConfirmed});
     else if (request.operation === 'recovery_cancel_trial') await recoveryOwner().cancelRecoveryTrial(request.attemptId, request.reservationId);
     else if (request.operation === 'recovery_cancel') await recoveryOwner().cancelRecovery(request.attemptId);
+    else if (request.operation === 'recovery_reconcile_pending') result = await recoveryOwner().reconcileRecoveredPending(request.proof);
     else if (request.operation === 'recovery_admission') result = await recoveryOwner().recoveryAdmission(request.clock, request.eligibleTask, request.conversationKey);
     else if (request.operation === 'recovery_admission_release') await owner.forConversation(request.conversationKey).releaseRecoveryAdmission?.();
     else if (request.operation === 'recovery_event') await recoveryOwner().recordRecoveryEvent({kind: request.eventKind, at: request.clock});

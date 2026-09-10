@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RELEASE_CAPABILITIES } from "../../src/generated/capabilities.js";
 import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client.js";
+import {TaskStore} from '../../src/server/task-store.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -52,6 +53,19 @@ const health = {
 };
 
 describe("CompanionHttpClient", () => {
+  it('accepts a bounded local admission diagnostic in the real snapshot response',async()=>{
+    const store=new TaskStore();
+    store.apply({taskId:'task',event:{type:'turn_started'}},0,
+      {conversationKey:'chat',turnKey:'turn',isCurrentTurn:true});
+    const snapshot=store.snapshot(0);
+    snapshot.rows![0]!.observer={state:'admission_blocked',admissionReason:'unresolved_previous_call',
+      estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
+    const {baseUrl,tokenPath}=await fixture((_request,response)=>json(response,200,snapshot));
+    const client=new CompanionHttpClient(baseUrl,tokenPath);
+    await expect(client.status()).resolves.toMatchObject({rows:[{observer:{
+      state:'admission_blocked',admissionReason:'unresolved_previous_call',
+    }}]});
+  });
   const aggregateSnapshot = {
     revision: 3,
     selectedTaskId: "hud_abcdefghijklmnopqrstuvwxyz0123456789",

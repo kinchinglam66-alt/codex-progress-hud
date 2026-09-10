@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {parseRequest, parseWorkerMessage} from '../../src/estimation/accounting-worker-protocol.js';
+import {parseRequest, parseWorkerMessage, recoveryStatusSchema} from '../../src/estimation/accounting-worker-protocol.js';
 
 const requestId = '11111111-1111-4111-8111-111111111111';
 const attemptId = '22222222-2222-4222-8222-222222222222';
@@ -32,5 +32,25 @@ describe('accounting recovery protocol', () => {
       kind: 'ready', version: 1,
       snapshot: {starts: 0, activeStarts: 0, inFlight: 0, unresolved: 0, knownTokens: 0, unknown: 0, poisoned: false},
     })).toBeUndefined();
+  });
+
+  it('accepts only a strict trusted reboot reconciliation proof', () => {
+    const proof = {source: 'windows-win32-operating-system', bootAt: 8, observedAt: 10};
+    expect(parseRequest({
+      kind: 'request', version: 1, requestId, operation: 'recovery_reconcile_pending', clock: 10, proof,
+    })).toMatchObject({operation: 'recovery_reconcile_pending', proof});
+    expect(parseRequest({
+      kind: 'request', version: 1, requestId, operation: 'recovery_reconcile_pending', clock: 10,
+    })).toBeUndefined();
+    expect(parseRequest({
+      kind: 'request', version: 1, requestId, operation: 'recovery_reconcile_pending', clock: 10,
+      proof: {...proof, rendererSupplied: true},
+    })).toBeUndefined();
+  });
+
+  it('accepts generic unsafe-unknown status without old-call reboot guidance', () => {
+    expect(recoveryStatusSchema.safeParse({
+      state: 'blocked', revision: 1, knownTokens: 0, unknown: 1, recoveryAllowed: true, reason: 'unsafe_unknown',
+    }).success).toBe(true);
   });
 });

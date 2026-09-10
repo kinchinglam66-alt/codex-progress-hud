@@ -4,6 +4,7 @@ import type {ObserverDiagnostic} from '../estimation/observer-diagnostics.js';
 import type {
   ReleaseAccountingRecoveryOwner,
   ReleaseRecoveryPreflight,
+  ReleaseRecoveryReason,
   ReleaseRecoveryStatus,
 } from '../estimation/release-accounting.js';
 
@@ -11,7 +12,7 @@ export interface RecoveryRuntimeBoundary {
   /** Native/plugin state only. This must not perform inference. */
   enabled(): boolean;
   /** Check ownership, configuration, ledger readability and binding. */
-  check(signal: AbortSignal): Promise<{binding: string; closureConfirmed: boolean}>;
+  check(signal: AbortSignal): Promise<{binding: string; closureConfirmed: boolean; reason?: ReleaseRecoveryReason}>;
   /** Runs exactly one fixed synthetic trial through the normal bounded runner. */
   runTrial(reservationId: string, signal: AbortSignal): Promise<RecoveryTrialResult>;
   /** Recreate disabled internal instances after the old owners are closed. */
@@ -114,6 +115,18 @@ export function createObserverRecoveryController(options: {
     try {
       const controller = new AbortController();
       const checked = await options.runtime.check(controller.signal);
+      if (!checked.closureConfirmed && typeof checked.binding === 'string' && checked.binding.length > 0) {
+        const current = baseStatus();
+        await releaseRuntime();
+        override = undefined;
+        return {
+          ...current,
+          state: 'blocked',
+          recoveryAllowed: true,
+          allowed: false,
+          reason: checked.reason ?? current.reason ?? 'unresolved_previous_call',
+        };
+      }
       if (!checked.closureConfirmed || typeof checked.binding !== 'string' || checked.binding.length === 0) {
         throw new Error('OBSERVER_RECOVERY_ENVIRONMENT');
       }
