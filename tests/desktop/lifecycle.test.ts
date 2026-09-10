@@ -191,6 +191,21 @@ async function realStateStores() {
 }
 
 describe("desktop lifecycle", () => {
+  it("keeps health available when native diagnostic reads fail", async () => {
+    const harness = desktopHarness();
+    Object.assign(harness.windowController, { diagnostics: () => { throw new Error("native failure"); } });
+    await runDesktop(harness.dependencies);
+    expect(harness.serverOptions?.health?.()).toMatchObject({ service: "codex-progress-hud" });
+    expect(harness.serverOptions?.health?.().windowDiagnostics).toBeUndefined();
+    await harness.trayCallbacks?.onDiagnose();
+    expect(harness.dependencies.diagnose).toHaveBeenCalled();
+  });
+  it("publishes window diagnostics in authenticated health even when visibility says visible", async () => {
+    const harness = desktopHarness();
+    Object.assign(harness.windowController, { diagnostics: () => ({ exists: true, visible: true, page: "failed", renderer: "gone", domReady: false, readyToShow: false }) });
+    await runDesktop(harness.dependencies);
+    expect(harness.serverOptions?.health?.()).toMatchObject({ windowDiagnostics: { page: "failed", renderer: "gone" } });
+  });
   it("starts observer setup after releasing readiness and does not await login", async () => {
     const harness = desktopHarness();
     const login = deferred<void>();

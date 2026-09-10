@@ -437,6 +437,20 @@ describe("CompanionHttpClient", () => {
     expect(Number.isSafeInteger(Number(deadline))).toBe(true);
   });
 
+  it("opts into window diagnostics and retains only safe fields", async () => {
+    const { baseUrl, tokenPath } = await fixture((request, response) => {
+      if (request.headers["x-hud-window-diagnostics"] !== "1") return json(response, 200, health);
+      json(response, 200, { ...health, windowDiagnostics: { exists: true, visible: true, page: "failed", renderer: "gone", domReady: false, readyToShow: true, secret: "private" } });
+    });
+    const result = await new CompanionHttpClient(baseUrl, tokenPath).health();
+    expect(result).toMatchObject({ windowDiagnostics: { page: "failed", renderer: "gone" } });
+    expect(JSON.stringify(result)).not.toContain("private");
+  });
+  it("does not treat malformed optional diagnostics as a core protocol mismatch", async () => {
+    const { baseUrl, tokenPath } = await fixture((_request, response) => json(response, 200, { ...health, windowDiagnostics: { page: "future-state" } }));
+    expect(await new CompanionHttpClient(baseUrl, tokenPath).health()).toMatchObject(health);
+  });
+
   it("uses authenticated JSON controls and preserves task requests", async () => {
     const seen: Array<{
       method: string | undefined;

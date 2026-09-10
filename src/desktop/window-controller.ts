@@ -1,4 +1,6 @@
 import { hudBounds, type HudRectangle } from "./hud-layout.js";
+import { windowDiagnosticsSchema, type WindowDiagnostics } from "../diagnostics/window-state.js";
+import { createWindowContentProbe, type ContentReader } from './window-content-probe.js';
 
 export interface BrowserWindowOptionsLike {
   width: number;
@@ -27,6 +29,11 @@ export interface WindowCloseEventLike {
 
 export interface BrowserWindowLike {
   webContents: {
+    executeJavaScript?: ContentReader['executeJavaScript'];
+    capturePage?: ContentReader['capturePage'];
+    on(event: "dom-ready" | "did-finish-load" | "did-start-loading", listener: () => void): void;
+    on(event: "did-fail-load", listener: (event: unknown, code: number, description: string, url: string, isMainFrame: boolean) => void): void;
+    on(event: "render-process-gone", listener: (event: unknown, details: { reason: string; exitCode: number }) => void): void;
     on(
       event: "will-navigate",
       listener: (event: { preventDefault(): void }, url: string) => void
@@ -49,6 +56,7 @@ export interface BrowserWindowLike {
   };
   on(event: "close", listener: (event: WindowCloseEventLike) => void): this;
   on(event: "closed", listener: () => void): this;
+  on(event: "responsive" | "unresponsive", listener: () => void): this;
   once(event: "ready-to-show", listener: () => void): this;
   loadURL(url: string): Promise<unknown>;
   setAlwaysOnTop(flag: boolean, level?: string): void;
@@ -108,6 +116,10 @@ export class WindowController {
   private rows = 0;
   private layoutRevision = -1;
   private unwatchDisplays: (() => void) | undefined;
+  private contentProbe: ReturnType<typeof createWindowContentProbe> | undefined;
+  private rendering: Omit<WindowDiagnostics, "exists" | "visible" | "bounds"> = {
+    page: "not-created", renderer: "unknown", domReady: false, readyToShow: false
+  };
 
   constructor(private readonly dependencies: WindowControllerDependencies) {}
 
@@ -132,6 +144,36 @@ export class WindowController {
 
     const window = this.dependencies.createWindow(WINDOW_OPTIONS);
     this.window = window;
+    this.contentProbe = window.webContents.executeJavaScript && window.webContents.capturePage
+      ? createWindowContentProbe({
+          executeJavaScript: code => window.webContents.executeJavaScript!(code),
+          capturePage: (rect, options) => window.webContents.capturePage!(rect, options)
+        }) : undefined;
+    this.rendering = { page: "loading", renderer: "unknown", domReady: false, readyToShow: false };
+    const current = () => this.window === window && !window.isDestroyed();
+    window.webContents.on("did-start-loading", () => {
+      if (current() && this.rendering.page !== 'loading') this.contentProbe?.dispose();
+      if (current()) this.rendering = { page: "loading", renderer: "unknown", domReady: false, readyToShow: this.rendering.readyToShow };
+    });
+    window.webContents.on("dom-ready", () => {
+      if (current()) Object.assign(this.rendering, { page: "dom-ready", domReady: true, renderer: "responsive" });
+    });
+    window.webContents.on("did-finish-load", () => {
+      if (current()) this.rendering.page = "loaded";
+    });
+    window.webContents.on("did-fail-load", (_event, code, _description, _url, isMainFrame) => {
+      if (current() && isMainFrame) {
+        this.rendering.page = "failed";
+        if (Number.isInteger(code) && code >= -2147483648 && code <= 2147483647) this.rendering.loadErrorCode = code;
+      }
+    });
+    window.webContents.on("render-process-gone", (_event, details) => {
+      if (!current()) return;
+      this.rendering.renderer = "gone";
+      if (Number.isInteger(details.exitCode) && details.exitCode >= -2147483648 && details.exitCode <= 2147483647) this.rendering.rendererExitCode = details.exitCode;
+    });
+    window.on("responsive", () => { if (current()) this.rendering.renderer = "responsive"; });
+    window.on("unresponsive", () => { if (current()) this.rendering.renderer = "unresponsive"; });
     const webRequest = window.webContents.session.webRequest;
     this.authorizationRequest = webRequest;
     try {
@@ -163,12 +205,15 @@ export class WindowController {
       });
       window.on("closed", () => {
         if (this.window !== window) return;
+        this.contentProbe?.dispose();
+        this.contentProbe = undefined;
         this.detachAuthorization();
         this.window = undefined;
       });
       window.setAlwaysOnTop(true, "floating");
       window.once("ready-to-show", () => {
         if (this.window !== window || this.dependencies.quitting()) return;
+        this.rendering.readyToShow = true;
         this.fitWindow();
         if (!this.manuallyHidden) this.show();
       });
@@ -240,6 +285,16 @@ export class WindowController {
       : "hidden";
   }
 
+  diagnostics(): WindowDiagnostics {
+    const exists = this.window !== undefined && !this.window.isDestroyed();
+    if (exists && this.rendering.page === 'loaded' && !this.dependencies.quitting()) this.contentProbe?.start();
+    return windowDiagnosticsSchema.parse({
+      ...this.rendering, exists, visible: exists && this.window!.isVisible(),
+      content: this.contentProbe?.snapshot(),
+      ...(exists && this.window!.getBounds ? { bounds: this.window!.getBounds() } : {})
+    });
+  }
+
   dispose(): void {
     const window = this.window;
     if (window !== undefined) this.release(window);
@@ -257,6 +312,8 @@ export class WindowController {
 
   private release(window: BrowserWindowLike): void {
     if (this.window !== window) return;
+    this.contentProbe?.dispose();
+    this.contentProbe = undefined;
     this.detachAuthorization();
     this.window = undefined;
     if (!window.isDestroyed()) window.destroy();

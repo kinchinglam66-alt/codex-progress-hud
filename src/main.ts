@@ -62,7 +62,7 @@ export function selectEntryMode(argv: string[]): EntryMode {
   return selectEntryIntent(argv).mode;
 }
 
-async function runSelectedMode(argv: string[]): Promise<void> {
+export async function runSelectedMode(argv: string[]): Promise<void> {
   const intent = selectEntryIntent(argv);
   if (intent.mode === "hook-event") {
     const { runHookEvent } = await import("./hooks/main.js");

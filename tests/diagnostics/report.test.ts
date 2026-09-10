@@ -4,6 +4,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   writeDiagnosticReport,
+  renderDiagnosticReport,
   type DiagnosticReportInput
 } from "../../src/diagnostics/report.js";
 
@@ -27,6 +28,20 @@ afterEach(async () => {
 });
 
 describe("diagnostic report", () => {
+  it("reports window rendering separately and strips arbitrary diagnostic content", () => {
+    const input = { ...validInput("unused"), windowDiagnostics: {
+      exists: true, visible: true, page: "failed", renderer: "gone", domReady: false, readyToShow: true,
+      loadErrorCode: -7, rendererExitCode: 9, token: "private-secret", url: "https://private-secret",
+      bounds: { x: 1, y: 2, width: 340, height: 82, title: "private-secret" }
+    } };
+    const report = renderDiagnosticReport(input as DiagnosticReportInput);
+    expect(report).toContain("Window visible (native flag): true");
+    expect(report).toContain("Page load: failed");
+    expect(report).toContain("Renderer state: gone");
+    expect(report).toContain("Load error code: -7");
+    expect(report).not.toContain("private-secret");
+    expect(() => renderDiagnosticReport({ ...input, windowDiagnostics: { ...input.windowDiagnostics, page: "private-secret" } } as any)).toThrow();
+  });
   it("reports installation, Hook trust/activity, MCP lease, companion, compatibility, and tracking separately", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-dimensions-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

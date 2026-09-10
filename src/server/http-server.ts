@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z, ZodError } from "zod";
+import { readWindowDiagnostics } from "../diagnostics/window-state.js";
 import { type ProgressEnvelope } from "../core/schema.js";
 import {controlEnvelopeSchema} from './control-schema.js';
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
@@ -750,7 +751,10 @@ export function createProgressServer(options: ProgressServerOptions) {
       if (request.method === "GET" && url.pathname === "/api/health") {
         if (options.health === undefined) throw new Error("health callback is unavailable");
         const health = options.health();
-        writeJson(response, 200, { ...health, capabilities: capabilities(health) });
+        const { windowDiagnostics: rawWindowDiagnostics, ...legacyHealth } = health;
+        const windowDiagnostics = readWindowDiagnostics(() => rawWindowDiagnostics);
+        writeJson(response, 200, { ...legacyHealth, capabilities: capabilities(health),
+          ...(request.headers["x-hud-window-diagnostics"] === "1" && windowDiagnostics !== undefined ? { windowDiagnostics } : {}) });
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/events") {

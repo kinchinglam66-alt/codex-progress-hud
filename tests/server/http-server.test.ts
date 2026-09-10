@@ -94,6 +94,19 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
 }
 
 describe("local progress HTTP service", () => {
+  it("keeps window diagnostics authenticated and opt-in for older strict clients", async () => {
+    const { baseUrl, token, health } = await startServer();
+    health.windowDiagnostics = { exists: true, visible: true, page: "failed", renderer: "gone", domReady: false, readyToShow: true };
+    Object.assign(health.windowDiagnostics, { secret: "private-secret" });
+    const ordinary = await fetch(`${baseUrl}/api/health`, { headers: { authorization: `Bearer ${token}` } });
+    expect(await ordinary.json()).not.toHaveProperty("windowDiagnostics");
+    const diagnostic = await fetch(`${baseUrl}/api/health`, { headers: { authorization: `Bearer ${token}`, "x-hud-window-diagnostics": "1" } });
+    const body = await diagnostic.json();
+    expect(body).toMatchObject({ windowDiagnostics: { page: "failed" } });
+    expect(JSON.stringify(body)).not.toContain("private-secret");
+    const unauthenticated = await fetch(`${baseUrl}/api/health`, { headers: { "x-hud-window-diagnostics": "1" } });
+    expect(unauthenticated.status).toBe(401);
+  });
   const taskA = "hud_abcdefghijklmnopqrstuvwxyz0123456789";
   const taskB = "hud_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 

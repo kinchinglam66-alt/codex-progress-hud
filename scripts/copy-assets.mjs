@@ -13,6 +13,7 @@ for(const entry of await readdir("dist/estimation/assets",{withFileTypes:true}))
   if(!estimatorNames.has(entry.name) || !entry.isFile()) throw new Error("UNEXPECTED_ESTIMATOR_ASSET");
 }
 await Promise.all([
+  cp("src/bootstrap.cjs", "dist/bootstrap.cjs"),
   cp("src/ui/index.html", "dist/ui/index.html"),
   cp("src/ui/styles.css", "dist/ui/styles.css"),
   cp("src/ui/settings.html", "dist/ui/settings.html"),

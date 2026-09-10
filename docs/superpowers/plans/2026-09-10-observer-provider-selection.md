@@ -26,7 +26,7 @@
 
 ## Workspace and execution gate
 
-Working source: `C:/Users/asus/Documents/Codex/2026-09-01/z/.hud-reinstall-1a3aa3f-isolated` (not a Git worktree). The main repository at `outputs/codex-progress-hud` has existing changes. Before implementation use the worktree skill to inspect both, identify a bounded source baseline and preserve all current modifications. Do not initialize Git in the preserved source or copy it over the dirty main repository. If integration cannot be established without choosing between conflicting changes, finish independent inspection and request that choice.
+Working source: a preserved local installation snapshot (not a Git worktree). The main repository has existing changes. Before implementation use the worktree skill to inspect both, identify a bounded source baseline and preserve all current modifications. Do not initialize Git in the preserved source or copy it over the dirty main repository. If integration cannot be established without choosing between conflicting changes, finish independent inspection and request that choice.
 
 All relative file paths below resolve against the chosen verified implementation root. At each task milestone record changed files and test results; commit only in an established Git worktree using an explicit file list, never `git add .`. Installation and live calls are separate final gates, not prerequisites for unit tests.
 

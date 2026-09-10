@@ -9,7 +9,7 @@ import { estimatorAssetPins, observerAssetPins } from "../../src/estimation/asse
 it("the real build copy preserves numeric and observer pinned asset byte sequences",async()=>{
   const root=await mkdtemp(join(tmpdir(),"hud-asset-copy-"));
   try {
-    for(const file of ["src/ui/index.html","src/ui/styles.css","src/ui/settings.html","src/ui/settings.css","src/ui/settings-preload.cjs","hooks/hooks.json","scripts/launch-hook.ps1"]) {
+    for(const file of ["src/bootstrap.cjs","src/ui/index.html","src/ui/styles.css","src/ui/settings.html","src/ui/settings.css","src/ui/settings-preload.cjs","hooks/hooks.json","scripts/launch-hook.ps1"]) {
       await mkdir(dirname(join(root,file)),{recursive:true});await writeFile(join(root,file),"fixture");
     }
     await cp(resolve("src/estimation/assets"),join(root,"src/estimation/assets"),{recursive:true});

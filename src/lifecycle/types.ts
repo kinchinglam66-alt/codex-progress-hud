@@ -46,6 +46,7 @@ export interface HudCapabilities {
 export type StateMutationOperation<T> = (signal: AbortSignal) => T | Promise<T>;
 
 export interface HudHealth extends RuntimeIdentity {
+  windowDiagnostics?: import("../diagnostics/window-state.js").WindowDiagnostics | undefined;
   service: "codex-progress-hud";
   protocolVersion: number;
   visibility: "visible" | "hidden";

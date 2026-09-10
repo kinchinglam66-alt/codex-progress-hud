@@ -16,12 +16,14 @@ const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 beforeAll(async () => {
   try {
     await access(resolve(pluginRoot, "dist/main.js"));
+    await access(resolve(pluginRoot, "dist/bootstrap.cjs"));
   } catch {
     await execFileAsync(
       process.execPath,
       [resolve(pluginRoot, "node_modules/typescript/bin/tsc"), "-p", "tsconfig.build.json"],
       { cwd: pluginRoot }
     );
+    await execFileAsync(process.execPath, [resolve(pluginRoot, "scripts/copy-assets.mjs")], { cwd: pluginRoot });
   }
 });
 

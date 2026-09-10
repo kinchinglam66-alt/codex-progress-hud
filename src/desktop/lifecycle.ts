@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { selectEntryIntent, type DesktopLaunchReason } from "../main.js";
 import { createOperationalLogger, type OperationalLogEntry, type OperationalLogger } from "../diagnostics/logger.js";
 import { writeDiagnosticReport, type DiagnosticReportInput } from "../diagnostics/report.js";
+import { readWindowDiagnostics } from "../diagnostics/window-state.js";
 import type { TaskStatus } from "../core/types.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
 import {
@@ -65,6 +66,7 @@ export interface DesktopAppLike {
 }
 
 export interface DesktopWindowController {
+  diagnostics?(): import("../diagnostics/window-state.js").WindowDiagnostics;
   updateRows?(rows: number, revision: number): void;
   create(options: { url: string; token: string }): Promise<void>;
   show(): void;
@@ -138,6 +140,7 @@ export interface DesktopDependencies {
 }
 
 export interface DesktopDiagnosticSnapshot {
+  windowDiagnostics?: DiagnosticReportInput["windowDiagnostics"];
   observedState: ObservedHudState;
   runtimeAgeMs: number;
   errors: Array<{ code: HudErrorCode | "OFFLINE"; occurredAt: string }>;
@@ -285,7 +288,8 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
         lease: snapshot.lease,
         compatibility: snapshot.compatibility,
         tracking: snapshot.tracking,
-        operationalEvents: snapshot.operationalEvents
+        operationalEvents: snapshot.operationalEvents,
+        ...(snapshot.windowDiagnostics === undefined ? {} : { windowDiagnostics: snapshot.windowDiagnostics })
       });
     },
     operationalLogger,
@@ -550,7 +554,8 @@ export async function runDesktop(
           service: "codex-progress-hud",
           ...runtimeIdentity!,
           protocolVersion: PROTOCOL_VERSION,
-          visibility: publishingWindowController.visibility()
+          visibility: publishingWindowController.visibility(),
+          windowDiagnostics: readWindowDiagnostics(() => publishingWindowController.diagnostics?.())
         });
         assertStarting();
         progressServer = resolved.createProgressServer({
@@ -715,7 +720,8 @@ export async function runDesktop(
                 ...(selectedStatus === undefined ? {} : { selectedStatus: selectedStatus as TaskStatus }),
                 lateAttached: selectedTask?.trackingOrigin === "late_attach"
               },
-              operationalEvents: [...recentOperationalEvents]
+              operationalEvents: [...recentOperationalEvents],
+              windowDiagnostics: readWindowDiagnostics(() => publishingWindowController.diagnostics?.())
             });
           },
           ...(resolved.settingsController === undefined ? {} : {onSettings: () => resolved.settingsController!.open()}),

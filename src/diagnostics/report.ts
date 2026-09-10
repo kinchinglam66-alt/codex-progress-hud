@@ -1,4 +1,5 @@
 import { basename, join } from "node:path";
+import { windowDiagnosticsSchema, type WindowDiagnostics } from "./window-state.js";
 import type { DesiredHudState, HudErrorCode, ObservedHudState } from "../lifecycle/types.js";
 import type { TaskStatus } from "../core/types.js";
 import type { OperationalEventCode } from "./logger.js";
@@ -12,6 +13,7 @@ import {
 } from "./safe-files.js";
 
 export interface DiagnosticReportInput {
+  windowDiagnostics?: WindowDiagnostics;
   directory: string;
   generatedAt: string;
   versions: {
@@ -180,6 +182,7 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
   })();
   return {
     generatedAt,
+    ...(input.windowDiagnostics === undefined ? {} : { windowDiagnostics: windowDiagnosticsSchema.parse(input.windowDiagnostics) }),
     versions: { plugin, mcp, ...(companion === undefined ? {} : { companion }), protocol },
     lifecycle: { ...(desiredState === undefined ? {} : { desiredState }), observedState },
     paths: { installManifestExists, dataDirectoryExists },
@@ -251,6 +254,21 @@ function formatSnapshot(snapshot: Omit<DiagnosticReportInput, "directory">): str
     line("Desired state", snapshot.lifecycle.desiredState),
     line("Observed state", snapshot.lifecycle.observedState),
     line("Runtime age (ms)", snapshot.runtimeAgeMs),
+    "",
+    "## Window rendering (not proof of on-screen pixels)",
+    "",
+    line("Window exists", snapshot.windowDiagnostics?.exists),
+    line("Window visible (native flag)", snapshot.windowDiagnostics?.visible),
+    line("Page load", snapshot.windowDiagnostics?.page),
+    line("DOM ready", snapshot.windowDiagnostics?.domReady),
+    line("Ready to show", snapshot.windowDiagnostics?.readyToShow),
+    line("Renderer state", snapshot.windowDiagnostics?.renderer),
+    line("Load error code", snapshot.windowDiagnostics?.loadErrorCode),
+    line("Renderer exit code", snapshot.windowDiagnostics?.rendererExitCode),
+    line("Content probe (one-shot)", snapshot.windowDiagnostics?.content?.status),
+    line("DOM flags and dimensions", snapshot.windowDiagnostics?.content?.dom === undefined ? undefined : JSON.stringify(snapshot.windowDiagnostics.content.dom)),
+    line("Internal paint sample statistics", snapshot.windowDiagnostics?.content?.paint === undefined ? undefined : JSON.stringify(snapshot.windowDiagnostics.content.paint)),
+    line("Window bounds", snapshot.windowDiagnostics?.bounds === undefined ? undefined : JSON.stringify(snapshot.windowDiagnostics.bounds)),
     "",
     "## Local endpoint",
     "",

@@ -1227,7 +1227,8 @@ export function createCompanionManager(
           ...(selectedTask?.status === undefined ? {} : { selectedStatus: selectedTask.status }),
           lateAttached: selectedTask?.trackingOrigin === "late_attach"
         },
-        operationalEvents: [...recentOperationalEvents]
+        operationalEvents: [...recentOperationalEvents],
+        ...(snapshot.health?.windowDiagnostics === undefined ? {} : { windowDiagnostics: snapshot.health.windowDiagnostics })
       };
       // Validate and capture before async export; never expose a raw filesystem error.
       const markdown = renderDiagnosticReport(reportInput);

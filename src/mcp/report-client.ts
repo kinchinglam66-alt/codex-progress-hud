@@ -4,6 +4,7 @@ import type { ProgressEnvelope } from "../core/schema.js";
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
 import { hookEnvelopeSchema, type HookEnvelope } from "../hooks/schema.js";
 import { type HudCapabilities, PROTOCOL_VERSION, type HudHealth } from "../lifecycle/types.js";
+import { windowDiagnosticsSchema } from "../diagnostics/window-state.js";
 import type { HudSnapshot } from "../server/task-store.js";
 import type { SessionLease } from "../server/lease-store.js";
 import { defaultServiceUrl, defaultTokenPath } from "../server/paths.js";
@@ -76,6 +77,7 @@ const healthSchema = z.object({
   instanceNonce: z.string().trim().min(1).max(256),
   startedAt: z.string(),
   visibility: z.enum(["visible", "hidden"]),
+  windowDiagnostics: windowDiagnosticsSchema.optional().catch(undefined),
   capabilities: capabilitiesSchema.optional()
 }).strict();
 const controlSchema = z.object({ accepted: z.literal(true) }).strict();
@@ -499,7 +501,7 @@ export class CompanionHttpClient implements ProgressClient, LeaseClient {
 
   async health(options: HudRequestOptions = {}): Promise<HudHealth> {
     try {
-      const health = healthSchema.parse(await this.#authenticatedJson("/api/health", {}, options));
+      const health = healthSchema.parse(await this.#authenticatedJson("/api/health", { headers: { "x-hud-window-diagnostics": "1" } }, options));
       const capabilities = health.capabilities as HudCapabilities | undefined;
       if (capabilities !== undefined && (
         RELEASE_CAPABILITIES.protocol.current < capabilities.protocol.minimumClient ||

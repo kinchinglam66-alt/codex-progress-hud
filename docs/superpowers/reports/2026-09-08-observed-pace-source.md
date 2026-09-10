@@ -41,7 +41,7 @@ npm test -- --run --maxWorkers=1 --no-file-parallelism
 ```
 
 Implementation directory:
-`C:/Users/asus/Documents/Codex/2026-09-01/z/.hud-reinstall-1a3aa3f-isolated`.
+a preserved local installation snapshot (machine-specific path omitted).
 The exact 30-path handoff list and review evidence are retained in the main
 repository's ignored `.superpowers/sdd/2026-09-08-observed-pace-source/` directory.
 Integration started from main at `0f4e4ec`; its pre-existing diagnostic/countdown

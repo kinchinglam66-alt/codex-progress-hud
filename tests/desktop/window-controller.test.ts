@@ -48,6 +48,49 @@ class FakeWindow extends EventEmitter {
 }
 
 describe("WindowController", () => {
+  it('starts one content probe after load only when diagnostics are read', async () => {
+    const window = new FakeWindow();
+    const executeJavaScript = vi.fn(async () => ({ hudPresent:true,statusPresent:true,closePresent:true,stylesheetCount:1,hudHidden:false,hudHasBackground:true,hudHasText:true,viewportWidth:340,viewportHeight:158 }));
+    Object.assign(window.webContents, { executeJavaScript, capturePage: async () => ({ getSize: () => ({width:1,height:1}), toBitmap: () => Buffer.from([255,255,255,255]) }) });
+    const controller = new WindowController({ createWindow: () => window, quitting: () => false });
+    await controller.create({ url: 'http://127.0.0.1:17837', token: 'secret' });
+    expect(controller.diagnostics().content).toBeUndefined();
+    window.webContentsListeners.get('did-finish-load')?.();
+    expect(executeJavaScript).not.toHaveBeenCalled();
+    controller.diagnostics();
+    for(let i=0;i<8;i++) await Promise.resolve();
+    expect(controller.diagnostics().content).toMatchObject({status:'ready',paint:{whitePixels:1}});
+    expect(executeJavaScript).toHaveBeenCalledTimes(1);
+    controller.dispose();
+    expect(controller.diagnostics().content).toBeUndefined();
+  });
+  it("distinguishes native visibility from page loading and renderer failure without retaining secrets", async () => {
+    const window = new FakeWindow();
+    const controller = new WindowController({ createWindow: () => window, quitting: () => false });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    controller.show();
+    expect(controller.diagnostics()).toMatchObject({ visible: true, page: "loading", readyToShow: false });
+    window.webContentsListeners.get("dom-ready")?.();
+    window.webContentsListeners.get("did-finish-load")?.();
+    window.emit("ready-to-show");
+    expect(controller.diagnostics()).toMatchObject({ page: "loaded", domReady: true, readyToShow: true });
+    window.webContentsListeners.get("did-start-loading")?.();
+    window.webContentsListeners.get("dom-ready")?.();
+    window.webContentsListeners.get("did-finish-load")?.();
+    expect(controller.diagnostics().readyToShow).toBe(true);
+    window.webContentsListeners.get("did-fail-load")?.({}, -7, "secret", "http://secret", false);
+    expect(controller.diagnostics().page).toBe("loaded");
+    window.webContentsListeners.get("did-fail-load")?.({}, -7, "secret", "http://secret", true);
+    expect(controller.diagnostics()).toMatchObject({ page: "failed", loadErrorCode: -7 });
+    window.webContentsListeners.get("render-process-gone")?.({}, { reason: "crashed", exitCode: 9 });
+    expect(controller.diagnostics()).toMatchObject({ renderer: "gone", rendererExitCode: 9, visible: true });
+    expect(JSON.stringify(controller.diagnostics())).not.toContain("secret");
+    controller.dispose();
+    expect(controller.diagnostics()).toMatchObject({ exists: false, visible: false });
+    await controller.create({ url: "http://127.0.0.1:17837", token: "secret" });
+    expect(controller.diagnostics()).toMatchObject({ page: "loading", renderer: "unknown", domReady: false });
+    expect(controller.diagnostics().rendererExitCode).toBeUndefined();
+  });
   it("sizes rows without showing, ignores stale updates and detaches display observation", async () => {
     const window = new FakeWindow();
     let displayChanged = () => {};
