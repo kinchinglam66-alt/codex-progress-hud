@@ -153,14 +153,14 @@ function parseResponse(value: unknown, status: number, retryPolicy: {delayMs?: n
     return {interpretation: null, usage, prediction: 'invalid', framingValid: false,
       failureCode: usage === null ? 'missing_usage' : 'invalid_output'};
   }
-  if (usage === null) return {interpretation: null, usage: null, prediction: 'invalid', framingValid: true, failureCode: 'missing_usage'};
   let decoded: unknown;
   try {decoded = JSON.parse((content[0] as Record<string, unknown>).text as string);}
   catch {return {interpretation: null, usage, prediction: 'invalid', framingValid: true, failureCode: 'invalid_output'};}
   const parsed = observerResponseSchema.safeParse(decoded);
   if (!parsed.success) return {interpretation: null, usage, prediction: 'invalid', framingValid: true, failureCode: 'invalid_output'};
   return {interpretation: Object.freeze(parsed.data), usage,
-    prediction: parsed.data.estimate === null ? 'unknown' : 'numeric', framingValid: true};
+    prediction: parsed.data.estimate === null ? 'unknown' : 'numeric', framingValid: true,
+    ...(usage === null ? {failureCode: 'missing_usage' as const} : {})};
 }
 
 function statusFailureCode(status: number): FailureCode {

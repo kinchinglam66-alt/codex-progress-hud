@@ -159,16 +159,18 @@ it('routes provider settings only through a trusted sender and keeps save inert'
     account: {label: 'person@example.invalid', observedAt: 1000, expiresAt: 301000}, recipient: 'Codex Progress HUD observer',
   }));
   const saveProviderSettings = vi.fn(async () => readProviderSettings());
+  const checkProvider = vi.fn();
+  const providerDialog = {showMessageBox: vi.fn(async () => ({response:1}))};
   const controller = createObserverSettingsController({
     createWindow: () => fixture.window,
     ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
-    dialog: {showMessageBox: vi.fn(async () => ({response: 1}))},
+    dialog: providerDialog,
     uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
     readStatus: () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
     preflight: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
     binding: () => 'binding', confirm: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
     provider: {readProviderSettings, saveProviderSettings,
-      replaceSubscriptionAccount: vi.fn(), checkProvider: vi.fn(), trialProvider: vi.fn(), activateProvider: vi.fn(), cancelProviderAction: vi.fn()},
+      replaceSubscriptionAccount: vi.fn(), checkProvider, trialProvider: vi.fn(), activateProvider: vi.fn(), cancelProviderAction: vi.fn()},
   });
   await controller.open();
   const channel = 'codex-progress-hud:settings:provider:read';
@@ -182,5 +184,9 @@ it('routes provider settings only through a trusted sender and keeps save inert'
   expect(saveProviderSettings).toHaveBeenCalledWith(expect.objectContaining({generation: 7, revision: 3, secret: 'write-only-secret'}));
   expect(await read({sender: fixture.window.webContents})).not.toHaveProperty('apiKey');
   expect(await read({sender: fixture.window.webContents})).not.toHaveProperty('keyRef');
+  // A declined endpoint-specific credential disclosure must not run the check.
+  await handlers.get(SETTINGS_CHANNELS.providerCheck)!({sender: fixture.window.webContents}, {generation:7,revision:3});
+  expect(providerDialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({detail:expect.stringContaining('API 密钥')}));
+  expect(checkProvider).not.toHaveBeenCalled();
   await controller.dispose();
 });

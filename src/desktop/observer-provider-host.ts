@@ -277,7 +277,12 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     if (value.selected === 'subscription') next = {version: 1, selected: 'subscription', api: null};
     else {
       const previous = draft.api;
-      let keyRef = previous?.keyRef ?? `pending-${randomUUID()}`;
+      const validated = parseProviderConfig({version:1, selected:'api', api:{...value.api,keyRef:`pending-${randomUUID()}`}}).api!;
+      const credentialEndpoint = (baseUrl: string): string => {
+        const url = new URL(baseUrl); url.pathname = url.pathname.replace(/\/+$/, ''); return url.toString();
+      };
+      const sameScope = previous?.profileId === validated.profileId && credentialEndpoint(previous.baseUrl) === credentialEndpoint(validated.baseUrl);
+      let keyRef = sameScope ? previous!.keyRef : validated.keyRef;
       if (input.secret !== undefined && input.secret.length > 0) keyRef = await secretStore.put(input.secret);
       next = parseProviderConfig({version: 1, selected: 'api', api: {...value.api, keyRef}});
     }

@@ -204,7 +204,7 @@ export function createObserverSettingsController(options: {
           return operation(payload);
         });
       };
-      confirmedProviderAction(SETTINGS_CHANNELS.providerCheck, provider.checkProvider, '是否检查 API 提供方？', '仅检查本地配置和连接，不运行推理。');
+      confirmedProviderAction(SETTINGS_CHANNELS.providerCheck, provider.checkProvider, '是否检查 API 提供方？', '将向以下地址发送配置的 API 密钥以检查连接，不运行推理。', true);
       confirmedProviderAction(SETTINGS_CHANNELS.providerTrial, provider.trialProvider, '是否进行一次合成试探？', '这会暂时停止当前估时，但任务追踪仍会继续；会向所选提供方发送固定合成输入，可能产生费用；', true);
       confirmedProviderAction(SETTINGS_CHANNELS.providerActivate, provider.activateProvider, '是否启用所选提供方？', '启用后估时数据会发送给所示接收方；API 调用可能产生费用。保存草稿本身不会启用。', true);
       options.ipcMain.handle(SETTINGS_CHANNELS.providerCancel, async event => { trusted(event); return provider.cancelProviderAction(); });

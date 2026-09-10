@@ -283,13 +283,14 @@ it('retains unknown usage for malformed usage instead of inventing zero', async 
   const provider = createObserverApiProvider({config, generation: 3, readKey: async () => 'synthetic-secret', transport,
     accounting, instructions: 'shared observer instructions', schema: {type: 'object'}, retry: false});
   const result = await provider.observe(input, new AbortController().signal, 'conversation-key');
-  expect(result.status).toBe('process_error');
+  expect(result.status).toBe('interpreted');
+  expect(result.interpretation).toEqual(interpretation);
   expect(result.usage).toBeNull();
   expect(accounting.settle).toHaveBeenCalledWith('malformed-usage', null);
 });
 
 it('treats absent cached-token detail as unknown usage for safe cost accounting', async () => {
-  const transport = async () => new Response(JSON.stringify({status: 'completed', output: [{type: 'message', content: [
+  const transport = async () => new Response(JSON.stringify({status: 'completed', output: [{type: 'message', role: 'assistant', content: [
     {type: 'output_text', text: JSON.stringify(interpretation)},
   ]}], usage: {input_tokens: 4, output_tokens: 1}}), {status: 200});
   const accounting = {reserve: async () => ({id: 'missing-cache-detail', profileId: config.profileId, generation: 3}),
@@ -299,6 +300,8 @@ it('treats absent cached-token detail as unknown usage for safe cost accounting'
   const result = await provider.observe(input, new AbortController().signal, 'conversation-key');
   expect(result.usage).toBeNull();
   expect(result.outcomes?.failureCode).toBe('missing_usage');
+  expect(result.status).toBe('interpreted');
+  expect(result.interpretation).toEqual(interpretation);
   expect(accounting.settle).toHaveBeenCalledWith('missing-cache-detail', null);
 });
 

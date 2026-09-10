@@ -1,6 +1,28 @@
 import {afterEach,expect,it,vi} from 'vitest';
 
 afterEach(()=>{vi.unstubAllGlobals();vi.resetModules();});
+it('allows Cancel during a pending provider action and does not overwrite its result', async () => {
+  const listeners = new Map<string, () => void>();
+  const elements = new Map<string, {textContent:string; disabled:boolean; value:string; addEventListener:(type:string,callback:()=>void)=>void}>();
+  for (const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-check','#provider-cancel']) {
+    elements.set(id,{textContent:'',disabled:false,value:'',addEventListener:(_type,callback)=>listeners.set(id,callback)});
+  }
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => {release=resolve;});
+  const api = {getStatus:async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false}),
+    readProviderSettings:async()=>({generation:1,revision:1,selected:'api',state:'inactive',active:{selected:'api',api:null},draft:{selected:'api',api:null},keyConfigured:false}),
+    checkProvider:vi.fn(async()=>{await pending; return {ok:true};}), cancelProviderAction:vi.fn(async()=>{release();})};
+  vi.stubGlobal('document',{querySelector:(selector:string)=>elements.get(selector)});
+  vi.stubGlobal('window',{codexProgressHudSettings:api});
+  await import('../../src/ui/settings-renderer.js');
+  listeners.get('#provider-check')!();
+  await vi.waitFor(()=>expect(api.checkProvider).toHaveBeenCalledOnce());
+  expect(elements.get('#provider-cancel')!.disabled).toBe(false);
+  listeners.get('#provider-cancel')!(); listeners.get('#provider-cancel')!();
+  await vi.waitFor(()=>expect(api.cancelProviderAction).toHaveBeenCalledOnce());
+  await vi.waitFor(()=>expect(elements.get('#message')!.textContent).toContain('已取消'));
+  expect(elements.get('#provider-cancel')!.disabled).toBe(true);
+});
 it('keeps recovery failure visible after refreshing status and renders bounded stage details',async()=>{
   const listeners=new Map<string,()=>void>();
   const elements=new Map<string,{textContent:string;disabled:boolean;addEventListener:(type:string,listener:()=>void)=>void}>();
@@ -69,7 +91,7 @@ it('renders provider source/account/key state, marks dirty drafts, clears secret
   const api={
     getStatus:vi.fn(async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false})),
     preflight:vi.fn(),confirm:vi.fn(),revokeConsent:vi.fn(),
-    readProviderSettings:vi.fn(async()=>({generation:4,revision:2,selected:'api',state:'ready',active:{selected:'api',api:null},draft:{selected:'api',api:{profileId:'p',name:'Provider',baseUrl:'https://api.example.test/v1',protocol:'responses',model:'model',reasoningEffort:'medium',maxOutputTokens:2048,dailyCallLimit:24}},keyConfigured:true,account:{label:'person@example.invalid',observedAt:1000,expiresAt:301000},recipient:'Codex Progress HUD observer'})),
+    readProviderSettings:vi.fn(async()=>({generation:4,revision:2,selected:'api',state:'ready',active:{selected:'api',api:null},draft:{selected:'api',api:{profileId:'p',name:'Provider',baseUrl:'https://api.example.test/v1',protocol:'responses',model:'model',reasoningEffort:'medium',maxOutputTokens:2048,dailyCallLimit:24,keyConfigured:true}},keyConfigured:false,account:{label:'person@example.invalid',observedAt:1000,expiresAt:301000},recipient:'Codex Progress HUD observer'})),
     saveProviderSettings:vi.fn(async()=>api.readProviderSettings()),checkProvider:vi.fn(async()=>({ok:true,stage:'network'})),trialProvider:vi.fn(),activateProvider:vi.fn(),cancelProviderAction:vi.fn(),replaceSubscriptionAccount:vi.fn(async()=>({outcome:'cancelled'})),
   };
   vi.stubGlobal('window',{codexProgressHudSettings:api});

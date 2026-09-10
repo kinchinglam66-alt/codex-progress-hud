@@ -1,6 +1,6 @@
 type SettingsState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'checking' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' | 'unconfigured' | 'unauthorized' | 'repair_environment';
 interface SettingsStatus {state: SettingsState; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
-interface ProviderDraft {selected: 'subscription'|'api'; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number}|null}
+interface ProviderDraft {selected: 'subscription'|'api'; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
 interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;recipient?:string}
 interface SettingsApi {
   getStatus(): Promise<SettingsStatus>; preflight(): Promise<SettingsStatus & {allowed: boolean; challenge?: string}>; confirm(revision: number, challenge: string): Promise<SettingsStatus>; revokeConsent(): Promise<SettingsStatus & {consentRevoked:boolean}>;
@@ -134,7 +134,7 @@ function renderProvider(value: ProviderSettings): void {
     if (maxOutputTokens) maxOutputTokens.value = String(draft.maxOutputTokens); if (dailyCallLimit) dailyCallLimit.value = String(draft.dailyCallLimit);
     if (draft.protocol !== 'responses') message.textContent = '不支持的协议；请选择 Responses。';
   }
-  if (keyState) keyState.textContent = value.keyConfigured ? '已配置（密钥不会显示）' : '未配置密钥';
+  if (keyState) keyState.textContent = (draft?.keyConfigured ?? false) ? '已配置（密钥不会显示）' : '未配置密钥';
   if (account) account.textContent = value.account?.label ?? '未登录订阅账户';
   if (accountTime) accountTime.textContent = value.account ? `观察时间：${new Date(value.account.observedAt).toLocaleString('zh-CN')}；有效至：${new Date(value.account.expiresAt).toLocaleString('zh-CN')}` : '—';
   if (recipient) recipient.textContent = value.recipient ?? '接收方待读取';
@@ -144,17 +144,24 @@ function providerEnvelope(extra: Record<string, unknown> = {}): Record<string, u
   return {generation: providerSnapshot?.generation ?? 0, revision: providerSnapshot?.revision ?? 0, ...extra};
 }
 function markDirty(): void {
-  if (dirty && providerSnapshot) dirty.textContent = JSON.stringify(providerDraftFromInputs()) === JSON.stringify(providerSnapshot.draft) ? '已保存' : '有未保存更改';
+  if (dirty && providerSnapshot) {
+    const original = providerSnapshot.draft;
+    const fields = original.api ? (({keyConfigured: _metadata, ...rest}) => rest)(original.api) : null;
+    dirty.textContent = JSON.stringify(providerDraftFromInputs()) === JSON.stringify({selected:original.selected, api:fields}) ? '已保存' : '有未保存更改';
+  }
 }
 async function refreshProvider(): Promise<void> {
   if (!providerApi?.readProviderSettings) return;
   try { renderProvider(await providerApi.readProviderSettings()); } catch { message.textContent = '无法读取提供方设置'; }
 }
+let providerActionGeneration = 0;
+let providerCancelling = false;
 async function providerAction(operation: () => Promise<unknown>, success: string): Promise<void> {
   if (providerBusy) return; setProviderBusy(true);
-  try { await operation(); await refreshProvider(); message.textContent = success; }
-  catch (error) { const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : '提供方操作失败；估时保持停用。'; message.textContent = text; }
-  finally { setProviderBusy(false); }
+  const generation = ++providerActionGeneration;
+  try { await operation(); if (generation !== providerActionGeneration) return; await refreshProvider(); if (generation === providerActionGeneration) message.textContent = success; }
+  catch (error) { if (generation !== providerActionGeneration) return; const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : '提供方操作失败；估时保持停用。'; message.textContent = text; }
+  finally { if (generation === providerActionGeneration) setProviderBusy(false); }
 }
 for (const control of [providerSource, profileId, providerName, baseUrl, model, protocol, reasoningEffort, maxOutputTokens, dailyCallLimit]) control?.addEventListener('input', markDirty);
 providerSave?.addEventListener('click', () => void providerAction(async () => {
@@ -167,7 +174,16 @@ providerCheck?.addEventListener('click', () => void providerAction(async () => {
 }, '连接检查完成；尚未运行推理。'));
 providerTrial?.addEventListener('click', () => void providerAction(async () => { await providerApi?.trialProvider?.(providerEnvelope()); }, '合成试探已完成；当前估时保持停用，请显式启用提供方。'));
 providerActivate?.addEventListener('click', () => void providerAction(async () => { await providerApi?.activateProvider?.(providerEnvelope({selected: providerSource?.value})); }, '提供方已启用。'));
-providerCancel?.addEventListener('click', () => void providerAction(async () => { await providerApi?.cancelProviderAction?.(); }, '操作已取消；提供方保持停用。'));
+providerCancel?.addEventListener('click', () => {
+  if (!providerBusy || providerCancelling) return;
+  providerCancelling = true; providerActionGeneration++;
+  providerCancel.disabled = true;
+  void (async () => {
+    try { await providerApi?.cancelProviderAction?.(); await refreshProvider(); message.textContent = '操作已取消；请检查当前提供方状态。'; }
+    catch { message.textContent = '取消未完成；请等待请求清理并检查状态。'; }
+    finally { providerCancelling = false; setProviderBusy(false); }
+  })();
+});
 async function subscriptionAction(action: 'login'|'device-auth'|'logout'): Promise<void> {
   await providerAction(async () => {
     const result = await providerApi?.replaceSubscriptionAccount?.(providerEnvelope({action}));

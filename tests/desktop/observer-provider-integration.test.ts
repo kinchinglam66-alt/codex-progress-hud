@@ -23,6 +23,18 @@ function owner(label: string): ProviderWorkerOwner {
 }
 
 describe('desktop observer provider composition', () => {
+  it('never reuses an API secret after changing its endpoint or profile', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
+    const openApi = vi.fn(async () => owner('api'));
+    const host = await createObserverProviderHost({dataDirectory: directory, consentProtection: {protect: v => v, unprotect: v => v}, openSubscription: async () => owner('subscription'), openApi});
+    await host.saveProviderSettings({...host.status(), draft: apiDraft, secret: 'original-key'});
+    const changed = {...apiDraft, api: {...apiDraft.api, baseUrl: 'https://different.example.test/v1'}};
+    await host.saveProviderSettings({...host.status(), draft: changed});
+    expect((await host.readProviderSettings()).draft.api?.keyConfigured).toBe(false);
+    expect((await host.checkProvider({...host.status()})).ok).toBe(false);
+    expect(openApi).not.toHaveBeenCalled();
+    await host.close();
+  });
   it('retains failed check cleanup and blocks another operation until close succeeds', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
     const candidate = owner('api');

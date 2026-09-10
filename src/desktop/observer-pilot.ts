@@ -107,14 +107,15 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     const assets=await loadObserverApiAssets(options.resourcesDirectory);
     apiAccounting??=createApiAccounting(resolve(options.dataDirectory,'observer-api-accounting.db'),Date.now);
     const transport=createObserverApiTransport(config===null?{}:{proxyUrl:config.proxyUrl});
-    const make=()=>createObserverApiProvider({config:apiConfig,generation,readKey,transport,accounting:apiAccounting!,instructions:assets.instructions,schema:assets.schema,maxAutoRetries:0,retry:false});
+    const make=(retry=true)=>createObserverApiProvider({config:apiConfig,generation,readKey,transport,accounting:apiAccounting!,instructions:assets.instructions,schema:assets.schema,maxAutoRetries:retry?1:0,retry});
     const workers=[make(),make()] as const;
+    const ownedWorkers=[...workers];
     const fingerprint=createHash('sha256').update(JSON.stringify({profileId:apiConfig.profileId,baseUrl:apiConfig.baseUrl,model:apiConfig.model})).digest('hex');
     const trialInput:ObserverInput={goalSummary:'Synthetic provider trial. Do not use any real conversation context.',activeSeconds:0,runtime:'waiting',messages:[{kind:'user',text:'Return one valid observer response for this synthetic provider trial.',truncated:false}],truncated:false};
     return {workers,inspect:async inspectSignal=>{inspectSignal.throwIfAborted();return {label:apiConfig.name,fingerprint};},
       check:async checkSignal=>{const key=await readKey();if(!key)return {ok:false,message:'API 密钥不可用'};const response=await transport(apiConfig.baseUrl,{method:'GET',redirect:'error',signal:AbortSignal.any([checkSignal,AbortSignal.timeout(15_000)]),headers:{authorization:`Bearer ${key}`}});await response.body?.cancel().catch(()=>undefined);if(response.status===401||response.status===403)return {ok:false,message:'API 凭据被拒绝，请更新配置'};if(response.status>=500)return {ok:false,message:'API 服务不可用'};return {ok:true,message:`网络已到达（HTTP ${response.status}）；未验证 API 身份或运行推理`};},
-      trial:async trialSignal=>{const result=await workers[0]!.observe(trialInput,trialSignal,'__provider_trial__');if(result.status!=='interpreted'||result.interpretation===null)throw Error('PROVIDER_TRIAL_FAILED');return result;},
-      close:async()=>{workers.forEach(worker=>worker.disable());await Promise.all(workers.map(worker=>worker.close()));await transport.close();}};
+      trial:async trialSignal=>{const worker=make(false);ownedWorkers.push(worker);const result=await worker.observe(trialInput,trialSignal,'__provider_trial__');if(result.status!=='interpreted'||result.interpretation===null)throw Error('PROVIDER_TRIAL_FAILED');return result;},
+      close:async()=>{ownedWorkers.forEach(worker=>worker.disable());await Promise.all(ownedWorkers.map(worker=>worker.close()));await transport.close();}};
   };
   const host=await createObserverProviderHost({dataDirectory:options.dataDirectory,consentProtection:options.consentProtection,
     openSubscription,openApi,autoStartSubscription:config!==null, ...(config?.proxyUrl===undefined?{}:{proxyUrl:config.proxyUrl}),
