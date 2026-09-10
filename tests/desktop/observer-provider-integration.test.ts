@@ -29,6 +29,29 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it('keeps verified identity when interactive start fails after inspection',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-interactive-account-'));
+    const settings={inspect:async()=>({accountLabel:'retained@example.invalid',evidence:{accountFingerprint:'a'.repeat(64),routeFingerprint:'b'.repeat(64),assetsFingerprint:'c'.repeat(64),observedAt:0,expiresAt:300000}})} as any;
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},subscriptionAccount:settings,openSubscription:async()=>{throw Error('SETUP_FAILED');}});
+    try{
+      await expect(host.startProvider({...host.status(),selected:'subscription',consent:true})).rejects.toThrow('PROVIDER_ACTIVATION_FAILED');
+      expect(await host.readProviderSettings()).toMatchObject({state:'inactive',accountStatus:'ready',account:{label:'retained@example.invalid'}});
+    }finally{await host.close();}
+  });
+  it.each(['ready','unavailable','signed_out'])('separates account %s from estimator startup failure', async(expected)=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-account-status-'));
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},autoStartSubscription:true,
+      readSubscriptionAccount:async()=>{if(expected!=='ready')throw Error(expected==='signed_out'?'OBSERVER_LOGIN_REQUIRED':'PRIVATE_NETWORK_ERROR');return {label:'fixture@example.invalid',observedAt:0,expiresAt:300000};},
+      openSubscription:async()=>{throw Error('SETUP_FAILED');}});
+    try{
+      expect((await host.readProviderSettings()).accountStatus).toBe('unknown');
+      await host.start(new AbortController().signal);
+      const value=await host.readProviderSettings();
+      expect(value.state).toBe('inactive');expect(value.accountStatus).toBe(expected);
+      expect(value.account?.label??null).toBe(expected==='ready'?'fixture@example.invalid':null);
+      expect(JSON.stringify(value)).not.toContain('PRIVATE_NETWORK_ERROR');
+    }finally{await host.close();}
+  });
   it('never reuses an API secret after changing its endpoint or profile', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'observer-provider-host-'));
     const openApi = vi.fn(async () => owner('api'));

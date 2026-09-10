@@ -128,6 +128,17 @@ function dialogFor(events: string[], response = 0) {
 describe('desktop observer runtime composition', () => {
   afterEach(() => {vi.useRealTimers();});
 
+  it('rejects an inline activation when setup fails instead of reporting completion', async () => {
+    const events: string[] = [];
+    const runtime = createDesktopObserverRuntime({identity: identityFor(() => 0, events),
+      dialog: dialogFor(events), now: () => 0,
+      openAccounting: async () => {throw new Error('PRIVATE_STORAGE_ERROR');}});
+    try {
+      await expect(runtime.start(new AbortController().signal, {kind: 'inline', accountFingerprint: 'a'.repeat(64), generation: 1, revision: 1})).rejects.toThrow('OBSERVER_SETUP_UNAVAILABLE');
+      expect(runtime.workers.every(worker => worker.status().disabled)).toBe(true);
+    } finally {await runtime.close();}
+  });
+
   it('accepts only a matching inline account binding and does not open the legacy consent dialog', async () => {
     const events: string[] = [];
     const runtime = createDesktopObserverRuntime({

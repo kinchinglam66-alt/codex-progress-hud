@@ -41,6 +41,7 @@ export interface ProviderSettingsPublic {
   draft: ReturnType<typeof toPublicProviderConfig>;
   keyConfigured: boolean;
   account: ProviderAccountMetadata | null;
+  accountStatus?: 'unknown' | 'checking' | 'ready' | 'signed_out' | 'unavailable';
   recipient: string;
   proxyUrl?: string;
 }
@@ -114,6 +115,20 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   let revision = storedState !== 'invalid' ? storedState?.revision ?? 0 : 0;
   let state: ProviderSettingsPublic['state'] = 'inactive';
   let account: ProviderAccountMetadata | null = null;
+  let accountStatus: NonNullable<ProviderSettingsPublic['accountStatus']> = 'unknown';
+
+  async function readAccount(signal: AbortSignal): Promise<void> {
+    if (!options.readSubscriptionAccount) return;
+    accountStatus='checking';
+    try {
+      const value=await options.readSubscriptionAccount(signal);
+      signal.throwIfAborted(); account=value; accountStatus='ready';
+    } catch(error) {
+      account=null;
+      accountStatus=error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED' ? 'signed_out' : 'unavailable';
+      throw error;
+    }
+  }
   let action: Promise<unknown> | undefined;
   let actionToken: object | undefined;
   let actionController: AbortController | undefined;
@@ -177,7 +192,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       generation, revision, state, selected: active.selected,
       active: toPublicProviderConfig(active, await keyConfigured(active)),
       draft: toPublicProviderConfig(draft, await keyConfigured(draft)),
-      keyConfigured: await keyConfigured(active), account,
+      keyConfigured: await keyConfigured(active), account, accountStatus,
       recipient: disclosure, ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
     };
   }
@@ -256,6 +271,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     {
       const combined = AbortSignal.any([signal, controller.signal]);
       try {
+        if (active.selected === 'subscription') await readAccount(combined);
         if (active.selected === 'api') {
           await apiConsentStore.read();
           if (!active.api || !await keyConfigured(active) || !apiConsentStore.matches(await apiConsentScope(active.api))) return;
@@ -266,7 +282,6 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         current = owner as ProviderWorkerOwner;
         dispatchGeneration = ++generation;
         state = 'ready';
-        if (active.selected === 'subscription' && options.readSubscriptionAccount) account = await options.readSubscriptionAccount(combined);
       } catch { current = null; state = 'inactive'; dispatchGeneration = ++generation; await drainSelection(); }
     }
     } finally { releaseAction(token); }
@@ -316,6 +331,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     }
     controller.signal.throwIfAborted();
         if(next.selected==='api') await grantApiConsent(next.api!);
+        if (next.selected === 'subscription') await readAccount(controller.signal);
         await selection.select(next, controller.signal);
         controller.signal.throwIfAborted();
         const owner = selection.currentOwner();
@@ -323,7 +339,6 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         await saveProviderConfig(activePath(options.dataDirectory), next);
         controller.signal.throwIfAborted();
         active = next; revision++;
-        if (active.selected === 'subscription' && options.readSubscriptionAccount) account = await options.readSubscriptionAccount(controller.signal);
         controller.signal.throwIfAborted();
         await writeState({version: 1, generation, revision, state: 'ready', selected: active.selected});
         controller.signal.throwIfAborted();
@@ -357,8 +372,14 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       const settings = options.subscriptionAccount;
       if (!settings) throw fixedFailure('OBSERVER_SUBSCRIPTION_ACCOUNT_UNAVAILABLE');
       let loginRequired = false;
-      try { await settings.inspect(controller.signal); }
+      accountStatus='checking';
+      try {
+        const snapshot=await settings.inspect(controller.signal);
+        controller.signal.throwIfAborted();
+        account={label:snapshot.accountLabel,observedAt:snapshot.evidence.observedAt,expiresAt:snapshot.evidence.expiresAt};accountStatus='ready';
+      }
       catch (error) {
+        account=null;accountStatus=error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED'?'signed_out':'unavailable';
         if (!(error instanceof Error) || error.message !== 'OBSERVER_LOGIN_REQUIRED') throw error;
         loginRequired = true;
       }
@@ -440,8 +461,8 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       await drainSelection(); controller.signal.throwIfAborted();
       if (!settings) throw fixedFailure('OBSERVER_SUBSCRIPTION_ACCOUNT_UNAVAILABLE');
       const kind=input.action; const outcome = kind === 'login' ? await settings.login(AbortSignal.any([signal,controller.signal])) : kind === 'device-auth' ? await settings.deviceAuth(AbortSignal.any([signal,controller.signal])) : await settings.logout(AbortSignal.any([signal,controller.signal]));
-      if (outcome === 'process_exited' && kind !== 'logout' && options.readSubscriptionAccount) account = await options.readSubscriptionAccount(signal);
-      if (kind === 'logout') account = null;
+      if (outcome === 'process_exited' && kind !== 'logout') await readAccount(signal);
+      if (kind === 'logout') {account = null; accountStatus=outcome==='process_exited'?'signed_out':'unknown';}
       state='inactive'; await writeState({version:1,generation,revision,state:'inactive',selected:active.selected});
       return {outcome, account};
     } catch(error) { state='inactive'; await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(()=>undefined); throw error; }
@@ -459,7 +480,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     return closing;
   }
   return {workers, status: () => ({
-    generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account,
+    generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account, accountStatus,
     recipient: draft.selected==='api'&&draft.api?`${new URL(draft.api.baseUrl).origin}${new URL(draft.api.baseUrl).pathname} · ${draft.api.model}`:(options.recipient ?? 'Codex Progress HUD observer'), ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
   }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
     disable: () => {dispatchGeneration = ++generation; state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of current?.workers??[]) worker.disable();}, close};

@@ -4,6 +4,59 @@ import {resolve} from 'node:path';
 
 afterEach(()=>{vi.unstubAllGlobals();vi.resetModules();});
 
+it.each([['unknown','尚未检查'],['unavailable','检查失败'],['signed_out','未登录']])('renders account status %s without inferring sign-out from missing metadata',async(accountStatus,expected)=>{
+  const elements=new Map<string,any>();
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-start'])elements.set(id,{textContent:'',disabled:false,addEventListener:()=>{}});
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'normal',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:async()=>({generation:0,revision:0,state:'inactive',selected:'subscription',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:null,accountStatus})}});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#provider-account').textContent).toContain(expected));
+  if(accountStatus!=='signed_out')expect(elements.get('#provider-start').textContent).not.toContain('登录');
+});
+
+it.each(['delayed','rejected'])('keeps post-activation refresh truthful when an earlier read is %s', async(kind)=>{
+  const listeners=new Map<string,()=>void>();const elements=new Map<string,any>();
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-activate'])
+    elements.set(id,{textContent:'',disabled:false,addEventListener:(_type:string,fn:()=>void)=>listeners.set(id,fn)});
+  let release!:(value:unknown)=>void;
+  const pending=new Promise(resolve=>{release=resolve;});let reads=0;
+  const status=(state:string)=>({state,revision:1,knownTokens:0,unknown:0,recoveryAllowed:false});
+  const snapshot={generation:1,revision:1,selected:'subscription',state:'ready',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},keyConfigured:false};
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>{reads++;if(reads===1)return kind==='delayed'?pending:status('unauthorized');if(kind==='rejected')throw Error('PRIVATE');return status('normal');},readProviderSettings:async()=>snapshot,activateProvider:async()=>snapshot}});
+  await import('../../src/ui/settings-renderer.js');
+  listeners.get('#provider-activate')!();
+  await vi.waitFor(()=>expect(elements.get('#provider-activate').disabled).toBe(false));
+  if(kind==='delayed'){
+    release(status('unauthorized'));await new Promise(resolve=>setTimeout(resolve,0));
+    expect(elements.get('#state').textContent).toBe('normal');
+  }else{
+    expect(elements.get('#message').textContent).toContain('刷新失败');
+    expect(elements.get('#message').textContent).not.toBe('提供方已启用。');
+  }
+});
+
+it('does not describe a healthy recovery check as disabled and refreshes status after activation', async()=>{
+  const listeners=new Map<string,()=>void>();
+  const elements=new Map<string,any>();
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-activate'])
+    elements.set(id,{textContent:'',disabled:false,addEventListener:(_type:string,fn:()=>void)=>listeners.set(id,fn)});
+  let current='normal';
+  const status=()=>({state:current,revision:1,knownTokens:0,unknown:0,recoveryAllowed:false});
+  const snapshot={generation:1,revision:1,selected:'subscription',state:'ready',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},keyConfigured:false};
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>status(),preflight:async()=>({...status(),allowed:false}),readProviderSettings:async()=>snapshot,activateProvider:async()=>{current='normal';return snapshot;}}});
+  await import('../../src/ui/settings-renderer.js');
+  listeners.get('#check')!();
+  await vi.waitFor(()=>expect(elements.get('#message').textContent).toContain('无需恢复'));
+  expect(elements.get('#message').textContent).not.toContain('停用');
+  current='unauthorized';listeners.get('#check')!();
+  await vi.waitFor(()=>expect(elements.get('#state').textContent).toBe('unauthorized'));
+  listeners.get('#provider-activate')!();
+  await vi.waitFor(()=>expect(elements.get('#state').textContent).toBe('normal'));
+  expect(elements.get('#message').textContent).not.toContain('未通过');
+});
+
 it('keeps one-step actions visible while legacy recovery and provider controls start collapsed', async()=>{
   const html=await readFile(resolve('src/ui/settings.html'),'utf8');
   expect(html).toContain('<button id="provider-start"');
@@ -69,7 +122,7 @@ it('derives subscription disclosure independently when leaving a saved API draft
   expect(elements.get('#provider-recipient').textContent).toBe('OpenAI / ChatGPT 订阅账户');
   expect(elements.get('#provider-usage-notice').textContent).toContain('订阅估时会消耗');
   expect(elements.get('#provider-usage-notice').textContent).not.toContain('saved.example.test');
-  expect(elements.get('#provider-start').textContent).toBe('登录并开始');
+  expect(elements.get('#provider-start').textContent).toBe('检查账户并开始');
   expect(elements.get('#provider-api-fields').hidden).toBe(true);
   expect(consent.checked).toBe(false);
   consent.checked=true; listeners.get('#provider-start:click')!();

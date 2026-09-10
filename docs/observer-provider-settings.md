@@ -100,6 +100,20 @@ connection failures.
 
 ## Verification boundaries
 
+The advanced local recovery check answers whether a recovery trial is eligible,
+not whether an estimate is currently running. A normal or recovered state needs
+no recovery trial; a failed check alone does not prove that estimation is disabled.
+Provider actions refresh the recovery display after completion. One-step startup
+reports a setup failure instead of treating unsuccessful initialization as ready.
+
+Missing account metadata is not proof of logout. Settings distinguish an unchecked
+account, a check in progress, a verified account, explicit login required, and an
+unavailable check. Startup inspects the existing account before estimator setup,
+so a later setup failure does not erase a successfully read account label. The
+"检查账户并开始" action reuses valid credentials and only requests login when the
+account inspector explicitly reports that login is required. No credential file
+is deleted to repair a display or connectivity problem.
+
 Local fixtures check parsing, cancellation, switching, accounting, and UI wiring
 without real credentials. A successful synthetic trial checks connectivity and
 schema compatibility, not ETA accuracy. Accuracy requires separate task samples

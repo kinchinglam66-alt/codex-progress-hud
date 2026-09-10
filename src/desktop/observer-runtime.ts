@@ -399,6 +399,8 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
       setupController = undefined;
     });
     await setup;
+    // One-step activation must not turn a swallowed setup error into provider ready.
+    if (inlineConsent !== undefined && (disabled || !ready)) throw new Error('OBSERVER_SETUP_UNAVAILABLE');
   }
 
   async function readConsent() {
