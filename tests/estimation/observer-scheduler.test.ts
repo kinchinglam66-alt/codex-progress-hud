@@ -4,7 +4,7 @@ import {ObserverScheduler, type ObserverWorker, type ObserverObservation} from '
 import {PassiveGoals} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
-import type {ObserverSubscriptionResult} from '../../src/estimation/subscription-session.js';
+import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
 it.each(['continue','unknown'] as const)('preserves outage exclusion after an inconclusive %s refresh',async relation=>{
@@ -47,7 +47,7 @@ it('backs off after repeated known-usage failures but continues observing long-r
   const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
   const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
   f.calls[0]!.finish(estimate);await f.flush();
-  const failed:ObserverSubscriptionResult={status:'process_error',interpretation:null,usage};
+  const failed:ObserverResult={status:'process_error',interpretation:null,usage};
   f.time(95000);f.scheduler.tick();f.calls[1]!.finish(failed);await f.flush();
   f.time(155000);f.scheduler.tick();f.calls[2]!.finish(failed);await f.flush();
   f.time(455000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
@@ -111,13 +111,13 @@ it('surfaces desktop startup failure without opening accounting or dispatching i
     expect(contacts).toBe(0);
   }finally{await scheduler.close();await runtime.close();await f.scheduler.close();}
 });
-const result = (relation: 'replace'|'continue' = 'replace'): ObserverSubscriptionResult => ({status: 'interpreted',
+const result = (relation: 'replace'|'continue' = 'replace'): ObserverResult => ({status: 'interpreted',
   interpretation: {relation, status: 'running', summary: 'current goal', estimate: {remainingSeconds: 600, errorPercent: 30}}, usage});
-const unknownUsageResult = (): ObserverSubscriptionResult => ({...result(),usage:null,
+const unknownUsageResult = (): ObserverResult => ({...result(),usage:null,
   outcomes:{prediction:'numeric',call:'success',usage:'unknown',framingValid:true,closureConfirmed:true,dispatch:'started'}});
-const transientResult=():ObserverSubscriptionResult=>({status:'process_error',interpretation:null,usage:null,
+const transientResult=():ObserverResult=>({status:'process_error',interpretation:null,usage:null,
   outcomes:{prediction:'invalid',call:'failed',usage:'unknown',framingValid:false,closureConfirmed:true,dispatch:'not_started',retryable:'pre_dispatch_transient'}});
-const cancelledBeforeDispatch=():ObserverSubscriptionResult=>({status:'aborted',interpretation:null,usage:null,
+const cancelledBeforeDispatch=():ObserverResult=>({status:'aborted',interpretation:null,usage:null,
   outcomes:{prediction:'invalid',call:'cancelled',usage:'not_dispatched',framingValid:false,closureConfirmed:true,dispatch:'not_started'}});
 it('counts estimate freshness from its input snapshot rather than hiding provider latency',async()=>{
   const f=fixture();const key=f.hook('UserPromptSubmit');
@@ -126,13 +126,32 @@ it('counts estimate freshness from its input snapshot rather than hiding provide
   expect(f.scheduler.diagnostics(key).estimateAgeSeconds).toBe(30);
   await f.scheduler.close();
 });
+it('preserves API usage through the neutral scheduler observation boundary',async()=>{
+  const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();
+  const apiUsage={kind:'api-tokens' as const,inputTokens:4,outputTokens:2,cachedInputTokens:0};
+  f.calls[0]!.finish({...result(),usage:apiUsage});await f.flush();
+  expect(records.find(row=>row.kind==='result'&&row.key===key)?.usage).toEqual(apiUsage);
+  await f.scheduler.close();
+});
+it('retains the current estimate after an unknown-usage refresh',async()=>{
+  const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
+  f.calls[0]!.finish(estimate);await f.flush();
+  const unknown=result('continue');unknown.interpretation!.estimate=null;unknown.usage=null;
+  f.time(95000);f.scheduler.tick();f.calls[1]!.finish(unknown);await f.flush();
+  expect(f.goals.view(key,95000)?.prediction?.remainingSeconds).toBe(100);
+  expect(records.find(row=>row.kind==='result'&&row.requestId===2)?.usage).toBeNull();
+  await f.scheduler.close();
+});
 function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false) {
   let now = 0, id = 0;
   const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts);
-  const calls: Array<{signal: AbortSignal; key: string; input: unknown; finish(value: ObserverSubscriptionResult, closed?: boolean): void}> = [];
+  const calls: Array<{signal: AbortSignal; key: string; input: unknown; finish(value: ObserverResult, closed?: boolean): void}> = [];
   const workers: ObserverWorker[] = Array.from({length: workerCount}, () => {
     let active = false, disabled = false;
-    return {observe: (input, signal, key) => {active = true; return new Promise(resolve => {
+    return {observe: (input, signal, key) => {active = true; return new Promise<ObserverResult>(resolve => {
       calls.push({signal, key, input, finish(value, closed = true) {active = !closed; resolve(value);}});
     });}, disable() {disabled = true;}, async close() {disabled = true;},
       status: () => ({active, disabled, poisoned: false}),
@@ -267,7 +286,7 @@ function selectedSourceFixture(workerCount = 1) {
     })
   };
   const goals = new PassiveGoals(contexts, source);
-  const calls: Array<{signal: AbortSignal; key: string; finish(value: ObserverSubscriptionResult): void}> = [];
+  const calls: Array<{signal: AbortSignal; key: string; finish(value: ObserverResult): void}> = [];
   const workers: ObserverWorker[] = Array.from({length: workerCount}, () => {
     let active = false, disabled = false;
     return {observe: (_input, signal, key) => {active = true; return new Promise(resolve => {

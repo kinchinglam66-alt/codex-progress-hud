@@ -10,12 +10,12 @@ import type { HudSnapshot } from '../../src/server/task-store.js';
 import { PassiveContextStore } from '../../src/server/passive-context-store.js';
 import { PassiveGoals } from '../../src/server/passive-goals.js';
 import type {ObserverObservation} from '../../src/estimation/observer-scheduler.js';
-import type {ObserverSubscriptionResult} from '../../src/estimation/subscription-session.js';
+import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 const observerTime = () => Math.floor(performance.now());
 it.each(['SessionEnd','shutdown'])('records an in-flight cancellation through real HTTP teardown: %s',async mode=>{
-  let now=0,active=false,disabled=false,pending:Promise<ObserverSubscriptionResult>|undefined;
+  let now=0,active=false,disabled=false,pending:Promise<ObserverResult>|undefined;
   const records:ObserverObservation[]=[];
   const {client,token,server}=await setup({now:()=>now,monotonicNow:()=>now,onObserverObservation:value=>records.push(value),observerWorkers:[{
     observe(_input,signal){active=true;pending=new Promise(resolve=>signal.addEventListener('abort',()=>{

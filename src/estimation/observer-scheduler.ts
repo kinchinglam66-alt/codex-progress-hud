@@ -1,5 +1,5 @@
 import type {ObserverInput} from './observer-contract.js';
-import type {ObserverSubscriptionResult} from './subscription-session.js';
+import type {ObserverResult} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
@@ -8,7 +8,7 @@ import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
   /** Authenticated local key is accounting metadata, never observer prompt data. */
-  observe(input: ObserverInput, signal: AbortSignal, conversationKey: string): Promise<ObserverSubscriptionResult>;
+  observe(input: ObserverInput, signal: AbortSignal, conversationKey: string): Promise<ObserverResult>;
   status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
   disable(): void;
   close(): Promise<void>;
@@ -24,8 +24,8 @@ export interface ObserverObservation {
   estimate?:{remainingSeconds:number;errorPercent:number}|null;
   forecast?:Readonly<ForecastRecord>;
   forecastDiagnostic?:'provenance_unavailable'|'invalid_provenance';
-  usage?:ObserverSubscriptionResult['usage'];
-  timings?:ObserverSubscriptionResult['timings'];
+  usage?:ObserverResult['usage'];
+  timings?:ObserverResult['timings'];
 }
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers: readonly ObserverWorker[]; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
@@ -35,7 +35,7 @@ interface Entry {
   runtime: string; statusEvidence: boolean; flight?: Flight;
   lastSkip?: string; sourceRevision?: number; sourceFinalAvailable?: boolean; eventReason?:TriggerReason;
   retryVersion?:number;retryUsedVersion?:number;
-  lastResultStatus?:ObserverSubscriptionResult['status'];lastEstimateAt?:number;
+  lastResultStatus?:ObserverResult['status'];lastEstimateAt?:number;
   goalIdentity?:object; predictionIdentity?:object|null; lastRequestActiveSeconds?:number;
   overdueEligibleActiveSeconds?:number; overdueReservedPrediction?:object;
   nearExpiryReservedPrediction?:object;
@@ -303,7 +303,7 @@ export class ObserverScheduler {
       } catch {this.settle(entry, flight, null);}
     }
   }
-  private settle(entry: Entry, flight: Flight, result: ObserverSubscriptionResult|null): void {
+  private settle(entry: Entry, flight: Flight, result: ObserverResult|null): void {
     const before=this.options.goals.scheduling(flight.key,this.time());
     if(before&&before.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity)
       this.syncSourceClock(entry,before);
@@ -379,7 +379,7 @@ export class ObserverScheduler {
     this.recordResult(entry,flight,result,accepted,settledAt,live);
     this.notify();
   }
-  private recordResult(entry:Entry,flight:Flight,result:ObserverSubscriptionResult|null,accepted:boolean,
+  private recordResult(entry:Entry,flight:Flight,result:ObserverResult|null,accepted:boolean,
     acceptedAt=this.time(),live:NonNullable<ReturnType<PassiveGoals['scheduling']>>|null=null):void {
     let forecast:Readonly<ForecastRecord>|undefined;
     let forecastDiagnostic:ObserverObservation['forecastDiagnostic'];

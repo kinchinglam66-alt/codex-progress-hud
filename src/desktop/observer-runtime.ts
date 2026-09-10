@@ -8,7 +8,7 @@ import type {ForecastVersions} from '../estimation/forecast-record.js';
 import {requestObserverConsent, type ObserverConsentDialog} from './observer-consent-dialog.js';
 import {createObserverRecoveryController, type ObserverRecoveryController, type RecoveryRuntimeBoundary} from './observer-recovery.js';
 import {createObserverDiagnosticRunner, type ObserverDiagnostic} from '../estimation/observer-diagnostics.js';
-import {createObserverSubscriptionSession} from '../estimation/subscription-session.js';
+import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from '../estimation/subscription-session.js';
 import type {AccountedUsage} from '../estimation/subscription-accounting.js';
 import type {ObserverScheduler} from '../estimation/observer-scheduler.js';
 
@@ -282,9 +282,9 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
           prepare: async (input: ObserverInput, prepareSignal: AbortSignal) => (await prepare(input, prepareSignal)).invocation,
           authorize: () => !disabled && ready && gate.authorized(),
         });
-        let result: ObserverResult;
+        let result: ObserverSubscriptionResult;
         try { result = await session.observe(RECOVERY_INPUT, signal); }
-        catch { result = unavailable(); }
+        catch { result = {status: 'disabled', interpretation: null, usage: null}; }
         let closureConfirmed = false;
         try { await session.close(); closureConfirmed = !runner.status().active && !runner.status().poisoned; }
         catch { closureConfirmed = false; }

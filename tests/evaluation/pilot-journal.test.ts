@@ -77,6 +77,19 @@ it('does not project an unrecognized forecast diagnostic',async()=>{
   }finally{await rm(directory,{recursive:true,force:true});}
 });
 
+it('persists API usage kind without relabeling it as subscription usage',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-api-'));
+  try{
+    const journal=createPilotJournal(directory);
+    journal.record({kind:'result',at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1,
+      usage:{kind:'api-tokens',inputTokens:4,outputTokens:2,cachedInputTokens:0}});
+    await journal.close();
+    const names=await readdir(directory);
+    const raw=await readFile(resolve(directory,names[0]!),'utf8');
+    expect(JSON.parse(raw.split('\n')[0]!).usage).toEqual({kind:'api-tokens',inputTokens:4,outputTokens:2,cachedInputTokens:0});
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
 it('projects only the allowlisted admitted measurement metadata',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-measurement-'));
   try {

@@ -5,7 +5,7 @@ import {ObserverScheduler, type ObserverWorker} from '../../src/estimation/obser
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {PassiveGoals} from '../../src/server/passive-goals.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
-import type {ObserverSubscriptionResult} from '../../src/estimation/subscription-session.js';
+import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {inputTokens: 6, outputTokens: 2, cachedInputTokens: 1};
 
@@ -131,9 +131,9 @@ it('drives a disabled scheduler through successful recovery before ordinary obse
   let now = 0;
   let active = false;
   let disabled = false;
-  const calls: Array<(result: ObserverSubscriptionResult) => void> = [];
-  const failure: ObserverSubscriptionResult = {status: 'process_error', interpretation: null, usage: null};
-  const success: ObserverSubscriptionResult = {
+  const calls: Array<(result: ObserverResult) => void> = [];
+  const failure: ObserverResult = {status: 'process_error', interpretation: null, usage: null};
+  const success: ObserverResult = {
     status: 'interpreted',
     interpretation: {relation: 'continue', status: 'running', summary: 'ordinary observation', estimate: {remainingSeconds: 120, errorPercent: 20}},
     usage: {kind: 'subscription-tokens', inputTokens: 4, outputTokens: 1, cachedInputTokens: 0},

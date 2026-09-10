@@ -5,19 +5,10 @@ import {packObserverInput} from './observer-input.js';
 import type { createOwnedProcessRunner, Invocation, OwnedProcessResult } from "./owned-process.js";
 import type {AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import {ObserverPreDispatchTransient} from './observer-call-failure.js';
+import type {ObserverCallOutcomes, ObserverCallTimings, ObserverStatus, ObserverSubscriptionResult} from './observer-provider.js';
+export type {ObserverCallOutcomes, ObserverCallTimings, ObserverSubscriptionResult} from './observer-provider.js';
 
-type Status="estimated"|"unavailable"|"invalid_input"|"busy"|"disabled"|"aborted"|
-  "admission_denied"|"accounting_error"|"process_error";
-export interface ObserverCallOutcomes {
-  prediction:'numeric'|'unknown'|'invalid';call:'success'|'timeout'|'cancelled'|'failed';usage:'known'|'unknown'|'not_dispatched';
-  framingValid:boolean;closureConfirmed:boolean;dispatch:'not_started'|'started'|'unknown';
-  retryable?:'pre_dispatch_transient';
-  preparationFailed?:boolean;
-  processReason?:OwnedProcessResult['reason'];
-}
-export interface ObserverCallTimings {
-  preparationMs:number;providerMs:number;settlementMs:number;deliveryMs:number;totalMs:number;
-}
+type Status=ObserverStatus;
 interface SessionResult<P> { status:Status; prediction:P|null; usage:SubscriptionUsage|null;admissionKind?:AdmissionKind;outcomes?:ObserverCallOutcomes;timings?:ObserverCallTimings }
 export type SubscriptionResult = SessionResult<Prediction>;
 interface Dependencies<I = Metrics> {
@@ -162,15 +153,6 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
 export function createSubscriptionSession(dependencies: Dependencies) {
   return createSession({...dependencies, authorize: () => true,
     parseInput: input => metricsSchema.safeParse(input), createParser: createCodexOutputParser});
-}
-
-export interface ObserverSubscriptionResult {
-  status: Exclude<Status, 'estimated'>|'interpreted';
-  interpretation: ObserverResponse|null;
-  usage: SubscriptionUsage|null;
-  admissionKind?: AdmissionKind;
-  outcomes?:ObserverCallOutcomes;
-  timings?:ObserverCallTimings;
 }
 
 /** Owner-provided authorization must attest current consent and route. No default

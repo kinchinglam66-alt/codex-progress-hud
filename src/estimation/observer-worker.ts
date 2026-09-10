@@ -3,6 +3,7 @@ import type {ObserverWorker} from './observer-scheduler.js';
 import type {Invocation} from './owned-process.js';
 import {createOwnedProcessRunner} from './owned-process.js';
 import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from './subscription-session.js';
+import type {ObserverResult} from './observer-provider.js';
 import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {ForecastVersions} from './forecast-record.js';
 import type {ReleaseRecoveryEvent} from './release-accounting.js';
@@ -23,6 +24,18 @@ const failure = (status: ObserverSubscriptionResult['status'] = 'process_error',
   interpretation: null,
   usage,
 });
+
+function neutralResult(value: ObserverSubscriptionResult): ObserverResult {
+  return {
+    ...value,
+    usage: value.usage === null ? null : {
+      kind: value.usage.kind,
+      inputTokens: value.usage.inputTokens,
+      outputTokens: value.usage.outputTokens,
+      cachedInputTokens: value.usage.cachedInputTokens ?? 0,
+    },
+  };
+}
 
 function authorized(authorize: () => boolean): boolean {
   try { return authorize() === true; }
@@ -155,10 +168,10 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
   }
 
   return {
-    observe(input, signal, conversationKey): Promise<ObserverSubscriptionResult> {
-      if (disabled || poisoned || closing) return Promise.resolve(failure('disabled'));
-      if (active) return Promise.resolve(failure('busy'));
-      if (!authorized(authorize)) return Promise.resolve(failure('disabled'));
+    observe(input, signal, conversationKey): Promise<ObserverResult> {
+      if (disabled || poisoned || closing) return Promise.resolve(neutralResult(failure('disabled')));
+      if (active) return Promise.resolve(neutralResult(failure('busy')));
+      if (!authorized(authorize)) return Promise.resolve(neutralResult(failure('disabled')));
       active = true;
       preparedProvenance = null;
       const operation = invoke(input, signal, conversationKey);
@@ -166,7 +179,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       operation.finally(() => {
         if (pending === operation) pending = undefined;
       }).catch(() => undefined);
-      return operation;
+      return operation.then(neutralResult);
     },
     status,
     provenance: () => preparedProvenance,

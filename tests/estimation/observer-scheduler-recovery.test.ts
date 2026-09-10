@@ -3,10 +3,10 @@ import {ObserverScheduler, type ObserverWorker} from '../../src/estimation/obser
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {PassiveGoals} from '../../src/server/passive-goals.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
-import type {ObserverSubscriptionResult} from '../../src/estimation/subscription-session.js';
+import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
-const failure: ObserverSubscriptionResult = {status: 'process_error', interpretation: null, usage: null};
-const success: ObserverSubscriptionResult = {
+const failure: ObserverResult = {status: 'process_error', interpretation: null, usage: null};
+const success: ObserverResult = {
   status: 'interpreted',
   interpretation: {relation: 'continue', status: 'running', summary: 'ordinary recovery observation', estimate: {remainingSeconds: 120, errorPercent: 20}},
   usage: {kind: 'subscription-tokens', inputTokens: 4, outputTokens: 1, cachedInputTokens: 0},
@@ -16,7 +16,7 @@ it('re-enables ordinary observation after the real global scheduler safety stop'
   let now = 0;
   let disabled = false;
   let active = false;
-  const calls: Array<{finish(result: ObserverSubscriptionResult): void}> = [];
+  const calls: Array<{finish(result: ObserverResult): void}> = [];
   const worker: ObserverWorker & {rearm(): void} = {
     observe: (_input, _signal) => {
       active = true;
@@ -70,7 +70,7 @@ it('drains a second active flight and refuses poisoned slots before recovery res
   let now = 0;
   const contexts = new PassiveContextStore();
   const goals = new PassiveGoals(contexts);
-  const calls: Array<{finish(result: ObserverSubscriptionResult): void}> = [];
+  const calls: Array<{finish(result: ObserverResult): void}> = [];
   const states = [{active: false, disabled: false, poisoned: false}, {active: false, disabled: false, poisoned: false}];
   const workers: ObserverWorker[] = states.map((state) => ({
     observe: () => { state.active = true; return new Promise(resolve => calls.push({finish(result) {state.active = false; resolve(result);}})); },
