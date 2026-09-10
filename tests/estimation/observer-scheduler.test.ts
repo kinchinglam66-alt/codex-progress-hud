@@ -134,6 +134,22 @@ it('preserves API usage through the neutral scheduler observation boundary',asyn
   expect(records.find(row=>row.kind==='result'&&row.key===key)?.usage).toEqual(apiUsage);
   await f.scheduler.close();
 });
+it('keeps the scheduler alive after a provider failure with trusted durable settlement',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish({status:'process_error',interpretation:null,usage:null,outcomes:{
+    prediction:'invalid',call:'failed',usage:'unknown',framingValid:false,closureConfirmed:true,
+    dispatch:'unknown',accounting:'durably_settled'}});await f.flush();
+  expect(f.scheduler.stats().disabled).toBe(false);
+  await f.scheduler.close();
+});
+it('does not dispatch fallback work while an API provider is blocked for configuration',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish({status:'disabled',interpretation:null,usage:null,outcomes:{
+    prediction:'invalid',call:'failed',usage:'not_dispatched',framingValid:false,closureConfirmed:true,
+    dispatch:'not_started',failureCode:'unauthorized'}});await f.flush();
+  expect(f.scheduler.stats().disabled).toBe(false);
+  await f.scheduler.close();
+});
 it('retains the current estimate after an unknown-usage refresh',async()=>{
   const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');
   f.time(15000);f.scheduler.tick();

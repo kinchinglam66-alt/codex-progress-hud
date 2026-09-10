@@ -29,6 +29,12 @@ export interface ObserverCallOutcomes {
   retryable?: 'pre_dispatch_transient';
   preparationFailed?: boolean;
   processReason?: OwnedProcessResult['reason'];
+  /** Host-trusted proof that the API reservation reached durable settlement. */
+  accounting?: 'durably_settled' | 'pre_dispatch_cancelled';
+  failureCode?: 'credential_unavailable' | 'unauthorized' | 'forbidden' | 'rate_limited' |
+    'server_error' | 'redirect' | 'network_error' | 'timeout' | 'cancelled' |
+    'response_too_large' | 'invalid_response' | 'invalid_output' | 'missing_usage' |
+    'accounting_error';
 }
 
 export interface ObserverCallTimings {

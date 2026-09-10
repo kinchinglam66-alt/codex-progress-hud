@@ -320,12 +320,17 @@ export class ObserverScheduler {
     const provenCancellation=result?.usage===null&&['aborted','disabled'].includes(result.status)
       &&result.outcomes?.usage==='not_dispatched'&&result.outcomes.dispatch==='not_started'
       &&result.outcomes.closureConfirmed&&result.outcomes.call==='cancelled';
-    const noDispatch = provenCancellation || provenTransient || result && ['invalid_input', 'admission_denied', 'busy'].includes(result.status);
     const proof = result?.outcomes;
+    const configurationBlocked = result?.status === 'disabled' && proof?.dispatch === 'not_started' &&
+      proof.closureConfirmed && (proof.failureCode === 'unauthorized' || proof.failureCode === 'forbidden');
+    const noDispatch = provenCancellation || provenTransient || configurationBlocked || result && ['invalid_input', 'admission_denied', 'busy'].includes(result.status);
     const safeUnknownUsage = result?.usage === null && proof?.usage === 'unknown'
       && proof.call === 'success' && proof.framingValid && proof.closureConfirmed
       && proof.dispatch === 'started' && proof.prediction !== 'invalid';
-    const mustDisable = !result || result.status === 'accounting_error' || (result.usage === null && !noDispatch && !safeUnknownUsage);
+    const trustedDurableFailure = result?.usage === null && proof?.accounting === 'durably_settled'
+      && proof.closureConfirmed;
+    const mustDisable = !result || result.status === 'accounting_error' ||
+      (result.usage === null && !noDispatch && !safeUnknownUsage && !trustedDurableFailure);
     // Capture external cancellation before the accounting safety stop aborts other flights.
     // A valid answer is not permission to make another call; goal tickets still reject stale answers.
     const eligible = flight.schedulerGeneration === this.schedulerGeneration && !this.disabled && !state.disabled && !flight.controller.signal.aborted
