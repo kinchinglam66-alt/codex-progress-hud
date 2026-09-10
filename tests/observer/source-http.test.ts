@@ -1,5 +1,5 @@
 import {expect,it} from 'vitest';
-import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,appendFile,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createProgressServer} from '../../src/server/http-server.js';
@@ -41,5 +41,15 @@ it('dispatches from a persisted source user message before the long tool finishe
     expect(calls[0]?.observation?.currentAction?.text).toBe('sleep 100');
     expect(observations.find(record=>record.kind==='request')?.activeTimeKnown).toBe(false);
     expect(calls[0]?.messages.some(message=>message.text.includes('hook body'))).toBe(false);
+    // No Stop hook is delivered: the source callback must still correct the HUD
+    // even when model dispatch is not involved in determining execution state.
+    now=20000;
+    await appendFile(join(day,`rollout-2026-09-06T00-00-00-${id}.jsonl`),
+      JSON.stringify({timestamp:new Date(18000).toISOString(),type:'event_msg',
+        payload:{type:'task_complete',turn_id:turn}})+'\n');
+    await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.goal?.runtime,{timeout:3000}).toBe('waiting');
+    const frozen=((await client.status()) as HudSnapshot).rows?.[0]?.goal?.activeSeconds;
+    now=25000;
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal?.activeSeconds).toBe(frozen);
   }finally{await server.close();await rm(directory,{recursive:true,force:true});}
 },10000);

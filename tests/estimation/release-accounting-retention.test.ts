@@ -98,7 +98,11 @@ it('uses the bounded SQLite file and keeps cumulative totals while pruning settl
 
   now = 100 * HOUR - 1;
   const reopened = await open(path, () => now);
-  expect(await reopened.forConversation('conversation-a').reserve()).toBeNull();
+  const continued = reopened.forConversation('conversation-a');
+  const continuedId = await continued.reserve();
+  expect(continuedId).toMatch(/^[0-9a-f-]{36}$/);
+  await continued.settle(continuedId!, usage);
+  expect(reopened.snapshot()).toMatchObject({starts:4_801,knownTokens:4_801*12,unresolved:0});
   await reopened.close();
   owners.pop();
   now = 100 * HOUR;

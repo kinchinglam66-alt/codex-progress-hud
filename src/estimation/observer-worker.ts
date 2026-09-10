@@ -5,6 +5,8 @@ import {createOwnedProcessRunner} from './owned-process.js';
 import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from './subscription-session.js';
 import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {ForecastVersions} from './forecast-record.js';
+import type {ReleaseRecoveryEvent} from './release-accounting.js';
+import type {AdmissionKind} from './subscription-accounting.js';
 
 export type {ObserverWorker} from './observer-scheduler.js';
 
@@ -13,6 +15,7 @@ export interface AccountedObserverWorkerOptions {
   prepare: (input: ObserverInput, signal: AbortSignal) => Invocation | {invocation:Invocation;provenance?:ForecastVersions} |
     Promise<Invocation | {invocation:Invocation;provenance?:ForecastVersions}>;
   authorize: () => boolean;
+  now?: () => number;
 }
 
 const failure = (status: ObserverSubscriptionResult['status'] = 'process_error', usage: ObserverSubscriptionResult['usage'] = null): ObserverSubscriptionResult => ({
@@ -32,7 +35,7 @@ function authorized(authorize: () => boolean): boolean {
  * Preparation and authorization are trusted host seams; neither receives the
  * internal conversation key.
  */
-export function createAccountedObserverWorker({accounting, prepare, authorize}: AccountedObserverWorkerOptions): ObserverWorker {
+export function createAccountedObserverWorker({accounting, prepare, authorize, now = Date.now}: AccountedObserverWorkerOptions): ObserverWorker {
   let active = false;
   let disabled = false;
   let poisoned = false;
@@ -65,6 +68,13 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
     let view: ReturnType<ReleaseAccountingOwner['forConversation']> | undefined;
     let localRunner: ReturnType<typeof createOwnedProcessRunner> | undefined;
     let localSession: ReturnType<typeof createObserverSubscriptionSession> | undefined;
+    let admittedKind: AdmissionKind | undefined;
+    let recoveryEventRecorded = false;
+    const recordRecoveryEvent = async (event: ReleaseRecoveryEvent): Promise<void> => {
+      if (recoveryEventRecorded || !accounting.recordRecoveryEvent) return;
+      recoveryEventRecorded = true;
+      await accounting.recordRecoveryEvent(event).catch(() => undefined);
+    };
     try {
       view = accounting.forConversation(conversationKey);
       localRunner = createOwnedProcessRunner();
@@ -76,7 +86,12 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
         }
         return prepared;
       };
-      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize});
+      const admission = accounting.recoveryAdmission
+        ? await accounting.recoveryAdmission(now(), true, conversationKey)
+        : {allowed: true, kind: 'ordinary' as const};
+      if (!admission.allowed) return failure('admission_denied');
+      admittedKind = admission.kind;
+      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize, admissionKind: admittedKind});
       runner = localRunner;
       session = localSession;
       let result: ObserverSubscriptionResult;
@@ -88,6 +103,13 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
         const deliveryMs=Math.round(performance.now()-deliveryStarted);
         return {...value,timings:{...result.timings,deliveryMs,totalMs:result.timings.totalMs+deliveryMs}};
       };
+      const event: ReleaseRecoveryEvent | undefined = result.outcomes?.retryable === 'pre_dispatch_transient'
+        ? {kind: admittedKind === 'half_open' ? 'half_open_failure' : 'recoverable_failure', at: now()}
+        : undefined;
+      // A retryable half-open transient owns the claim until this serialized
+      // event atomically clears it and installs cooldown. Generic release is
+      // only for proven no-dispatch exits.
+      if (event) await recordRecoveryEvent(event);
       let closeFailed = false;
       try { await localSession.close(); }
       catch { closeFailed = true; }
@@ -104,12 +126,19 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
         unconfirmedRunner = localRunner;
       }
       if (closeFailed) return delivered(failure());
+      if (!event && admittedKind === 'half_open' && !childStatus.active && !childStatus.poisoned) {
+        try {
+          if (accounting.releaseRecoveryAdmission) await accounting.releaseRecoveryAdmission(conversationKey);
+          else await view.releaseRecoveryAdmission?.();
+        } catch { poisoned = true; disabled = true; return delivered(failure()); }
+      }
       const revoked = disabled || signal.aborted || !authorized(authorize);
       if (revoked && result.status === 'interpreted') {
         return delivered(failure(signal.aborted ? 'aborted' : 'disabled', result.usage));
       }
       return delivered(result);
     } catch {
+      if (admittedKind !== undefined) await recordRecoveryEvent({kind: admittedKind === 'half_open' ? 'half_open_failure' : 'recoverable_failure', at: now()});
       disabled = true;
       try { await localSession?.close(); }
       catch { poisoned = true; }
@@ -141,6 +170,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize}: 
     },
     status,
     provenance: () => preparedProvenance,
+    recoveryStatus: () => accounting.recoveryStatus?.(),
     disable,
     close(): Promise<void> {
       if (closing) return closing;

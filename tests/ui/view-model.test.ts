@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildHudView } from "../../src/ui/view-model.js";
+import { buildConversationViews, buildHudView, createConversationViewProjector, conversationActivityLabel } from "../../src/ui/view-model.js";
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
+import type { ConversationRow } from "../../src/server/conversation-projection.js";
 
 function task(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   return {
@@ -42,7 +43,74 @@ function snapshot(taskValue: TaskSnapshot | null, eta: EtaEstimate | null, tasks
   };
 }
 
+function overdueConversation(runtime: "running" | "waiting" | "paused" = "running", observerState?: "pending" | "estimating" | "call_failed" | "setup_failed" | "rate_limited" | "disabled" | "ready"): ConversationRow {
+  return {
+    conversationKey: "conversation-1",
+    task: task(),
+    eta: null,
+    name: { value: "任务", freshness: "fresh" },
+    goal: {
+      generation: 1,
+      estimateRevision: 1,
+      status: runtime,
+      runtime,
+      activeSeconds: 101,
+      prediction: { remainingSeconds: 100, observedActiveSeconds: 0, errorPercent: 20 },
+      sampledAtMs: 0
+    },
+    ...(observerState === undefined ? {} : {
+      observer: { state: observerState, estimateAgeSeconds: null, callsLastHour: 1, retryPending: false }
+    })
+  };
+}
+
 describe("HUD view model", () => {
+  it('counts actual running rows separately from waiting or uncertain goals',()=>{
+    const waiting=overdueConversation('waiting'),running=overdueConversation('running');
+    const uncertain=overdueConversation('waiting');uncertain.goal!.runtimeUncertain=true;
+    expect(conversationActivityLabel(buildConversationViews([waiting,uncertain]))).toBe('暂无执行中任务 · 2 个待处理');
+    expect(conversationActivityLabel(buildConversationViews([waiting,running]))).toBe('1 个执行中 · 1 个待处理');
+    expect(conversationActivityLabel([])).toBe('暂无进行中任务');
+    expect(buildConversationViews([uncertain])[0]?.statusLabel).toBe('状态待确认');
+  });
+  it.each([
+    ["estimating", "已超出预计时间 · 正在重新估时"],
+    ["call_failed", "已超出预计时间 · 估时暂不可用"],
+    ["setup_failed", "已超出预计时间 · 估时暂不可用"],
+    ["disabled", "已超出预计时间 · 估时暂不可用"],
+    ["rate_limited", "已超出预计时间 · 重估受限，等待额度"],
+    ["ready", "已超出预计时间 · 等待重新估时"],
+    ["pending", "已超出预计时间 · 等待重新估时"]
+  ] as const)("uses an honest overdue label for observer state %s", (state, label) => {
+    const view = buildConversationViews([overdueConversation("running", state)])[0];
+
+    expect(view?.etaLabel).toBe(label);
+  });
+
+  it.each(["waiting", "paused"] as const)("marks overdue %s work as paused while awaiting re-estimation", runtime => {
+    const view = buildConversationViews([overdueConversation(runtime, "estimating")])[0];
+
+    expect(view?.etaLabel).toBe("已超出预计时间 · 工作计时已暂停");
+    expect(view?.progressMode).toBe("paused");
+  });
+
+  it("keeps overdue progress monotonic below completion", () => {
+    const project = createConversationViewProjector();
+    const row = overdueConversation();
+
+    expect(project([row])[0]).toMatchObject({ progressPercent: 99, progressMode: "determinate" });
+    expect(project([row], 10)[0]?.progressPercent).toBe(99);
+    expect(project([row])[0]?.progressMode).not.toBe("complete");
+  });
+
+  it("keeps completed conversations complete instead of relabeling them overdue", () => {
+    const row = overdueConversation();
+    row.goal!.status = "completed";
+    row.goal!.runtime = "waiting";
+
+    expect(buildConversationViews([row])).toEqual([]);
+  });
+
   it("labels grouped current and prior turns without displaying opaque identities", () => {
     const value = snapshot(task(), null);
     value.tasks = [

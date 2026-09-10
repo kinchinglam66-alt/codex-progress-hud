@@ -5,6 +5,7 @@ import {projectCountdown} from './countdown.js';
 import type {ObserverDiagnostics} from '../core/observer-diagnostics.js';
 
 const observerLabels:Record<ObserverDiagnostics['state'],string>={pending:'等待首次估时',history_loading:'正在加载任务历史',
+  history_unavailable:'任务历史暂不可用，正在重试读取',
   estimating:'正在估时',insufficient_context:'依据不足，暂无法估时',call_failed:'估时调用失败',
   setup_failed:'估时启动失败，请检查运行环境或授权',
   rate_limited:'估时受限，等待可用额度',disabled:'估时已停用，请查看诊断',ready:'估值可用'};
@@ -24,6 +25,7 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
     }) : passivePresentation(row.goal, elapsedSeconds, row.observer,displayedSeconds.get(row.conversationKey));
     return {
       key: row.conversationKey, taskId: row.task.id,
+      executing:row.goal===undefined?row.task.status==='running':row.goal.runtime==='running'&&!row.goal.runtimeUncertain,
       title: row.name.value ?? "聊天名称暂不可用",
       statusLabel: view.statusLabel, tone: view.tone,
       progressMode: view.progressMode, progressPercent: view.progressPercent,
@@ -74,7 +76,8 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
   Pick<HudView, 'statusLabel'|'tone'|'progressMode'|'progressPercent'|'etaLabel'> {
   const running = goal.runtime === 'running';
   const terminal = goal.runtime === 'interrupted' || goal.runtime === 'failed';
-  const statusLabel = goal.runtime === 'interrupted' ? '任务已中断'
+  const statusLabel = goal.runtimeUncertain ? '状态待确认'
+    : goal.runtime === 'interrupted' ? '任务已中断'
     : goal.runtime === 'failed' ? '任务失败'
     : goal.runtime === 'paused' ? '跟踪已暂停'
     : running ? (goal.status === 'unknown' ? '执行中 · 目标状态待判断' : '执行中')
@@ -87,15 +90,29 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
     displayedSeconds!==undefined&&Number.isFinite(displayedSeconds)&&displayedSeconds>=0
     ?projectCountdown({prediction:{...goal.prediction,remainingSeconds:displayedSeconds,observedActiveSeconds:0},
       activeSeconds:0,state:running?'running':'waiting'}):countdown;
+  const overdueLabel = (): string => {
+    if (!running) return '已超出预计时间 · 工作计时已暂停';
+    const action = observer?.state === 'estimating' ? '正在重新估时'
+      : observer?.state === 'call_failed' || observer?.state === 'setup_failed' || observer?.state === 'disabled'
+        ? '估时暂不可用'
+        : observer?.state === 'rate_limited' ? '重估受限，等待额度' : '等待重新估时';
+    return `已超出预计时间 · ${action}`;
+  };
   const etaLabel = terminal ? '工作计时已停止'
     : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabels[observer.state]:'剩余时间未知'
-    : countdown.status === 'overdue' ? '00:00:00 · 已超出估时，等待更新'
+    : countdown.status === 'overdue' ? overdueLabel()
     : `${display.timeText} · 上次估时误差 ${countdown.uncertaintyText}`;
   return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',
     progressMode: running ? 'indeterminate' : 'paused', progressPercent: null, etaLabel};
 }
 
 export type ConversationView = ReturnType<typeof buildConversationViews>[number];
+
+export function conversationActivityLabel(views:readonly ConversationView[]):string {
+  if(views.length===0)return '暂无进行中任务';
+  const running=views.filter(view=>view.executing).length,other=views.length-running;
+  return `${running===0?'暂无执行中任务':`${running} 个执行中`}${other===0?'':` · ${other} 个待处理`}`;
+}
 
 export type HudTone = "idle" | "active" | "waiting" | "warning" | "danger" | "success";
 export type ProgressMode = "determinate" | "indeterminate" | "paused" | "complete";

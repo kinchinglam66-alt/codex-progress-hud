@@ -4,6 +4,8 @@ export const codexRuntimeProfiles = Object.freeze([
   Object.freeze({version: '0.153.3', sha256: 'bc15d59a3062bf165181a30007c3d0f5b1ee0ca4855e33d9b486ad59c984a31b'}),
   Object.freeze({version: '0.153.4', sha256: 'a1cf6360ca71918d5466bc3a32d9f18b7044c9128756d1949e715d277b88c9b6'}),
   Object.freeze({version: '0.153.4', sha256: 'e5aa76d19c7c94e2e9ef9b707d590206a73ac0e97c8ddc8382181242494bef75'}),
+  // Exact local build verified with isolated runtime preflight on 2026-09-09.
+  Object.freeze({version: '0.153.4', sha256: 'ccdc9eb9dd71fbcfb03ad42c4eca2b0d6ff6fbd32ebe9416550e6244561e559b'}),
 ]);
 
 export function supportedCodexVersion(version: unknown): version is string {

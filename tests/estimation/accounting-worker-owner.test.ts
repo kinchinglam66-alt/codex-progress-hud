@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {afterEach, expect, it} from 'vitest';
-import type {ReleaseAccountingOwner} from '../../src/estimation/release-accounting.js';
+import type {ReleaseAccountingOwner, ReleaseAccountingRecoveryOwner} from '../../src/estimation/release-accounting.js';
 
 const paths: string[] = [];
 const owners: ReleaseAccountingOwner[] = [];
@@ -188,6 +188,37 @@ it('uses the real worker protocol for not-dispatched cancellation without usage 
   expect(restored.snapshot()).toMatchObject({starts:1,inFlight:0,unknown:0,knownTokens:0});
 });
 
+it('carries revision-bound recovery commands through the worker and rejects stale confirmations', async () => {
+  const owner = await openCompiled(await directory(), () => 0);
+  const recoveryOwner = owner as ReleaseAccountingRecoveryOwner;
+  const view = recoveryOwner.forConversation('recovery-worker');
+  const id = (await view.reserve())!;
+  await view.settle(id, null, 'safe_unknown');
+  const preflight = await recoveryOwner.preflightRecovery('account:route:assets');
+  expect(preflight).toMatchObject({allowed: true, revision: 1});
+  await expect(recoveryOwner.confirmRecovery({revision: 0, binding: 'account:route:assets'})).rejects.toThrow('RELEASE_RECOVERY_STALE');
+  const confirmation = await recoveryOwner.confirmRecovery({revision: 1, binding: 'account:route:assets'});
+  const trial = await recoveryOwner.reserveRecoveryTrial(confirmation);
+  expect(trial).toMatch(/^[0-9a-f-]{36}$/);
+  await recoveryOwner.settleRecoveryTrial(confirmation.attemptId, trial!, usage);
+  await recoveryOwner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: true});
+  expect(recoveryOwner.recoveryStatus()).toMatchObject({state: 'recovered', unknown: 1});
+});
+
+it('serializes durable half-open admission and persists the post-failure cooldown through the worker', async () => {
+  let now = 0;
+  const path = await directory();
+  const owner = await openCompiled(path, () => now) as ReleaseAccountingRecoveryOwner;
+  const views = ['one', 'two', 'three'].map(key => owner.forConversation(key));
+  for (const view of views) { const id = await view.reserve(); await view.settle(id!, null, 'safe_unknown'); }
+  now = 300_000;
+  const [first, second] = await Promise.all([owner.recoveryAdmission(now, true, 'one'), owner.recoveryAdmission(now, true, 'two')]);
+  expect([first.allowed, second.allowed].filter(Boolean)).toHaveLength(1);
+  expect([first.kind, second.kind]).toContain('half_open');
+  await owner.recordRecoveryEvent({kind: 'half_open_failure', at: now});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'cooldown', cooldownUntil: 1_200_000});
+});
+
 it('uses a real worker and SQLite for competing conversations and confirmed snapshots', async () => {
   let now = 0;
   const owner = await openCompiled(await directory(), () => now);
@@ -208,7 +239,7 @@ it('uses a real worker and SQLite for competing conversations and confirmed snap
   expect(await third.reserve()).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-it('keeps unknown state blocking, drains view close, and allows reopen settlement', async () => {
+it('keeps unknown state durable, drains view close, and allows bounded reopen admission', async () => {
   let now = 0;
   const path = await directory();
   const owner = await openCompiled(path, () => now);
@@ -216,7 +247,7 @@ it('keeps unknown state blocking, drains view close, and allows reopen settlemen
   const pending = owner.forConversation('pending');
   const unknownId = await unknown.reserve();
   const pendingId = await pending.reserve();
-  await unknown.settle(unknownId!, null);
+  await unknown.settle(unknownId!, null, 'safe_unknown');
   await pending.close();
   await owner.close();
   owners.pop();
@@ -225,7 +256,9 @@ it('keeps unknown state blocking, drains view close, and allows reopen settlemen
   expect(await reopened.forConversation('later').reserve()).toBeNull();
   await reopened.forConversation('pending').settle(pendingId!, usage);
   expect(reopened.snapshot()).toMatchObject({starts: 2, knownTokens: 12, unknown: 1, unresolved: 0});
-  expect(await reopened.forConversation('later').reserve()).toBeNull();
+  const finalLater = await reopened.forConversation('later').reserve();
+  expect(finalLater).toMatch(/^[0-9a-f-]{36}$/);
+  await reopened.forConversation('later').cancelBeforeDispatch(finalLater!);
 });
 
 it('drains queued admitted work before owner close and rejects malformed usage without file damage', async () => {

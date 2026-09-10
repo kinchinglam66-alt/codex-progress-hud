@@ -138,7 +138,9 @@ footer {
 
 #hud { display: flex; flex-direction: column; }
 #hud > header { display: flex; flex: none; }
-#hide-window { margin-left: auto; color: #b8b5c6; background: transparent; border: 0; font-size: 19px; cursor: pointer; -webkit-app-region: no-drag; }
+#open-settings, #hide-window { color: #b8b5c6; background: transparent; border: 0; font-size: 17px; cursor: pointer; -webkit-app-region: no-drag; }
+#open-settings { margin-left: auto; }
+#hide-window { margin-left: 4px; font-size: 19px; }
 #tasks { overflow-y: auto; min-height: 0; flex: 1; -webkit-app-region: no-drag; scrollbar-width: thin; }
 .conversation-row { --accent: #8b7cff; padding: 9px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
 .conversation-row:last-child { border-bottom: 0; }

@@ -1,12 +1,13 @@
 import {describe, expect, it} from 'vitest';
-import {PassiveGoals} from '../../src/server/passive-goals.js';
+import {PassiveGoals, type GoalContextSource} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 
 const key = 'protected-goal-owner-test-token-1234567890';
-function fixture() {
+type ExecutionEvidence=NonNullable<ReturnType<NonNullable<GoalContextSource['execution']>>>;
+function fixture(source?:GoalContextSource) {
   const contexts = new PassiveContextStore();
-  const goals = new PassiveGoals(contexts);
+  const goals = new PassiveGoals(contexts,source);
   let counter = 0;
   let sessionKey = '';
   const hook = (hook: HookName, now: number, turn = 'one', follow = true, session = 'session') => {
@@ -31,6 +32,75 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it.each(['continue','unknown'] as const)('keeps the prior countdown during a same-turn %s refresh without a new estimate',relation=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0);
+    expect(f.goals.settle(f.request(15000).ticket,answer(),16000)).toBe(true);
+    const previous=f.goals.view(session,16000)!.prediction!;
+    const refresh=f.request(30000);
+    expect(f.goals.view(session,35000)!.prediction).toEqual(previous);
+    expect(f.goals.settle(refresh.ticket,{...answer('continue'),relation,status:relation==='unknown'?'unknown':'running',summary:null,estimate:null},40000)).toBe(true);
+    const later=f.goals.view(session,50000)!;
+    expect(later.prediction).toEqual(previous);
+    expect(later.activeSeconds).toBeGreaterThan(f.goals.view(session,40000)!.prediction!.observedActiveSeconds);
+  });
+  it('freezes at the last authenticated boundary when an initial source failure has no trusted timestamp',()=>{
+    const f=fixture({epoch:()=>1,read:()=>null,execution:()=>({state:'unknown',identity:'initial-partial'})});
+    const session=f.hook('UserPromptSubmit',0);
+    f.goals.reconcileSource(session,500);
+    expect(f.goals.view(session,5000)).toMatchObject({runtime:'waiting',runtimeUncertain:true,timingUncertain:true,activeSeconds:0});
+  });
+  it('reconciles missing Stop from source without allowing stale source activity to undo a hook Stop', () => {
+    let evidence:ExecutionEvidence={state:'waiting',boundaryMs:1000,identity:'final'};
+    const f=fixture({epoch:()=>1,read:()=>null,execution:()=>evidence});
+    const session=f.hook('UserPromptSubmit',0);
+    f.goals.reconcileSource(session,3000);
+    expect(f.goals.view(session,4000)).toMatchObject({runtime:'waiting',activeSeconds:1});
+    f.hook('PostToolUse',4500);
+    expect(f.goals.view(session,4500)).toMatchObject({runtime:'waiting',activeSeconds:1});
+    evidence={state:'running',boundaryMs:5000,identity:'resume'};
+    f.goals.reconcileSource(session,5000);
+    expect(f.goals.view(session,6000)).toMatchObject({runtime:'running',activeSeconds:2});
+    f.hook('Stop',6000);
+    evidence={state:'running',boundaryMs:7000,identity:'late'};
+    f.goals.reconcileSource(session,7000);
+    expect(f.goals.view(session,8000)).toMatchObject({runtime:'waiting',activeSeconds:2});
+  });
+  it('freezes uncertain timing but never times out a silent running action', () => {
+    let evidence:ExecutionEvidence={state:'running',boundaryMs:0,identity:'long-tool'};
+    const f=fixture({epoch:()=>1,read:()=>null,execution:()=>evidence});
+    const session=f.hook('UserPromptSubmit',0);
+    f.goals.reconcileSource(session,1000);
+    f.goals.reconcileSource(session,900000);
+    expect(f.goals.view(session,900000)).toMatchObject({runtime:'running',activeSeconds:900});
+    evidence={state:'unknown',boundaryMs:900000,identity:'read-failure'};
+    f.goals.reconcileSource(session,901000);
+    expect(f.goals.view(session,905000)).toMatchObject({runtime:'waiting',timingUncertain:true,activeSeconds:900});
+    evidence={state:'running',boundaryMs:0,identity:'long-tool'};
+    f.goals.reconcileSource(session,910000);
+    expect(f.goals.view(session,911000)).toMatchObject({runtime:'running',timingUncertain:true,activeSeconds:901});
+  });
+  it('does not restart a stopped turn on late tool results or a repeated prompt', () => {
+    const f=fixture(),session=f.hook('UserPromptSubmit',0);
+    const stale=f.request(500);
+    f.hook('Stop',1000);
+    f.hook('PostToolUse',2000);
+    f.hook('UserPromptSubmit',3000);
+    expect(f.goals.view(session,5000)).toMatchObject({runtime:'waiting',activeSeconds:1});
+    expect(f.goals.settle(stale.ticket,answer(),5000)).toBe(false);
+    f.hook('UserPromptSubmit',6000,'two');
+    expect(f.goals.view(session,7000)).toMatchObject({runtime:'running',activeSeconds:2});
+  });
+  it('keeps stop fences conversation-local and permits an explicit verified resume',()=>{
+    const f=fixture(),a=f.hook('UserPromptSubmit',0,'one',true,'a');
+    const b=f.hook('UserPromptSubmit',0,'one',true,'b');
+    f.hook('Stop',1000,'one',true,'a');
+    f.hook('PostToolUse',2000,'one',true,'b');
+    expect(f.goals.view(a,3000)).toMatchObject({runtime:'waiting',activeSeconds:1});
+    expect(f.goals.view(b,3000)).toMatchObject({runtime:'running',activeSeconds:3});
+    const turn=normalizeHookInput('UserPromptSubmit',{session_id:'a',turn_id:'one'},0,key).envelope.turnKey!;
+    f.goals.runtime(a,turn,'running',4000);
+    expect(f.goals.view(a,5000)).toMatchObject({runtime:'running',activeSeconds:2});
+  });
   it('projects only the accepted bounded change reason and clears absent reasons',()=>{
     const f=fixture(),session=f.hook('UserPromptSubmit',0);
     const withWork={...answer(),work:{composition:'serial',changeReason:'failure',parts:[

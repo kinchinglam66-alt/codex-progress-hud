@@ -2,8 +2,8 @@ import { metricsSchema, type Metrics, type Prediction } from "./contracts.js";
 import { createCodexOutputParser, createObserverOutputParser, type CodexOutput, type SubscriptionUsage, type ObserverOutput } from "./codex-output.js";
 import type {ObserverInput, ObserverResponse} from './observer-contract.js';
 import {packObserverInput} from './observer-input.js';
-import type { createOwnedProcessRunner, Invocation } from "./owned-process.js";
-import type {SubscriptionAccounting} from './subscription-accounting.js';
+import type { createOwnedProcessRunner, Invocation, OwnedProcessResult } from "./owned-process.js";
+import type {AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import {ObserverPreDispatchTransient} from './observer-call-failure.js';
 
 type Status="estimated"|"unavailable"|"invalid_input"|"busy"|"disabled"|"aborted"|
@@ -12,11 +12,13 @@ export interface ObserverCallOutcomes {
   prediction:'numeric'|'unknown'|'invalid';call:'success'|'timeout'|'cancelled'|'failed';usage:'known'|'unknown'|'not_dispatched';
   framingValid:boolean;closureConfirmed:boolean;dispatch:'not_started'|'started'|'unknown';
   retryable?:'pre_dispatch_transient';
+  preparationFailed?:boolean;
+  processReason?:OwnedProcessResult['reason'];
 }
 export interface ObserverCallTimings {
   preparationMs:number;providerMs:number;settlementMs:number;deliveryMs:number;totalMs:number;
 }
-interface SessionResult<P> { status:Status; prediction:P|null; usage:SubscriptionUsage|null;outcomes?:ObserverCallOutcomes;timings?:ObserverCallTimings }
+interface SessionResult<P> { status:Status; prediction:P|null; usage:SubscriptionUsage|null;admissionKind?:AdmissionKind;outcomes?:ObserverCallOutcomes;timings?:ObserverCallTimings }
 export type SubscriptionResult = SessionResult<Prediction>;
 interface Dependencies<I = Metrics> {
   ledger:SubscriptionAccounting;
@@ -25,6 +27,7 @@ interface Dependencies<I = Metrics> {
 }
 interface SharedDependencies<I, P> extends Dependencies<I> {
   observerMode?:boolean;
+  admissionKind?: AdmissionKind;
   authorize: () => boolean;
   parseInput: (input: unknown) => {success: true; data: I} | {success: false};
   createParser: () => {push(chunk: Uint8Array): boolean; end(): CodexOutput<P>&Partial<Pick<ObserverOutput,'framingValid'|'predictionStatus'|'usageStatus'>>};
@@ -34,7 +37,7 @@ interface SharedDependencies<I, P> extends Dependencies<I> {
  * trusted, not task/model supplied. No default executable or live activation.
  * close drains this session; it does not implement a companion shutdown budget.
  */
-function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false}:SharedDependencies<I, P>) {
+function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind}:SharedDependencies<I, P>) {
   let disabled=false, externallyDisabled=false, active=false;
   let pending:Promise<SessionResult<P>>|undefined, closing:Promise<void>|undefined;
   let preparation:AbortController|undefined;
@@ -42,16 +45,18 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
     prediction:'invalid',call:status==='aborted'?'cancelled':'failed',usage:usage?'known':'unknown',
     framingValid:false,closureConfirmed:false,dispatch:'not_started'});
   const result=(status:Status,usage:SubscriptionUsage|null=null,prediction:P|null=null,outcomes?:ObserverCallOutcomes):SessionResult<P>=>({status,prediction,usage,
+    ...(admissionKind?{admissionKind}:{}),
     ...(observerMode?{outcomes:outcomes?{...outcomes,usage:usage?'known':outcomes.usage==='not_dispatched'?'not_dispatched':'unknown'}:emptyOutcomes(status,usage)}:{})});
   const authorized=()=>{try {return authorize() === true;} catch {return false;}};
   const disable=()=>{externallyDisabled=true;disabled=true;preparation?.abort();runner.disable();};
   async function execute(invocation:Invocation,signal:AbortSignal,timings:ObserverCallTimings):Promise<SessionResult<P>> {
     const outcomes=observerMode?emptyOutcomes('process_error',null):undefined;
     let id:string|null;
-    try { id=await ledger.reserve(); }
+    try { id=await ledger.reserve(admissionKind); }
     catch { disable(); return result("accounting_error"); }
     if(id===null) return result("admission_denied");
     let usage:SubscriptionUsage|null=null, prediction:P|null=null;
+    let settlementClassification: SettlementClassification = 'unsafe_unknown';
     let status:Status="process_error";
     if(disabled || signal.aborted || !authorized()) {
       // Persist cancellation as its own transition. No provider usage was reported.
@@ -71,6 +76,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
           .finally(()=>{timings.providerMs=Math.round(performance.now()-providerStarted);});
         const output=parser.end();
         if(outcomes){
+          outcomes.processReason=process.reason;
           outcomes.closureConfirmed=process.closed;outcomes.framingValid=output.framingValid===true;
           outcomes.prediction=output.predictionStatus??'invalid';
           outcomes.call=process.reason==='exited'&&process.exitCode===0?'success':
@@ -81,6 +87,13 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
         // Only confirmed exit makes the reported stream final. Cancellation can
         // suppress a prediction while an already-complete usage frame settles.
         if(process.closed && (output.ok || (observerMode&&output.framingValid===true))) usage=output.usage;
+        const safeUnknown = observerMode && process.closed && output.framingValid === true &&
+          output.predictionStatus !== 'invalid' && outcomes?.dispatch === 'started' &&
+          outcomes.call === 'success' && !signal.aborted && !disabled && authorized();
+        settlementClassification = usage === null
+          ? safeUnknown ? 'safe_unknown' : 'unsafe_unknown'
+          : process.closed && outcomes?.call === 'success' && output.framingValid === true &&
+            !signal.aborted && !disabled && authorized() ? 'known_success' : 'known_non_success';
         if(disabled || !authorized()) status="disabled";
         else if(signal.aborted) status="aborted";
         else if(process.closed && process.reason==="exited" && process.exitCode===0 &&
@@ -91,7 +104,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
     }
     const settlementStarted=performance.now();
     try {
-      await ledger.settle(id,usage?{inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,cachedInputTokens:usage.cachedInputTokens}:null);
+      await ledger.settle(id,usage?{inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,cachedInputTokens:usage.cachedInputTokens}:null,settlementClassification);
     } catch { disable(); return result("accounting_error",usage,null,outcomes); }
     finally {timings.settlementMs=Math.round(performance.now()-settlementStarted);}
     if(usage===null) {disabled=true;runner.disable();}
@@ -129,8 +142,9 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
           return execute(invocation,signal,timings);
         } catch(error) {
           if(observerMode&&!disabled&&!signal.aborted&&authorized()&&error instanceof ObserverPreDispatchTransient)
-            return result('process_error',null,null,{...emptyOutcomes('process_error',null),closureConfirmed:true,retryable:'pre_dispatch_transient'});
-          return result(disabled?'disabled':signal.aborted?'aborted':'process_error');
+            return result('process_error',null,null,{...emptyOutcomes('process_error',null),preparationFailed:true,closureConfirmed:true,retryable:'pre_dispatch_transient'});
+          const failedStatus=disabled?'disabled':signal.aborted?'aborted':'process_error';
+          return result(failedStatus,null,null,observerMode?{...emptyOutcomes(failedStatus,null),preparationFailed:true}:undefined);
         }
       }).then(value=>observerMode?{...value,timings:{...timings,totalMs:Math.round(performance.now()-startedAt)}}:value)
         .finally(()=>{active=false;preparation=undefined;});
@@ -154,6 +168,7 @@ export interface ObserverSubscriptionResult {
   status: Exclude<Status, 'estimated'>|'interpreted';
   interpretation: ObserverResponse|null;
   usage: SubscriptionUsage|null;
+  admissionKind?: AdmissionKind;
   outcomes?:ObserverCallOutcomes;
   timings?:ObserverCallTimings;
 }
@@ -162,7 +177,7 @@ export interface ObserverSubscriptionResult {
  * activation is supplied here. The owner must disable the session on revocation
  * to abort an already-running process, not merely change the callback result.
  */
-export function createObserverSubscriptionSession(dependencies: Dependencies<ObserverInput> & {authorize: () => boolean}) {
+export function createObserverSubscriptionSession(dependencies: Dependencies<ObserverInput> & {authorize: () => boolean; admissionKind?: AdmissionKind}) {
   const session = createSession<ObserverInput, ObserverResponse>({...dependencies,
     observerMode:true,
     parseInput(input) {
@@ -182,8 +197,9 @@ export function createObserverSubscriptionSession(dependencies: Dependencies<Obs
     close: session.close,
     status: dependencies.runner.status,
     async observe(input: unknown, signal: AbortSignal): Promise<ObserverSubscriptionResult> {
-      const {status, prediction, usage,outcomes,timings} = await session.estimate(input, signal);
+      const {status, prediction, usage,admissionKind,outcomes,timings} = await session.estimate(input, signal);
       return {status: status === 'estimated' ? 'interpreted' : status, interpretation: prediction, usage,
+        ...(admissionKind?{admissionKind}:{}),
         ...(outcomes?{outcomes}:{}),...(timings?{timings}:{})};
     }
   };

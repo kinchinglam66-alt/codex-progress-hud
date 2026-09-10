@@ -18,7 +18,8 @@ it('persists not-dispatched separately, releases concurrency and retains hourly 
   const restored=await open(path,()=>0);expect(restored.snapshot()).toMatchObject({starts:1,inFlight:0,unknown:0,knownTokens:0});
   const next=restored.forConversation('one');
   for(let i=1;i<12;i++)await next.cancelBeforeDispatch((await next.reserve())!);
-  expect(await next.reserve()).toBeNull();
+  const thirteenth=await next.reserve();expect(thirteenth).not.toBeNull();
+  await next.cancelBeforeDispatch(thirteenth!);
 });
 it('does not let another conversation or reopened owner cancel an uncertain reservation',async()=>{
   const path=await directory(),owner=await open(path,()=>0),id=(await owner.forConversation('one').reserve())!;
@@ -41,11 +42,12 @@ it.each(['settled','pending','unknown'] as const)('migrates v2 %s accounting wit
   });
   const owner=await open(path,()=>0);
   expect(owner.snapshot()).toMatchObject({starts:1,knownTokens:state==='settled'?12:0,unknown:state==='unknown'?1:0,unresolved:state==='pending'?1:0});
-  if(state!=='settled')expect(await owner.forConversation('two').reserve()).toBeNull();
+  if(state==='pending') expect(await owner.forConversation('two').reserve()).toBeNull();
+  if(state==='unknown') { expect(await owner.forConversation('two').reserve()).toBeNull(); expect(owner.recoveryStatus()).toMatchObject({state:'blocked'}); }
   if(state==='pending')await expect(owner.forConversation('one').cancelBeforeDispatch(id)).rejects.toThrow();
   await owner.close();
   await mutateDatabase(path,db=>{
-    expect(db.prepare('PRAGMA user_version').get()).toMatchObject({user_version:3});
+    expect(db.prepare('PRAGMA user_version').get()).toMatchObject({user_version:4});
     expect(db.prepare('SELECT id,state FROM admissions').get()).toMatchObject({id,state});
   });
 });
@@ -104,7 +106,7 @@ it('admits two different conversations concurrently and denies a third or a dupl
   expect(await third.reserve()).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-it('keeps twelve starts consumed across reopen and releases the first at exactly one hour', async () => {
+it('keeps call counts across reopen without imposing a twelve-call quota', async () => {
   let now = 0;
   const path = await directory();
   const owner = await open(path, () => now);
@@ -118,7 +120,9 @@ it('keeps twelve starts consumed across reopen and releases the first at exactly
   await owner.close();
   await open(path, () => now);
   const reopened = owners.at(-1)!;
-  expect(await reopened.forConversation('conversation-a').reserve()).toBeNull();
+  const extra=await reopened.forConversation('conversation-a').reserve();
+  expect(extra).not.toBeNull();
+  await reopened.forConversation('conversation-a').settle(extra!,usage);
   await reopened.close();
   owners.pop();
 
@@ -159,16 +163,18 @@ it('blocks admission after an unmatched restart until the known reservation sett
   expect(await recovered.reserve()).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-it('treats null settlement as unknown and permanently blocks future admission', async () => {
+it('treats null settlement as unknown while allowing bounded future admission', async () => {
   let now = 0;
   const path = await directory();
   const owner = await open(path, () => now);
   const view = owner.forConversation('conversation-a');
   const id = await view.reserve();
-  await view.settle(id!, null);
+  await view.settle(id!, null, 'safe_unknown');
   await owner.close();
   const reopened = await open(path, () => now);
-  expect(await reopened.forConversation('conversation-a').reserve()).toBeNull();
+  const next = await reopened.forConversation('conversation-a').reserve();
+  expect(next).toMatch(/^[0-9a-f-]{36}$/);
+  await reopened.forConversation('conversation-a').cancelBeforeDispatch(next!);
   expect(reopened.snapshot()).toEqual(expect.objectContaining({unknown: 1}));
 });
 
@@ -191,11 +197,11 @@ it('rejects already queued reservations after the first admission commit fails',
   } finally { DatabaseSync.prototype.exec = original; }
 });
 
-it('rejects cumulative admissions beyond the unknown ceiling even with the later row absent', async () => {
+it('rejects a corrupted unsafe unknown ceiling even with the later row absent', async () => {
   const path = await directory();
   const owner = await open(path, () => 0);
   const view = owner.forConversation('unknown');
-  await view.settle((await view.reserve())!, null);
+  await view.settle((await view.reserve())!, null, 'unsafe_unknown');
   await owner.close();
   await mutateDatabase(path, db => db.exec('UPDATE metadata SET cumulative_starts = 2, last_admission = 1'));
   await expect(open(path, () => 1)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
@@ -209,12 +215,14 @@ it.each([0, 1])('reopens unknown-then-known settlement with peer admission time 
   const first = await a.reserve();
   now = peerTime;
   const second = await b.reserve();
-  await a.settle(first!, null);
+  await a.settle(first!, null, 'safe_unknown');
   await b.settle(second!, usage);
   await owner.close();
   const recovered = await open(path, () => now);
   expect(recovered.snapshot()).toMatchObject({starts: 2, knownTokens: 12, unknown: 1, unresolved: 0});
-  expect(await recovered.forConversation('later').reserve()).toBeNull();
+  const later = await recovered.forConversation('later').reserve();
+  expect(later).toMatch(/^[0-9a-f-]{36}$/);
+  await recovered.forConversation('later').cancelBeforeDispatch(later!);
 });
 
 it('reopens a valid peer settled before an unknown result despite distinct admission times', async () => {
@@ -227,13 +235,15 @@ it('reopens a valid peer settled before an unknown result despite distinct admis
   now = 1;
   const knownId = await knownView.reserve();
   await knownView.settle(knownId!, usage);
-  await unknownView.settle(unknownId!, null);
+  await unknownView.settle(unknownId!, null, 'safe_unknown');
   await owner.close();
   owners.pop();
 
   const reopened = await open(path, () => now);
   expect(reopened.snapshot()).toEqual(expect.objectContaining({starts: 2, knownTokens: 12, unknown: 1, unresolved: 0}));
-  expect(await reopened.forConversation('conversation-later').reserve()).toBeNull();
+  const later = await reopened.forConversation('conversation-later').reserve();
+  expect(later).toMatch(/^[0-9a-f-]{36}$/);
+  await reopened.forConversation('conversation-later').cancelBeforeDispatch(later!);
 });
 
 it('reopens with an unknown result and settles an earlier admitted pending peer', async () => {
@@ -245,7 +255,7 @@ it('reopens with an unknown result and settles an earlier admitted pending peer'
   const unknownId = await unknownView.reserve();
   now = 1;
   const pendingId = await pendingView.reserve();
-  await unknownView.settle(unknownId!, null);
+  await unknownView.settle(unknownId!, null, 'safe_unknown');
   await owner.close();
   owners.pop();
 
@@ -268,11 +278,11 @@ it('rejects duplicate and foreign settlements without changing totals', async ()
   expect(owner.snapshot()).toEqual(expect.objectContaining({knownTokens: 12, unresolved: 0, unknown: 0}));
 });
 
-it('rejects a persisted reserve after unknown settlement as an invalid journal', async () => {
+it('allows a validated safe unknown alongside a later persisted settlement', async () => {
   const path = await directory();
   const owner = await open(path, () => 0);
   const id = await owner.forConversation('conversation-a').reserve();
-  await owner.forConversation('conversation-a').settle(id!, null);
+  await owner.forConversation('conversation-a').settle(id!, null, 'safe_unknown');
   await owner.close();
   owners.pop();
   await mutateDatabase(path, db => {
@@ -281,7 +291,8 @@ it('rejects a persisted reserve after unknown settlement as an invalid journal',
     db.prepare('UPDATE metadata SET cumulative_starts = 2, known_tokens = 12, last_admission = 1 WHERE id = 1').run();
     db.exec('COMMIT');
   });
-  await expect(openReleaseAccounting(path, () => 1)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
+  const reopened = await open(path, () => 1);
+  expect(reopened.snapshot()).toMatchObject({starts: 2, knownTokens: 12, unknown: 1});
 });
 
 it('rejects persisted third and same-conversation overlapping reservations', async () => {
@@ -309,7 +320,7 @@ it('rejects persisted third and same-conversation overlapping reservations', asy
   await expect(openReleaseAccounting(overlapPath, () => 0)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
 });
 
-it('rejects a persisted thirteenth start inside one rolling hour', async () => {
+it('accepts valid persisted call counts beyond twelve inside one rolling hour', async () => {
   const path = await directory();
   await initialize(path);
   await mutateDatabase(path, db => {
@@ -318,7 +329,8 @@ it('rejects a persisted thirteenth start inside one rolling hour', async () => {
     db.prepare('UPDATE metadata SET cumulative_starts = 13, known_tokens = 156, last_admission = 12 WHERE id = 1').run();
     db.exec('COMMIT');
   });
-  await expect(openReleaseAccounting(path, () => 12)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
+  const restored=await open(path,()=>12);
+  expect(restored.snapshot()).toMatchObject({starts:13,knownTokens:156});
 });
 
 it('fails closed on an altered SQLite schema without rewriting the original evidence', async () => {

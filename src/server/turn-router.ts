@@ -78,7 +78,8 @@ export function createTurnRouter(options: { maxTurns?: number; retentionMs?: num
           record.expired = true;
           return { kind: 'ignored', reason: 'expired_turn' };
         }
-        if (record.events.has(eventId) || (terminal !== undefined && record.terminals.has(terminal)) ||
+        if ((terminal === undefined && record.terminals.size > 0) ||
+            record.events.has(eventId) || (terminal !== undefined && record.terminals.has(terminal)) ||
             (receivedAt < record.lastReceipt && hook !== 'Stop' && hook !== 'Interrupt' &&
               !(hook === 'UserPromptSubmit' && !record.promptSeen))) {
           return { kind: 'ignored', reason: 'duplicate' };

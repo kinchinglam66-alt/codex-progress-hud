@@ -16,6 +16,7 @@ export interface TrayControllerOptions {
   onShow(): void | Promise<void>;
   onHide(): void | Promise<void>;
   onDiagnose(): void | Promise<void>;
+  onSettings?(): void | Promise<void>;
   onSelectTask?(taskId: string): void | Promise<void>;
   onFollowActivity?(): void | Promise<void>;
   taskItems?: readonly { id: string; title: string; selected?: boolean }[];
@@ -56,6 +57,9 @@ export function createTrayController(options: TrayControllerOptions): TrayContro
         checked: task.selected === true,
         click: () => invoke(`Select task ${task.id}`, () => options.onSelectTask!(task.id))
       }))),
+      ...(options.onSettings === undefined ? [] : [
+        { label: "Settings", click: () => invoke("Settings", options.onSettings!) }
+      ]),
       { label: "Diagnose", click: () => invoke("Diagnose", options.onDiagnose) },
       { type: "separator" },
       { label: "Exit", click: () => invoke("Exit", options.onExit) }

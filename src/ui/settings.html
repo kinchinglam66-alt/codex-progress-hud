@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Progress HUD 设置</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Codex Progress HUD 设置</h1>
+      <section aria-labelledby="status-heading">
+        <h2 id="status-heading">估时状态</h2>
+        <p id="state" role="status">读取中</p>
+        <dl>
+          <div><dt>已知 token</dt><dd id="known-tokens">—</dd></div>
+          <div><dt>历史未知用量次数</dt><dd id="unknown-count">—</dd></div>
+        </dl>
+      </section>
+      <p id="message" role="status"></p>
+      <p id="diagnostic" role="status"></p>
+      <div class="actions">
+        <button id="check" type="button">本地检查</button>
+        <button id="recover" type="button" disabled>确认并试探一次</button>
+        <button id="revoke" type="button">撤销估时授权</button>
+      </div>
+      <p class="note">本地检查不会运行推理。恢复试探只使用固定合成输入，最多调用一次模型；未知用量历史不会被删除。</p>
+    </main>
+    <script type="module" src="settings-renderer.js"></script>
+  </body>
+</html>

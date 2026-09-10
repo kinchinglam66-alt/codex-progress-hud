@@ -1,4 +1,4 @@
-import { buildHudView, createConversationViewProjector } from "./view-model.js";
+import { buildHudView, createConversationViewProjector, conversationActivityLabel } from "./view-model.js";
 import { createConversationRenderer } from "./conversation-renderer.js";
 import type { HudSnapshot } from "../server/task-store.js";
 import {createHudDisplayClock, startDisplayTicker} from './display-clock.js';
@@ -17,7 +17,7 @@ function render(): void {
   const {snapshot, elapsedSeconds, connected, updatedKeys,displayedSeconds} = frame;
   const views = projectRows(snapshot.rows ?? [], elapsedSeconds, updatedKeys,displayedSeconds);
   renderRows(views);
-  status.textContent = views.length === 0 ? "暂无进行中任务" : String(views.length) + " 个显示任务";
+  status.textContent = conversationActivityLabel(views);
   empty.hidden = views.length !== 0;
   empty.textContent = snapshot.rows === undefined ? "请同时更新插件与伴侣程序以显示多对话" : "等待任务活动";
   banner.textContent = connected ? buildHudView(snapshot).compatibilityBanner ?? ""
@@ -28,14 +28,21 @@ const stopTicker = startDisplayTicker(render);
 window.addEventListener('pagehide', stopTicker, {once: true});
 
 document.querySelector("#hide-window")?.addEventListener("click", () => {
-  void (async () => {
+  void controlWindow("/api/window/hide").catch(() => { banner.textContent = "隐藏窗口失败，请检查伴侣程序连接"; });
+});
+
+document.querySelector("#open-settings")?.addEventListener("click", () => {
+  void controlWindow("/api/window/settings").catch(() => { banner.textContent = "打开设置失败，请检查伴侣程序连接"; });
+});
+
+async function controlWindow(path: string): Promise<void> {
     const response = await fetch("/api/bootstrap", { cache: "no-store" });
     if (!response.ok) throw new Error("Bootstrap unavailable");
     const bootstrap = await response.json() as { protocolVersion?: unknown; generation?: unknown };
     if (typeof bootstrap.protocolVersion !== "number" || !Number.isSafeInteger(bootstrap.protocolVersion) ||
         typeof bootstrap.generation !== "number" || !Number.isSafeInteger(bootstrap.generation) ||
         bootstrap.generation < 0) throw new Error("Invalid bootstrap");
-    const hidden = await fetch("/api/window/hide", {
+    const result = await fetch(path, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -44,9 +51,8 @@ document.querySelector("#hide-window")?.addEventListener("click", () => {
       },
       body: "{}"
     });
-    if (!hidden.ok) throw new Error("Hide failed");
-  })().catch(() => { banner.textContent = "隐藏窗口失败，请检查伴侣程序连接"; });
-});
+    if (!result.ok) throw new Error("Window action failed");
+}
 
 async function connect(): Promise<void> {
   let retryMs = 500;

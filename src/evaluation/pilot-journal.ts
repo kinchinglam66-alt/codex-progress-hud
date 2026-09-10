@@ -4,7 +4,7 @@ import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
 import {resolve} from 'node:path';
 
-const triggerCodes=new Set(['initial','important_event','status_evidence','overdue','periodic','pre_dispatch_retry']);
+const triggerCodes=new Set(['initial','important_event','status_evidence','near_expiry','overdue','periodic','pre_dispatch_retry']);
 const forecastDiagnosticCodes=new Set(['provenance_unavailable','invalid_provenance']);
 const activeAnchor=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=31_536_000?value:undefined;
 

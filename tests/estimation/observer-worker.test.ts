@@ -119,7 +119,7 @@ it.each([false, true])('waits for async preparation before admission (disable=%s
   await value.close();
 });
 
-it('reuses workers across keys and carries the rolling conversation cap through replacement', async () => {
+it('reuses workers across keys and preserves usage without a twelve-call cap through replacement', async () => {
   const path = await directory();
   const accounting = await owner(path);
   const first = worker(accounting, simpleScript);
@@ -133,8 +133,8 @@ it('reuses workers across keys and carries the rolling conversation cap through 
     await expect(replacement.observe(input, new AbortController().signal, 'conversation-a')).resolves.toMatchObject({status: 'interpreted'});
   }
   await expect(replacement.observe(input, new AbortController().signal, 'conversation-a')).resolves.toMatchObject({status: 'interpreted'});
-  await expect(replacement.observe(input, new AbortController().signal, 'conversation-a')).resolves.toMatchObject({status: 'admission_denied', interpretation: null, usage: null});
-  expect(accounting.snapshot()).toMatchObject({starts: 13, knownTokens: 299, unknown: 0, unresolved: 0});
+  await expect(replacement.observe(input, new AbortController().signal, 'conversation-a')).resolves.toMatchObject({status: 'interpreted'});
+  expect(accounting.snapshot()).toMatchObject({starts: 14, knownTokens: 322, unknown: 0, unresolved: 0});
   await replacement.close();
 
   const later = accounting.forConversation('after-worker-close');
@@ -244,14 +244,15 @@ it('revoking consent stops the real owned child and denies further reservation',
   } finally {await value.close();}
 });
 
-it('turns missing usage into unknown accounting and denies later starts', async () => {
+it('turns missing usage into unknown accounting and permits bounded warning admissions', async () => {
   const path = await directory();
   const accounting = await owner(path);
   const value = worker(accounting, () => simpleScript(stream(false)));
   await expect(value.observe(input, new AbortController().signal, 'conversation-unknown')).resolves.toMatchObject({status: 'interpreted', usage: null,
     outcomes:{prediction:'numeric',call:'success',usage:'unknown',framingValid:true,closureConfirmed:true}});
   expect(accounting.snapshot()).toMatchObject({starts: 1, unknown: 1, unresolved: 0});
-  await expect(value.observe(input, new AbortController().signal, 'conversation-later')).resolves.toMatchObject({status: 'admission_denied'});
+  await expect(value.observe(input, new AbortController().signal, 'conversation-later')).resolves.toMatchObject({status: 'interpreted', usage: null});
+  expect(accounting.snapshot()).toMatchObject({starts: 2, unknown: 2, unresolved: 0});
   await value.close();
 });
 

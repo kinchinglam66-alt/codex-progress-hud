@@ -45,6 +45,7 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
   };
   const showWindow = vi.fn();
   const hideWindow = vi.fn();
+  const openSettings = vi.fn();
   const requestShutdown = vi.fn();
   let generation = 1;
   let desiredState: "on" | "off" = "on";
@@ -61,6 +62,7 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
     health: () => health,
     showWindow,
     hideWindow,
+    openSettings,
     requestShutdown,
     bootstrap: () => ({
       protocolVersion: RELEASE_CAPABILITIES.protocol.current,
@@ -82,6 +84,7 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
     health,
     showWindow,
     hideWindow,
+    openSettings,
     requestShutdown
     ,setLifecycle(nextGeneration: number, nextState: "on" | "off") {
       generation = nextGeneration;
@@ -221,6 +224,11 @@ describe("local progress HTTP service", () => {
         headers: { "content-type": "application/json" },
         body: "{}"
       }),
+      fetch(`${baseUrl}/api/window/settings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}"
+      }),
       fetch(`${baseUrl}/api/shutdown`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -228,7 +236,7 @@ describe("local progress HTTP service", () => {
       })
     ]);
 
-    expect(responses.map(({ status }) => status)).toEqual([401, 401, 401, 401]);
+    expect(responses.map(({ status }) => status)).toEqual([401, 401, 401, 401, 401]);
   });
 
   it("returns full health only to an authenticated client", async () => {
@@ -345,7 +353,7 @@ describe("local progress HTTP service", () => {
   });
 
   it("accepts authenticated idempotent window controls", async () => {
-    const { baseUrl, token, showWindow, hideWindow } = await startServer();
+    const { baseUrl, token, showWindow, hideWindow, openSettings } = await startServer();
     const headers = {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
@@ -360,13 +368,16 @@ describe("local progress HTTP service", () => {
       fetch(`${baseUrl}/api/window/hide`, { method: "POST", headers, body: "{}" }),
       fetch(`${baseUrl}/api/window/hide`, { method: "POST", headers, body: "{}" })
     ]);
+    const settingsResponse = await fetch(`${baseUrl}/api/window/settings`, { method: "POST", headers, body: "{}" });
 
     expect(showResponses.map(({ status }) => status)).toEqual([202, 202]);
     expect(hideResponses.map(({ status }) => status)).toEqual([202, 202]);
+    expect(settingsResponse.status).toBe(202);
     expect(await showResponses[0].json()).toEqual({ accepted: true });
     expect(await hideResponses[0].json()).toEqual({ accepted: true });
     expect(showWindow).toHaveBeenCalledTimes(2);
     expect(hideWindow).toHaveBeenCalledTimes(2);
+    expect(openSettings).toHaveBeenCalledOnce();
   });
 
   it("requires JSON for authenticated controls", async () => {

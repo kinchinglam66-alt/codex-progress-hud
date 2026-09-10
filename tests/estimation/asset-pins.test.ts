@@ -9,7 +9,7 @@ import { estimatorAssetPins, observerAssetPins } from "../../src/estimation/asse
 it("the real build copy preserves numeric and observer pinned asset byte sequences",async()=>{
   const root=await mkdtemp(join(tmpdir(),"hud-asset-copy-"));
   try {
-    for(const file of ["src/ui/index.html","src/ui/styles.css","hooks/hooks.json","scripts/launch-hook.ps1"]) {
+    for(const file of ["src/ui/index.html","src/ui/styles.css","src/ui/settings.html","src/ui/settings.css","src/ui/settings-preload.cjs","hooks/hooks.json","scripts/launch-hook.ps1"]) {
       await mkdir(dirname(join(root,file)),{recursive:true});await writeFile(join(root,file),"fixture");
     }
     await cp(resolve("src/estimation/assets"),join(root,"src/estimation/assets"),{recursive:true});
@@ -21,6 +21,8 @@ it("the real build copy preserves numeric and observer pinned asset byte sequenc
       expect(built.equals(source)).toBe(true);
       expect(createHash("sha256").update(built).digest("hex")).toBe(pin);
     }
+    await rm(join(root,"src/ui/settings.html"));
+    await expect(promisify(execFile)(process.execPath,[resolve("scripts/copy-assets.mjs")],{cwd:root,windowsHide:true})).rejects.toThrow();
     await writeFile(join(root,"dist/estimation/assets/stale.txt"),"preserve evidence");
     await expect(promisify(execFile)(process.execPath,[resolve("scripts/copy-assets.mjs")],{cwd:root,windowsHide:true})).rejects.toThrow();
     expect(await readFile(join(root,"dist/estimation/assets/stale.txt"),"utf8")).toBe("preserve evidence");

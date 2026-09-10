@@ -10,6 +10,10 @@ import {ObserverScheduler, type ObserverObservation} from '../../src/estimation/
 import {PassiveGoals} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createObserverConsentStore} from '../../src/estimation/observer-consent-store.js';
 
 const input: ObserverInput = {
   goalSummary: 'Build a report',
@@ -124,6 +128,38 @@ function dialogFor(events: string[], response = 0) {
 describe('desktop observer runtime composition', () => {
   afterEach(() => {vi.useRealTimers();});
 
+  it('captures sanitized exit and HTTP details through the actual recovery runner',async()=>{
+    const events:string[]=[];
+    const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),
+      identity:identityFor(()=>0,events,{invocation:()=>({...invocation(),args:['-e',"process.stderr.write('HTTP 403 token=SECRET private@example.invalid');process.exitCode=7;"]})})});
+    try{
+      await runtime.start(new AbortController().signal);
+      const trial=await runtime.recoveryBoundary().runTrial('synthetic-reservation',new AbortController().signal);
+      expect(trial).toMatchObject({success:false,usage:null,diagnostic:{reason:'exited',exitCode:7,parserError:'protocol',errorCategories:['http_403']}});
+      expect(JSON.stringify(trial)).not.toMatch(/SECRET|private@example/);
+    }finally{await runtime.close();}
+  });
+
+  it('cancels authorized dispatch before waiting for a consent deletion that fails',async()=>{
+    const events:string[]=[];
+    const deletion=deferred<void>();
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>0,events),dialog:dialogFor(events),
+      openAccounting:async()=>owner(events),now:()=>0,
+      consentStore:{read:async()=>null,grant:async()=>{},matches:()=>false,revoke:()=>deletion.promise}});
+    await runtime.start(new AbortController().signal);
+    expect(runtime.workers.every(worker=>!worker.status().disabled)).toBe(true);
+    const revoke=runtime.revokeConsent();
+    const rejected=expect(revoke).rejects.toThrow('STORAGE_LOCKED');
+    const disabledImmediately=runtime.workers.every(worker=>worker.status().disabled);
+    deletion.reject(Error('STORAGE_LOCKED'));
+    try{
+      await rejected;
+      expect(disabledImmediately).toBe(true);
+      await expect(runtime.workers[0]!.observe(input,new AbortController().signal,'after-revoke')).resolves.toMatchObject({status:'disabled'});
+      expect(events).not.toContain('prepare');
+    }finally{await runtime.close();}
+  });
+
   it('keeps both slots unavailable and performs no dispatch before consent and accounting readiness', async () => {
     const events: string[] = [];
     const consent = deferred<{response: number}>();
@@ -221,6 +257,22 @@ describe('desktop observer runtime composition', () => {
       await vi.advanceTimersByTimeAsync(120000);
     }
     expect(events.filter(event => event === 'inspect').length).toBeGreaterThanOrEqual(5);
+    expect(runtime.workers.every(worker => !worker.status().disabled)).toBe(true);
+    await runtime.close();
+  });
+
+  it('suspends dispatch during a temporary identity refresh failure and resumes after revalidation', async () => {
+    vi.useFakeTimers();
+    let clock = 0, inspections = 0;
+    const events: string[] = [];
+    const runtime = createDesktopObserverRuntime({
+      identity: identityFor(() => clock, events, {inspect: () => { if (inspections++ === 1) throw Error('TEMPORARY_NETWORK'); return evidence(clock); }}),
+      dialog: dialogFor(events), openAccounting: async () => owner(events), now: () => clock,
+    });
+    await runtime.start(new AbortController().signal);
+    clock = 120000; await vi.advanceTimersByTimeAsync(120000);
+    expect(runtime.workers.every(worker => worker.status().disabled)).toBe(true);
+    clock = 240000; await vi.advanceTimersByTimeAsync(120000);
     expect(runtime.workers.every(worker => !worker.status().disabled)).toBe(true);
     await runtime.close();
   });
@@ -391,6 +443,44 @@ describe('desktop observer runtime composition', () => {
     expect(events).toContain('identity-close');
     expect(events).toContain('accounting-close-failed');
     expect(events.indexOf('identity-close')).toBeLessThan(events.indexOf('accounting-close-failed'));
+  });
+
+  it('restores a remembered consent grant only after fresh identity validation on restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'hud-runtime-consent-'));
+    try {
+      const path = join(directory, 'consent.json');
+      const firstStore = createObserverConsentStore(path, {protect: value => `sealed:${value}`, unprotect: value => value.slice('sealed:'.length)});
+      const firstEvents: string[] = [];
+      const first = createDesktopObserverRuntime({identity: identityFor(() => 0, firstEvents), dialog: dialogFor(firstEvents), openAccounting: async () => owner(firstEvents), consentStore: firstStore, now: () => 0});
+      await first.start(new AbortController().signal);
+      await first.close();
+
+      const secondEvents: string[] = [];
+      const secondStore = createObserverConsentStore(path, {protect: value => `sealed:${value}`, unprotect: value => value.slice('sealed:'.length)});
+      const second = createDesktopObserverRuntime({identity: identityFor(() => 0, secondEvents), dialog: dialogFor(secondEvents, 1), openAccounting: async () => owner(secondEvents), consentStore: secondStore, now: () => 0});
+      await second.start(new AbortController().signal);
+      expect(secondEvents).not.toContain('dialog');
+      expect(second.workers.every(worker => !worker.status().disabled)).toBe(true);
+      await second.close();
+    } finally { await rm(directory, {recursive: true, force: true}); }
+  });
+
+  it('does not restore remembered consent when the verified account scope changes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'hud-runtime-consent-scope-'));
+    try {
+      const path = join(directory, 'consent.json');
+      const store = createObserverConsentStore(path, {protect: value => `sealed:${value}`, unprotect: value => value.slice('sealed:'.length)});
+      const firstEvents: string[] = [];
+      const first = createDesktopObserverRuntime({identity: identityFor(() => 0, firstEvents), dialog: dialogFor(firstEvents), openAccounting: async () => owner(firstEvents), consentStore: store, now: () => 0});
+      await first.start(new AbortController().signal); await first.close();
+      const secondEvents: string[] = [];
+      const changedIdentity = identityFor(() => 0, secondEvents, {inspect: () => evidence(0, 'd'.repeat(64))});
+      const second = createDesktopObserverRuntime({identity: changedIdentity, dialog: dialogFor(secondEvents, 1), openAccounting: async () => owner(secondEvents), consentStore: createObserverConsentStore(path, {protect: value => `sealed:${value}`, unprotect: value => value.slice('sealed:'.length)}), now: () => 0});
+      await second.start(new AbortController().signal);
+      expect(secondEvents).toContain('dialog');
+      expect(second.workers.every(worker => worker.status().disabled)).toBe(true);
+      await second.close();
+    } finally { await rm(directory, {recursive: true, force: true}); }
   });
 });
 

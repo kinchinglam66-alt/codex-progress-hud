@@ -1,8 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import {mkdir} from 'node:fs/promises';
 import {Worker} from 'node:worker_threads';
-import type {AccountedUsage, SubscriptionAccounting} from './subscription-accounting.js';
-import type {ReleaseAccountingOwner, ReleaseAccountingSnapshot} from './release-accounting.js';
+import type {AccountedUsage, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import type {ReleaseAccountingOwner, ReleaseAccountingSnapshot, ReleaseRecoveryEvent} from './release-accounting.js';
 import {
   ACCOUNTING_OPERATION_TIMEOUT_MS,
   ACCOUNTING_PROTOCOL_VERSION,
@@ -10,6 +10,10 @@ import {
   MAX_ACCOUNTING_PENDING,
   cloneUsage,
   parseWorkerMessage,
+  recoveryConfirmationCopy,
+  recoveryAdmissionCopy,
+  recoveryPreflightCopy,
+  recoveryStatusCopy,
   sanitizedError,
   snapshotCopy,
   validateClock,
@@ -18,6 +22,7 @@ import {
   type AccountingErrorCode,
   type AccountingResponse,
 } from './accounting-worker-protocol.js';
+import type {ReleaseRecoveryConfirmation, ReleaseRecoveryPreflight, ReleaseRecoveryStatus} from './release-accounting.js';
 
 type Pending = {
   promise: Promise<unknown>;
@@ -44,6 +49,7 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
   const pending = new Map<string, Pending>();
   const operations = new Set<Promise<unknown>>();
   let confirmed: ReleaseAccountingSnapshot = {starts: 0, activeStarts: 0, inFlight: 0, unresolved: 0, knownTokens: 0, unknown: 0, poisoned: false};
+  let confirmedRecovery: ReleaseRecoveryStatus = {state: 'normal', revision: 0, knownTokens: 0, unknown: 0, recoveryAllowed: false};
   let failed = false;
   let ownerClosed = false;
   let closePromise: Promise<void> | undefined;
@@ -63,6 +69,11 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
     const checked = snapshotCopy(snapshot);
     if (checked.starts < confirmed.starts || checked.knownTokens < confirmed.knownTokens || checked.unknown < confirmed.unknown) throw error('RELEASE_PROTOCOL_INVALID');
     confirmed = checked;
+  }
+  function updateConfirmedRecovery(status: ReleaseRecoveryStatus): void {
+    const checked = recoveryStatusCopy(status);
+    if (checked.revision < confirmedRecovery.revision || checked.knownTokens < confirmedRecovery.knownTokens || checked.unknown < confirmedRecovery.unknown) throw error('RELEASE_PROTOCOL_INVALID');
+    confirmedRecovery = checked;
   }
 
   function settleStartupFailure(reason: Error): void {
@@ -101,6 +112,8 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
       readySeen = true;
       try { updateConfirmed(message.snapshot); }
       catch { poison('RELEASE_PROTOCOL_INVALID'); settleStartupFailure(error('RELEASE_PROTOCOL_INVALID')); return; }
+      try { updateConfirmedRecovery(message.recovery); }
+      catch { poison('RELEASE_PROTOCOL_INVALID'); settleStartupFailure(error('RELEASE_PROTOCOL_INVALID')); return; }
       if (!startupSettled) { startupSettled = true; startupResolve(); }
       return;
     }
@@ -109,6 +122,8 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
     const entry = pending.get(message.requestId);
     if (!entry) { poison('RELEASE_PROTOCOL_INVALID'); return; }
     try { updateConfirmed(message.snapshot); }
+    catch { poison('RELEASE_PROTOCOL_INVALID'); return; }
+    try { updateConfirmedRecovery(message.recovery); }
     catch { poison('RELEASE_PROTOCOL_INVALID'); return; }
     clearTimeout(entry.timer);
     pending.delete(message.requestId);
@@ -136,7 +151,8 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
     return promise;
   }
 
-  function send(operation: 'reserve' | 'settle'|'not_dispatched', key: string, reservation: string | undefined, inputUsage: AccountedUsage | null | undefined): Promise<unknown> {
+  type NonShutdownOperation = Exclude<import('./accounting-worker-protocol.js').AccountingRequest['operation'], 'shutdown'>;
+  function send(operation: NonShutdownOperation, payload: Record<string, unknown>): Promise<unknown> {
     if (failed) return Promise.reject(error('RELEASE_DATABASE_UNAVAILABLE'));
     if (pending.size >= MAX_ACCOUNTING_PENDING) return Promise.reject(error('RELEASE_PENDING_LIMIT'));
     const requestId = randomUUID();
@@ -148,9 +164,7 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
     submissionQueue = submissionQueue.then(() => {
       if (failed) throw error('RELEASE_DATABASE_UNAVAILABLE');
       const clock = validateClock(now());
-      const message = operation === 'reserve'
-        ? {kind: 'request' as const, version: ACCOUNTING_PROTOCOL_VERSION, requestId, operation, conversationKey: key, clock}
-        : {kind: 'request' as const, version: ACCOUNTING_PROTOCOL_VERSION, requestId, operation, conversationKey: key, clock, reservationId: reservation!, ...(operation==='settle'?{usage:inputUsage!}:{})};
+      const message = {kind: 'request' as const, version: ACCOUNTING_PROTOCOL_VERSION, requestId, operation, ...payload, clock};
       try { worker.postMessage(message); }
       catch (postError) { poison('RELEASE_WORKER_FAILED'); throw postError; }
     }).catch(reason => {
@@ -173,24 +187,29 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
       return promise;
     }
     return {
-      reserve(): Promise<string | null> {
+      reserve(admissionKind: AdmissionKind = 'ordinary'): Promise<string | null> {
         if (viewClosed || ownerClosed) return Promise.resolve(null);
-        return viewTrack(send('reserve', key, undefined, undefined) as Promise<string | null>);
+        return viewTrack(send('reserve', {conversationKey: key, admissionKind}) as Promise<string | null>);
       },
-      settle(id: string, inputUsage: AccountedUsage | null): Promise<void> {
+      settle(id: string, inputUsage: AccountedUsage | null, classification: SettlementClassification = inputUsage === null ? 'unsafe_unknown' : 'known_success'): Promise<void> {
         if (ownerClosed) return Promise.reject(error('RELEASE_OWNER_CLOSED'));
         if (viewClosed) return Promise.reject(error('RELEASE_VIEW_CLOSED'));
         let copiedId: string;
         let copiedUsage: AccountedUsage | null;
         try { copiedId = validateReservationId(id); copiedUsage = cloneUsage(inputUsage); }
         catch (validationError) { return Promise.reject(validationError); }
-        return viewTrack(send('settle', key, copiedId, copiedUsage).then(() => undefined));
+        return viewTrack(send('settle', {conversationKey: key, reservationId: copiedId, usage: copiedUsage, settlement: classification}).then(() => undefined));
       },
       cancelBeforeDispatch(id:string):Promise<void>{
         if(ownerClosed)return Promise.reject(error('RELEASE_OWNER_CLOSED'));
         if(viewClosed)return Promise.reject(error('RELEASE_VIEW_CLOSED'));
         let copiedId:string;try{copiedId=validateReservationId(id);}catch(validationError){return Promise.reject(validationError);}
-        return viewTrack(send('not_dispatched',key,copiedId,undefined).then(()=>undefined));
+        return viewTrack(send('not_dispatched', {conversationKey: key, reservationId: copiedId}).then(()=>undefined));
+      },
+      releaseRecoveryAdmission(): Promise<void> {
+        if (ownerClosed) return Promise.reject(error('RELEASE_OWNER_CLOSED'));
+        if (viewClosed) return Promise.reject(error('RELEASE_VIEW_CLOSED'));
+        return viewTrack(send('recovery_admission_release', {conversationKey: key}).then(() => undefined));
       },
       close(): Promise<void> {
         if (closingPromise) return closingPromise;
@@ -199,6 +218,10 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
         return closingPromise;
       },
     };
+  }
+
+  function recoverySend(operation: NonShutdownOperation, payload: Record<string, unknown>): Promise<unknown> {
+    return send(operation, payload);
   }
 
   async function stopAfterClose(): Promise<void> {
@@ -228,6 +251,40 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
       return createView(validateConversationKey(key));
     },
     snapshot(): ReleaseAccountingSnapshot { return {...confirmed}; },
+    recoveryStatus(): ReleaseRecoveryStatus {
+      return {...confirmedRecovery};
+    },
+    preflightRecovery(binding: string): Promise<ReleaseRecoveryPreflight> {
+      return recoverySend('recovery_preflight', {binding}).then(value => recoveryPreflightCopy(value as ReleaseRecoveryPreflight));
+    },
+    confirmRecovery(input: {revision: number; binding: string}): Promise<ReleaseRecoveryConfirmation> {
+      return recoverySend('recovery_confirm', input as unknown as Record<string, unknown>).then(value => recoveryConfirmationCopy(value as ReleaseRecoveryConfirmation));
+    },
+    reserveRecoveryTrial(confirmation: ReleaseRecoveryConfirmation): Promise<string | null> {
+      return recoverySend('recovery_trial_reserve', confirmation as unknown as Record<string, unknown>) as Promise<string | null>;
+    },
+    settleRecoveryTrial(attemptId: string, reservationId: string, inputUsage: AccountedUsage | null): Promise<void> {
+      return recoverySend('recovery_trial_settle', {attemptId, reservationId, usage: cloneUsage(inputUsage)}).then(() => undefined);
+    },
+    finishRecovery(attemptId: string, result: {success: boolean; closureConfirmed: boolean}): Promise<void> {
+      return recoverySend('recovery_finish', {attemptId, ...result}).then(() => undefined);
+    },
+    cancelRecoveryTrial(attemptId: string, reservationId: string): Promise<void> {
+      return recoverySend('recovery_cancel_trial', {attemptId, reservationId}).then(() => undefined);
+    },
+    cancelRecovery(attemptId: string): Promise<void> {
+      return recoverySend('recovery_cancel', {attemptId}).then(() => undefined);
+    },
+    recoveryAdmission(_current: number, eligibleTask: boolean, conversationKey?: string) {
+      if (!conversationKey) return Promise.resolve({allowed: false, kind: 'ordinary' as const, nextEligibleAt: null, reason: 'no_eligible_task' as const});
+      return recoverySend('recovery_admission', {eligibleTask, conversationKey}).then(value => recoveryAdmissionCopy(value as import('./release-accounting.js').ReleaseRecoveryAdmission));
+    },
+    releaseRecoveryAdmission(conversationKey: string): Promise<void> {
+      return recoverySend('recovery_admission_release', {conversationKey}).then(() => undefined);
+    },
+    recordRecoveryEvent(event: ReleaseRecoveryEvent) {
+      return recoverySend('recovery_event', {eventKind: event.kind}).then(() => undefined);
+    },
     close(): Promise<void> {
       if (closePromise) return closePromise;
       ownerClosed = true;

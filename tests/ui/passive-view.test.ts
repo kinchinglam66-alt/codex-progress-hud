@@ -88,6 +88,7 @@ it('shows whole-goal time beyond 24 hours without inventing completion percentag
 });
 it.each([
   ['pending','等待首次估时'],['history_loading','正在加载任务历史'],['estimating','正在估时'],
+  ['history_unavailable','任务历史暂不可用，正在重试读取'],
   ['insufficient_context','依据不足，暂无法估时'],['call_failed','估时调用失败'],
   ['setup_failed','估时启动失败，请检查运行环境或授权'],
   ['rate_limited','估时受限，等待可用额度'],['disabled','估时已停用，请查看诊断']
@@ -111,7 +112,7 @@ it.each(['waiting', 'paused'] as const)('freezes %s while another running row co
 });
 it('shows overdue as pending update, never as task completion', () => {
   const view = buildConversationViews([row()], 90000)[0]!;
-  expect(view.etaLabel).toBe('00:00:00 · 已超出估时，等待更新');
+  expect(view.etaLabel).toBe('已超出预计时间 · 等待重新估时');
   expect(view.statusLabel).toBe('执行中');
   expect(view.progressPercent).toBeNull();
 });

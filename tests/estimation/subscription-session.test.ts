@@ -44,6 +44,23 @@ it('settles known observer usage even when its answer is semantically invalid',a
   expect(d.ledger.snapshot()).toMatchObject({starts:1,knownTokens:23,unknown:0});
 });
 
+it('reports preparation failure without exposing the exception or implying dispatch',async()=>{
+  const d=await setup();
+  const s=createObserverSubscriptionSession({...d,authorize:()=>true,prepare:()=>{throw Error('SECRET configuration');}});
+  closers.push(()=>s.close());
+  const result=await s.observe(observerInput,signal());
+  expect(result.outcomes).toMatchObject({preparationFailed:true,dispatch:'not_started'});
+  expect(JSON.stringify(result)).not.toContain('SECRET');
+  expect(d.ledger.snapshot().starts).toBe(0);
+});
+
+it('preserves timeout reason without retaining process output',async()=>{
+  const d=await setup('setInterval(()=>{},1000)');
+  const s=createObserverSubscriptionSession({...d,authorize:()=>true});closers.push(()=>s.close());
+  const result=await s.observe(observerInput,signal());
+  expect(result.outcomes).toMatchObject({processReason:'timeout',call:'timeout',closureConfirmed:true});
+});
+
 it.each([true,false])('only trusted pre-dispatch transient failures authorize retry (trusted=%s)',async trusted=>{
   const d=await setup();
   const s=createObserverSubscriptionSession({...d,authorize:()=>true,prepare:()=>{

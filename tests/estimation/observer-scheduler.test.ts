@@ -7,6 +7,94 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverSubscriptionResult} from '../../src/estimation/subscription-session.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it.each(['continue','unknown'] as const)('preserves outage exclusion after an inconclusive %s refresh',async relation=>{
+  const f=selectedSourceFixture();f.hook();f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:1000,errorPercent:30};
+  f.calls[0]!.finish(estimate);await f.flush();
+  f.setAvailable(false);f.time(3600000);f.scheduler.tick();f.setAvailable(true);f.scheduler.tick();
+  f.time(4400000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  const uncertain=result('continue');uncertain.interpretation={relation,status:relation==='unknown'?'unknown':'running',summary:null,estimate:null};
+  f.calls[1]!.finish(uncertain);await f.flush();
+  try{
+    f.time(4460000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  }finally{for(const call of f.calls)call.finish(result('continue'));await f.flush();await f.scheduler.close();}
+});
+it('retains the overdue reservation after a numeric-less refresh instead of retrying every minute',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
+  const uncertain=result('continue');uncertain.interpretation!.estimate=null;
+  f.calls[0]!.finish(estimate);await f.flush();
+  f.time(95000);f.scheduler.tick();f.calls[1]!.finish(uncertain);await f.flush();
+  f.time(155000);f.scheduler.tick();f.calls[2]!.finish(uncertain);await f.flush();
+  try{
+    f.time(215000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+    f.time(455000);f.scheduler.tick();expect(f.calls).toHaveLength(4);
+  }finally{for(const call of f.calls)call.finish(result('continue'));await f.flush();await f.scheduler.close();}
+});
+it('reports source failure separately from loading and clears it when source recovers',async()=>{
+  const f=selectedSourceFixture();f.setAvailable(false);const key=f.hook();
+  f.time(15000);f.scheduler.tick();
+  try{
+    expect(f.scheduler.diagnostics(key).state).toBe('history_unavailable');
+    f.setAvailable(true);f.scheduler.tick();
+    expect(f.scheduler.diagnostics(key).state).toBe('estimating');
+    expect(f.calls).toHaveLength(1);
+    f.calls[0]!.finish(result());await f.flush();
+    expect(f.scheduler.diagnostics(key).state).toBe('ready');
+  }finally{await f.scheduler.close();}
+});
+it('backs off after repeated known-usage failures but continues observing long-running work',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
+  f.calls[0]!.finish(estimate);await f.flush();
+  const failed:ObserverSubscriptionResult={status:'process_error',interpretation:null,usage};
+  f.time(95000);f.scheduler.tick();f.calls[1]!.finish(failed);await f.flush();
+  f.time(155000);f.scheduler.tick();f.calls[2]!.finish(failed);await f.flush();
+  f.time(455000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+  f.time(754999);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+  f.time(755000);f.scheduler.tick();expect(f.calls).toHaveLength(4);
+  f.calls[3]!.finish(failed);await f.flush();
+  f.time(2554999);f.scheduler.tick();expect(f.calls).toHaveLength(4);
+  f.time(2555000);f.scheduler.tick();expect(f.calls).toHaveLength(5);
+  f.calls[4]!.finish(result('continue'));await f.flush();
+  expect(f.scheduler.stats().disabled).toBe(false);
+  await f.scheduler.close();
+});
+it('does not spend the near-expiry opportunity again after a rejected attempt until a new prediction',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:400,errorPercent:30};
+  f.calls[0]!.finish(estimate);await f.flush();
+  f.time(335000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish({status:'admission_denied',interpretation:null,usage:null});await f.flush();
+  f.time(395000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  await f.scheduler.close();
+});
+it('does not count a selected-source outage toward the near-expiry threshold',async()=>{
+  const f=selectedSourceFixture();f.hook();f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
+  f.calls[0]!.finish(estimate);await f.flush();
+  f.setAvailable(false);f.time(3600000);f.scheduler.tick();
+  f.setAvailable(true);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(3679999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(3680000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result('continue'));await f.flush();await f.scheduler.close();
+});
+it('rechecks at eighty percent once per prediction and keeps an overdue fallback after safe failure',async()=>{
+  const records:ObserverObservation[]=[];const f=fixture(1,6000,r=>records.push(r));
+  f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
+  f.calls[0]!.finish(estimate);await f.flush();
+  f.time(94999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(95000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  expect(records.filter(r=>r.kind==='request').at(-1)?.triggerReason).toBe('near_expiry');
+  f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish({status:'process_error',interpretation:null,usage});await f.flush();
+  f.time(115000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(155000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+  expect(records.filter(r=>r.kind==='request').at(-1)?.triggerReason).toBe('overdue');
+  f.calls[2]!.finish(result('continue'));await f.flush();
+  await f.scheduler.close();
+});
 it('surfaces desktop startup failure without opening accounting or dispatching inference',async()=>{
   const f=fixture(),key=f.hook('UserPromptSubmit');let now=0,contacts=0;
   const runtime=createDesktopObserverRuntime({
@@ -170,6 +258,7 @@ function selectedSourceFixture(workerCount = 1) {
   let now = 0, id = 0, revision = 1, sourceEpoch = 0, available = true, currentActionId: string|null = 'action', finalAvailable = false;
   const contexts = new PassiveContextStore();
   const source = {
+    health: () => available ? 'ready' as const : 'error' as const,
     epoch: () => available ? sourceEpoch : null,
     read: (_key: string, _turnKey: string, query: {activeSeconds: number; runtime: 'running'|'waiting'|'paused'}) => ({
       epoch: 0, revision, currentActionId, finalAvailable,
@@ -267,12 +356,14 @@ it('does not retry a proven transient when its goal was cancelled',async()=>{
   await f.scheduler.close();
 });
 
-it('displays a proven current answer with unknown usage but disables further calls globally',async()=>{
+it('displays a proven current answer with unknown usage without globally disabling calls',async()=>{
   const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
   f.calls[0]!.finish(unknownUsageResult());await f.flush();
   expect(f.goals.view(key,15000)?.prediction?.remainingSeconds).toBe(600);
-  expect(f.scheduler.stats().disabled).toBe(true);
-  f.time(90000);f.hook('UserPromptSubmit','two');f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  expect(f.scheduler.stats().disabled).toBe(false);
+  f.time(90000);f.hook('UserPromptSubmit','two');f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+  f.time(105000);f.scheduler.tick();expect(f.calls).toHaveLength(2);f.calls[1]!.finish(result());await f.flush();
   await f.scheduler.close();
 });
 
@@ -519,15 +610,15 @@ it('attempts every worker cleanup even if another worker close throws synchronou
   expect(secondClosed).toBe(true);
 });
 
-it('keeps the twelve-start hourly quota across replacements', async () => {
+it('continues observing replacements beyond twelve calls while retaining the minimum spacing', async () => {
   const f = fixture(1);
   for (let index = 0; index < 13; index++) {
     f.time(index * 70000); f.hook('UserPromptSubmit', 'one', `turn-${index}`); f.hook('PostToolUse', 'one', `turn-${index}`);
     f.time(index * 70000 + 15000); f.scheduler.tick();
-    if (index < 12) {expect(f.calls).toHaveLength(index + 1); f.calls[index]!.finish(result()); await f.flush();}
+    expect(f.calls).toHaveLength(index + 1); f.calls[index]!.finish(result()); await f.flush();
   }
-  expect(f.calls).toHaveLength(12);
-  f.time(3615000); f.scheduler.tick(); expect(f.calls).toHaveLength(13);
+  expect(f.calls).toHaveLength(13);
+  await f.scheduler.close();
 });
 
 it('dispatches selected-source changes only when the source revision changes', async () => {

@@ -9,6 +9,14 @@ function event(hook: HookName, turn = 'a', at = 100, overrides: Partial<HookEnve
 }
 
 describe('turn-scoped routing', () => {
+  it('rejects same-turn activity after Stop even when received later', () => {
+    const router=createTurnRouter();
+    router.route(event('UserPromptSubmit','a',100),100);
+    router.route(event('Stop','a',200),200);
+    expect(router.route(event('PostToolUse','a',300),300).kind).toBe('ignored');
+    expect(router.route(event('UserPromptSubmit','a',400),400).kind).toBe('ignored');
+    expect(router.route(event('UserPromptSubmit','b',500),500)).toMatchObject({kind:'apply',follow:true});
+  });
   it.each(['Stop', 'Interrupt'] as const)('accepts late %s after activity saturation without promoting the old turn', hook => {
     const router = createTurnRouter();
     for (let index = 0; index < 256; index++) {
@@ -34,7 +42,7 @@ describe('turn-scoped routing', () => {
       expect(router.route(event(index % 2 ? 'Stop' : 'Interrupt', 'a', index), index))
         .toEqual({kind: 'ignored', reason: 'duplicate'});
     }
-    expect(router.route(event('PostToolUse', 'a', 700), 700)).toEqual({kind: 'degraded', reason: 'turn_capacity_reached'});
+    expect(router.route(event('PostToolUse', 'a', 700), 700)).toEqual({kind: 'ignored', reason: 'duplicate'});
   });
 
   it('does not promote a tool-attached turn after an intervening newer prompt', () => {

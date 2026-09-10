@@ -1,0 +1,150 @@
+import {expect, it, vi} from 'vitest';
+import {createObserverSettingsController, SETTINGS_CHANNELS, type SettingsBrowserWindowLike} from '../../src/desktop/observer-settings.js';
+
+function windowFixture() {
+  const listeners = new Map<string, (...args: any[]) => void>();
+  const webContents = {
+    on: vi.fn((event: string, listener: (...args: any[]) => void) => {listeners.set(event, listener);}),
+    setWindowOpenHandler: vi.fn(),
+  };
+  let destroyed = false;
+  const window: SettingsBrowserWindowLike = {
+    webContents,
+    on: vi.fn((event: string, listener: (...args: any[]) => void) => {listeners.set(event, listener); return window;}),
+    loadFile: vi.fn(async () => undefined),
+    show: vi.fn(),
+    focus: vi.fn(),
+    hide: vi.fn(),
+    isDestroyed: () => destroyed,
+    destroy: vi.fn(() => {destroyed = true;}),
+  };
+  return {window, listeners};
+}
+
+it('reuses one local settings window and rejects untrusted or stale IPC senders', async () => {
+  const first = windowFixture();
+  const createWindow = vi.fn(() => first.window);
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const controller = createObserverSettingsController({
+    createWindow,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog: {showMessageBox: vi.fn(async () => ({response: 0}))},
+    uiPath: 'C:/hud/settings.html',
+    preloadPath: 'C:/hud/settings-preload.js',
+    quitting: () => false,
+    readStatus: () => ({state: 'blocked', revision: 4, knownTokens: 12, unknown: 1, recoveryAllowed: true}),
+    preflight: async () => ({state: 'blocked', revision: 4, knownTokens: 12, unknown: 1, recoveryAllowed: true, allowed: true}),
+    binding: () => 'account:route:assets',
+    confirm: async () => ({state: 'recovered', revision: 4, knownTokens: 20, unknown: 1, recoveryAllowed: false}),
+  });
+
+  await controller.open();
+  await controller.open();
+  expect(createWindow).toHaveBeenCalledOnce();
+  expect(first.window.focus).toHaveBeenCalledOnce();
+
+  const getStatus = handlers.get(SETTINGS_CHANNELS.status)!;
+  await expect(getStatus({sender: {}})).rejects.toThrow('SETTINGS_UNTRUSTED_SENDER');
+  await expect(getStatus({sender: first.window.webContents})).resolves.toMatchObject({state: 'blocked'});
+
+  const close = first.listeners.get('close')!;
+  const event = {preventDefault: vi.fn()};
+  close(event);
+  expect(event.preventDefault).toHaveBeenCalledOnce();
+  expect(first.window.hide).toHaveBeenCalledOnce();
+
+  await expect(getStatus({sender: first.window.webContents})).resolves.toMatchObject({state: 'blocked'});
+  await controller.dispose();
+});
+
+it('shows native confirmation before a revision-bound recovery and rejects stale revision data', async () => {
+  const fixture = windowFixture();
+  const dialog = {showMessageBox: vi.fn(async () => ({response: 0}))};
+  const confirm = vi.fn(async () => ({state: 'recovered' as const, revision: 4, knownTokens: 20, unknown: 1, recoveryAllowed: false}));
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog,
+    uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.js', quitting: () => false,
+    readStatus: () => ({state: 'blocked', revision: 4, knownTokens: 12, unknown: 1, recoveryAllowed: true}),
+    preflight: async () => ({state: 'blocked', revision: 4, knownTokens: 12, unknown: 1, recoveryAllowed: true, allowed: true}),
+    binding: () => 'account:route:assets',
+    confirm,
+  });
+  await controller.open();
+  const invoke = handlers.get(SETTINGS_CHANNELS.confirm)!;
+  await expect(invoke({sender: fixture.window.webContents}, {revision: 3, challenge: '11111111-1111-4111-8111-111111111111'})).rejects.toThrow('SETTINGS_STALE_REVISION');
+  expect(confirm).not.toHaveBeenCalled();
+  const preflight = handlers.get(SETTINGS_CHANNELS.preflight)!;
+  const checked = await preflight({sender: fixture.window.webContents}) as {challenge: string};
+  await expect(invoke({sender: fixture.window.webContents}, {revision: 4, challenge: checked.challenge})).resolves.toMatchObject({state: 'recovered'});
+  await expect(invoke({sender: fixture.window.webContents}, {revision: 4, challenge: checked.challenge})).rejects.toThrow('SETTINGS_STALE_CHALLENGE');
+  expect(dialog.showMessageBox).toHaveBeenCalledOnce();
+  expect(confirm).toHaveBeenCalledOnce();
+  await controller.dispose();
+});
+
+it('issues a one-time expiring challenge bound to the settings window and recovery binding', async () => {
+  const fixture = windowFixture();
+  let now = 1000;
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog: {showMessageBox: vi.fn(async () => ({response: 0}))},
+    uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
+    now: () => now,
+    readStatus: () => ({state: 'blocked', revision: 9, knownTokens: 12, unknown: 1, recoveryAllowed: true}),
+    preflight: async () => ({state: 'blocked' as const, revision: 9, knownTokens: 12, unknown: 1, recoveryAllowed: true, allowed: true}),
+    binding: () => 'account:route:assets',
+    confirm: async () => ({state: 'recovered' as const, revision: 9, knownTokens: 20, unknown: 1, recoveryAllowed: false}),
+  });
+  await controller.open();
+  const checked = await handlers.get(SETTINGS_CHANNELS.preflight)!({sender: fixture.window.webContents}) as {challenge: string};
+  expect(checked.challenge).toMatch(/^[0-9a-f-]{36}$/);
+  now += 30_001;
+  await expect(handlers.get(SETTINGS_CHANNELS.confirm)!({sender: fixture.window.webContents}, {revision: 9, challenge: checked.challenge})).rejects.toThrow('SETTINGS_STALE_CHALLENGE');
+  await controller.dispose();
+});
+
+it('keeps the settings surface available when observer configuration is absent', async () => {
+  const fixture = windowFixture();
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog: {showMessageBox: vi.fn(async () => ({response: 0}))},
+    uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
+    readStatus: () => ({state: 'unconfigured' as const, revision: 0, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    preflight: async () => ({state: 'unconfigured' as const, revision: 0, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
+    binding: () => undefined,
+    confirm: async () => { throw new Error('SETTINGS_UNAVAILABLE'); },
+  });
+  await controller.open();
+  await expect(handlers.get(SETTINGS_CHANNELS.status)!({sender: fixture.window.webContents})).resolves.toMatchObject({state: 'unconfigured'});
+  await expect(handlers.get(SETTINGS_CHANNELS.preflight)!({sender: fixture.window.webContents})).resolves.toMatchObject({allowed: false, state: 'unconfigured'});
+  await controller.dispose();
+});
+
+it.each([0,1])('reports whether native confirmation actually revoked consent (choice %s)', async response => {
+  const fixture = windowFixture();
+  const revokeConsent = vi.fn(async () => undefined);
+  const dialog = {showMessageBox: vi.fn(async () => ({response}))};
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog, uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
+    readStatus: () => ({state: 'normal' as const, revision: 1, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    preflight: async () => ({state: 'normal' as const, revision: 1, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
+    binding: () => 'binding', confirm: async () => ({state: 'normal' as const, revision: 1, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    revokeConsent,
+  });
+  await controller.open();
+  const result=await handlers.get(SETTINGS_CHANNELS.revoke)!({sender: fixture.window.webContents});
+  expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({message: expect.stringContaining('撤销估时授权')}));
+  expect(revokeConsent).toHaveBeenCalledTimes(response===0?1:0);
+  expect(result).toMatchObject({consentRevoked:response===0});
+  await controller.dispose();
+});

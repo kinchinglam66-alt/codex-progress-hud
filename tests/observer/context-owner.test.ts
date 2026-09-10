@@ -10,6 +10,53 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('times out a stuck read, retries, and ignores its late result after recovery',async()=>{
+  vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
+  const f=setup();
+  try{
+    f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();
+    f.time(15500);await vi.advanceTimersByTimeAsync(15000);
+    expect(f.owner.snapshot('one')).toMatchObject({health:'error',reason:'source_read_timeout'});
+    expect(f.calls[0]!.signal.aborted).toBe(true);
+    f.time(16500);f.owner.tick();expect(f.calls).toHaveLength(2);
+    f.calls[1]!.finish(batch);await f.flush();
+    expect(f.owner.snapshot('one')).toMatchObject({health:'ready',records:batch.records});
+    f.calls[0]!.finish({...batch,reset:true,records:[]});await f.flush();
+    expect(f.owner.snapshot('one')).toMatchObject({health:'ready',records:batch.records});
+  }finally{for(const call of f.calls)call.finish(batch);await f.flush();await f.owner.close();vi.useRealTimers();}
+});
+it('bounds abandoned reads while making their blocked state explicit',async()=>{
+  vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
+  const f=setup();
+  try{
+    f.owner.attach('one','host1','t1');
+    for(let i=0;i<6;i++){
+      f.time(500+i*20000);f.owner.tick();f.time(15500+i*20000);await vi.advanceTimersByTimeAsync(15000);
+    }
+    expect(f.calls).toHaveLength(4);
+    expect(f.owner.snapshot('one')?.health).toBe('error');
+    f.calls[0]!.finish(batch);await f.flush();f.time(130000);f.owner.tick();
+    expect(f.calls).toHaveLength(5);
+    f.calls[4]!.finish(batch);await f.flush();expect(f.owner.snapshot('one')?.health).toBe('ready');
+  }finally{for(const call of f.calls)call.finish(batch);await f.flush();await f.owner.close();vi.useRealTimers();}
+});
+it('trims a large catch-up batch in one sizing pass while preserving the current goal and newest output',async()=>{
+  const f=setup();f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();
+  const records=[...batch.records,...Array.from({length:2000},(_,i)=>({id:`r${i}`,turnId:'t1',atMs:i+1,kind:'tool_result',text:'x'.repeat(512)}))];
+  const original=JSON.stringify;
+  let serializedBytes=0;
+  const spy=vi.spyOn(JSON,'stringify').mockImplementation(((value:unknown)=>{
+    const encoded=original(value);serializedBytes+=encoded?.length??0;return encoded;
+  }) as typeof JSON.stringify);
+  try {f.calls[0]!.finish({...batch,records});await f.flush();} finally {spy.mockRestore();}
+  const snapshot=f.owner.snapshot('one')!;
+  expect(snapshot.health).toBe('ready');
+  expect(snapshot.records[0]?.id).toBe('u1');
+  expect(snapshot.records.at(-1)?.id).toBe('r1999');
+  expect(Buffer.byteLength(JSON.stringify(snapshot.records))).toBeLessThanOrEqual(256*1024);
+  expect(serializedBytes).toBeLessThan(2*1024*1024);
+  await f.owner.close();
+});
 it('retains first objective and latest user amendment across large current-turn output',async()=>{
   const f=setup();f.owner.attach('one','host1','t2');f.time(500);f.owner.tick();
   const amendment={id:'u2',turnId:'t2',atMs:1,kind:'user',text:'Use the amended goal'};
@@ -37,6 +84,11 @@ it('debounces source reads then publishes persisted user content without a tool 
   f.time(5500);f.owner.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish({...batch,records:[]});await f.flush();
   expect(f.owner.snapshot('one')?.revision).toBe(1);
+  expect(f.owner.snapshot('one')?.lastSuccessfulReadAt).toBe(5500);
+  const notifications=f.changes.length;
+  f.time(10500);f.owner.tick();f.calls[2]!.finish({...batch,records:[],partialLine:true});await f.flush();
+  expect(f.changes.length).toBe(notifications+1);
+  expect(f.owner.snapshot('one')?.lastSuccessfulReadAt).toBe(5500);
 });
 
 it('bounds global reads to two and keeps each conversation isolated',async()=>{

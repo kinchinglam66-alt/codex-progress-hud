@@ -6,12 +6,27 @@ const base:RequestContext={elapsedSeconds:15,lastRequestSeconds:null,remainingSe
   state:'running',statusEvidenceArrived:false,goalInFlight:false,globalInFlight:0,
   conversationStartsLastHour:0};
 describe('long-task request eligibility (not spend authorization)',()=>{
+  it('admits a reserved near-expiry check while retaining cooldown and safety gates',()=>{
+    const c={...base,lastRequestSeconds:15,elapsedSeconds:95,remainingSeconds:20,
+      hasNewInformation:false,nearExpiryRecheck:true};
+    expect(decideTrigger(c).reason).toBe('near_expiry');
+    expect(canRequest({...c,elapsedSeconds:74})).toBe(false);
+    expect(canRequest({...c,state:'waiting'})).toBe(false);
+    expect(canRequest({...c,state:'paused'})).toBe(false);
+    expect(canRequest({...c,state:'terminal'})).toBe(false);
+    expect(canRequest({...c,goalInFlight:true})).toBe(false);
+    expect(canRequest({...c,globalInFlight:2})).toBe(false);
+    expect(canRequest({...c,conversationStartsLastHour:12})).toBe(true);
+    expect(canRequest({...c,contentReady:false})).toBe(false);
+    expect(canRequest({...c,remainingSeconds:null})).toBe(false);
+    expect(canRequest({...c,remainingSeconds:0})).toBe(false);
+  });
   it('keeps hard timing, runtime and resource gates on a pre-dispatch retry',()=>{
     const retry={...base,preDispatchRetry:true,hasNewInformation:false,lastRequestSeconds:15,elapsedSeconds:75};
     expect(canRequest(retry)).toBe(true);
     expect(canRequest({...retry,elapsedSeconds:74})).toBe(false);
     expect(canRequest({...retry,globalInFlight:2})).toBe(false);
-    expect(canRequest({...retry,conversationStartsLastHour:12})).toBe(false);
+    expect(canRequest({...retry,conversationStartsLastHour:12})).toBe(true);
     expect(canRequest({...retry,state:'paused'})).toBe(false);
     expect(canRequest({...retry,state:'terminal'})).toBe(false);
     expect(canRequest({...retry,contentReady:false})).toBe(false);
@@ -50,7 +65,7 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...c,remainingSeconds:null})).toBe(false);
     expect(canRequest({...c,lastRequestSeconds:null})).toBe(false);
     expect(canRequest({...c,elapsedSeconds:74})).toBe(false);
-    expect(canRequest({...c,conversationStartsLastHour:12})).toBe(false);
+    expect(canRequest({...c,conversationStartsLastHour:12})).toBe(true);
     expect(canRequest({...c,globalInFlight:2})).toBe(false);
     expect(canRequest({...c,state:'paused'})).toBe(false);
     expect(canRequest({...c,state:'waiting',statusEvidenceArrived:false,eventAtSeconds:60})).toBe(false);
@@ -62,10 +77,10 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...base,state:'paused',statusEvidenceArrived:true,eventAtSeconds:5})).toBe(false);
     expect(canRequest({...base,state:'waiting',statusEvidenceArrived:true,eventAtSeconds:null})).toBe(false);
   });
-  it('applies conversation and in-flight limits even for a fresh goal',()=>{
+  it('retains concurrency limits without blocking a fresh goal on historical call counts',()=>{
     expect(canRequest({...base,goalInFlight:true})).toBe(false);
     expect(canRequest({...base,globalInFlight:2})).toBe(false);
-    expect(canRequest({...base,conversationStartsLastHour:12})).toBe(false);
+    expect(canRequest({...base,conversationStartsLastHour:120})).toBe(true);
     expect(canRequest({...base,globalInFlight:1,conversationStartsLastHour:11})).toBe(true);
   });
   it('fails closed on invalid clocks and counters',()=>{

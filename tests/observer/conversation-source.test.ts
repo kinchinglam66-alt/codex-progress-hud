@@ -3,6 +3,60 @@ import {createConversationSource} from '../../src/observer/conversation-source.j
 import type {ReadBatch} from '../../src/observer/conversation-record.js';
 
 const query={goalSummary:null,activeSeconds:15,runtime:'running' as const,previousEstimate:null};
+it('keeps authenticated turn content across unattributed records without importing those records',async()=>{
+  const f=setup();f.set({records:[
+    {id:'start',turnId:'current',atMs:0,kind:'runtime',runtime:'running'},
+    {id:'unattributed',turnId:null,atMs:1,kind:'user',text:'Unverified instruction'},
+    ...records.slice(1),
+  ],caughtUp:true,partialLine:false,reset:false});
+  f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  try{
+    expect(f.source.goals.inspect?.('key','opaque-current',query)).toMatchObject({ready:true,currentActionId:'call'});
+    expect(f.source.goals.read('key','opaque-current',query)?.input.messages.map(m=>m.text)).toEqual(['Continue','sleep 100']);
+  }finally{await f.source.close();}
+});
+
+it('never rejoins current-turn records beyond a different authenticated turn',async()=>{
+  const f=setup();f.set({records:[...records,
+    {id:'future',turnId:'future',atMs:3000,kind:'user',text:'Another task'},
+    {id:'late',turnId:'current',atMs:4000,kind:'assistant',assistantPhase:'final',text:'Late final'},
+  ],caughtUp:true,partialLine:false,reset:false});
+  f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  try{
+    expect(f.source.goals.inspect?.('key','opaque-current',query)?.finalAvailable).toBe(false);
+    expect(f.source.goals.read('key','opaque-current',query)?.input.messages.map(m=>m.text)).toEqual(['Build a report','Continue','sleep 100']);
+  }finally{await f.source.close();}
+});
+
+it('marks the first partial loading read uncertain without needing a prior execution cache',async()=>{
+  const f=setup();f.set({records:[],caughtUp:false,partialLine:true,reset:false});
+  f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'unknown'});
+  await f.source.close();
+});
+it('uses same-turn final/runtime evidence and not quiet duration for execution',async()=>{
+  const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'running'});
+  f.set({records:[{id:'result',turnId:'current',atMs:3000,kind:'tool_result',actionId:'call'},
+    {id:'final',turnId:'current',atMs:4000,kind:'assistant',assistantPhase:'final',text:'Done'}],caughtUp:true,partialLine:false,reset:false});
+  f.time(5500);f.source.tick();await f.flush();
+  expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'waiting'});
+  f.set({records:[{id:'resume',turnId:'current',atMs:5000,kind:'runtime',runtime:'running'}],caughtUp:true,partialLine:false,reset:false});
+  f.time(10500);f.source.tick();await f.flush();
+  expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'running'});
+  await f.source.close();
+});
+it('does not use another turn final or incomplete records to claim the current turn ended',async()=>{
+  const f=setup();
+  f.set({records:[...records,{id:'future-final',turnId:'future',atMs:3000,kind:'assistant',assistantPhase:'final',text:'done'}],
+    caughtUp:true,partialLine:false,reset:false});
+  f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'running'});
+  f.set({records:[],caughtUp:true,partialLine:true,reset:false});
+  f.time(5500);f.source.tick();await f.flush();
+  expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'unknown',boundaryMs:500});
+  await f.source.close();
+});
 const records:ReadBatch['records']=[{id:'old',turnId:'old',atMs:0,kind:'user',text:'Build a report'},
   {id:'u',turnId:'current',atMs:1000,kind:'user',text:'Continue'},
   {id:'call',turnId:'current',atMs:2000,kind:'tool_start',actionId:'call',text:'sleep 100'}];

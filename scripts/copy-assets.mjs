@@ -15,6 +15,9 @@ for(const entry of await readdir("dist/estimation/assets",{withFileTypes:true}))
 await Promise.all([
   cp("src/ui/index.html", "dist/ui/index.html"),
   cp("src/ui/styles.css", "dist/ui/styles.css"),
+  cp("src/ui/settings.html", "dist/ui/settings.html"),
+  cp("src/ui/settings.css", "dist/ui/settings.css"),
+  cp("src/ui/settings-preload.cjs", "dist/ui/settings-preload.cjs"),
   cp("hooks/hooks.json", "dist/hooks/hooks.json"),
   cp("scripts/launch-hook.ps1", "dist/scripts/launch-hook.ps1"),
   cp("src/estimation/assets/instructions.md", "dist/estimation/assets/instructions.md"),

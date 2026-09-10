@@ -16,7 +16,7 @@ it('requires explicit current one-use confirmation, not just fresh evidence', ()
   expect(gate.authorized()).toBe(true);
 });
 
-it.each(['accountFingerprint', 'routeFingerprint', 'assetsFingerprint'] as const)('invalidates before callback reentry when %s changes', field => {
+it.each(['accountFingerprint'] as const)('invalidates before callback reentry when %s changes', field => {
   const observed: boolean[] = [];
   const gate = createObserverConsentGate({now: () => 0, onInvalidate() {observed.push(gate.authorized());}});
   gate.update(proof); gate.accept(gate.offer()!);
@@ -25,10 +25,18 @@ it.each(['accountFingerprint', 'routeFingerprint', 'assetsFingerprint'] as const
   expect(gate.authorized()).toBe(false);
 });
 
+it('does not invalidate remembered authorization for transient route or asset fingerprints', () => {
+  const gate = createObserverConsentGate({now: () => 0, onInvalidate() {throw Error('unexpected');}});
+  gate.update(proof); gate.accept(gate.offer()!);
+  gate.update({...proof, routeFingerprint: 'd'.repeat(64)});
+  gate.update({...proof, assetsFingerprint: 'e'.repeat(64)});
+  expect(gate.authorized()).toBe(true);
+});
+
 it('rejects stale offers and cannot revive revoked approval with old evidence', () => {
   const gate = createObserverConsentGate({now: () => 0, onInvalidate() {}});
   gate.update(proof); const old = gate.offer()!;
-  gate.update({...proof, routeFingerprint: 'd'.repeat(64)});
+  gate.update({...proof, accountFingerprint: 'd'.repeat(64)});
   expect(gate.accept(old)).toBe(false);
   const current = gate.offer()!;
   gate.revoke(); gate.update(proof);

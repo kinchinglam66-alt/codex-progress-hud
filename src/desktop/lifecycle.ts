@@ -41,6 +41,8 @@ import {
 import { createTaskMutationController } from "../ui/task-mutations.js";
 import { createConversationNameService } from '../server/conversation-name-service.js';
 import {loadDesktopObserverPilot} from './observer-pilot.js';
+import {createObserverSettingsController} from './observer-settings.js';
+import {createSafeStorageConsentProtection} from './consent-protection.js';
 
 export function scheduleAfterReady(
   ready: Promise<void>,
@@ -100,11 +102,17 @@ export interface DesktopTrayImage {
 
 export interface DesktopDependencies {
   observerWorkers?: ProgressServerOptions['observerWorkers'];
+  observerSchedulerRecovery?: ProgressServerOptions['observerSchedulerRecovery'];
   onObserverObservation?: ProgressServerOptions['onObserverObservation'];
   observerSetup?: {
     start(signal: AbortSignal): Promise<unknown>;
     disable(): void;
+    revokeConsent?(): Promise<void>;
     close(): Promise<void>;
+  };
+  settingsController?: {
+    open(): Promise<void>;
+    dispose(): Promise<void>;
   };
   app: DesktopAppLike;
   createWindowController(options: { quitting(): boolean; onHideSelectedTask?(taskId: string): void | Promise<void> }): DesktopWindowController;
@@ -191,11 +199,25 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     maxFiles: 3
   });
   const observer = await loadDesktopObserverPilot({dataDirectory,resourcesDirectory:process.resourcesPath,
-    dialog:electron.dialog,environment:process.env}).catch(()=>{
+    dialog:electron.dialog,environment:process.env,consentProtection:createSafeStorageConsentProtection(electron.safeStorage)}).catch(()=>{
       console.warn('OBSERVER_PILOT_SETUP_UNAVAILABLE');return null;
     });
+  const settingsController = createObserverSettingsController({
+    createWindow: windowOptions => new electron.BrowserWindow(windowOptions as Electron.BrowserWindowConstructorOptions) as unknown as import('./observer-settings.js').SettingsBrowserWindowLike,
+    ipcMain: electron.ipcMain,
+    dialog: electron.dialog,
+    uiPath: resolve(currentDirectory, '../ui/settings.html'),
+    preloadPath: resolve(currentDirectory, '../ui/settings-preload.cjs'),
+    quitting: () => false,
+    readStatus: () => observer?.recovery.status() ?? {state: 'unconfigured' as const, revision: 0, knownTokens: 0, unknown: 0, recoveryAllowed: false},
+    preflight: () => observer?.recovery.preflight() ?? Promise.resolve({state: 'unconfigured' as const, revision: 0, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
+    binding: () => observer?.recovery.binding(),
+    confirm: revision => observer?.recovery.confirm(revision) ?? Promise.reject(new Error('SETTINGS_UNAVAILABLE')),
+    revokeConsent: () => observer?.revokeConsent() ?? Promise.reject(new Error('SETTINGS_UNAVAILABLE')),
+  });
   return {
-    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,onObserverObservation:observer.onObservation}:{}),
+    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,observerSchedulerRecovery:observer.schedulerRecovery,onObserverObservation:observer.onObservation}:{}),
+    ...(settingsController ? {settingsController} : {}),
     app: electron.app,
       createWindowController: ({ quitting, onHideSelectedTask }) => new WindowController({
         createWindow: (options: BrowserWindowOptionsLike) =>
@@ -397,6 +419,7 @@ export async function runDesktop(
           await Promise.all([resolved.observerSetup?.close(), observerSetupPending]);
         } catch { throw new Error("OBSERVER_SETUP_CLOSE_FAILED"); }
       }],
+      ["settings dispose", () => resolved.settingsController?.dispose()],
       // If explicit release failed, keep the listener reachable (and returning
       // SHUTTING_DOWN) until process exit releases both resources atomically.
       ...(singletonReleased
@@ -531,6 +554,7 @@ export async function runDesktop(
         assertStarting();
         progressServer = resolved.createProgressServer({
           ...(resolved.observerWorkers?{observerWorkers:resolved.observerWorkers}:{}),
+          ...(resolved.observerSchedulerRecovery?{observerSchedulerRecovery:resolved.observerSchedulerRecovery}:{}),
           ...(resolved.onObserverObservation?{onObserverObservation:resolved.onObserverObservation}:{}),
           port: resolved.port,
           awaitInitialLease: launchReason.kind === "manager",
@@ -544,6 +568,7 @@ export async function runDesktop(
             quitting = true;
             quit();
           },
+          ...(resolved.settingsController === undefined ? {} : {openSettings: () => resolved.settingsController!.open()}),
           ...(resolved.leaseGraceMs === undefined ? {} : { leaseGraceMs: resolved.leaseGraceMs }),
           runIfGeneration: (generation, desiredState, operation, signal) =>
             resolved.stateStore.runIfGeneration(generation, desiredState, operation, { signal })
@@ -692,6 +717,7 @@ export async function runDesktop(
               operationalEvents: [...recentOperationalEvents]
             });
           },
+          ...(resolved.settingsController === undefined ? {} : {onSettings: () => resolved.settingsController!.open()}),
           onExit: async () => {
             const { generation } = await resolved.stateStore.setDesiredState("off");
             await resolved.stateStore.runIfGeneration(generation, "off", () => {

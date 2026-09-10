@@ -5,6 +5,7 @@ interface Source {
   remove(id:string):void;close():Promise<void>;
 }
 export interface ContextSnapshot {
+  lastSuccessfulReadAt?:number;
   records:ConversationRecord[];revision:number;sourceEpoch:number;
   health:'loading'|'ready'|'error';historyComplete:boolean;partialLine:boolean;
   reason:string|null;
@@ -29,12 +30,27 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
   const snapshot=(key:string):ContextSnapshot|null=>{
     const e=entries.get(key);if(!e)return null;
     return {records:e.records.map(r=>({...r})),revision:e.revision,sourceEpoch:e.sourceEpoch,
+      ...(e.lastSuccessfulReadAt===undefined?{}:{lastSuccessfulReadAt:e.lastSuccessfulReadAt}),
       health:e.health,historyComplete:e.historyComplete,partialLine:e.partialLine,reason:e.reason};
   };
   const start=(key:string,e:Entry)=>{
     const controller=new AbortController();e.flight=controller;inFlight++;
     entries.delete(key);entries.set(key,e);
     const current=()=>!closed&&entries.get(key)===e&&!controller.signal.aborted;
+    let released=false,deadline:ReturnType<typeof setTimeout>|undefined;
+    const releaseFlight=()=>{
+      if(released)return;released=true;inFlight--;
+      if(deadline!==undefined)clearTimeout(deadline);
+      if(e.flight===controller)delete e.flight;
+    };
+    controller.signal.addEventListener('abort',releaseFlight,{once:true});
+    deadline=setTimeout(()=>{
+      if(!current())return;
+      e.health='error';e.reason='source_read_timeout';e.failures++;
+      e.due=clock()+([1000,2000,5000][Math.min(2,e.failures-1)]??5000);
+      controller.abort();notify(key);
+    },15000);
+    deadline.unref?.();
     let read:Promise<ReadBatch>;
     try{read=options.source.read(e.hostId,controller.signal);}catch(error){read=Promise.reject(error);}
     const operation=read.then(batch=>{
@@ -42,11 +58,16 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       if(batch.reset)e.goalRetentionFailed=false;
       if(e.goalRetentionFailed)throw Error('SOURCE_GOAL_LIMIT');
       const previousHealth=e.health;
-      const records=batch.reset?[]:[...e.records];
+      const previousPartial=e.partialLine,previousComplete=e.historyComplete;
+      let records=batch.reset?[]:[...e.records];
       const known=new Set(records.map(r=>r.id));
       let changed=batch.reset;
       for(const record of batch.records){if(!known.has(record.id)){known.add(record.id);records.push({...record});changed=true;}}
-      let bytes=Buffer.byteLength(JSON.stringify(records));let trimmed=false;
+      // Exact JSON array size, without repeatedly serializing the entire
+      // history for every discarded record during catch-up.
+      const sizes=records.map(record=>Buffer.byteLength(JSON.stringify(record)));
+      let bytes=2+sizes.reduce((sum,size)=>sum+size,0)+Math.max(0,records.length-1);
+      let trimmed=false;
       const firstUser=records.find(r=>r.kind==='user');
       let latestUser:ConversationRecord|undefined,currentUser:ConversationRecord|undefined;
       for(const record of records){
@@ -55,11 +76,13 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
         if(record.turnId!==null&&(options.turnKeyFor?options.turnKeyFor(e.hostId,record.turnId):record.turnId)===e.turnKey)currentUser=record;
       }
       const protectedUsers=new Set([firstUser,latestUser,currentUser]);
-      while(bytes>256*1024&&records.length){
-        const index=records.findIndex(r=>!protectedUsers.has(r));
-        if(index<0){e.goalRetentionFailed=true;throw Error('SOURCE_GOAL_LIMIT');}
-        records.splice(index,1);trimmed=true;bytes=Buffer.byteLength(JSON.stringify(records));
-      }
+      let retainedCount=records.length;
+      records=records.filter((record,index)=>{
+        if(bytes<=256*1024||protectedUsers.has(record))return true;
+        bytes-=sizes[index]!+(retainedCount>1?1:0);
+        retainedCount--;trimmed=true;return false;
+      });
+      if(bytes>256*1024){e.goalRetentionFailed=true;throw Error('SOURCE_GOAL_LIMIT');}
       if(totalBytes-e.bytes+bytes>8*1024*1024)throw Error('SOURCE_LIMIT');
       totalBytes+=bytes-e.bytes;e.bytes=bytes;e.records=records;
       if(batch.reset)e.sourceEpoch++;
@@ -68,15 +91,17 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
         ('historyTruncated' in batch && batch.historyTruncated===true);
       e.historyComplete=batch.caughtUp&&!e.historyTrimmed;
       e.partialLine=batch.partialLine;e.health=batch.caughtUp?'ready':'loading';e.reason=null;e.failures=0;
-      e.due=clock()+(batch.caughtUp?5000:0);
-      if(changed||previousHealth!==e.health)notify(key);
+      const readAt=clock();
+      if(batch.caughtUp&&!batch.partialLine)e.lastSuccessfulReadAt=readAt;
+      e.due=readAt+(batch.caughtUp?5000:0);
+      if(changed||previousHealth!==e.health||previousPartial!==e.partialLine||previousComplete!==e.historyComplete)notify(key);
     }).catch(()=>{
       if(!current())return;
       e.health='error';e.reason='source_unavailable';e.failures++;
       e.due=clock()+([1000,2000,5000][Math.min(2,e.failures-1)]??5000);notify(key);
     }).finally(()=>{
-      if(e.flight===controller)delete e.flight;
-      inFlight--;operations.delete(operation);
+      releaseFlight();controller.signal.removeEventListener('abort',releaseFlight);
+      operations.delete(operation);
     });
     e.operation=operation;operations.add(operation);
   };
@@ -93,10 +118,24 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
     changed(key:string):void {const e=entries.get(key);if(e&&!closed)e.due=Math.min(e.due,clock()+500);},
     setActive(key:string,active:boolean):void {const e=entries.get(key);if(!e||closed)return;e.active=active;if(active)e.due=clock()+500;},
     snapshot,remove,
+    health(key:string):ContextSnapshot['health']|'missing' {return entries.get(key)?.health??'missing';},
     sourceEpoch(key:string):number|null {return entries.get(key)?.sourceEpoch??null;},
     tick():void {
       if(closed)return;const now=clock();
-      for(const [key,e] of [...entries]){if(inFlight>=2)break;if(e.active&&!e.flight&&now>=e.due)start(key,e);}
+      for(const [key,e] of [...entries]){
+        if(inFlight>=2)break;
+        if(e.active&&!e.flight&&now>=e.due){
+          // Logical timeout cannot guarantee that an OS read stopped. Bound
+          // all unresolved reads, including timed-out ones, to four globally.
+          if(operations.size>=4){
+            if(e.health!=='error'||e.reason!=='source_read_capacity'){
+              e.health='error';e.reason='source_read_capacity';notify(key);
+            }
+            continue;
+          }
+          start(key,e);
+        }
+      }
     },
     close():Promise<void> {
       if(closing)return closing;

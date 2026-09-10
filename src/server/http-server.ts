@@ -67,6 +67,7 @@ export interface ProgressServerControls {
   health(): HudHealth;
   showWindow(): void | Promise<void>;
   hideWindow(): void | Promise<void>;
+  openSettings?(): void | Promise<void>;
   requestShutdown(): void | Promise<void>;
 }
 
@@ -96,6 +97,7 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   passiveGoals?: PassiveGoals;
   /** Owned, authorized workers only. Omission leaves live observation unconfigured. */
   observerWorkers?: readonly ObserverWorker[];
+  observerSchedulerRecovery?: {attachScheduler(scheduler: Pick<ObserverScheduler, 'prepareRecovery' | 'restoreRecovery'>): void};
   /** Explicit selected local source; omission preserves the legacy test adapter. */
   observerSessionsRoot?:string;
   onObserverObservation?: (record:ObserverObservation)=>void;
@@ -337,7 +339,7 @@ export function createProgressServer(options: ProgressServerOptions) {
       turnKeyFor:(hostId,turnId)=>{
         if(sourceToken===undefined)throw Error('SOURCE_IDENTITY_UNAVAILABLE');
         return `turn_${createHmac('sha256',sourceToken).update(`${hostId}\u0000${turnId}`).digest('base64url')}`;
-      },onChange:key=>{if(!shuttingDown){passiveObserver?.changed(key,'activity');store.refreshPresentation();}}});
+      },onChange:key=>{if(!shuttingDown){passiveGoals.reconcileSource(key,goalNow());passiveObserver?.changed(key,'activity');store.refreshPresentation();}}});
   const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals);
   const pruneSources=()=>{
     const at=goalNow();selectedSource?.prune(key=>{
@@ -354,6 +356,7 @@ export function createProgressServer(options: ProgressServerOptions) {
     ...(options.onObserverObservation?{onObservation:options.onObserverObservation}:{}),
     onChange: () => {if (!shuttingDown) {pruneSources();store.refreshPresentation();}}
   });
+  if (passiveObserver !== undefined) options.observerSchedulerRecovery?.attachScheduler(passiveObserver);
   let observerTimer: ReturnType<typeof setInterval>|undefined;
   let sourceTimer:ReturnType<typeof setInterval>|undefined;
   const leaseStore = options.leaseStore ?? new LeaseStore();
@@ -1054,6 +1057,7 @@ export function createProgressServer(options: ProgressServerOptions) {
         request.method === "POST" &&
         (url.pathname === "/api/window/show" ||
           url.pathname === "/api/window/hide" ||
+          url.pathname === "/api/window/settings" ||
           url.pathname === "/api/shutdown")
       ) {
         if (!hasJsonMediaType(request)) {
@@ -1066,7 +1070,9 @@ export function createProgressServer(options: ProgressServerOptions) {
             ? options.showWindow
             : url.pathname === "/api/window/hide"
               ? options.hideWindow
-              : options.requestShutdown;
+              : url.pathname === "/api/window/settings"
+                ? options.openSettings
+                : options.requestShutdown;
         if (callback === undefined) throw new Error("control callback is unavailable");
         const desiredState = url.pathname === "/api/shutdown" &&
           request.headers[COMPATIBILITY_CLOSE_HEADER] !== "true" ? "off" : "on";

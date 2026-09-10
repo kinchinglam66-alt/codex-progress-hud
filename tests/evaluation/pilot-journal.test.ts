@@ -47,7 +47,7 @@ it('persists only allowed trigger codes and finite active-time anchors',async()=
   try{
     const journal=createPilotJournal(directory);
     const base={kind:'request' as const,at:300000,key:'private',generation:1,activeSeconds:300,runtime:'running',version:1};
-    for(const triggerReason of ['initial','important_event','status_evidence','overdue','periodic','pre_dispatch_retry']){
+    for(const triggerReason of ['initial','important_event','status_evidence','overdue','periodic','pre_dispatch_retry','near_expiry']){
       journal.record({...base,...{triggerReason,lastRequestActiveSeconds:15,eligibleActiveSeconds:315,secret:'PRIVATE_CONTEXT'}});
     }
     journal.record({...base,...{triggerReason:'PRIVATE_REASON',lastRequestActiveSeconds:Infinity,eligibleActiveSeconds:-1}});
@@ -55,11 +55,11 @@ it('persists only allowed trigger codes and finite active-time anchors',async()=
     const names=await readdir(directory);
     const raw=await readFile(resolve(directory,names[0]!),'utf8');
     const rows=raw.trim().split('\n').map(line=>JSON.parse(line));
-    expect(rows.slice(0,6).map(row=>row.triggerReason)).toEqual(['initial','important_event','status_evidence','overdue','periodic','pre_dispatch_retry']);
+    expect(rows.slice(0,7).map(row=>row.triggerReason)).toEqual(['initial','important_event','status_evidence','overdue','periodic','pre_dispatch_retry','near_expiry']);
     expect(rows[0]).toMatchObject({lastRequestActiveSeconds:15,eligibleActiveSeconds:315});
-    expect(rows[6]).not.toHaveProperty('triggerReason');
-    expect(rows[6]).not.toHaveProperty('lastRequestActiveSeconds');
-    expect(rows[6]).not.toHaveProperty('eligibleActiveSeconds');
+    expect(rows[7]).not.toHaveProperty('triggerReason');
+    expect(rows[7]).not.toHaveProperty('lastRequestActiveSeconds');
+    expect(rows[7]).not.toHaveProperty('eligibleActiveSeconds');
     expect(raw).not.toMatch(/PRIVATE_REASON|PRIVATE_CONTEXT/);
   }finally{await rm(directory,{recursive:true,force:true});}
 });

@@ -47,11 +47,14 @@ export function createConversationSource(options:OwnerOptions & {
     // Bound the snapshot at the end of the authenticated turn. A later on-disk
     // turn cannot silently change which goal this attachment sends to inference.
     let end=start;
-    while(end<snapshot.records.length&&matches(snapshot.records[end]!.turnId))end++;
+    // Unattributed records are not a new authenticated turn, but must not be
+    // sent as if they belonged to this one. Only an explicit different turn
+    // closes the boundary; later same-turn records beyond it remain excluded.
+    while(end<snapshot.records.length&&(snapshot.records[end]!.turnId===null||matches(snapshot.records[end]!.turnId)))end++;
     const floor=query.contextFloorTurnKey===undefined?0:snapshot.records.findIndex(record=>record.turnId!==null&&
       options.turnKeyFor(binding.hostId,record.turnId)===query.contextFloorTurnKey);
-    const records=snapshot.records.slice(floor<0?start:floor,end);
-    const current=snapshot.records.slice(start,end),actions=new Map<string,boolean>();
+    const records=snapshot.records.slice(floor<0?start:floor,end).filter(record=>record.turnId!==null);
+    const current=snapshot.records.slice(start,end).filter(record=>matches(record.turnId)),actions=new Map<string,boolean>();
     for(const record of current){
       if(record.kind==='tool_start'&&record.actionId)actions.set(record.actionId,true);
       if(record.kind==='tool_result'&&record.actionId)actions.delete(record.actionId);
@@ -101,7 +104,31 @@ export function createConversationSource(options:OwnerOptions & {
     return {paceBatches,measurementEpoch:observeHealth(key)};
   };
   const measurementEpoch=(key:string):number|null=>bindings.has(key)?observeHealth(key):null;
-  const goals:GoalContextSource={epoch,measurementEpoch,inspect(key,turnKey,query){
+  const executionCache=new Map<string,{identity:string;boundaryMs:number;trustedAt:number}>();
+  const goals:GoalContextSource={epoch,measurementEpoch,health:owner.health,execution(key,turnKey){
+    const snapshot=owner.snapshot(key),binding=bindings.get(key);
+    if(!binding||binding.turnKey!==turnKey||!snapshot)return null;
+    const previous=executionCache.get(key),now=options.now();
+    const trustedAt=snapshot.lastSuccessfulReadAt??previous?.trustedAt;
+    if(snapshot.health==='loading')return previous||snapshot.partialLine?{state:'unknown',identity:`${turnKey}:loading:${snapshot.sourceEpoch}`,
+      ...(trustedAt===undefined?{}:{boundaryMs:trustedAt})}:null;
+    if(snapshot.health==='error'||snapshot.partialLine)return {state:'unknown',identity:`${turnKey}:unavailable:${snapshot.sourceEpoch}`,
+      ...(trustedAt===undefined?{}:{boundaryMs:trustedAt})};
+    const selected=select(key,turnKey,{goalSummary:null,activeSeconds:0,runtime:'running',previousEstimate:null});
+    if(!selected)return {state:'unknown',identity:`${turnKey}:missing:${snapshot.sourceEpoch}`,boundaryMs:previous?.trustedAt??now};
+    // Terminal evidence is not undone by a late tool result. Only a subsequent
+    // actual start/runtime event establishes another running interval.
+    const record=selected.current.filter(r=>r.kind==='runtime'||r.kind==='user'||r.kind==='tool_start'||
+      (r.kind==='assistant'&&r.assistantPhase==='final')).at(-1);
+    if(!record)return null;
+    const state=record.kind==='runtime'?(record.runtime??'unknown'):
+      record.kind==='assistant'?(selected.actions.size===0?'waiting':'unknown'):'running';
+    const identity=`${selected.currentEpoch}:${turnKey}:${record.id}:${state}`;
+    const boundaryMs=previous?.identity===identity?previous.boundaryMs:
+      Math.max(0,Math.floor(now-Math.max(0,options.wallNow()-record.atMs)));
+    executionCache.set(key,{identity,boundaryMs,trustedAt:now});
+    return {state,identity,boundaryMs};
+  },inspect(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
     return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,currentActionId:[...selected.actions.keys()].at(-1)??null,
       finalAvailable:selected.finalAvailable,
@@ -133,14 +160,15 @@ export function createConversationSource(options:OwnerOptions & {
     changed:owner.changed,setActive:owner.setActive,tick:owner.tick,snapshot:owner.snapshot,
     stop(key:string):void {
       const binding=bindings.get(key);if(!binding)return;
+      executionCache.delete(key);
       owner.remove(key);invalidateScopes(key);owner.attach(key,binding.hostId,binding.turnKey);owner.setActive(key,false);
       binding.epoch=allocate();binding.sourceEpoch=0;
     },
-    remove(key:string):void {owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);},
+    remove(key:string):void {owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);},
     prune(retain:(key:string)=>boolean):void {
-      for(const key of bindings.keys())if(!retain(key)){owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);}
+      for(const key of bindings.keys())if(!retain(key)){owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);}
     },
     measurementEpoch,
-    async close():Promise<void>{bindings.clear();scopesByKey.clear();measurementEpochs.clear();await owner.close();}
+    async close():Promise<void>{bindings.clear();scopesByKey.clear();measurementEpochs.clear();executionCache.clear();await owner.close();}
   };
 }

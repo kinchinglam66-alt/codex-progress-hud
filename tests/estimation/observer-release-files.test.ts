@@ -4,6 +4,14 @@ import {observerReleaseFiles} from '../../src/estimation/observer-release-files.
 import {observerAssetPins} from '../../src/estimation/asset-pins.js';
 import {codexRuntimeProfiles} from '../../src/estimation/codex-runtime-profiles.js';
 
+it('admits the verified September 9 runtime build only with its matching version and pin',()=>{
+  const pin='ccdc9eb9dd71fbcfb03ad42c4eca2b0d6ff6fbd32ebe9416550e6244561e559b';
+  const args=[resolve('resources'),resolve('codex.exe'),resolve('empty')] as const;
+  expect(observerReleaseFiles(...args,'0.153.4',pin).executableSha256).toBe(pin);
+  expect(()=>observerReleaseFiles(...args,'0.153.3',pin)).toThrow();
+  expect(()=>observerReleaseFiles(...args,'0.153.4',pin.slice(0,-1)+'0')).toThrow();
+});
+
 it('selects only an explicitly supported same-version build hash',()=>{
   const hash='e5aa76d19c7c94e2e9ef9b707d590206a73ac0e97c8ddc8382181242494bef75';
   expect(observerReleaseFiles(resolve('resources'),resolve('codex.exe'),resolve('empty'),'0.153.4',hash).executableSha256).toBe(hash);

@@ -1,4 +1,4 @@
-export type TriggerReason = 'initial'|'important_event'|'status_evidence'|'overdue'|'periodic'|'pre_dispatch_retry';
+export type TriggerReason = 'initial'|'important_event'|'status_evidence'|'near_expiry'|'overdue'|'periodic'|'pre_dispatch_retry';
 
 export type RequestBlockReason = 'invalid_clock'|'invalid_counter'|'context_missing'|'request_in_flight'
   |'no_new_information'|'no_active_progress'|'global_concurrency_limit'|'hourly_limit'|'runtime_ineligible'
@@ -18,6 +18,7 @@ export interface RequestContext {
   activeSeconds?:number;
   lastRequestActiveSeconds?:number|null;
   overdueActionRecheck?:boolean;
+  nearExpiryRecheck?:boolean;
   overdueAlreadyChecked?:boolean;
   overdueEligibleActiveSeconds?:number|null;
   preDispatchRetry?:boolean;
@@ -75,7 +76,6 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
 
   if(input.state!=='running'&&!statusEvent)return decision('runtime_ineligible',null,null,eligibleActiveSeconds);
   if(input.globalInFlight>=2)return decision('global_concurrency_limit',null,null,eligibleActiveSeconds);
-  if(input.conversationStartsLastHour>=12)return decision('hourly_limit',null,null,eligibleActiveSeconds);
   if(input.elapsedSeconds<15)return decision('initial_delay',null,15,eligibleActiveSeconds);
   if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<60)
     return decision('cooldown',null,input.lastRequestSeconds+60,eligibleActiveSeconds);
@@ -89,9 +89,11 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
   if(input.preDispatchRetry===true)return decision(null,'pre_dispatch_retry',null,eligibleActiveSeconds);
   if(statusEvent)return decision(null,'status_evidence',null,eligibleActiveSeconds);
   if(importantEvent)return decision(null,'important_event',null,eligibleActiveSeconds);
+  if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
+  if(input.nearExpiryRecheck===true&&input.remainingSeconds!==null&&input.remainingSeconds>0)
+    return decision(null,'near_expiry',null,input.activeSeconds??null);
   if(input.overdueActionRecheck===true&&input.remainingSeconds===0)
     return decision(null,'overdue',null,input.overdueEligibleActiveSeconds??input.activeSeconds??null);
-  if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
   if(!input.hasNewInformation&&!activeProgress)
     return decision(activeClock?'no_active_progress':'no_new_information',null,null,eligibleActiveSeconds);
   if(activeClock) {

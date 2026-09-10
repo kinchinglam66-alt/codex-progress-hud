@@ -718,6 +718,7 @@ export function createLocalSessionReader({root}: {root: string}): {
   const requestedRoot = resolve(root);
   const cursors = new Map<string, Cursor>();
   const locks = new Map<string, Promise<ReadBatch>>();
+  const pendingReads = new Set<Promise<ReadBatch>>();
   let closed = false;
 
   async function canonicalRoot(signal: AbortSignal): Promise<string> {
@@ -824,6 +825,7 @@ export function createLocalSessionReader({root}: {root: string}): {
     checkCancelled(signal);
     if (!UUID.test(threadId)) throw new LocalSessionSourceError("source_invalid_thread");
     const candidate = await discover(threadId, signal);
+    checkCancelled(signal);
     let cursor = cursors.get(threadId);
     let reset = false;
     if (cursor !== undefined && (!samePath(cursor.path, candidate.path) ||
@@ -841,7 +843,9 @@ export function createLocalSessionReader({root}: {root: string}): {
     let file: FileHandle | undefined;
     try {
       file = await open(candidate.path, "r");
+      checkCancelled(signal);
       const stats = await file.stat();
+      checkCancelled(signal);
       if(!sameIdentity(candidate.identity,identityOf(stats)))throw new LocalSessionSourceError('source_unsafe_path');
       if(stats.size===0){
         Object.assign(cursor,{size:0,offset:0,validation:'',scanOffset:0,scanValidation:'',
@@ -851,6 +855,7 @@ export function createLocalSessionReader({root}: {root: string}): {
       // Discovery opens a separate handle. Bind the actual content read to its
       // own bounded metadata check; replacement is not permission to read a peer.
       assertSessionIdentity(await firstLine(file,signal),threadId);
+      checkCancelled(signal);
       const truncated = stats.size < cursor.size || stats.size < cursor.scanOffset;
       if (!sameIdentity(cursor.identity, identityOf(stats)) || truncated ||
           (cursor.forceResetOnGrowth && stats.size > cursor.offset)) {
@@ -862,7 +867,9 @@ export function createLocalSessionReader({root}: {root: string}): {
       } else {
         const validationOffset = cursor.skippingOversized ? cursor.scanOffset : cursor.offset;
         const validation = cursor.skippingOversized ? cursor.scanValidation : cursor.validation;
-        if (validationOffset > 0 && validation !== await cursorValidation(file, validationOffset, signal)) {
+        const actualValidation = validationOffset > 0 ? await cursorValidation(file, validationOffset, signal) : validation;
+        checkCancelled(signal);
+        if (validationOffset > 0 && validation !== actualValidation) {
           reset = true;
           cursor = {path: candidate.path, identity: identityOf(stats), size: 0, offset: 0, validation: "", seen: new Set(),
             seenOrder: [], activeTurnId: null, forceResetOnGrowth: false, scanOffset: 0,
@@ -880,6 +887,7 @@ export function createLocalSessionReader({root}: {root: string}): {
       const result = await runPass(file, cursor, threadId, signal);
       assertSessionIdentity(await firstLine(file,signal),threadId);
       const endStats = await file.stat();
+      checkCancelled(signal);
       if (!sameIdentity(cursor.identity, identityOf(endStats)) || endStats.size < result.scanOffset) {
         cursors.set(threadId, {path: candidate.path, identity: identityOf(endStats), size: 0, offset: 0,
           validation: "", seen: new Set(), seenOrder: [], activeTurnId: null, forceResetOnGrowth: true,
@@ -914,10 +922,21 @@ export function createLocalSessionReader({root}: {root: string}): {
   }
 
   function read(threadId: string, signal: AbortSignal): Promise<ReadBatch> {
+    if(closed)return Promise.reject(new LocalSessionSourceError('source_closed'));
+    if(signal.aborted)return Promise.reject(new LocalSessionSourceError('source_cancelled'));
+    if(pendingReads.size>=4)return Promise.reject(new LocalSessionSourceError('source_limit'));
     const previous = locks.get(threadId);
-    const current = (previous?.catch(() => undefined) ?? Promise.resolve()).then(() => readOne(threadId, signal));
+    const current = (previous?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
+      const batch=await readOne(threadId,signal);checkCancelled(signal);return batch;
+    });
     locks.set(threadId, current);
+    pendingReads.add(current);
+    const cancel=()=>{
+      if(locks.get(threadId)===current){locks.delete(threadId);cursors.delete(threadId);}
+    };
+    signal.addEventListener('abort',cancel,{once:true});
     void current.finally(() => {
+      signal.removeEventListener('abort',cancel);pendingReads.delete(current);
       if (locks.get(threadId) === current) locks.delete(threadId);
     }).catch(() => undefined);
     return current;
@@ -931,7 +950,7 @@ export function createLocalSessionReader({root}: {root: string}): {
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      await Promise.allSettled([...locks.values()]);
+      await Promise.allSettled([...pendingReads]);
       locks.clear();
       cursors.clear();
     }

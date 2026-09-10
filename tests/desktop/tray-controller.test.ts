@@ -2,6 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import { createTrayController, type TrayMenuItem } from "../../src/desktop/tray-controller.js";
 
 describe("createTrayController", () => {
+  it("exposes a settings entry without coupling it to HUD visibility", async () => {
+    const template: TrayMenuItem[] = [];
+    const onSettings = vi.fn();
+    createTrayController({
+      tray: { setContextMenu: vi.fn(), destroy: vi.fn() },
+      buildMenu: (received) => { template.push(...received); return {}; },
+      onShow: vi.fn(), onHide: vi.fn(), onDiagnose: vi.fn(), onSettings, onExit: vi.fn(), onError: vi.fn()
+    });
+    template.find((item) => item.label === "Settings")?.click?.({checked: false});
+    await vi.waitFor(() => expect(onSettings).toHaveBeenCalledOnce());
+  });
+
   it("exposes task selection entries without companion controls", async () => {
     const template: TrayMenuItem[] = [];
     const onSelectTask = vi.fn();

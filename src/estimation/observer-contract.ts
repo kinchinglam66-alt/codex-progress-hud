@@ -14,7 +14,7 @@ const workPartSchema=z.object({
   unit:z.enum(['file','batch','unknown']),
   remainingUnits:z.number().int().positive().max(1_000_000).nullable(),
   priorSeconds:seconds,
-  measurementRef:measurementRef.optional(),
+  measurementRef:measurementRef.nullable().transform(value=>value??undefined).optional(),
 }).strict();
 const workSchema=z.object({composition:z.enum(['serial','unknown']),
   changeReason:z.enum(['routine','scope_change','failure','unknown']),

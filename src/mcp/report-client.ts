@@ -149,7 +149,7 @@ const aggregateSnapshotSchema = z.object({
     task: taskSnapshotSchema,
     eta: etaSchema.nullable(),
     name: z.object({value:z.string().max(1024).nullable(),freshness:z.enum(['fresh','stale','unavailable'])}).strict(),
-    observer:z.object({state:z.enum(['pending','history_loading','estimating','insufficient_context','call_failed','setup_failed','rate_limited','disabled','ready']),
+    observer:z.object({state:z.enum(['pending','history_loading','history_unavailable','estimating','insufficient_context','call_failed','setup_failed','rate_limited','disabled','ready']),
       estimateAgeSeconds:z.number().finite().nonnegative().nullable(),callsLastHour:z.number().int().nonnegative(),retryPending:z.boolean()}).strict().optional(),
     goal: z.object({
       generation: z.number().int().nonnegative(),
