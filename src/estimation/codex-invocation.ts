@@ -33,7 +33,9 @@ export function subscriptionEnvironment(env:NodeJS.ProcessEnv):NodeJS.ProcessEnv
  * assets and actual capability evidence. Never accept this profile from tasks.
  * The exact version gate reflects the tested Windows system-proxy profile.
  */
-function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.ProcessEnv, mode: 'exec' | 'login' | 'status' | 'metadata' = 'exec'): Invocation {
+type ObserverSetupAction = 'login' | 'status' | 'metadata' | 'logout' | 'device-auth';
+
+function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.ProcessEnv, mode: 'exec' | ObserverSetupAction = 'exec'): Invocation {
   if (!supportedCodexVersion(profile.version) ||
     [profile.executable, profile.cwd, profile.schemaPath, profile.instructionsPath].some(
       path => typeof path !== "string" || !isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) ||
@@ -43,7 +45,9 @@ function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.Proce
   }
   const args = mode === 'exec' ? ["exec", "--ignore-user-config", "--strict-config", "--ephemeral", "--skip-git-repo-check",
     "--sandbox", "read-only", "--model", "gpt-5.6-luna", "--color", "never", "--json",
-    "--output-schema", profile.schemaPath, "--cd", profile.cwd] : mode === 'login' ? ['login'] : mode === 'status' ? ['login', 'status'] : ['app-server', '--stdio', '--strict-config'];
+    "--output-schema", profile.schemaPath, "--cd", profile.cwd] : mode === 'login' ? ['login'] :
+    mode === 'device-auth' ? ['login', '--device-auth'] : mode === 'logout' ? ['logout'] :
+    mode === 'status' ? ['login', 'status'] : ['app-server', '--stdio', '--strict-config'];
   for (const feature of disabled) args.push("--disable", feature);
   const config = {
     forced_login_method:"chatgpt", model_provider:"openai", model_reasoning_effort:"medium",
@@ -108,7 +112,7 @@ function observerEnvironment(env: NodeJS.ProcessEnv, observerHome?: string): Nod
 
 /** Builds only. The owner must attest filesystem/config/assets first, then manage
  * interactive login or the metadata protocol and cancellation. No implicit spawn. */
-export function buildObserverSetupInvocation(profile: CodexProfile, action: 'login' | 'status' | 'metadata', env: NodeJS.ProcessEnv, observerHome?: string): Invocation {
-  if (!['login', 'status', 'metadata'].includes(action)) throw new Error('INVALID_OBSERVER_SETUP_ACTION');
+export function buildObserverSetupInvocation(profile: CodexProfile, action: ObserverSetupAction, env: NodeJS.ProcessEnv, observerHome?: string): Invocation {
+  if (!['login', 'status', 'metadata', 'logout', 'device-auth'].includes(action)) throw new Error('INVALID_OBSERVER_SETUP_ACTION');
   return buildInvocation(profile, '', observerEnvironment(env, observerHome), action);
 }

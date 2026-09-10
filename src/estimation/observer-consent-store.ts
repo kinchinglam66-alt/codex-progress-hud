@@ -4,7 +4,7 @@ import {dirname} from 'node:path';
 import {z} from 'zod';
 
 export const OBSERVER_CONSENT_VERSION = 1 as const;
-export interface ObserverConsentScope {
+export interface ObserverSubscriptionConsentScope {
   accountFingerprint: string;
   providerFingerprint: string;
   recipientFingerprint: string;
@@ -12,6 +12,19 @@ export interface ObserverConsentScope {
   billingMode: 'subscription';
   policyVersion: string;
 }
+export interface ObserverApiConsentScope {
+  bindingVersion: 1;
+  accountFingerprint: string;
+  providerFingerprint: string;
+  recipientFingerprint: string;
+  profileId: string;
+  keyRevision: string;
+  endpointFingerprint: string;
+  dataCategories: readonly string[];
+  billingMode: 'api';
+  policyVersion: string;
+}
+export type ObserverConsentScope = ObserverSubscriptionConsentScope | ObserverApiConsentScope;
 export interface ObserverConsentGrant {
   version: typeof OBSERVER_CONSENT_VERSION;
   scope: ObserverConsentScope;
@@ -19,7 +32,7 @@ export interface ObserverConsentGrant {
 }
 
 const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
-const scopeSchema = z.object({
+const subscriptionScopeSchema = z.object({
   accountFingerprint: fingerprint,
   providerFingerprint: fingerprint,
   recipientFingerprint: fingerprint,
@@ -27,6 +40,19 @@ const scopeSchema = z.object({
   billingMode: z.literal('subscription'),
   policyVersion: z.string().regex(/^[a-z0-9-]{1,64}$/),
 }).strict();
+const apiScopeSchema = z.object({
+  bindingVersion: z.literal(1),
+  accountFingerprint: fingerprint,
+  providerFingerprint: fingerprint,
+  recipientFingerprint: fingerprint,
+  profileId: z.string().min(1).max(128).refine(value => !/[\p{Cc}\p{Cf}]/u.test(value)),
+  keyRevision: z.string().min(1).max(256).refine(value => !/[\p{Cc}\p{Cf}]/u.test(value)),
+  endpointFingerprint: fingerprint,
+  dataCategories: z.array(z.string().min(1).max(64)).min(1).max(16),
+  billingMode: z.literal('api'),
+  policyVersion: z.string().regex(/^[a-z0-9-]{1,64}$/),
+}).strict();
+const scopeSchema = z.union([subscriptionScopeSchema, apiScopeSchema]);
 const grantSchema = z.object({version: z.literal(OBSERVER_CONSENT_VERSION), scope: scopeSchema, grantedAt: z.number().int().nonnegative().safe()}).strict();
 
 export interface ConsentProtection {
@@ -35,7 +61,8 @@ export interface ConsentProtection {
 }
 
 function canonicalScope(scope: ObserverConsentScope): string {
-  return JSON.stringify({...scope, dataCategories: [...scope.dataCategories].sort()});
+  const normalized = {...scope, dataCategories: [...scope.dataCategories].sort()};
+  return JSON.stringify(Object.fromEntries(Object.keys(normalized).sort().map(key => [key, normalized[key as keyof typeof normalized]])));
 }
 
 export function createObserverConsentStore(path: string, protection: ConsentProtection) {

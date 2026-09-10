@@ -14,6 +14,7 @@ import type {ForecastVersions} from './forecast-record.js';
 import {OBSERVER_INPUT_FACTS_VERSION} from './observer-input.js';
 import {ObserverAccountTimeout,ObserverPreDispatchTransient} from './observer-call-failure.js';
 
+type SetupAction='login'|'device-auth'|'logout';
 type PreparationStage='home-prepare'|'runtime-preflight'|'account-read'|'home-recheck'|'binding'|'ready';
 export interface PreparationDiagnostic {stage:PreparationStage;outcome:'passed'|'failed'|'reader';elapsedMs:number;reader?:AccountReadDiagnostic}
 interface Options {
@@ -39,8 +40,9 @@ export function createObserverIdentityRuntime(options:Options) {
   let cancel:(()=>void)|undefined,owned:(()=>boolean)|undefined;
   const fail=()=>Error('OBSERVER_IDENTITY_UNAVAILABLE');
   const disable=()=>{disabled=true;runtimeCache.invalidate();cancel?.();};
-    function perform(signal:AbortSignal,mode:'inspect'|'login'|ObserverInput):Promise<Snapshot|Invocation|PreparedEstimate> {
-      const loginMode=mode==='login';
+    function perform(signal:AbortSignal,mode:'inspect'|SetupAction|ObserverInput):Promise<Snapshot|Invocation|PreparedEstimate> {
+      const setupMode=mode==='login'||mode==='device-auth'||mode==='logout';
+      const loginMode=mode==='login'||mode==='device-auth';
       if(disabled || poisoned || pending || signal.aborted) return Promise.reject(fail());
       const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
       const home=createObserverHomeManager(homeConfig);
@@ -67,11 +69,13 @@ export function createObserverIdentityRuntime(options:Options) {
           const profile=await runtimeCache.check(probe.probe);check();
           if(profile.version!==config.version)throw fail();
           emit('passed');stage='account-read';
-          const setupInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
-          reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
           let account;
-          try {account=await reader.read(combined);}
-          catch(error) {if(!loginMode || !(error instanceof Error) || error.message!=='OBSERVER_LOGIN_REQUIRED')throw error;}
+          if(mode!=='logout') {
+            const setupInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
+            reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
+            try {account=await reader.read(combined);}
+            catch(error) {if(!loginMode || !(error instanceof Error) || error.message!=='OBSERVER_LOGIN_REQUIRED')throw error;}
+          }
           check();
           emit('passed');stage='home-recheck';
           await home.prepare(true,combined);check();
@@ -79,7 +83,7 @@ export function createObserverIdentityRuntime(options:Options) {
           const completedAt=now();
           if(!Number.isSafeInteger(completedAt) || completedAt<observedAt || completedAt>=observedAt+300000 || ownersBusy())throw fail();
           stage='ready';emit('passed');
-          if(loginMode)return buildObserverSetupInvocation(profile,'login',env,authHome);
+          if(setupMode)return buildObserverSetupInvocation(profile,mode,env,authHome);
           if(!account)throw fail();
           const snapshot:Snapshot={accountLabel:account.email && account.email.length<=256?account.email:`ChatGPT (${account.planType})`,
             evidence:{accountFingerprint:digest(['observer-account-v1',account.accountId]),routeFingerprint:account.routeFingerprint,
@@ -110,9 +114,12 @@ export function createObserverIdentityRuntime(options:Options) {
       }).finally(()=>{pending=undefined;});
       return pending;
     }
-  return {
-    inspect:(signal:AbortSignal)=>perform(signal,'inspect') as Promise<Snapshot>,
-    prepareLogin:(signal:AbortSignal)=>perform(signal,'login') as Promise<Invocation>,
+    return {
+      inspect:(signal:AbortSignal)=>perform(signal,'inspect') as Promise<Snapshot>,
+      prepareLogin:(signal:AbortSignal)=>perform(signal,'login') as Promise<Invocation>,
+      prepareDeviceLogin:(signal:AbortSignal)=>perform(signal,'device-auth') as Promise<Invocation>,
+      prepareDeviceAuth:(signal:AbortSignal)=>perform(signal,'device-auth') as Promise<Invocation>,
+      prepareLogout:(signal:AbortSignal)=>perform(signal,'logout') as Promise<Invocation>,
     prepareEstimate:(input:ObserverInput,signal:AbortSignal)=>perform(signal,input) as Promise<PreparedEstimate>,
     disable,
     close():Promise<void> {

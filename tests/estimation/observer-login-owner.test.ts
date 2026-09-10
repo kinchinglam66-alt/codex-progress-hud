@@ -43,6 +43,41 @@ it('does not prepare a pre-cancelled request',async()=>{
   await owner.close();
 });
 
+it('presents only a bounded device authorization event through the dedicated callback', async () => {
+  const events: unknown[] = [];
+  const owner = createObserverLoginOwner(
+    (_signal, action) => invocation(action === 'device-auth'
+      ? 'process.stdout.write("Open https://auth.openai.com/codex/device and enter code ABCD-EFGH")'
+      : 'process.exit(0)'),
+    {onDeviceAuth: event => events.push(event)},
+  );
+  expect(await owner.deviceAuth(new AbortController().signal)).toBe('process_exited');
+  expect(events).toEqual([{kind: 'device-auth', url: 'https://auth.openai.com/codex/device', code: 'ABCD-EFGH'}]);
+  await owner.close();
+});
+
+it('parses ANSI-wrapped device prompts from stderr and rejects non-device URLs', async () => {
+  const events: unknown[] = [];
+  const owner = createObserverLoginOwner(
+    (_signal, action) => invocation(action === 'device-auth'
+      ? 'process.stderr.write("\\u001b[1mOpen https://auth.openai.com/codex/device and enter code WXYZ-1234\\u001b[0m")'
+      : 'process.exit(0)'),
+    {onDeviceAuth: event => events.push(event)},
+  );
+  expect(await owner.deviceAuth(new AbortController().signal)).toBe('process_exited');
+  expect(events).toEqual([{kind: 'device-auth', url: 'https://auth.openai.com/codex/device', code: 'WXYZ-1234'}]);
+  await owner.close();
+
+  const rejectedEvents: unknown[] = [];
+  const rejected = createObserverLoginOwner(
+    () => invocation('process.stderr.write("Open https://auth.openai.com/other and enter code WXYZ-1234")'),
+    {onDeviceAuth: event => rejectedEvents.push(event)},
+  );
+  expect(await rejected.deviceAuth(new AbortController().signal)).toBe('process_exited');
+  expect(rejectedEvents).toEqual([]);
+  await rejected.close();
+});
+
 it('cancels an actual waiting child and confirms cleanup before close resolves',async()=>{
   const root=await mkdtemp(join(tmpdir(),'hud-login-child-'));
   const marker=join(root,'ready');

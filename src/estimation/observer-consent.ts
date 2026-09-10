@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import {createHash} from 'node:crypto';
 import type {ObserverConsentGrant} from './observer-consent-store.js';
+import type {ObserverApiConsentScope} from './observer-consent-store.js';
 
 const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
 const evidenceSchema = z.object({
@@ -27,6 +28,33 @@ export function observerConsentScope(value: ObserverAttestation) {
     dataCategories: [...(value.dataCategories ?? ['goal', 'conversation', 'tools'])].sort(),
     billingMode: value.billingMode ?? 'subscription' as const,
     policyVersion: value.policyVersion ?? 'remembered-v1',
+  };
+}
+
+/** Creates the separate API binding. It deliberately includes endpoint,
+ * profile, account and key revision so an old grant cannot authorize a new
+ * remote identity or silently migrate subscription history. */
+export function observerApiConsentScope(value: {
+  accountFingerprint: string;
+  providerFingerprint: string;
+  recipientFingerprint: string;
+  profileId: string;
+  keyRevision: string;
+  endpointFingerprint: string;
+  dataCategories: readonly string[];
+  policyVersion?: string;
+}): ObserverApiConsentScope {
+  return {
+    bindingVersion: 1,
+    accountFingerprint: value.accountFingerprint,
+    providerFingerprint: value.providerFingerprint,
+    recipientFingerprint: value.recipientFingerprint,
+    profileId: value.profileId,
+    keyRevision: value.keyRevision,
+    endpointFingerprint: value.endpointFingerprint,
+    dataCategories: [...value.dataCategories].sort(),
+    billingMode: 'api',
+    policyVersion: value.policyVersion ?? 'api-v1',
   };
 }
 

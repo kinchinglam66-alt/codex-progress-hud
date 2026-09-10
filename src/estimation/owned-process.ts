@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { isAbsolute } from "node:path";
 
-export interface Invocation { executable: string; cwd: string; args: readonly string[]; env: NodeJS.ProcessEnv; input: string; onStdout?: (chunk: Uint8Array) => boolean }
+export interface Invocation { executable: string; cwd: string; args: readonly string[]; env: NodeJS.ProcessEnv; input: string; onStdout?: (chunk: Uint8Array) => boolean; onStderr?: (chunk: Uint8Array) => boolean }
 type Reason = "exited" | "aborted" | "disabled" | "busy" | "unavailable" | "timeout" | "output_limit" | "spawn_error" | "stdin_error" | "cleanup_timeout" | "protocol_error";
 export interface OwnedProcessResult { reason: Reason; exitCode: number | null; closed: boolean; stdout: string; stderr: string }
 type Spawn = (executable: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -78,7 +78,10 @@ function createRunner(options: Options, maximumTimeoutMs:number) {
           if (stopReason || settled) return;
           errBytes += chunk.length;
           if (errBytes > 65_536) { stop("output_limit"); return; }
-          if (!invocation.onStdout) stderr.push(Buffer.from(chunk));
+          try {
+            if (invocation.onStderr && invocation.onStderr(Buffer.from(chunk)) !== true) { stop("protocol_error"); return; }
+          } catch { stop("protocol_error"); return; }
+          if (!invocation.onStdout && !invocation.onStderr) stderr.push(Buffer.from(chunk));
         });
         child.on("error", () => stop("spawn_error"));
         child.stdin.on("error", () => stop("stdin_error"));

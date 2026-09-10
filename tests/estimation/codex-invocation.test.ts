@@ -23,6 +23,14 @@ it.each(['login', 'status', 'metadata'] as const)('isolates %s setup from main a
   expect(() => buildObserverSetupInvocation(profile, action, env)).toThrow('OBSERVER_AUTH_HOME_REQUIRED');
 });
 
+it('builds guarded official logout and device-auth actions in the independent home', () => {
+  const env = {CODEX_HOME:resolve('main-home'), HTTPS_PROXY:'http://proxy.invalid', OPENAI_API_KEY:'private'};
+  expect(buildObserverSetupInvocation(profile, 'logout', env, resolve('observer-home')).args.slice(0, 1)).toEqual(['logout']);
+  expect(buildObserverSetupInvocation(profile, 'device-auth', env, resolve('observer-home')).args.slice(0, 2)).toEqual(['login', '--device-auth']);
+  expect(buildObserverSetupInvocation(profile, 'logout', env, resolve('observer-home')).env)
+    .toEqual({CODEX_HOME:resolve('observer-home'), HTTPS_PROXY:'http://proxy.invalid'});
+});
+
 it('rejects arbitrary setup commands', () => {
   expect(() => buildObserverSetupInvocation(profile, 'exec' as 'login', {}, resolve('observer-home'))).toThrow('INVALID_OBSERVER_SETUP_ACTION');
 });

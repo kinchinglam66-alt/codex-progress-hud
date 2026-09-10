@@ -65,3 +65,18 @@ it('fails closed for malformed, forged, and oversized stored records', async () 
   await writeFile(path, 'sealed:{"version":999}', {mode: 0o600});
   await expect(store.read()).resolves.toBeNull();
 });
+
+it('stores API consent with a versioned profile/key/endpoint binding while retaining subscription grants', async () => {
+  const {store} = await storeFixture();
+  const apiScope = {
+    accountFingerprint: 'd'.repeat(64), providerFingerprint: 'e'.repeat(64), recipientFingerprint: 'f'.repeat(64),
+    profileId: 'api-profile', keyRevision: 'key-revision-1', endpointFingerprint: '1'.repeat(64),
+    bindingVersion: 1 as const, dataCategories: ['goal', 'conversation'], billingMode: 'api' as const, policyVersion: 'api-v1',
+  };
+  await store.grant(apiScope, 200);
+  expect(store.matches(apiScope)).toBe(true);
+  expect(store.matches({...apiScope, keyRevision: 'key-revision-2'})).toBe(false);
+  expect(store.matches({...apiScope, endpointFingerprint: '2'.repeat(64)})).toBe(false);
+  expect(store.matches({...apiScope, profileId: 'other-profile'})).toBe(false);
+  expect(await store.read()).toMatchObject({version: 1, scope: expect.objectContaining({bindingVersion: 1, billingMode: 'api'})});
+});

@@ -7,7 +7,7 @@ vi.mock('../../src/estimation/codex-probe.js',()=>({createObserverRuntimeProbe:(
 vi.mock('../../src/estimation/codex-preflight.js',()=>({createRuntimePreflightCache:()=>({
   check:async()=>{state.events.push('preflight');return {version:'0.153.4'};},invalidate(){state.events.push('cache-invalidated');}
 })}));
-vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'})}));
+vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:action==='device-auth'?['login','--device-auth']:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'})}));
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:()=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure)throw Error(state.failure);return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:'b'.repeat(64)};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.failure='';state.active=false;});
@@ -48,6 +48,14 @@ it('prepares isolated login only after runtime and metadata checks',async()=>{
   const invocation=await runtime.prepareLogin(new AbortController().signal);
   expect(invocation.args).toEqual(['login']);expect(invocation.input).toBe('');
   expect(state.events).toContain('account');await runtime.close();
+});
+it('prepares official logout and device-auth invocations without reading the main home',async()=>{
+  const runtime=createObserverIdentityRuntime(config());
+  const logout=await runtime.prepareLogout(new AbortController().signal);
+  expect(logout.args).toEqual(['logout']);
+  const device=await runtime.prepareDeviceLogin(new AbortController().signal);
+  expect(device.args).toEqual(['login','--device-auth']);
+  await runtime.close();
 });
 it('prepares an estimate with fresh identity evidence but never dispatches it',async()=>{
   const runtime=createObserverIdentityRuntime(config());
