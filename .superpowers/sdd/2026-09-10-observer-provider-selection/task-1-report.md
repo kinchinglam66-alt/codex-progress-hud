@@ -33,4 +33,4 @@ The full suite and the ongoing baseline controller-run were not rerun.
 
 `src/estimation/observer-provider.ts`, `src/estimation/subscription-session.ts`, `src/estimation/observer-scheduler.ts`, `src/estimation/observer-worker.ts`, `src/desktop/observer-runtime.ts`, `tests/estimation/observer-scheduler.test.ts`, `tests/estimation/observer-scheduler-recovery.test.ts`, `tests/desktop/observer-recovery.test.ts`, `tests/server/turn-http.test.ts`, and `tests/evaluation/pilot-journal.test.ts`.
 
-Commit: ec6cf23
+Commit: da6abb8
