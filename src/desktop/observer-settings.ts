@@ -7,6 +7,13 @@ export const SETTINGS_CHANNELS = Object.freeze({
   preflight: 'codex-progress-hud:settings:preflight',
   confirm: 'codex-progress-hud:settings:confirm',
   revoke: 'codex-progress-hud:settings:revoke',
+  providerRead: 'codex-progress-hud:settings:provider:read',
+  providerSave: 'codex-progress-hud:settings:provider:save',
+  providerAccount: 'codex-progress-hud:settings:provider:account',
+  providerCheck: 'codex-progress-hud:settings:provider:check',
+  providerTrial: 'codex-progress-hud:settings:provider:trial',
+  providerActivate: 'codex-progress-hud:settings:provider:activate',
+  providerCancel: 'codex-progress-hud:settings:provider:cancel',
 });
 
 export interface SettingsBrowserWindowLike {
@@ -50,6 +57,17 @@ interface SettingsDialogLike {
   }): Promise<{response: number}>;
 }
 
+interface ProviderSettingsActions {
+  readProviderSettings(): Promise<unknown>;
+  saveProviderSettings(payload: unknown): Promise<unknown>;
+  replaceSubscriptionAccount(payload: unknown): Promise<unknown>;
+  checkProvider(payload: unknown): Promise<unknown>;
+  trialProvider(payload: unknown): Promise<unknown>;
+  activateProvider(payload: unknown): Promise<unknown>;
+  cancelProviderAction(): Promise<unknown>;
+  providerConsentRequired?(payload: unknown): Promise<boolean>;
+}
+
 export type SettingsStatus = ObserverRecoveryControllerStatus | (Omit<ObserverRecoveryControllerStatus, 'state'> & {state: 'unconfigured'});
 export type SettingsPreflight = SettingsStatus & {allowed: boolean; challenge?: string};
 
@@ -79,6 +97,7 @@ export function createObserverSettingsController(options: {
   binding(): string | undefined;
   confirm(revision: number): Promise<SettingsStatus>;
   revokeConsent?: () => Promise<void>;
+  provider?: ProviderSettingsActions;
 }) {
   let window: SettingsBrowserWindowLike | undefined;
   let registered = false;
@@ -86,6 +105,8 @@ export function createObserverSettingsController(options: {
   let windowGeneration = 0;
   let challenge: {value: string; sender: unknown; generation: number; revision: number; binding: string; expiresAt: number; consuming: boolean} | undefined;
   const now = options.now ?? Date.now;
+  const providerMutation = z.object({generation: z.number().int().nonnegative().safe(), revision: z.number().int().nonnegative().safe()}).passthrough();
+  const providerAccountPayload = z.object({generation: z.number().int().nonnegative().safe(), revision: z.number().int().nonnegative().safe(), action: z.enum(['login', 'device-auth', 'logout'] as const)}).strict();
 
   function invalidateChallenge(): void { challenge = undefined; }
   function activeChallenge(value: string, revision: number, sender: unknown): NonNullable<typeof challenge> {
@@ -131,6 +152,7 @@ export function createObserverSettingsController(options: {
         cancelId: 1,
         noLink: true,
       });
+      trusted(event);
       if (challenge !== pending) throw new Error('SETTINGS_STALE_CHALLENGE');
       invalidateChallenge();
       if (confirmation.response !== 0) return options.readStatus();
@@ -146,12 +168,47 @@ export function createObserverSettingsController(options: {
         detail: '撤销后会删除本机记住的估时授权并停止后续估时；已开始的请求仍会按现有会计记录完成结算。下次启用时需要重新确认。',
         buttons: ['撤销估时授权', '取消'], defaultId: 1, cancelId: 1, noLink: true,
       });
+      trusted(event);
       if (confirmation.response !== 0) return {...options.readStatus(),consentRevoked:false};
       if(!options.revokeConsent)throw Error('SETTINGS_UNAVAILABLE');
       invalidateChallenge();
       await options.revokeConsent();
       return {...options.readStatus(),consentRevoked:true};
     });
+    if (options.provider) {
+      const provider = options.provider;
+      options.ipcMain.handle(SETTINGS_CHANNELS.providerRead, async event => { trusted(event); return provider.readProviderSettings(); });
+      options.ipcMain.handle(SETTINGS_CHANNELS.providerSave, async (event, payload) => {
+        trusted(event); const parsed = providerMutation.safeParse(payload); if (!parsed.success) throw new Error('SETTINGS_INVALID_REQUEST'); return provider.saveProviderSettings(payload);
+      });
+      options.ipcMain.handle(SETTINGS_CHANNELS.providerAccount, async (event, payload) => {
+        trusted(event); const parsed = providerAccountPayload.safeParse(payload); if (!parsed.success) throw new Error('SETTINGS_INVALID_REQUEST');
+        if (parsed.data.action === 'login' || parsed.data.action === 'device-auth') {
+          const confirmation = await options.dialog.showMessageBox({type: 'question', title: 'Codex Progress HUD：切换订阅账户', message: '是否开始订阅账户操作？', detail: '登录成功后仍需本机账户证明才会启用估时；取消按钮只在操作尚未开始时保持账户不变，开始后请以当前账户元数据为准。', buttons: ['继续', '取消'], defaultId: 1, cancelId: 1, noLink: true});
+          trusted(event);
+          if (confirmation.response !== 0) return {outcome: 'cancelled'};
+        }
+        return provider.replaceSubscriptionAccount(payload);
+      });
+      const confirmedProviderAction = (channel: string, operation: (payload: unknown) => Promise<unknown>, message: string, detail: string, disclosureRequired = false): void => {
+        options.ipcMain.handle(channel, async (event, payload) => {
+          trusted(event); const parsed = providerMutation.safeParse(payload); if (!parsed.success) throw new Error('SETTINGS_INVALID_REQUEST');
+          const needsDisclosure=disclosureRequired&&provider.providerConsentRequired?await provider.providerConsentRequired(payload):disclosureRequired;
+          if(!needsDisclosure)return operation(payload);
+          const status=await provider.readProviderSettings();
+          trusted(event);
+          const recipient=typeof status==='object'&&status!==null&&typeof (status as {recipient?:unknown}).recipient==='string'?(status as {recipient:string}).recipient:'当前提供方';
+          const confirmation = await options.dialog.showMessageBox({type: 'question', title: 'Codex Progress HUD：显式提供方操作', message, detail: `${detail} 数据接收方：${recipient}。`, buttons: ['继续', '取消'], defaultId: 1, cancelId: 1, noLink: true});
+          trusted(event);
+          if (confirmation.response !== 0) return provider.readProviderSettings();
+          return operation(payload);
+        });
+      };
+      confirmedProviderAction(SETTINGS_CHANNELS.providerCheck, provider.checkProvider, '是否检查 API 提供方？', '仅检查本地配置和连接，不运行推理。');
+      confirmedProviderAction(SETTINGS_CHANNELS.providerTrial, provider.trialProvider, '是否进行一次合成试探？', '这会暂时停止当前估时，但任务追踪仍会继续；会向所选提供方发送固定合成输入，可能产生费用；', true);
+      confirmedProviderAction(SETTINGS_CHANNELS.providerActivate, provider.activateProvider, '是否启用所选提供方？', '启用后估时数据会发送给所示接收方；API 调用可能产生费用。保存草稿本身不会启用。', true);
+      options.ipcMain.handle(SETTINGS_CHANNELS.providerCancel, async event => { trusted(event); return provider.cancelProviderAction(); });
+    }
   }
   function removeHandlers(): void {
     if (!registered) return;

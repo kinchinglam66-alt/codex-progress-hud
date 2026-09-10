@@ -148,3 +148,39 @@ it.each([0,1])('reports whether native confirmation actually revoked consent (ch
   expect(result).toMatchObject({consentRevoked:response===0});
   await controller.dispose();
 });
+
+it('routes provider settings only through a trusted sender and keeps save inert', async () => {
+  const fixture = windowFixture();
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const readProviderSettings = vi.fn(async () => ({
+    generation: 7, revision: 3, selected: 'subscription', state: 'ready',
+    draft: {selected: 'api', api: {profileId: 'draft', name: 'Draft', baseUrl: 'https://api.example.test/v1', protocol: 'responses', model: 'model', reasoningEffort: 'medium', maxOutputTokens: 2048, dailyCallLimit: 24}},
+    active: {selected: 'subscription', api: null}, keyConfigured: false,
+    account: {label: 'person@example.invalid', observedAt: 1000, expiresAt: 301000}, recipient: 'Codex Progress HUD observer',
+  }));
+  const saveProviderSettings = vi.fn(async () => readProviderSettings());
+  const controller = createObserverSettingsController({
+    createWindow: () => fixture.window,
+    ipcMain: {handle: (channel, listener) => {handlers.set(channel, listener);}, removeHandler: vi.fn()},
+    dialog: {showMessageBox: vi.fn(async () => ({response: 1}))},
+    uiPath: 'C:/hud/settings.html', preloadPath: 'C:/hud/settings-preload.cjs', quitting: () => false,
+    readStatus: () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    preflight: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false, allowed: false}),
+    binding: () => 'binding', confirm: async () => ({state: 'normal' as const, revision: 3, knownTokens: 0, unknown: 0, recoveryAllowed: false}),
+    provider: {readProviderSettings, saveProviderSettings,
+      replaceSubscriptionAccount: vi.fn(), checkProvider: vi.fn(), trialProvider: vi.fn(), activateProvider: vi.fn(), cancelProviderAction: vi.fn()},
+  });
+  await controller.open();
+  const channel = 'codex-progress-hud:settings:provider:read';
+  const read = handlers.get(channel)!;
+  await expect(read({sender: {}})).rejects.toThrow('SETTINGS_UNTRUSTED_SENDER');
+  await expect(read({sender: fixture.window.webContents})).resolves.toMatchObject({keyConfigured: false});
+  const save = handlers.get('codex-progress-hud:settings:provider:save')!;
+  await expect(save({sender: fixture.window.webContents}, {
+    generation: 7, revision: 3, draft: {selected: 'api', api: {profileId: 'draft', name: 'Draft', baseUrl: 'https://api.example.test/v1', protocol: 'responses', model: 'model', reasoningEffort: 'medium', maxOutputTokens: 2048, dailyCallLimit: 24}}, secret: 'write-only-secret'
+  })).resolves.toMatchObject({selected: 'subscription'});
+  expect(saveProviderSettings).toHaveBeenCalledWith(expect.objectContaining({generation: 7, revision: 3, secret: 'write-only-secret'}));
+  expect(await read({sender: fixture.window.webContents})).not.toHaveProperty('apiKey');
+  expect(await read({sender: fixture.window.webContents})).not.toHaveProperty('keyRef');
+  await controller.dispose();
+});

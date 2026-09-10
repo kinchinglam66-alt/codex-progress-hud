@@ -214,6 +214,7 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     binding: () => observer?.recovery.binding(),
     confirm: revision => observer?.recovery.confirm(revision) ?? Promise.reject(new Error('SETTINGS_UNAVAILABLE')),
     revokeConsent: () => observer?.revokeConsent() ?? Promise.reject(new Error('SETTINGS_UNAVAILABLE')),
+    ...(observer?.providerSettings === undefined ? {} : {provider: observer.providerSettings}),
   });
   return {
     ...(observer?{observerSetup:observer,observerWorkers:observer.workers,observerSchedulerRecovery:observer.schedulerRecovery,onObserverObservation:observer.onObservation}:{}),

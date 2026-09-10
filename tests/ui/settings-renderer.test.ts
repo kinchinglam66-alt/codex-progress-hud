@@ -58,3 +58,42 @@ it.each([
   expect(elements.get('#revoke')?.disabled).toBe(false);
   expect(api.revokeConsent).toHaveBeenCalledOnce();
 });
+
+it('renders provider source/account/key state, marks dirty drafts, clears secrets, and reports cancelled login',async()=>{
+  const listeners=new Map<string,(event?:unknown)=>void>();
+  const values=new Map<string,string>();
+  const elements=new Map<string,{textContent:string;disabled:boolean;value:string;hidden:boolean;addEventListener:(type:string,listener:(event?:unknown)=>void)=>void}>();
+  for(const selector of ['#state','#known-tokens','#unknown-count','#message','#diagnostic','#check','#recover','#revoke','#provider-source','#api-profile-id','#api-name','#api-base-url','#api-model','#api-protocol','#api-key','#api-key-state','#provider-dirty','#provider-account','#provider-account-time','#provider-recipient','#provider-save','#provider-check','#provider-trial','#provider-activate','#subscription-login','#subscription-device-login','#subscription-logout','#provider-cancel'])
+    elements.set(selector,{textContent:'',disabled:false,value:values.get(selector)??'',hidden:false,addEventListener:(_type,listener)=>listeners.set(selector,listener)});
+  vi.stubGlobal('document',{querySelector:(selector:string)=>elements.get(selector)});
+  const api={
+    getStatus:vi.fn(async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false})),
+    preflight:vi.fn(),confirm:vi.fn(),revokeConsent:vi.fn(),
+    readProviderSettings:vi.fn(async()=>({generation:4,revision:2,selected:'api',state:'ready',active:{selected:'api',api:null},draft:{selected:'api',api:{profileId:'p',name:'Provider',baseUrl:'https://api.example.test/v1',protocol:'responses',model:'model',reasoningEffort:'medium',maxOutputTokens:2048,dailyCallLimit:24}},keyConfigured:true,account:{label:'person@example.invalid',observedAt:1000,expiresAt:301000},recipient:'Codex Progress HUD observer'})),
+    saveProviderSettings:vi.fn(async()=>api.readProviderSettings()),checkProvider:vi.fn(async()=>({ok:true,stage:'network'})),trialProvider:vi.fn(),activateProvider:vi.fn(),cancelProviderAction:vi.fn(),replaceSubscriptionAccount:vi.fn(async()=>({outcome:'cancelled'})),
+  };
+  vi.stubGlobal('window',{codexProgressHudSettings:api});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#provider-account')?.textContent).toContain('person@example.invalid'));
+  expect(elements.get('#api-key-state')?.textContent).toContain('已配置');
+  const model=elements.get('#api-model')!; model.value='changed'; listeners.get('#api-model')!({target:model});
+  expect(elements.get('#provider-dirty')?.textContent).toContain('未保存');
+  const key=elements.get('#api-key')!; key.value='one-shot-secret'; listeners.get('#provider-save')!();
+  await vi.waitFor(()=>expect(api.saveProviderSettings).toHaveBeenCalled());
+  expect(key.value).toBe('');
+  await vi.waitFor(()=>expect(elements.get('#provider-save')?.disabled).toBe(false));
+  listeners.get('#subscription-login')!();
+  await vi.waitFor(()=>expect(elements.get('#message')?.textContent).toContain('已取消'));
+});
+
+it('renders unsupported protocol as a fixed validation message',async()=>{
+  const listeners=new Map<string,(event?:unknown)=>void>();
+  const elements=new Map<string,{textContent:string;disabled:boolean;value:string;hidden:boolean;addEventListener:(type:string,listener:(event?:unknown)=>void)=>void}>();
+  for(const selector of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-source','#api-profile-id','#api-name','#api-base-url','#api-model','#api-protocol','#api-key','#api-key-state','#provider-dirty','#provider-account','#provider-account-time','#provider-recipient','#provider-save','#provider-check','#provider-trial','#provider-activate','#subscription-login','#subscription-device-login','#subscription-logout','#provider-cancel'])
+    elements.set(selector,{textContent:'',disabled:false,value:'',hidden:false,addEventListener:(_type,listener)=>listeners.set(selector,listener)});
+  vi.stubGlobal('document',{querySelector:(selector:string)=>elements.get(selector)});
+  const provider={generation:1,revision:1,selected:'api',state:'inactive',active:{selected:'api',api:null},draft:{selected:'api',api:{profileId:'p',name:'Provider',baseUrl:'https://api.example.test/v1',protocol:'chat',model:'model',maxOutputTokens:2048,dailyCallLimit:24}},keyConfigured:false};
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:async()=>provider}});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#message')?.textContent).toContain('协议'));
+});

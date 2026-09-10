@@ -25,6 +25,42 @@
         <button id="revoke" type="button">撤销估时授权</button>
       </div>
       <p class="note">本地检查不会运行推理。恢复试探只使用固定合成输入，最多调用一次模型；未知用量历史不会被删除。</p>
+      <section aria-labelledby="provider-heading">
+        <h2 id="provider-heading">估时提供方</h2>
+        <p id="provider-account" role="status">读取中</p>
+        <p id="provider-account-time" role="status">—</p>
+        <p>数据接收方：<span id="provider-recipient">接收方待读取</span></p>
+        <label>来源
+          <select id="provider-source"><option value="subscription">订阅账户</option><option value="api">API</option></select>
+        </label>
+        <fieldset>
+          <legend>API 草稿</legend>
+          <label>Profile ID <input id="api-profile-id" autocomplete="off" /></label>
+          <label>名称 <input id="api-name" autocomplete="off" /></label>
+          <label>Base URL <input id="api-base-url" autocomplete="off" /></label>
+          <label>协议 <select id="api-protocol"><option value="responses">Responses</option><option value="chat">不支持</option></select></label>
+          <label>模型 <input id="api-model" autocomplete="off" /></label>
+          <label>推理强度 <select id="api-reasoning-effort"><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></label>
+          <label>最大输出 token <input id="api-max-output-tokens" type="number" min="1" /></label>
+          <label>每日调用上限 <input id="api-daily-call-limit" type="number" min="1" /></label>
+          <label>新密钥（仅写入，不会回显） <input id="api-key" type="password" autocomplete="new-password" /></label>
+          <p id="api-key-state" role="status">未配置密钥</p>
+        </fieldset>
+        <p id="provider-dirty" role="status">读取中</p>
+        <div class="actions">
+          <button id="provider-save" type="button">保存草稿</button>
+          <button id="provider-check" type="button">检查连接</button>
+          <button id="provider-trial" type="button">合成试探（暂止当前估时）</button>
+          <button id="provider-activate" type="button">启用提供方</button>
+          <button id="provider-cancel" type="button" disabled>取消当前操作</button>
+        </div>
+        <div class="actions">
+          <button id="subscription-login" type="button">订阅登录</button>
+          <button id="subscription-device-login" type="button">设备登录</button>
+          <button id="subscription-logout" type="button">订阅退出</button>
+        </div>
+        <p class="note">保存只保存草稿，不会运行模型，也不会自动启用；合成试探会暂时停止当前估时，但任务追踪仍会继续，完成后仍需显式启用。启用或试探前会明确显示接收方和可能费用。密钥只可写入，读取状态由受保护密钥存储确认。</p>
+      </section>
     </main>
     <script type="module" src="settings-renderer.js"></script>
   </body>
