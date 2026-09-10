@@ -3,6 +3,44 @@ import {createConversationSource} from '../../src/observer/conversation-source.j
 import type {ReadBatch} from '../../src/observer/conversation-record.js';
 
 const query={goalSummary:null,activeSeconds:15,runtime:'running' as const,previousEstimate:null};
+it('retains compact lifecycle evidence when protected message bodies fill the memory budget',async()=>{
+  const f=setup();const text='x'.repeat(65536);
+  f.source.attach('key','host','opaque-current');
+  f.set({records:[{id:'first',turnId:'old',atMs:0,kind:'user',text},
+    {id:'current',turnId:'current',atMs:1000,kind:'user',text},
+    {id:'final',turnId:'current',atMs:3000,kind:'assistant',assistantPhase:'final',text},
+    {id:'next',turnId:'next',atMs:4000,kind:'user',text}],caughtUp:true,partialLine:false,reset:false});
+  f.time(20000);f.source.tick();await f.flush();
+  try{
+    expect(f.source.snapshot('key')?.health).toBe('ready');
+    expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'waiting',boundaryMs:3000});
+    expect(Buffer.byteLength(JSON.stringify(f.source.snapshot('key')!.records))).toBeLessThanOrEqual(256*1024);
+  }finally{await f.source.close();}
+});
+it.each(['waiting','interrupted','failed'] as const)('retains %s across bounded history trimming and subsequent reads',async(runtime)=>{
+  const f=setup();f.source.attach('key','host','opaque-current');
+  f.set({records:[...records,{id:'end',turnId:'current',atMs:3000,kind:'runtime',runtime},
+    {id:'next',turnId:'next',atMs:4000,kind:'user',text:'Next task'},
+    ...Array.from({length:8},(_,i)=>({id:`large-${i}`,turnId:'next',atMs:5000+i,kind:'tool_result' as const,text:'x'.repeat(60000)}))],
+    caughtUp:true,partialLine:false,reset:false});
+  f.time(20000);f.source.tick();await f.flush();
+  try{
+    expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:runtime,boundaryMs:3000});
+    f.set({records:[],caughtUp:true,partialLine:false,reset:false});
+    f.time(25000);f.source.tick();await f.flush();
+    expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:runtime,boundaryMs:3000});
+    expect(Buffer.byteLength(JSON.stringify(f.source.snapshot('key')!.records))).toBeLessThanOrEqual(256*1024);
+  }finally{await f.source.close();}
+});
+it('freezes an old turn when a later user starts before its hook arrives without claiming completion',async()=>{
+  const f=setup();f.source.attach('key','host','opaque-current');
+  f.set({records:[...records,{id:'next',turnId:'next',atMs:4000,kind:'user',text:'Next task'}],caughtUp:true,partialLine:false,reset:false});
+  f.time(20000);f.source.tick();await f.flush();
+  try{
+    expect(f.source.goals.execution?.('key','opaque-current')).toMatchObject({state:'unknown',boundaryMs:4000});
+    expect(f.source.goals.read('key','opaque-current',query)?.input.messages.some(m=>m.text==='Next task')).toBe(false);
+  }finally{await f.source.close();}
+});
 it('keeps authenticated turn content across unattributed records without importing those records',async()=>{
   const f=setup();f.set({records:[
     {id:'start',turnId:'current',atMs:0,kind:'runtime',runtime:'running'},

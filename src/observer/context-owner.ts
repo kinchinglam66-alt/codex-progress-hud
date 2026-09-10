@@ -76,9 +76,39 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
         if(record.turnId!==null&&(options.turnKeyFor?options.turnKeyFor(e.hostId,record.turnId):record.turnId)===e.turnKey)currentUser=record;
       }
       const protectedUsers=new Set([firstUser,latestUser,currentUser]);
+      const protectedRecords=new Set(protectedUsers);
+      // Lifecycle evidence must survive body eviction. Otherwise a retained
+      // prompt becomes the last evidence and resurrects an already ended turn.
+      const matches=(record:ConversationRecord)=>record.turnId!==null&&
+        (options.turnKeyFor?options.turnKeyFor(e.hostId,record.turnId):record.turnId)===e.turnKey;
+      const start=records.findIndex(matches);
+      if(start>=0){
+        let lastExecution:ConversationRecord|undefined;
+        for(let index=start;index<records.length;index++){
+          const record=records[index]!;
+          if(record.turnId===null)continue;
+          if(!matches(record)){protectedRecords.add(record);break;}
+          if(record.kind==='runtime'||record.kind==='user'||record.kind==='tool_start'||
+            (record.kind==='assistant'&&record.assistantPhase==='final'))lastExecution=record;
+        }
+        protectedRecords.add(lastExecution);
+      }
+      // Keep identity/state, not a potentially 64 KiB final/tool body, when
+      // lifecycle protection would compete with the protected user instructions.
+      if(bytes>256*1024)records=records.map((record,index)=>{
+        if(!protectedRecords.has(record)||protectedUsers.has(record))return record;
+        const compact:ConversationRecord={id:record.id,turnId:record.turnId,atMs:record.atMs,kind:record.kind,
+          ...(record.runtime===undefined?{}:{runtime:record.runtime}),
+          ...(record.assistantPhase===undefined?{}:{assistantPhase:record.assistantPhase}),
+          ...(record.actionId===undefined?{}:{actionId:record.actionId})};
+        const size=Buffer.byteLength(JSON.stringify(compact));
+        if(size>=sizes[index]!)return record;
+        bytes-=sizes[index]!-size;sizes[index]=size;trimmed=true;
+        protectedRecords.delete(record);protectedRecords.add(compact);return compact;
+      });
       let retainedCount=records.length;
       records=records.filter((record,index)=>{
-        if(bytes<=256*1024||protectedUsers.has(record))return true;
+        if(bytes<=256*1024||protectedRecords.has(record))return true;
         bytes-=sizes[index]!+(retainedCount>1?1:0);
         retainedCount--;trimmed=true;return false;
       });

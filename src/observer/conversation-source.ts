@@ -65,7 +65,8 @@ export function createConversationSource(options:OwnerOptions & {
     // They affect local validity only; `records` sent to inference stays turn-bounded.
     const userFingerprint=createHash('sha256').update(JSON.stringify(snapshot.records.filter(r=>r.kind==='user')
       .map(r=>[r.id,r.turnId,r.text??'']))).digest('hex');
-    return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,actions,finalAvailable,userFingerprint};
+    const nextTurn=snapshot.records[end];
+    return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,actions,finalAvailable,userFingerprint,nextTurn};
   };
   const paceContinuity=(selected:NonNullable<ReturnType<typeof select>>,evidence:ReturnType<typeof parsePaceEvidence>):PaceContinuity=>{
     const endMs=options.wallNow();
@@ -118,11 +119,17 @@ export function createConversationSource(options:OwnerOptions & {
     if(!selected)return {state:'unknown',identity:`${turnKey}:missing:${snapshot.sourceEpoch}`,boundaryMs:previous?.trustedAt??now};
     // Terminal evidence is not undone by a late tool result. Only a subsequent
     // actual start/runtime event establishes another running interval.
-    const record=selected.current.filter(r=>r.kind==='runtime'||r.kind==='user'||r.kind==='tool_start'||
+    let record=selected.current.filter(r=>r.kind==='runtime'||r.kind==='user'||r.kind==='tool_start'||
       (r.kind==='assistant'&&r.assistantPhase==='final')).at(-1);
     if(!record)return null;
-    const state=record.kind==='runtime'?(record.runtime??'unknown'):
+    let state:NonNullable<ReturnType<NonNullable<GoalContextSource['execution']>>>['state']=record.kind==='runtime'?(record.runtime??'unknown'):
       record.kind==='assistant'?(selected.actions.size===0?'waiting':'unknown'):'running';
+    // A new persisted start fences the old clock even if its Hook is delayed.
+    // It does not authorize importing the new turn or claiming goal completion.
+    const next=selected.nextTurn;
+    if(state==='running'&&next&&(next.kind==='user'||(next.kind==='runtime'&&next.runtime==='running'))){
+      state='unknown';record=next;
+    }
     const identity=`${selected.currentEpoch}:${turnKey}:${record.id}:${state}`;
     const boundaryMs=previous?.identity===identity?previous.boundaryMs:
       Math.max(0,Math.floor(now-Math.max(0,options.wallNow()-record.atMs)));

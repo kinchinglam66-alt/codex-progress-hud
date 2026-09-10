@@ -20,6 +20,29 @@ function setup(){
   return {goals,contexts,envelope,available:()=>{available=true;},reset:()=>{epoch++;},advance:()=>{revision++;}};
 }
 const answer={relation:'replace',status:'running',summary:'sleep',estimate:{remainingSeconds:90,errorPercent:20}};
+it('stops charging active time at a persisted end even when later output evicts old bodies',async()=>{
+  let monotonic=0;
+  const envelope=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'turn'},0,
+    'protected-clock-regression-token-1234567890').envelope;
+  let contents:ReadBatch={records:[{id:'user',turnId:'turn',atMs:0,kind:'user',text:'Work'}],
+    caughtUp:true,partialLine:false,reset:false};
+  const source=createConversationSource({source:{read:async()=>contents,remove:()=>{},close:async()=>{}},
+    now:()=>monotonic,wallNow:()=>monotonic,turnKeyFor:(_host,turn)=>turn==='turn'?envelope.turnKey!:'next'});
+  const goals=new PassiveGoals(new PassiveContextStore(),source.goals);
+  goals.observe(envelope,true,0);source.attach(envelope.sessionKey,'host',envelope.turnKey!);
+  try{
+    monotonic=500;source.tick();await new Promise<void>(resolve=>setImmediate(resolve));
+    goals.reconcileSource(envelope.sessionKey,monotonic);
+    contents={records:[{id:'end',turnId:'turn',atMs:3000,kind:'runtime',runtime:'waiting'},
+      {id:'next',turnId:'next',atMs:4000,kind:'user',text:'Next'},
+      ...Array.from({length:8},(_,i)=>({id:`body${i}`,turnId:'next',atMs:4001+i,kind:'tool_result' as const,text:'x'.repeat(60000)}))],
+      caughtUp:true,partialLine:false,reset:false};
+    monotonic=5500;source.tick();await new Promise<void>(resolve=>setImmediate(resolve));
+    goals.reconcileSource(envelope.sessionKey,monotonic);
+    expect(goals.view(envelope.sessionKey,6000)).toMatchObject({runtime:'waiting',activeSeconds:3});
+    expect(goals.view(envelope.sessionKey,3600000)).toMatchObject({runtime:'waiting',activeSeconds:3});
+  }finally{await source.close();}
+});
 it('rejects a new answer based on superseded source input without erasing the previous estimate',()=>{
   const f=setup();f.available();const first=f.goals.request(f.envelope.sessionKey,15000)!;
   expect(f.goals.settle(first.ticket,answer,16000)).toBe(true);
