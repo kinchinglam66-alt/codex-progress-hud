@@ -46,6 +46,24 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...c,elapsedSeconds:15+delay-1})).toBe(false);
     expect(canRequest({...c,elapsedSeconds:15+delay})).toBe(true);
   });
+  it('allows one bounded bootstrap recovery only with new content after cooldown',()=>{
+    const c={...base,remainingSeconds:null,unknownResults:1,lastRequestSeconds:15,elapsedSeconds:75,
+      hasNewInformation:true,hasNewContent:true,bootstrapRecovery:true};
+    expect(decideTrigger(c)).toMatchObject({reason:'bootstrap_recovery',blockReason:null});
+    expect(canRequest({...c,elapsedSeconds:74})).toBe(false);
+    expect(canRequest({...c,hasNewContent:false})).toBe(false);
+    expect(canRequest({...c,state:'paused'})).toBe(false);
+    expect(canRequest({...c,state:'terminal'})).toBe(false);
+    expect(canRequest({...c,contentReady:false})).toBe(false);
+    expect(canRequest({...c,goalInFlight:true})).toBe(false);
+  });
+  it('excludes a long pause from the bootstrap active-time cooldown',()=>{
+    const c={...base,remainingSeconds:null,unknownResults:1,lastRequestSeconds:15,elapsedSeconds:1000,
+      activeSeconds:25,lastRequestActiveSeconds:15,hasNewInformation:true,hasNewContent:true,bootstrapRecovery:true};
+    expect(decideTrigger(c)).toMatchObject({blockReason:'cooldown',eligibleActiveSeconds:75});
+    expect(decideTrigger({...c,activeSeconds:74.999})).toMatchObject({blockReason:'cooldown'});
+    expect(decideTrigger({...c,activeSeconds:75})).toMatchObject({reason:'bootstrap_recovery',eligibleActiveSeconds:75});
+  });
   it('coalesces events without bypassing cooldown',()=>{
     const c={...base,lastRequestSeconds:15,remainingSeconds:50000,eventAtSeconds:70};
     expect(canRequest({...c,elapsedSeconds:79})).toBe(false);

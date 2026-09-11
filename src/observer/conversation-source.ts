@@ -61,6 +61,12 @@ export function createConversationSource(options:OwnerOptions & {
       if(record.kind==='tool_result'&&record.actionId)actions.delete(record.actionId);
     }
     const finalAvailable=current.some(record=>record.kind==='assistant'&&record.assistantPhase==='final');
+    // Content identity intentionally excludes record ids, timestamps, runtime
+    // state and other source bookkeeping so it represents only current-turn
+    // text that could improve an inference.
+    const contentFingerprint=createHash('sha256').update(JSON.stringify(current
+      .filter(record=>record.kind!=='runtime'&&typeof record.text==='string'&&record.text.length>0)
+      .map(record=>[record.kind,record.text]))).digest('hex');
     // Local proof of unchanged instructions, never a public identity or model input.
     // Also fence later user turns already persisted before their Hook arrives.
     // They affect local validity only; `records` sent to inference stays turn-bounded.
@@ -68,7 +74,7 @@ export function createConversationSource(options:OwnerOptions & {
       .map(r=>[r.id,r.turnId,r.text??'']))).digest('hex');
     const nextTurn=snapshot.records[end];
     return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,
-      currentTurnId:current[0]?.turnId??null,actions,finalAvailable,userFingerprint,nextTurn};
+      currentTurnId:current[0]?.turnId??null,actions,finalAvailable,userFingerprint,contentFingerprint,nextTurn};
   };
   const paceContinuity=(selected:NonNullable<ReturnType<typeof select>>,evidence:ReturnType<typeof parsePaceEvidence>):PaceContinuity=>{
     const endMs=options.wallNow();
@@ -159,7 +165,8 @@ export function createConversationSource(options:OwnerOptions & {
     return {state,identity,boundaryMs,...(outcome===undefined?{}:{outcome})};
   },takeover,inspect(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
-    return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,currentActionId:[...selected.actions.keys()].at(-1)??null,
+     return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,contentFingerprint:selected.contentFingerprint,
+       currentActionId:[...selected.actions.keys()].at(-1)??null,
       finalAvailable:selected.finalAvailable,
       ready:selected.records.some(record=>!!record.text&&(record.kind==='user'||
         (query.goalSummary!==null&&record.kind!=='runtime')))};
@@ -173,7 +180,7 @@ export function createConversationSource(options:OwnerOptions & {
         historyComplete:snapshot.historyComplete&&floor>=0,nowMs:options.wallNow(),previousEstimate:query.previousEstimate,
         runtime:query.runtime,currentTurnId:selected.currentTurnId});
       return {epoch:currentEpoch,revision:snapshot.revision,userFingerprint:selected.userFingerprint,input,
-        currentActionId:[...actions.keys()].at(-1)??null,
+         currentActionId:[...actions.keys()].at(-1)??null,contentFingerprint:selected.contentFingerprint,
         finalAvailable,...paceFor(key,selected,query)};
     }catch{return null;}
   }};

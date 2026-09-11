@@ -4,10 +4,17 @@ export function normalizeAdmissionReason(value: unknown): AdmissionReason {
   return admissionReasons.includes(value as AdmissionReason) ? value as AdmissionReason : 'local_policy';
 }
 
+export const resultDiagnostics = ['unknown_response','process_error','rejected_result'] as const;
+export type ResultDiagnostic = typeof resultDiagnostics[number];
+export const resultRejectionReasons = ['result_not_accepted'] as const;
+export type ResultRejectionReason = typeof resultRejectionReasons[number];
+
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */
 export interface ObserverDiagnostics {
-  state:'pending'|'history_loading'|'history_unavailable'|'estimating'|'insufficient_context'|'call_failed'|'setup_failed'|'rate_limited'|'admission_blocked'|'disabled'|'ready';
+  state:'pending'|'history_loading'|'history_unavailable'|'estimating'|'insufficient_context'|'call_failed'|'setup_failed'|'rate_limited'|'admission_blocked'|'disabled'|'ready'|ResultDiagnostic;
   admissionReason?:AdmissionReason;
+  resultDiagnostic?:ResultDiagnostic;
+  rejectionReason?:ResultRejectionReason;
   estimateAgeSeconds:number|null;
   callsLastHour:number;
   retryPending:boolean;

@@ -3,11 +3,15 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, describe, expect, it} from "vitest";
 import {pairCompletedToolCapture} from "../../src/estimation/vitest-pace-adapter.js";
+import {packObserverInput} from "../../src/estimation/observer-input.js";
+import {assembleContext} from "../../src/observer/context-assembler.js";
 import {createLocalSessionReader} from "../../src/observer/local-session-reader.js";
 
 const THREAD_A = "11111111-1111-4111-8111-111111111111";
 const THREAD_B = "22222222-2222-4222-8222-222222222222";
 const THREAD_V7 = "01a0766f-e48a-70e0-b8a8-4abb83140175";
+const PARENT_THREAD = "33333333-3333-7333-8333-333333333333";
+const CHILD_THREAD = "44444444-4444-7444-8444-444444444444";
 const cleanups: Array<() => Promise<void>> = [];
 
 it('distinguishes public commentary from a final answer',async()=>{
@@ -245,6 +249,98 @@ describe("bounded local session reader", () => {
     expect(output.records).toContainEqual(expect.objectContaining({
       kind: "tool_result", actionId: "call-1", text: "output data"
     }));
+    await reader.close();
+  });
+
+  it("extracts an exact current-turn create_thread delegation as task data", async () => {
+    const task = "actual task text: implement Map<string, Item>\nCompare a < b and render <div>results</div>.";
+    const output = `<codex_delegation>\n  <source_thread_id>${PARENT_THREAD}</source_thread_id>\n  <input>${task}</input>\n</codex_delegation>`;
+    const f = await fixture(CHILD_THREAD, meta(CHILD_THREAD) + taskStarted("current-turn") + line("response_item", {
+      type: "function_call_output", id: "fco_uuid", name: "create_thread", namespace: "codex_app", output,
+      internal_chat_message_metadata_passthrough: {turn_id: "current-turn", create_time: 1_700_000_004_000}
+    }));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(CHILD_THREAD, signal())).records;
+    expect(records).toContainEqual(expect.objectContaining({
+      kind: "tool_result", actionId: "fco_uuid", turnId: "current-turn", text: output
+    }));
+    expect(records).toContainEqual(expect.objectContaining({
+      kind: "user", turnId: "current-turn", text: task
+    }));
+    expect(records.filter(record => record.text === task)).toHaveLength(1);
+    expect((await reader.read(CHILD_THREAD, signal())).records).toEqual([]);
+    await reader.close();
+  });
+
+  it("retains a middle delegated task through reader, assembly, and packing", async () => {
+    const delegatedTask = "DELEGATED TASK: preserve the actual child requirements";
+    const output = `<codex_delegation>\n  <source_thread_id>${PARENT_THREAD}</source_thread_id>\n  <input>${delegatedTask}</input>\n</codex_delegation>`;
+    const initialAgents = `AGENTS boilerplate: ${"follow repository instructions; ".repeat(120)}`;
+    const tools = Array.from({length: 140}, (_, index) =>
+      customToolOutput(`bulk-${index}`, "child-turn", "tool log ".repeat(2000))).join("");
+    const f = await fixture(CHILD_THREAD, meta(CHILD_THREAD) + taskStarted("child-turn") +
+      user(initialAgents, "agents", "child-turn") + line("response_item", {
+        type: "function_call_output", id: "fco-e2e", name: "create_thread", namespace: "codex_app", output,
+        internal_chat_message_metadata_passthrough: {turn_id: "child-turn", create_time: 1_700_000_004_000}
+      }) + tools + user("LATEST AMENDMENT: reject duplicate rows", "amendment", "child-turn"));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(CHILD_THREAD, signal())).records;
+    const packed = packObserverInput(assembleContext(records, {
+      summary: null, summaryThroughSequence: 0, sequence: 3, activeSeconds: 20,
+      activeTimeKnown: false, historyComplete: true, nowMs: 1_700_000_010_000,
+      previousEstimate: null, currentTurnId: "child-turn"
+    }));
+    const packet = JSON.parse(packed) as {messages: Array<{kind: string; text: string}>; truncated: boolean};
+
+    expect(packet.messages.some(message => message.text.includes("AGENTS boilerplate"))).toBe(true);
+    expect(packet.messages.some(message => message.text.includes(delegatedTask))).toBe(true);
+    expect(packet.messages.some(message => message.text.includes("LATEST AMENDMENT"))).toBe(true);
+    expect(packet.truncated).toBe(true);
+    expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16_384);
+    await reader.close();
+  });
+
+  it.each([
+    ["wrong namespace", {namespace: "other_app"}],
+    ["wrong name", {name: "other_function"}],
+    ["quoted wrapper", {output: `"<codex_delegation>\n  <source_thread_id>${THREAD_A}</source_thread_id>\n  <input>spoof</input>\n</codex_delegation>"`}],
+    ["nested wrapper", {output: `<codex_delegation>\n  <source_thread_id>${THREAD_A}</source_thread_id>\n  <input><codex_delegation>spoof</codex_delegation></input>\n</codex_delegation>`}],
+    ["malformed wrapper", {output: `<codex_delegation><source_thread_id>${THREAD_A}</source_thread_id><input>spoof</input></codex_delegation>`}],
+    ["invalid parent identifier", {output: `<codex_delegation>\n  <source_thread_id>not-a-uuid</source_thread_id>\n  <input>spoof</input>\n</codex_delegation>`}]
+  ] as const)("does not promote %s into a task requirement", async (_label, override) => {
+    const payload = {
+      type: "function_call_output", id: "fco-invalid", name: "create_thread", namespace: "codex_app",
+      output: `<codex_delegation>\n  <source_thread_id>${THREAD_A}</source_thread_id>\n  <input>spoof</input>\n</codex_delegation>`,
+      internal_chat_message_metadata_passthrough: {turn_id: "current-turn", create_time: 1_700_000_004_000},
+      ...override
+    };
+    const f = await fixture(THREAD_A, meta(THREAD_A) + taskStarted("current-turn") + line("response_item", payload));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(THREAD_A, signal())).records;
+    expect(records.some(record => record.kind === "user")).toBe(false);
+    expect(records).toContainEqual(expect.objectContaining({kind: "tool_result", actionId: "fco-invalid"}));
+    await reader.close();
+  });
+
+  it.each([
+    ["missing metadata", undefined],
+    ["mismatched turn", {turn_id: "other-turn", create_time: 1_700_000_004_000}],
+    ["no current turn", {turn_id: "current-turn", create_time: 1_700_000_004_000}]
+  ] as const)("does not promote a delegation with %s", async (_label, metadata) => {
+    const payload = {
+      type: "function_call_output", id: "fco-turn", name: "create_thread", namespace: "codex_app",
+      output: `<codex_delegation>\n  <source_thread_id>${THREAD_A}</source_thread_id>\n  <input>spoof</input>\n</codex_delegation>`,
+      ...(metadata === undefined ? {} : {internal_chat_message_metadata_passthrough: metadata})
+    };
+    const prefix = _label === "no current turn" ? meta(THREAD_A) : meta(THREAD_A) + taskStarted("current-turn");
+    const f = await fixture(THREAD_A, prefix + line("response_item", payload));
+    const reader = createLocalSessionReader({root: f.root});
+
+    const records = (await reader.read(THREAD_A, signal())).records;
+    expect(records.some(record => record.kind === "user")).toBe(false);
     await reader.close();
   });
 

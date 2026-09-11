@@ -1,4 +1,4 @@
-export type TriggerReason = 'initial'|'important_event'|'status_evidence'|'near_expiry'|'overdue'|'periodic'|'pre_dispatch_retry';
+export type TriggerReason = 'initial'|'important_event'|'status_evidence'|'near_expiry'|'overdue'|'periodic'|'pre_dispatch_retry'|'bootstrap_recovery';
 
 export type RequestBlockReason = 'invalid_clock'|'invalid_counter'|'context_missing'|'request_in_flight'
   |'no_new_information'|'no_active_progress'|'global_concurrency_limit'|'hourly_limit'|'runtime_ineligible'
@@ -15,6 +15,8 @@ export interface RequestContext {
   eventReason?:TriggerReason|null;
   contentReady:boolean;
   hasNewInformation:boolean;
+  hasNewContent?:boolean;
+  bootstrapRecovery?:boolean;
   activeSeconds?:number;
   lastRequestActiveSeconds?:number|null;
   overdueActionRecheck?:boolean;
@@ -71,8 +73,10 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
   const activeClock=input.activeSeconds!==undefined&&input.lastRequestActiveSeconds!==undefined&&
     input.lastRequestActiveSeconds!==null;
   const activeProgress=activeClock&&input.activeSeconds!>input.lastRequestActiveSeconds!;
+  const bootstrapRecovery=input.bootstrapRecovery===true&&input.remainingSeconds===null&&
+    input.hasNewInformation&&input.hasNewContent===true;
   const interval=ordinaryInterval(input.remainingSeconds,input.unknownResults);
-  const eligibleActiveSeconds=activeClock?input.lastRequestActiveSeconds!+interval:null;
+  const eligibleActiveSeconds=activeClock?input.lastRequestActiveSeconds!+(bootstrapRecovery?60:interval):null;
 
   if(input.state!=='running'&&!statusEvent)return decision('runtime_ineligible',null,null,eligibleActiveSeconds);
   if(input.elapsedSeconds<15)return decision('initial_delay',null,15,eligibleActiveSeconds);
@@ -87,6 +91,11 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
   }
   if(input.preDispatchRetry===true)return decision(null,'pre_dispatch_retry',null,eligibleActiveSeconds);
   if(statusEvent)return decision(null,'status_evidence',null,eligibleActiveSeconds);
+  if(bootstrapRecovery){
+    if(activeClock&&input.activeSeconds!<eligibleActiveSeconds!)
+      return decision('cooldown',null,null,eligibleActiveSeconds);
+    return decision(null,'bootstrap_recovery',null,eligibleActiveSeconds);
+  }
   if(importantEvent)return decision(null,'important_event',null,eligibleActiveSeconds);
   if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
   if(input.nearExpiryRecheck===true&&input.remainingSeconds!==null&&input.remainingSeconds>0)

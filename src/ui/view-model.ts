@@ -7,6 +7,7 @@ import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics
 const observerLabels:Record<ObserverDiagnostics['state'],string>={pending:'等待首次估时',history_loading:'正在加载任务历史',
   history_unavailable:'任务历史暂不可用，正在重试读取',
   estimating:'正在估时',insufficient_context:'依据不足，暂无法估时',call_failed:'估时调用失败',
+  unknown_response:'估时返回不确定结果',process_error:'估时进程出错',rejected_result:'估时结果未采纳',
   setup_failed:'估时启动失败，请检查运行环境或授权',
   rate_limited:'估时受限，等待可用额度',admission_blocked:'本地估时暂受限，请查看诊断',disabled:'估时已停用，请查看诊断',ready:'估值可用'};
 const admissionLabels:Record<AdmissionReason,string>={
@@ -106,7 +107,7 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
   const overdueLabel = (): string => {
     if (!running) return '已超出预计时间 · 工作计时已暂停';
     const action = observer?.state === 'estimating' ? '正在重新估时'
-      : observer?.state === 'call_failed' || observer?.state === 'setup_failed' || observer?.state === 'disabled'
+      : observer?.state === 'call_failed' || observer?.state === 'process_error' || observer?.state === 'unknown_response' || observer?.state === 'rejected_result' || observer?.state === 'setup_failed' || observer?.state === 'disabled'
         ? '估时暂不可用'
         : observer?.state === 'admission_blocked' ? observerLabel(observer)
         : observer?.state === 'rate_limited' ? '重估受限，等待额度' : '等待重新估时';

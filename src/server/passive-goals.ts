@@ -5,6 +5,7 @@ import type {CountdownPrediction} from '../ui/countdown.js';
 import {PaceMeasurements, type PaceContinuity, type PaceEvidence, type PaceGroup} from '../estimation/pace-measurements.js';
 import type {PaceInterval, WorkBreakdown} from '../estimation/pace-correction.js';
 import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
+import {createHash} from 'node:crypto';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
@@ -64,10 +65,10 @@ export interface GoalContextSource {
   takeover?(key:string,turnKey:string):SourceTurnTakeover|null;
   epoch(key:string):number|null;
   inspect?(key:string,turnKey:string,query:GoalContextQuery):{
-    ready:boolean;revision:number;userFingerprint?:string;currentActionId:string|null;finalAvailable:boolean
+    ready:boolean;revision:number;userFingerprint?:string;contentFingerprint?:string;currentActionId:string|null;finalAvailable:boolean
   }|null;
   read(key:string,turnKey:string,query:GoalContextQuery):{
-    epoch:number;revision:number;userFingerprint?:string;currentActionId:string|null;finalAvailable:boolean;input:ObserverInput
+    epoch:number;revision:number;userFingerprint?:string;contentFingerprint?:string;currentActionId:string|null;finalAvailable:boolean;input:ObserverInput
     paceEvidence?:PaceEvidence|readonly PaceEvidence[];paceContinuity?:PaceContinuity;
     paceBatches?:readonly {evidence:PaceEvidence;continuity:PaceContinuity}[];measurementEpoch?:number;
   }|null;
@@ -85,6 +86,8 @@ export interface PassiveGoalScheduling {
   finalAvailable: boolean;
   revision?: number;
   currentActionId?: string|null;
+  /** Opaque local identity of current-turn source content; never sent to the UI. */
+  contentIdentity?: string;
 }
 
 /** Owns local identities and active clocks. Does not launch inference or authorize spend.
@@ -146,9 +149,21 @@ export class PassiveGoals {
       const capture=this.source.read(key,goal.turnKey,query);
       if(!inspectOnly){this.ingestPace(goal,capture,epochChanged);return capture;}
       if(!capture)return capture;
-      return {revision:capture.revision,userFingerprint:capture.userFingerprint,currentActionId:capture.currentActionId,finalAvailable:capture.finalAvailable,
+      return {revision:capture.revision,userFingerprint:capture.userFingerprint,contentFingerprint:capture.contentFingerprint,
+        currentActionId:capture.currentActionId,finalAvailable:capture.finalAvailable,
         ready:capture.input.messages.length>0&&(goal.summary!==null||capture.input.messages.some(m=>m.kind==='user'))};}
     catch{return null;}
+  }
+
+  private contextContentIdentity(sessionKey:string,turnKey:string):string|null {
+    try {
+      const context=this.contexts.read(sessionKey);
+      if(!context)return null;
+      const digest=createHash('sha256');
+      for(const entry of context.entries)if(entry.turnKey===turnKey)
+        digest.update(JSON.stringify([entry.hook,entry.content.kind,entry.content.text,entry.content.truncated]));
+      return digest.digest('hex');
+    } catch { return null; }
   }
 
   private clock(now: number, goal?: Goal): boolean {
@@ -318,17 +333,23 @@ export class PassiveGoals {
     if(this.source){
       const selected=this.sourceContext(sessionKey,goal,nowMs,true);
       view=this.view(sessionKey,nowMs)!;
+      // Revisions, action IDs and user-identity fences also advance for
+      // bookkeeping. Only a current-turn text fingerprint qualifies here.
+      const contentIdentity=selected?.contentFingerprint===undefined?undefined:
+        `source:${goal.turnKey}:${selected.contentFingerprint}`;
       return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,sourceAvailable:selected!==null,ready:selected?.ready??false,
         finalAvailable:selected?.finalAvailable??false,revision:selected?.revision??0,
-        currentActionId:selected?.currentActionId??null};
+        currentActionId:selected?.currentActionId??null,...(contentIdentity===undefined?{}:{contentIdentity})};
     }
     const messages = this.contexts.read(sessionKey)?.entries.filter(entry => entry.turnKey === goal.turnKey) ?? [];
     const hasUser = messages.some(entry => entry.content.kind === 'user');
     // Match request(): a current user message is enough for an initial estimate.
     // Whether its meaning supplies an ETA basis belongs to the observer model.
+    const contentIdentity=this.contextContentIdentity(sessionKey,goal.turnKey);
     return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,
       sourceAvailable:true,
       ready: messages.length > 0 && (goal.summary !== null || hasUser),
+      ...(contentIdentity===null?{}:{contentIdentity}),
       finalAvailable: messages.some(entry => entry.content.kind === 'assistant')};
   }
 

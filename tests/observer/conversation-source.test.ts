@@ -3,6 +3,21 @@ import {createConversationSource} from '../../src/observer/conversation-source.j
 import type {ReadBatch} from '../../src/observer/conversation-record.js';
 
 const query={goalSummary:null,activeSeconds:15,runtime:'running' as const,previousEstimate:null};
+it('tracks current-turn assistant and tool text but excludes lifecycle-only content from recovery identity',async()=>{
+  const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  const identity=()=>f.source.goals.inspect?.('key','opaque-current',query)?.contentFingerprint;
+  const initial=identity();expect(initial).toMatch(/^[a-f0-9]{64}$/u);
+  f.set({records:[{id:'runtime',turnId:'current',atMs:3000,kind:'runtime',runtime:'running',text:'host lifecycle notice'}],
+    caughtUp:true,partialLine:false,reset:false});
+  f.time(5500);f.source.tick();await f.flush();expect(identity()).toBe(initial);
+  f.set({records:[{id:'assistant',turnId:'current',atMs:4000,kind:'assistant',text:'Parsing is now implemented'}],
+    caughtUp:true,partialLine:false,reset:false});
+  f.time(10500);f.source.tick();await f.flush();const assistant=identity();expect(assistant).not.toBe(initial);
+  f.set({records:[{id:'result',turnId:'current',atMs:5000,kind:'tool_result',text:'Three integration tests passed'}],
+    caughtUp:true,partialLine:false,reset:false});
+  f.time(15500);f.source.tick();await f.flush();expect(identity()).not.toBe(assistant);
+  await f.source.close();
+});
 it('retains compact lifecycle evidence when protected message bodies fill the memory budget',async()=>{
   const f=setup();const text='x'.repeat(65536);
   f.source.attach('key','host','opaque-current');
@@ -112,6 +127,21 @@ it('reads current persisted user and tool action without needing hook content',a
   expect(capture?.input.observation).toMatchObject({historyComplete:true,activeTimeKnown:false,
     currentAction:{text:'sleep 100',elapsedSeconds:18}});
   expect(capture?.currentActionId).toBe('call');await f.source.close();
+});
+
+it('exposes an opaque current-turn text digest while excluding runtime and timestamp metadata',async()=>{
+  const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  try{
+    const first=f.source.goals.inspect?.('key','opaque-current',query);
+    expect(first?.contentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    f.set({records:[...records,{id:'runtime-only',turnId:'current',atMs:9999,kind:'runtime',runtime:'running'}],caughtUp:true,partialLine:false,reset:false});
+    f.time(5500);f.source.tick();await f.flush();
+    const runtimeOnly=f.source.goals.inspect?.('key','opaque-current',query);
+    expect(runtimeOnly?.contentFingerprint).toBe(first?.contentFingerprint);
+    f.set({records:[...records,{id:'assistant-text',turnId:'current',atMs:10000,kind:'assistant',assistantPhase:'commentary',text:'New context'}],caughtUp:true,partialLine:false,reset:false});
+    f.time(10500);f.source.tick();await f.flush();
+    expect(f.source.goals.inspect?.('key','opaque-current',query)?.contentFingerprint).not.toBe(first?.contentFingerprint);
+  }finally{await f.source.close();}
 });
 
 it('inspects eligibility without taking an inference-time snapshot',async()=>{

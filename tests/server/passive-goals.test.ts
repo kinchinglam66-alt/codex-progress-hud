@@ -32,6 +32,18 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it('does not count revision or action-only bookkeeping as new recovery content',()=>{
+    let revision=1,currentActionId:string|null='action',contentFingerprint='content-one';
+    const source:GoalContextSource={health:()=> 'ready',epoch:()=>0,
+      inspect:()=>({ready:true,revision,currentActionId,contentFingerprint,finalAvailable:false}),
+      read:()=>null};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0);
+    const initial=f.goals.scheduling(session,0)!.contentIdentity;expect(initial).toBeDefined();
+    revision++;currentActionId=null;
+    expect(f.goals.scheduling(session,1000)!.contentIdentity).toBe(initial);
+    contentFingerprint='content-two';revision++;
+    expect(f.goals.scheduling(session,2000)!.contentIdentity).not.toBe(initial);
+  });
   it.each(['continue','unknown'] as const)('keeps the prior countdown during a same-turn %s refresh without a new estimate',relation=>{
     const f=fixture(),session=f.hook('UserPromptSubmit',0);
     expect(f.goals.settle(f.request(15000).ticket,answer(),16000)).toBe(true);

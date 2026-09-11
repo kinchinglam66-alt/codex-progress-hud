@@ -347,6 +347,44 @@ function normalizeTool(
   return addRecord(context, record, `${record.kind}:${actionId}`);
 }
 
+function delegatedTaskText(
+  context: ParseContext,
+  value: Record<string, unknown>
+): string | undefined {
+  if (value.type !== "function_call_output" || value.name !== "create_thread" ||
+      value.namespace !== "codex_app" || stringValue(value.id) === undefined ||
+      typeof value.output !== "string") return undefined;
+  const metadata = value.internal_chat_message_metadata_passthrough;
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const passthrough = metadata as Record<string, unknown>;
+  if (Object.keys(passthrough).length !== 2 || typeof passthrough.create_time !== "number" ||
+      !Number.isFinite(passthrough.create_time) || stringValue(passthrough.turn_id) === undefined ||
+      context.activeTurnId === null || passthrough.turn_id !== context.activeTurnId) return undefined;
+  const match = /^<codex_delegation>\r?\n  <source_thread_id>([^<>\r\n]+)<\/source_thread_id>\r?\n  <input>([\s\S]+)<\/input>\r?\n<\/codex_delegation>$/u.exec(value.output);
+  if (match === null || !UUID.test(match[1]!) || /<\/?codex_delegation\b/iu.test(match[2]!)) return undefined;
+  return boundedText(match[2]!);
+}
+
+function normalizeHostDelegation(
+  context: ParseContext,
+  value: Record<string, unknown>,
+  atMs: number,
+  offset: number,
+  toolRecords: ConversationRecord[]
+): ConversationRecord[] {
+  const taskText = delegatedTaskText(context, value);
+  if (taskText === undefined) return toolRecords;
+  const actionId = stringValue(value.id)!;
+  const task: ConversationRecord = {
+    id: recordId(context.threadId, offset, `host-delegation:${actionId}`, "user"),
+    turnId: context.activeTurnId,
+    atMs,
+    kind: "user",
+    text: taskText
+  };
+  return [...toolRecords, ...addRecord(context, task, `host_delegation:${context.activeTurnId}:${actionId}`)];
+}
+
 function normalizeCommand(
   context: ParseContext,
   value: Item,
@@ -412,7 +450,8 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
       return normalizeTool(context, payload, atMs, context.offset, false);
     }
     if (itemType === "custom_tool_call_output" || itemType === "function_call_output") {
-      return normalizeTool(context, payload, atMs, context.offset, true);
+      return normalizeHostDelegation(context, payload, atMs, context.offset,
+        normalizeTool(context, payload, atMs, context.offset, true));
     }
     return [];
   }

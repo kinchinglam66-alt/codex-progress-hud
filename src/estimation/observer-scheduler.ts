@@ -3,7 +3,7 @@ import type {ObserverResult} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
-import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics} from '../core/observer-diagnostics.js';
+import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
@@ -27,6 +27,8 @@ export interface ObserverObservation {
   triggerReason?:TriggerReason|string; lastRequestActiveSeconds?:number|null; eligibleActiveSeconds?:number|null;
   activeTimeKnown?:boolean;
   estimate?:{remainingSeconds:number;errorPercent:number}|null;
+  resultDiagnostic?:ResultDiagnostic;
+  rejectionReason?:ResultRejectionReason;
   forecast?:Readonly<ForecastRecord>;
   forecastDiagnostic?:'provenance_unavailable'|'invalid_provenance';
   usage?:ObserverResult['usage'];
@@ -48,6 +50,9 @@ interface Entry {
   timerFailures?:number;
   sourceClockAvailable?:boolean;
   sourceActiveSeconds?:number; predictionExcludedSeconds?:number;
+  contentIdentity?:string; consumedContentIdentity?:string;
+  bootstrapRecoveryEligible?:boolean; bootstrapRecoveryUsed?:boolean;
+  lastResultDiagnostic?:ResultDiagnostic; lastRejectionReason?:ResultRejectionReason;
   expiredTimerResults:number;
   ended:boolean;
 }
@@ -147,6 +152,10 @@ export class ObserverScheduler {
       entry.goalIdentity=state.goalIdentity;entry.predictionIdentity=state.predictionIdentity;
       entry.unknown=0;entry.expiredTimerResults=0;delete entry.overdueEligibleActiveSeconds;
       delete entry.overdueReservedPrediction;entry.lastRequestActiveSeconds=state.view.activeSeconds;
+      if(state.contentIdentity===undefined)delete entry.contentIdentity;else entry.contentIdentity=state.contentIdentity;
+      delete entry.consumedContentIdentity;
+      entry.bootstrapRecoveryEligible=false;entry.bootstrapRecoveryUsed=false;
+      delete entry.lastResultDiagnostic;delete entry.lastRejectionReason;delete entry.lastResultStatus;
       if(state.view.prediction)entry.overdueEligibleActiveSeconds=
         state.view.prediction.observedActiveSeconds+state.view.prediction.remainingSeconds+15;
     } else if(entry.predictionIdentity!==state.predictionIdentity){
@@ -159,6 +168,10 @@ export class ObserverScheduler {
           state.view.prediction.remainingSeconds+15;
       }
     }
+  }
+  private syncContent(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
+    if(state.contentIdentity===undefined)delete entry.contentIdentity;
+    else entry.contentIdentity=state.contentIdentity;
   }
   private syncSourceClock(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
     const active=state.view.activeSeconds;
@@ -191,10 +204,11 @@ export class ObserverScheduler {
         predictionIdentity:state.predictionIdentity,
         sourceClockAvailable:state.sourceAvailable,
         sourceActiveSeconds:state.view.activeSeconds,
+        ...(state.contentIdentity===undefined?{}:{contentIdentity:state.contentIdentity}),
         ...(selectedSource ? {sourceRevision: state.revision, sourceFinalAvailable: state.finalAvailable} : {})};
       this.entries.set(key, entry);
     }
-    this.syncGoal(entry,state);this.syncSourceClock(entry,state);
+    this.syncGoal(entry,state);this.syncContent(entry,state);this.syncSourceClock(entry,state);
     if (selectedSource) {
       this.syncSource(entry, state.revision!);
       if (state.view.runtime === 'waiting' && state.finalAvailable && entry.sourceFinalAvailable !== true) {
@@ -204,8 +218,6 @@ export class ObserverScheduler {
     } else {
       entry.version++;
     }
-    if (event === 'prompt') {entry.unknown = 0;entry.expiredTimerResults=0;delete entry.overdueEligibleActiveSeconds;
-      delete entry.lastResultStatus;delete entry.lastAdmissionReason;delete entry.lastEstimateAt;delete entry.lastSkip;delete entry.retryVersion;}
     const resumed=entry.runtime!=='running'&&state.view.runtime==='running';
     if(event==='prompt')this.markEvent(entry,now,'important_event');
     if(event==='final'&&state.finalAvailable){entry.statusEvidence=true;this.markEvent(entry,now,'status_evidence');}
@@ -272,6 +284,7 @@ export class ObserverScheduler {
         entry.sourceFinalAvailable = state.finalAvailable;
       }
       this.syncGoal(entry,state);
+      this.syncContent(entry,state);
       this.syncSourceClock(entry,state);
       const view = state.view;
       const runtime = view.status === 'completed' || ['stopped', 'failed', 'interrupted'].includes(view.runtime)
@@ -302,13 +315,15 @@ export class ObserverScheduler {
         eventAtSeconds: entry.eventAt === null ? null : (entry.eventAt - entry.born) / 1000,
         ...(entry.eventReason===undefined?{}:{eventReason:entry.eventReason}),
         eventSequence:entry.eventSequence,consumedEventSequence:entry.consumedEventSequence,
-        remainingSeconds: remaining, unknownResults: entry.unknown, contentReady: state.ready,
-        hasNewInformation: entry.version > entry.consumed, activeSeconds:view.activeSeconds,
+         remainingSeconds: remaining, unknownResults: entry.unknown, contentReady: state.ready,
+         hasNewInformation: entry.version > entry.consumed, activeSeconds:view.activeSeconds,
+         hasNewContent:entry.contentIdentity!==undefined&&entry.contentIdentity!==entry.consumedContentIdentity,
         lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,
         overdueActionRecheck: overdueReady,overdueAlreadyChecked:overdueAlready,
         nearExpiryRecheck:nearExpiryReady,
-        overdueEligibleActiveSeconds:entry.overdueEligibleActiveSeconds??null,retryBackoff:retryBackoff||failureBackoff,
-        preDispatchRetry:entry.retryVersion===entry.version,
+         overdueEligibleActiveSeconds:entry.overdueEligibleActiveSeconds??null,retryBackoff:retryBackoff||failureBackoff,
+         preDispatchRetry:entry.retryVersion===entry.version,
+         bootstrapRecovery:entry.bootstrapRecoveryEligible===true&&entry.bootstrapRecoveryUsed!==true,
         state: runtime, statusEvidenceArrived: entry.statusEvidence,
         goalInFlight: entry.flight !== undefined, globalInFlight: this.flights.size, conversationStartsLastHour: entry.starts.length});
       if(decision.blockReason){this.skip(key,entry,decision.blockReason);continue;}
@@ -334,6 +349,10 @@ export class ObserverScheduler {
       entry.flight = flight; entry.lastStart = now; entry.starts.push(now); entry.consumed = entry.version;
       entry.consumedEventSequence=entry.eventSequence;
       entry.lastRequestActiveSeconds=request.input.activeSeconds;
+      if(entry.contentIdentity===undefined)delete entry.consumedContentIdentity;else entry.consumedContentIdentity=entry.contentIdentity;
+      if(decision.reason==='bootstrap_recovery'){
+        entry.bootstrapRecoveryUsed=true;entry.bootstrapRecoveryEligible=false;
+      }
       if(entry.retryVersion===entry.version)entry.retryUsedVersion=entry.version;
       delete entry.retryVersion;
       if (overdueReady&&state.predictionIdentity!==null)entry.overdueReservedPrediction=state.predictionIdentity;
@@ -389,6 +408,7 @@ export class ObserverScheduler {
     const live=this.options.goals.scheduling(flight.key,settledAt);
     const sameGoal=live!==null&&live.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity;
     const localResultAllowed=accepted||sameGoal;
+    const classification=this.classifyResult(result,accepted);
     if(sameGoal&&entry.version===flight.version&&result?.status==='process_error'&&
       ['near_expiry','overdue','periodic'].includes(flight.triggerReason))
       entry.timerFailures=Math.min(8,(entry.timerFailures??0)+1);
@@ -401,10 +421,17 @@ export class ObserverScheduler {
       this.stopReason ??= 'accounting_error';this.stoppedAt ??= this.lastClock;
       this.disable();
     }
-    if(entry.version===flight.version&&localResultAllowed){
+    // Result state is a safe same-goal diagnostic even when current-turn
+    // content advanced during the flight. Forecast/status mutation remains
+    // owned by PassiveGoals' ticket and identity fences below.
+    if(localResultAllowed){
       entry.lastResultStatus=result?.status??'process_error';
       if(result?.status==='admission_denied')entry.lastAdmissionReason=normalizeAdmissionReason(result.admissionReason);
       else delete entry.lastAdmissionReason;
+      if(classification.diagnostic)entry.lastResultDiagnostic=classification.diagnostic;
+      else delete entry.lastResultDiagnostic;
+      if(classification.rejectionReason)entry.lastRejectionReason=classification.rejectionReason;
+      else delete entry.lastRejectionReason;
     }
     if(accepted&&result?.interpretation?.estimate&&live){
       entry.timerFailures=0;
@@ -436,14 +463,24 @@ export class ObserverScheduler {
       if(!predictionRetained){entry.expiredTimerResults=0;
         delete entry.overdueEligibleActiveSeconds;delete entry.overdueReservedPrediction;}
     }
+    if(localResultAllowed&&live?.view.prediction===null&&entry.bootstrapRecoveryUsed!==true&&entry.bootstrapRecoveryEligible!==true&&
+      (classification.diagnostic==='unknown_response'||(classification.diagnostic==='rejected_result'&&result?.status==='interpreted')))
+      entry.bootstrapRecoveryEligible=true;
     this.recordResult(entry,flight,result,accepted,settledAt,live);
     void this.workerSource.release(flight.key).catch(() => undefined);
     this.notify();
+  }
+  private classifyResult(result:ObserverResult|null,accepted:boolean):{diagnostic?:ResultDiagnostic;rejectionReason?:ResultRejectionReason} {
+    if(result===null||result.status==='process_error')return {diagnostic:'process_error'};
+    if(!accepted)return {diagnostic:'rejected_result',rejectionReason:'result_not_accepted'};
+    if(result.status==='interpreted'&&result.interpretation?.estimate===null)return {diagnostic:'unknown_response'};
+    return {};
   }
   private recordResult(entry:Entry,flight:Flight,result:ObserverResult|null,accepted:boolean,
     acceptedAt=this.time(),live:NonNullable<ReturnType<PassiveGoals['scheduling']>>|null=null):void {
     let forecast:Readonly<ForecastRecord>|undefined;
     let forecastDiagnostic:ObserverObservation['forecastDiagnostic'];
+    const classification=this.classifyResult(result,accepted);
     const snapshotAnchor=accepted?this.options.goals.settledAnchor(flight.ticket):flight.observedActiveSeconds;
     if(accepted && live){
       let versions:ForecastVersions|null=null;
@@ -473,7 +510,9 @@ export class ObserverScheduler {
       accepted,status:result?.status??'process_error',
       ...(result?.interpretation?{relation:result.interpretation.relation}:{}),
       estimate:result?.interpretation?.estimate?{...result.interpretation.estimate}:null,
-      ...(forecast?{forecast}:{}),...(forecastDiagnostic?{forecastDiagnostic}:{}),
+       ...(forecast?{forecast}:{}),...(forecastDiagnostic?{forecastDiagnostic}:{}),
+       ...(classification.diagnostic?{resultDiagnostic:classification.diagnostic}:{}),
+       ...(classification.rejectionReason?{rejectionReason:classification.rejectionReason}:{}),
       ...(result?.timings?{timings:{...result.timings}}:{}),
       usage:result?.usage?{...result.usage}:null},flight);
   }
@@ -518,9 +557,10 @@ export class ObserverScheduler {
       ['hourly_limit','global_concurrency_limit'].includes(entry?.lastSkip??'')?'rate_limited':
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
-      entry?.lastResultStatus==='process_error'?'call_failed':
-      view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending';
+      (entry?.lastResultDiagnostic ?? (view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending'));
     return {state,...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+      ...(entry?.lastResultDiagnostic?{resultDiagnostic:entry.lastResultDiagnostic}:{}),
+      ...(entry?.lastRejectionReason?{rejectionReason:entry.lastRejectionReason}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,
       callsLastHour:entry?.starts.filter(start=>at-start<3600000).length??0,
       retryPending:entry?.retryVersion!==undefined&&entry.retryVersion===entry.version};

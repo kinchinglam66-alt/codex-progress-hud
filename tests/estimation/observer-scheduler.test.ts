@@ -158,6 +158,7 @@ const transientResult=():ObserverResult=>({status:'process_error',interpretation
   outcomes:{prediction:'invalid',call:'failed',usage:'unknown',framingValid:false,closureConfirmed:true,dispatch:'not_started',retryable:'pre_dispatch_transient'}});
 const cancelledBeforeDispatch=():ObserverResult=>({status:'aborted',interpretation:null,usage:null,
   outcomes:{prediction:'invalid',call:'cancelled',usage:'not_dispatched',framingValid:false,closureConfirmed:true,dispatch:'not_started'}});
+const unknownResult=():ObserverResult=>({status:'interpreted',interpretation:{relation:'unknown',status:'unknown',summary:null,estimate:null},usage});
 it('counts estimate freshness from its input snapshot rather than hiding provider latency',async()=>{
   const f=fixture();const key=f.hook('UserPromptSubmit');
   f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
@@ -198,6 +199,74 @@ it('retains the current estimate after an unknown-usage refresh',async()=>{
   f.time(95000);f.scheduler.tick();f.calls[1]!.finish(unknown);await f.flush();
   expect(f.goals.view(key,95000)?.prediction?.remainingSeconds).toBe(100);
   expect(records.find(row=>row.kind==='result'&&row.requestId===2)?.usage).toBeNull();
+  await f.scheduler.close();
+});
+it('allows exactly one bootstrap recovery after new current-turn content',async()=>{
+  const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(unknownResult());await f.flush();
+  f.time(75000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.hook('PostToolUse');f.time(85000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  expect(records.filter(row=>row.kind==='request').at(-1)?.triggerReason).toBe('bootstrap_recovery');
+  f.calls[1]!.finish(unknownResult());await f.flush();
+  f.hook('PostToolUse');f.time(145000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  await f.scheduler.close();
+  expect(key).toBeTruthy();
+});
+it.each(['replace','continue'] as const)('recovers an accepted initial %s scope with no numeric estimate',async relation=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish({...result(),interpretation:{relation,status:'running',summary:'Known scope',estimate:null}});
+  await f.flush();f.time(85000);f.hook('PostToolUse');f.scheduler.tick();
+  expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(unknownResult());await f.flush();await f.scheduler.close();
+});
+it('reports an accepted unknown response and a source-rejected result truthfully',async()=>{
+  const unknown=fixture(1);const unknownKey=unknown.hook('UserPromptSubmit');unknown.time(15000);unknown.scheduler.tick();
+  unknown.calls[0]!.finish(unknownResult());await unknown.flush();
+  expect(unknown.scheduler.diagnostics(unknownKey)).toMatchObject({state:'unknown_response',resultDiagnostic:'unknown_response'});
+  await unknown.scheduler.close();
+
+  const rejected=selectedSourceFixture();const rejectedKey=rejected.hook();rejected.time(15000);rejected.scheduler.tick();
+  rejected.setSource(2,'action');rejected.calls[0]!.finish(result());await rejected.flush();
+  expect(rejected.scheduler.diagnostics(rejectedKey)).toMatchObject({state:'rejected_result',resultDiagnostic:'rejected_result',rejectionReason:'result_not_accepted'});
+  await rejected.scheduler.close();
+});
+it('clears an old unknown diagnostic when an aged same-turn numeric result is accepted',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish(unknownResult());await f.flush();
+  expect(f.scheduler.diagnostics(key).state).toBe('unknown_response');
+  f.time(85000);f.hook('PostToolUse');f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(86000);f.hook('PostToolUse');
+  f.calls[1]!.finish(result());await f.flush();
+  expect(f.goals.view(key,86000)?.prediction).not.toBeNull();
+  expect(f.scheduler.diagnostics(key).state).toBe('ready');
+  expect(f.scheduler.diagnostics(key).resultDiagnostic).toBeUndefined();
+  await f.scheduler.close();
+});
+it.each(['paused','failed'] as const)('does not bootstrap recover a %s goal',async runtime=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish(unknownResult());await f.flush();
+  f.goals.runtime(key,f.goals.currentTurnKey(key)!,runtime,75000);f.scheduler.changed(key,'runtime');
+  f.hook('PostToolUse');f.time(85000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  await f.scheduler.close();
+});
+it('resets bootstrap recovery only for a new turn identity',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit','one','first');f.time(15000);f.scheduler.tick();
+  f.calls[0]!.finish(unknownResult());await f.flush();
+  f.time(85000);f.hook('PostToolUse','one','first');f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(unknownResult());await f.flush();
+  f.time(100000);f.hook('UserPromptSubmit','one','second');f.time(145000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+  f.calls[2]!.finish(unknownResult());await f.flush();
+  f.hook('PostToolUse','one','second');f.time(205000);f.scheduler.tick();expect(f.calls).toHaveLength(4);
+  f.calls[3]!.finish(unknownResult());await f.flush();
+  await f.scheduler.close();
+});
+it('does not let a late old flight overwrite a newer turn diagnostic or forecast',async()=>{
+  const f=fixture(1);const key=f.hook('UserPromptSubmit','one','first');f.time(15000);f.scheduler.tick();
+  f.goals.clear();f.time(20000);f.hook('UserPromptSubmit','one','second');
+  f.calls[0]!.finish(result());await f.flush();
+  expect(f.goals.view(key,20000)?.prediction).toBeNull();
+  expect(f.scheduler.diagnostics(key).state).not.toBe('ready');
   await f.scheduler.close();
 });
 function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false, dynamic = false) {
@@ -336,13 +405,14 @@ it('anchors null replacement forecasts to the new goal snapshot, excluding respo
 });
 
 function selectedSourceFixture(workerCount = 1) {
-  let now = 0, id = 0, revision = 1, sourceEpoch = 0, available = true, currentActionId: string|null = 'action', finalAvailable = false;
+  let now = 0, id = 0, revision = 1, sourceEpoch = 0, available = true, currentActionId: string|null = 'action', finalAvailable = false,
+    contentFingerprint = 'content-a';
   const contexts = new PassiveContextStore();
   const source = {
     health: () => available ? 'ready' as const : 'error' as const,
     epoch: () => available ? sourceEpoch : null,
     read: (_key: string, _turnKey: string, query: {activeSeconds: number; runtime: 'running'|'waiting'|'paused'}) => ({
-      epoch: 0, revision, currentActionId, finalAvailable,
+      epoch: 0, revision, currentActionId, contentFingerprint, finalAvailable,
       input: {goalSummary: null, activeSeconds: query.activeSeconds, runtime: query.runtime,
         messages: [{kind: 'user' as const, text: 'source task', truncated: false}], truncated: false}
     })
@@ -378,8 +448,9 @@ function selectedSourceFixture(workerCount = 1) {
     scheduler, goals, calls, hook, stop,
     time: (value: number) => {now = value;},
     flush: async () => {await Promise.resolve(); await Promise.resolve();},
-    setSource: (nextRevision: number, nextActionId: string|null = currentActionId, nextFinalAvailable = finalAvailable) => {
-      revision = nextRevision; currentActionId = nextActionId; finalAvailable = nextFinalAvailable;
+     setSource: (nextRevision: number, nextActionId: string|null = currentActionId, nextFinalAvailable = finalAvailable,
+       nextContentFingerprint = contentFingerprint) => {
+       revision = nextRevision; currentActionId = nextActionId; finalAvailable = nextFinalAvailable; contentFingerprint = nextContentFingerprint;
     },
     setEpoch: (nextEpoch:number) => {sourceEpoch=nextEpoch;},
     setAvailable: (nextAvailable:boolean) => {available=nextAvailable;}
@@ -390,7 +461,7 @@ it('retries a proven transient once after cooldown, not repeatedly on identical 
   const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
   f.calls[0]!.finish(transientResult());await f.flush();
   expect(f.scheduler.stats().disabled).toBe(false);
-  expect(f.scheduler.diagnostics(f.calls[0]!.key)).toMatchObject({state:'call_failed',retryPending:true,callsLastHour:1});
+  expect(f.scheduler.diagnostics(f.calls[0]!.key)).toMatchObject({state:'process_error',resultDiagnostic:'process_error',retryPending:true,callsLastHour:1});
   f.time(74999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   f.time(75000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(transientResult());await f.flush();
@@ -717,6 +788,25 @@ it('dispatches selected-source changes only when the source revision changes', a
   f.time(315000); f.scheduler.tick();
   expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result()); await f.flush();
+  await f.scheduler.close();
+});
+it('does not bootstrap recover on selected-source revision metadata without new text or action content', async () => {
+  const f = selectedSourceFixture();
+  const key = f.hook(); f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(unknownResult()); await f.flush();
+  f.setSource(2, 'action'); f.time(85000); f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);
+  expect(f.scheduler.diagnostics(key).state).toBe('unknown_response');
+  await f.scheduler.close();
+});
+it('bootstraps on selected-source text changes even when action identity stays null', async () => {
+  const f = selectedSourceFixture();
+  f.setSource(1, null, false, 'content-a');
+  f.hook(); f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(unknownResult()); await f.flush();
+  f.setSource(2, null, false, 'content-b'); f.time(85000); f.scheduler.tick();
+  expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(unknownResult());await f.flush();
   await f.scheduler.close();
 });
 

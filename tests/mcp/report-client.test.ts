@@ -77,6 +77,18 @@ describe("CompanionHttpClient", () => {
       state:'admission_blocked',admissionReason:'unresolved_previous_call',
     }}]});
   });
+  it('accepts bounded unknown, process, and rejected-result diagnostics',async()=>{
+    const store=new TaskStore();
+    store.apply({taskId:'task',event:{type:'turn_started'}},0,
+      {conversationKey:'chat',turnKey:'turn',isCurrentTurn:true});
+    const snapshot=store.snapshot(0);
+    snapshot.rows![0]!.observer={state:'rejected_result',resultDiagnostic:'rejected_result',rejectionReason:'result_not_accepted',
+      estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
+    const {baseUrl,tokenPath}=await fixture((_request,response)=>json(response,200,snapshot));
+    await expect(new CompanionHttpClient(baseUrl,tokenPath).status()).resolves.toMatchObject({rows:[{observer:{
+      state:'rejected_result',resultDiagnostic:'rejected_result',rejectionReason:'result_not_accepted'
+    }}]});
+  });
   const aggregateSnapshot = {
     revision: 3,
     selectedTaskId: "hud_abcdefghijklmnopqrstuvwxyz0123456789",

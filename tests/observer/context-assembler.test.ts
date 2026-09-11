@@ -99,6 +99,18 @@ it('retains original goal and newest amendment before repetitive tool output',()
   expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(16384);
 });
 
+it('retains a promoted delegation requirement with the latest amendment under packing pressure',()=>{
+  const records=[user('initial','actual task text: preserve the approved requirements'),
+    ...Array.from({length:140},(_,i)=>({id:`tool-${i}`,turnId:'turn1',kind:'tool_result' as const,
+      atMs:1000+i,text:'tool log '.repeat(2000)})),
+    user('amendment','LATEST AMENDMENT: reject duplicates',20_000)];
+  const packed=packObserverInput(assembleContext(records,base));
+  const decoded=JSON.parse(packed) as {messages:Array<{text:string}>};
+  expect(decoded.messages.some(message=>message.text.includes('actual task text'))).toBe(true);
+  expect(decoded.messages.some(message=>message.text.includes('LATEST AMENDMENT'))).toBe(true);
+  expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16384);
+});
+
 it('provides running action elapsed time and explicitly partial work clock',()=>{
   const result=assembleContext([user('u1','sleep 100'),{id:'c1',actionId:'a1',turnId:'turn1',
     atMs:5000,kind:'tool_start',text:'Start-Sleep -Seconds 100'}],base);

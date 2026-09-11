@@ -3,9 +3,12 @@ import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
 import {resolve} from 'node:path';
+import {resultDiagnostics,resultRejectionReasons} from '../core/observer-diagnostics.js';
 
-const triggerCodes=new Set(['initial','important_event','status_evidence','near_expiry','overdue','periodic','pre_dispatch_retry']);
+const triggerCodes=new Set(['initial','important_event','status_evidence','near_expiry','overdue','periodic','pre_dispatch_retry','bootstrap_recovery']);
 const forecastDiagnosticCodes=new Set(['provenance_unavailable','invalid_provenance']);
+const resultDiagnosticCodes=new Set(resultDiagnostics);
+const resultRejectionReasonCodes=new Set(resultRejectionReasons);
 const activeAnchor=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=31_536_000?value:undefined;
 
 /** Local research metadata only. Bounded asynchronous I/O never gates model work.
@@ -33,7 +36,9 @@ export function createPilotJournal(directory:string){
         triggerReason:typeof value.triggerReason==='string'&&triggerCodes.has(value.triggerReason)?value.triggerReason:undefined,
         lastRequestActiveSeconds:activeAnchor(value.lastRequestActiveSeconds),
         eligibleActiveSeconds:activeAnchor(value.eligibleActiveSeconds),
-        accepted:value.accepted,status:value.status,relation:value.relation,
+         accepted:value.accepted,status:value.status,relation:value.relation,
+         resultDiagnostic:typeof value.resultDiagnostic==='string'&&resultDiagnosticCodes.has(value.resultDiagnostic)?value.resultDiagnostic:undefined,
+         rejectionReason:typeof value.rejectionReason==='string'&&resultRejectionReasonCodes.has(value.rejectionReason)?value.rejectionReason:undefined,
         timings:value.timings?{preparationMs:value.timings.preparationMs,providerMs:value.timings.providerMs,
           settlementMs:value.timings.settlementMs,deliveryMs:value.timings.deliveryMs,totalMs:value.timings.totalMs}:undefined,
         estimate:value.estimate?{remainingSeconds:value.estimate.remainingSeconds,errorPercent:value.estimate.errorPercent}:value.estimate,

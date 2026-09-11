@@ -64,6 +64,23 @@ it('persists only allowed trigger codes and finite active-time anchors',async()=
   }finally{await rm(directory,{recursive:true,force:true});}
 });
 
+it('persists bounded recovery and result diagnostics without raw provider details',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-recovery-diagnostic-'));
+  try{
+    const journal=createPilotJournal(directory);
+    const base={kind:'result' as const,at:300000,key:'private',generation:1,activeSeconds:300,runtime:'running',version:1,
+      requestId:2,accepted:false,status:'interpreted',resultDiagnostic:'rejected_result' as const,
+      rejectionReason:'result_not_accepted' as const,summary:'PRIVATE_CONTEXT'};
+    journal.record({...base,triggerReason:'bootstrap_recovery' as const,...({providerMessage:'PRIVATE_PROVIDER_MESSAGE'} as Record<string,unknown>)});
+    await journal.close();
+    const names=await readdir(directory);
+    const raw=await readFile(resolve(directory,names[0]!),'utf8');
+    const row=JSON.parse(raw.split('\n')[0]!);
+    expect(row).toMatchObject({triggerReason:'bootstrap_recovery',resultDiagnostic:'rejected_result',rejectionReason:'result_not_accepted'});
+    expect(raw).not.toMatch(/PRIVATE_CONTEXT|PRIVATE_PROVIDER_MESSAGE/);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
 it('does not project an unrecognized forecast diagnostic',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-diagnostic-'));
   try{

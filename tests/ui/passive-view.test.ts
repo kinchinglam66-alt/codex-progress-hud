@@ -90,6 +90,7 @@ it.each([
   ['pending','等待首次估时'],['history_loading','正在加载任务历史'],['estimating','正在估时'],
   ['history_unavailable','任务历史暂不可用，正在重试读取'],
   ['insufficient_context','依据不足，暂无法估时'],['call_failed','估时调用失败'],
+  ['unknown_response','估时返回不确定结果'],['process_error','估时进程出错'],['rejected_result','估时结果未采纳'],
   ['setup_failed','估时启动失败，请检查运行环境或授权'],
   ['rate_limited','估时受限，等待可用额度'],['disabled','估时已停用，请查看诊断']
 ] as const)('shows a distinct missing estimate reason for %s',(state,label)=>{
