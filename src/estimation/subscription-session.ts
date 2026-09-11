@@ -6,6 +6,7 @@ import type { createOwnedProcessRunner, Invocation, OwnedProcessResult } from ".
 import type {AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import type {InvocationRecord} from './invocation-ownership.js';
 import {ObserverPreDispatchTransient} from './observer-call-failure.js';
+import {reportObserverStage, type ObserverCallStage} from './observer-provider.js';
 import type {ObserverCallOutcomes, ObserverCallTimings, ObserverStatus, ObserverSubscriptionResult} from './observer-provider.js';
 export type {ObserverCallOutcomes, ObserverCallTimings, ObserverSubscriptionResult} from './observer-provider.js';
 
@@ -19,6 +20,7 @@ interface Dependencies<I = Metrics> {
   invocationRecord?: (admissionId: string) => InvocationRecord;
 }
 interface SharedDependencies<I, P> extends Dependencies<I> {
+  onStage?: (stage:ObserverCallStage)=>void;
   observerMode?:boolean;
   admissionKind?: AdmissionKind;
   authorize: () => boolean;
@@ -31,7 +33,7 @@ interface SharedDependencies<I, P> extends Dependencies<I> {
  * trusted, not task/model supplied. No default executable or live activation.
  * close drains this session; it does not implement a companion shutdown budget.
  */
-function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind,invocationRecord}:SharedDependencies<I, P>) {
+function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind,invocationRecord,onStage}:SharedDependencies<I, P>) {
   let disabled=false, externallyDisabled=false, active=false;
   let pending:Promise<SessionResult<P>>|undefined, closing:Promise<void>|undefined;
   let preparation:AbortController|undefined;
@@ -46,6 +48,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
   async function execute(invocation:Invocation,signal:AbortSignal,timings:ObserverCallTimings):Promise<SessionResult<P>> {
     const outcomes=observerMode?emptyOutcomes('process_error',null):undefined;
     let id:string|null;
+    reportObserverStage(onStage,'reservation');
     try { id=await ledger.reserve(admissionKind); }
     catch { disable(); return result("accounting_error"); }
     if(id===null) return result("admission_denied");
@@ -71,6 +74,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
         if(outcomes)outcomes.dispatch='unknown';
         const providerStarted=performance.now();
         if (ownedInvocation) await ledger.updateInvocation?.(id, {phase: 'dispatching'});
+        reportObserverStage(onStage,'dispatch');
         const process=await runner.run({...invocation, ...(ownedInvocation ? {
           ownership: ownedInvocation,
           onSpawnIdentity: async (pid:number, creationIdentity:string) => {
@@ -79,6 +83,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
           }
         } : {}), onStdout:parser.push},signal)
           .finally(()=>{timings.providerMs=Math.round(performance.now()-providerStarted);});
+        reportObserverStage(onStage,'provider_returned');
         cleanupConfirmed = process.closed === true;
         const output=parser.end();
         if(outcomes){
@@ -109,6 +114,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
       } catch { /* A launch may have happened; never invent zero usage. */ }
     }
     const settlementStarted=performance.now();
+    reportObserverStage(onStage,'settlement');
     try {
       if (ownedInvocation) await ledger.updateInvocation?.(id, {phase: 'settling'});
       await ledger.settle(id,usage?{inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,cachedInputTokens:usage.cachedInputTokens}:null,settlementClassification);
@@ -142,6 +148,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
         if(signal.aborted) return result('aborted');
         try {
           const preparationStarted=performance.now();
+          reportObserverStage(onStage,'preparation');
           let prepared:Invocation;
           try {prepared=await prepare(Object.freeze(parsed.data),prepareSignal);}
           finally {timings.preparationMs=Math.round(performance.now()-preparationStarted);}
@@ -177,7 +184,7 @@ export function createSubscriptionSession(dependencies: Dependencies) {
  * activation is supplied here. The owner must disable the session on revocation
  * to abort an already-running process, not merely change the callback result.
  */
-export function createObserverSubscriptionSession(dependencies: Dependencies<ObserverInput> & {authorize: () => boolean; admissionKind?: AdmissionKind}) {
+export function createObserverSubscriptionSession(dependencies: Dependencies<ObserverInput> & {authorize: () => boolean; admissionKind?: AdmissionKind;onStage?:(stage:ObserverCallStage)=>void}) {
   const session = createSession<ObserverInput, ObserverResponse>({...dependencies,
     observerMode:true,
     parseInput(input) {

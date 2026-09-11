@@ -29,6 +29,20 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it.each(['dynamic','compatibility'])('forwards stages through the %s provider host',async mode=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-stage-forwarding-'));
+    const delegate=worker('stages');
+    delegate.observe=async(_input,_signal,_key,_generation,onStage)=>{onStage?.('preparation');return {status:'process_error',interpretation:null,usage:null};};
+    const owned:ProviderWorkerOwner={workers:[delegate],workerSource:{acquire:()=>delegate,release:async()=>{},all:()=>[delegate]},close:async()=>{},inspect:async()=>({label:'fixture',fingerprint:'fixture'})};
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owned,autoStartSubscription:true});
+    try{
+      await host.start(new AbortController().signal);
+      const stages:string[]=[];
+      const subject=mode==='dynamic'?host.workerSource!.acquire('stages'):host.workers[0]!;
+      await subject.observe({goalSummary:null,activeSeconds:0,runtime:'running',messages:[],truncated:false},new AbortController().signal,'stages',0,stage=>stages.push(stage));
+      expect(stages).toEqual(['preparation']);
+    }finally{await host.close();}
+  });
   it('replaces a retained poisoned lease after its child finally exits',async()=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-retained-lease-'));
     let alive=true;
@@ -57,7 +71,7 @@ describe('desktop observer provider composition', () => {
       const input={goalSummary:null,activeSeconds:1,runtime:'running' as const,messages:[],truncated:false};
       const signal=new AbortController().signal;
       const result=lease.observe(input,signal,'conversation',17);
-      expect(delegate.observe).toHaveBeenCalledWith(input,signal,'conversation',17);
+      expect(delegate.observe).toHaveBeenCalledWith(input,signal,'conversation',17,undefined);
       const releasing=host.workerSource!.release('conversation');
       expect(()=>host.workerSource!.acquire('conversation')).toThrow('PROVIDER_WORKER_CLOSING');
       released.resolve();await releasing;

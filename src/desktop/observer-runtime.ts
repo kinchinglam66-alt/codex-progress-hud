@@ -2,6 +2,7 @@ import {createObserverConsentGate, observerConsentScope, type ObserverAttestatio
 import type {ObserverConsentStore} from '../estimation/observer-consent-store.js';
 import {createAccountedObserverWorker, type ObserverWorker} from '../estimation/observer-worker.js';
 import type {ObserverInput} from '../estimation/observer-contract.js';
+import type {ObserverCallStage} from '../estimation/observer-provider.js';
 import type {Invocation} from '../estimation/owned-process.js';
 import type {ReleaseAccountingOwner} from '../estimation/release-accounting.js';
 import type {ForecastVersions} from '../estimation/forecast-record.js';
@@ -144,10 +145,10 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
 
   function slot(key: string): ObserverWorker {
     return {
-      observe(input, signal, conversationKey, turnGeneration): Promise<ObserverResult> {
+      observe(input, signal, conversationKey, turnGeneration, onStage): Promise<ObserverResult> {
         const delegate = delegates.get(key);
         if (disabled || !ready || !delegate) return Promise.resolve(unavailable());
-        try {return delegate.observe(input, signal, conversationKey, turnGeneration);}
+        try {return delegate.observe(input, signal, conversationKey, turnGeneration, onStage);}
         catch {return Promise.resolve(unavailable());}
       },
       status() {
@@ -211,9 +212,9 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
   // Legacy consumers receive stable handles, while production scheduling uses
   // workerSource directly and therefore has no fixed concurrency ceiling.
   const workers = Object.freeze(Array.from({length: 2}, () => ({
-    observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number): Promise<ObserverResult> {
+    observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number,onStage?:(stage:ObserverCallStage)=>void): Promise<ObserverResult> {
       if (disabled || !ready) return Promise.resolve(unavailable());
-      try { return workerSource.acquire(conversationKey).observe(input, signal, conversationKey, turnGeneration); }
+      try { return workerSource.acquire(conversationKey).observe(input, signal, conversationKey, turnGeneration, onStage); }
       catch { return Promise.resolve(unavailable()); }
     },
     status() {

@@ -20,6 +20,18 @@ const interpretation = {
   relation: 'continue', status: 'running', summary: 'Finish the report',
   estimate: {remainingSeconds: 600, errorPercent: 30},
 };
+it('records API settlement stages even when the stage listener throws',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'hud-api-stages-'));
+  const accounting=createApiAccounting(join(directory,'ledger.sqlite'),()=>1_000_000);
+  const stages:string[]=[];
+  const provider=createObserverApiProvider({config,generation:3,readKey:async()=> 'fixture',accounting,instructions:'fixture',schema:{},retry:false,transport:async()=>responseFixture()});
+  try{
+    const result=await provider.observe(input,new AbortController().signal,'stages',3,stage=>{stages.push(stage);throw Error('recording failed');});
+    expect(result.status).toBe('interpreted');
+    expect(stages).toEqual(['preparation','reservation','dispatch','provider_returned','cleanup','settlement','finished']);
+    expect(accounting.snapshot().unresolved).toBe(0);
+  }finally{await provider.close();await accounting.close();await rm(directory,{recursive:true,force:true});}
+});
 
 it.each([false, true])('records durable HTTP dispatch and local cleanup (cancelled=%s)', async cancelled => {
   const directory = await mkdtemp(join(tmpdir(), 'hud-api-ownership-'));

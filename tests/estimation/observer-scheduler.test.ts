@@ -228,8 +228,38 @@ it('reports an accepted unknown response and a source-rejected result truthfully
 
   const rejected=selectedSourceFixture();const rejectedKey=rejected.hook();rejected.time(15000);rejected.scheduler.tick();
   rejected.setSource(2,'action');rejected.calls[0]!.finish(result());await rejected.flush();
-  expect(rejected.scheduler.diagnostics(rejectedKey)).toMatchObject({state:'rejected_result',resultDiagnostic:'rejected_result',rejectionReason:'result_not_accepted'});
+  expect(rejected.scheduler.diagnostics(rejectedKey)).toMatchObject({state:'rejected_result',resultDiagnostic:'rejected_result',rejectionReason:'source_revision_changed'});
   await rejected.scheduler.close();
+});
+
+it('forwards an allowlisted worker stage as a payload-free observation', async () => {
+  let now = 0;
+  const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts);
+  const records: ObserverObservation[] = [];
+  const worker: ObserverWorker = {
+    observe: async (_input, _signal, _key, _generation, onStage) => {
+      onStage?.('provider_returned' as never);
+      return result();
+    },
+    status: () => ({active: false, disabled: false, poisoned: false}),
+    disable: () => {}, close: async () => {}
+  };
+  const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => now,
+    onObservation: record => records.push(record)});
+  const envelope = normalizeHookInput('UserPromptSubmit', {session_id: 'stage-session', turn_id: 'one'}, now,
+    'protected-observer-scheduler-stage-token-123456789').envelope;
+  envelope.content = {kind: 'user', text: 'stage task', truncated: false};
+  contexts.ingest(envelope, now); goals.observe(envelope, true, now); scheduler.changed(envelope.sessionKey, 'prompt');
+  now = 15_000;
+  scheduler.tick();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(records).toContainEqual(expect.objectContaining({kind: 'stage', key: envelope.sessionKey,
+    requestId: 1, stage: 'provider_returned'}));
+  const stage = records.find(record => record.kind === 'stage');
+  expect(stage).not.toHaveProperty('usage');
+  expect(stage).not.toHaveProperty('estimate');
+  await scheduler.close();
 });
 it('clears an old unknown diagnostic when an aged same-turn numeric result is accepted',async()=>{
   const f=fixture(1);const key=f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();

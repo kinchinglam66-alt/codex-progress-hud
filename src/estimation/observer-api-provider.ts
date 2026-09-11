@@ -5,6 +5,7 @@ import {observerInputSchema, observerResponseSchema} from './observer-contract.j
 import {packObserverInput} from './observer-input.js';
 import type {ApiTransport} from '../desktop/observer-api-transport.js';
 import type {ObserverResult} from './observer-provider.js';
+import {reportObserverStage, type ObserverCallStage} from './observer-provider.js';
 import type {ObserverWorker} from './observer-scheduler.js';
 import {randomUUID,createHash} from 'node:crypto';
 
@@ -202,9 +203,10 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
 
   const disable = () => {disabled = true; abortController?.abort();};
 
-  async function attempt(body: string, key: string, signal: AbortSignal, conversationKey: string, turnGeneration: number): Promise<{value: ObserverResult; retry: boolean; retryDelayMs: number}> {
+  async function attempt(body: string, key: string, signal: AbortSignal, conversationKey: string, turnGeneration: number,onStage?: (stage:ObserverCallStage)=>void): Promise<{value: ObserverResult; retry: boolean; retryDelayMs: number}> {
     const accountScope=createHash('sha256').update(JSON.stringify([options.config.baseUrl,key])).digest('hex');
     const ownership={conversationKey,turnGeneration,ownerUuid,accountScope,providerKind:'api' as const,phase:'prepared' as const,deadline:now()+REQUEST_TIMEOUT_MS,cleanupOutcome:'pending' as const};
+    reportObserverStage(onStage,'reservation');
     const reservation: ApiReservation | null = await options.accounting.reserve(binding, limits, ownership);
     if (reservation === null) return {value: result('admission_denied'), retry: false, retryDelayMs: 0};
     let dispatched = false;
@@ -212,6 +214,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
     let ownershipBound = reservation.ownershipBound===true;
     let cleanupWritten = false;
     const closeLocal = async () => {
+      reportObserverStage(onStage,'cleanup');
       if (ownershipBound && !cleanupWritten) {
         // Only the local HTTP request has ended; provider-side cancellation is unknown.
         await options.accounting.updateInvocation!(reservation.id, {phase: 'closed', cleanupOutcome: 'confirmed'});
@@ -241,6 +244,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
       const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
       const requestSignal = AbortSignal.any([signal, timeout]);
       let response: Response;
+      reportObserverStage(onStage,'dispatch');
       try {
         response = await options.transport(responsesUrl(options.config.baseUrl), {
           method: 'POST', redirect: 'error', signal: requestSignal,
@@ -256,6 +260,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
         failureCode = error instanceof Error && error.message === 'response_too_large' ? 'response_too_large' : 'invalid_response';
         throw new Error('response_body_failed');
       }
+      reportObserverStage(onStage,'provider_returned');
       retryPolicy = retryAfter(response.headers, now, maxRetryDelayMs);
       let decoded: unknown;
       try {const text = new TextDecoder('utf-8', {fatal: true}).decode(raw); decoded = JSON.parse(text);}
@@ -263,6 +268,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
       const parsed = parseResponse(decoded, response.status, retryPolicy);
       usage = parsed.usage; failureCode = parsed.failureCode;
       await closeLocal();
+      reportObserverStage(onStage,'settlement');
       await options.accounting.settle(reservation.id, usage); settled = true;
       if (failureCode === 'unauthorized' || failureCode === 'forbidden') configurationFailure = failureCode;
       const outcomes = {
@@ -285,7 +291,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
         throw new Error('accounting_error');
       }
       if (!settled) {
-        try {await closeLocal(); await options.accounting.settle(reservation.id, usage); settled = true;}
+        try {await closeLocal(); reportObserverStage(onStage,'settlement'); await options.accounting.settle(reservation.id, usage); settled = true;}
         catch {return {value: result('accounting_error', 'accounting_error'), retry: false, retryDelayMs: 0};}
       }
       const code = failureCode ?? 'network_error';
@@ -298,7 +304,8 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
     }
   }
 
-  async function observeImpl(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration: number): Promise<ObserverResult> {
+  async function observeImpl(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration: number,onStage?: (stage:ObserverCallStage)=>void): Promise<ObserverResult> {
+    reportObserverStage(onStage,'preparation');
     if (configurationFailure) return configurationBlocked(configurationFailure);
     if (disabled) return result('disabled');
     if (signal.aborted) return result('aborted', 'cancelled');
@@ -325,7 +332,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
         catch {return current.value;}
       }
       const previous=current;
-      try {current = await attempt(body, key, signal, conversationKey, turnGeneration);}
+      try {current = await attempt(body, key, signal, conversationKey, turnGeneration,onStage);}
       catch {return result('accounting_error', 'accounting_error');}
       if(index>0&&current.value.status==='admission_denied')return previous.value;
       if (!current.retry || index === maxRetries) return current.value;
@@ -334,12 +341,12 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
   }
 
   return {
-    observe(input, signal, conversationKey, turnGeneration=options.generation) {
+    observe(input, signal, conversationKey, turnGeneration=options.generation,onStage) {
       if (disabled) return Promise.resolve(result('disabled'));
       if (active) return Promise.resolve(result('busy'));
       active = true; abortController = new AbortController();
-      pending = observeImpl(input, AbortSignal.any([signal, abortController.signal]), conversationKey, turnGeneration)
-        .finally(() => {active = false; abortController = undefined;});
+      pending = observeImpl(input, AbortSignal.any([signal, abortController.signal]), conversationKey, turnGeneration,onStage)
+        .finally(() => {active = false; abortController = undefined;reportObserverStage(onStage,'finished');});
       return pending;
     },
     status: () => ({active, disabled, poisoned: false}),

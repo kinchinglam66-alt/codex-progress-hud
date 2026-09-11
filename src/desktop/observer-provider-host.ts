@@ -239,12 +239,12 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
 
   function proxy(index: number): ObserverWorker {
     return {
-      async observe(input, signal, conversationKey, turnGeneration) {
+      async observe(input, signal, conversationKey, turnGeneration, onStage) {
         const expected = dispatchGeneration;
         const owner = current;
         const delegate = state === 'ready' ? owner?.workerSource?.acquire(conversationKey) ?? owner?.workers[index] : undefined;
         if (state !== 'ready' || owner === null || delegate === undefined) return {status: 'disabled', interpretation: null, usage: null};
-        const result = await delegate.observe(input, signal, conversationKey, turnGeneration);
+        const result = await delegate.observe(input, signal, conversationKey, turnGeneration, onStage);
         if (owner === current && expected === dispatchGeneration && (result.outcomes?.failureCode === 'unauthorized' || result.outcomes?.failureCode === 'forbidden')) {
           state='failed'; dispatchGeneration=++generation; current=null;
           for (const worker of ownerWorkers(owner)) worker.disable();
@@ -283,9 +283,9 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       const delegate=owner.workerSource.acquire(key);
       const guarded:ObserverWorker={
         ...delegate,
-        async observe(input,signal,conversationKey,turnGeneration) {
+        async observe(input,signal,conversationKey,turnGeneration,onStage) {
           if(current!==owner||state!=='ready'||expected!==dispatchGeneration)return {status:'disabled',interpretation:null,usage:null};
-          const result=await delegate.observe(input,signal,conversationKey,turnGeneration);
+          const result=await delegate.observe(input,signal,conversationKey,turnGeneration,onStage);
           if(current===owner&&expected===dispatchGeneration&&(result.outcomes?.failureCode==='unauthorized'||result.outcomes?.failureCode==='forbidden')) {
             state='failed';dispatchGeneration=++generation;current=null;
             ownerWorkers(owner).forEach(worker=>worker.disable());

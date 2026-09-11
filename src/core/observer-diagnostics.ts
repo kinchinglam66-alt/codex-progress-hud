@@ -6,7 +6,33 @@ export function normalizeAdmissionReason(value: unknown): AdmissionReason {
 
 export const resultDiagnostics = ['unknown_response','process_error','rejected_result'] as const;
 export type ResultDiagnostic = typeof resultDiagnostics[number];
-export const resultRejectionReasons = ['result_not_accepted'] as const;
+export const resultRejectionReasons = [
+  'result_not_accepted',
+  'ticket_missing',
+  'source_epoch_changed',
+  'source_epoch_unavailable',
+  'measurement_epoch_changed',
+  'measurement_epoch_unavailable',
+  'clock_invalid',
+  'response_before_request',
+  'goal_replaced',
+  'epoch_changed',
+  'runtime_terminal',
+  'source_not_ready',
+  'source_revision_changed',
+  'source_identity_changed',
+  'schema_invalid',
+  'aged_response_invalid',
+  'continue_without_summary',
+  'replace_without_pending_relation',
+  'completed_runtime_mismatch',
+  'scheduler_aborted',
+  'scheduler_disabled',
+  'scheduler_stale',
+  'worker_disabled',
+  'worker_stale',
+  'worker_unavailable',
+] as const;
 export type ResultRejectionReason = typeof resultRejectionReasons[number];
 
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */

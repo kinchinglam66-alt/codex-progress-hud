@@ -22,6 +22,18 @@ const input: ObserverInput = {
   messages: [{kind: 'user', text: 'Build the report', truncated: false}],
   truncated: false,
 };
+it.each(['dynamic','compatibility'])('forwards stage diagnostics through the %s runtime worker',async mode=>{
+  const events:string[]=[],stages:string[]=[];
+  const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events)});
+  try{
+    await runtime.start(new AbortController().signal);
+    const worker=mode==='dynamic'?runtime.workerSource.acquire('stages'):runtime.workers[0]!;
+    const result=await worker.observe(input,new AbortController().signal,'stages',0,stage=>stages.push(stage));
+    expect(result.status).toBe('interpreted');
+    expect(stages).toContain('settlement');
+    expect(stages.at(-1)).toBe('finished');
+  }finally{await runtime.close();}
+});
 
 const interpretation = JSON.stringify({
   relation: 'continue',

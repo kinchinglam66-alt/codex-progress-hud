@@ -350,4 +350,50 @@ describe('passive goal interpretation owner', () => {
     f.goals.clear();
     expect(f.goals.view(first, 6000)).toBeNull();
   });
+
+  it('reports concrete rejection gates while preserving the boolean settlement contract', () => {
+    const malformed = fixture();
+    const malformedSession = malformed.hook('UserPromptSubmit', 0);
+    const malformedTicket = malformed.request(1000).ticket;
+    expect(malformed.goals.settle(malformedTicket, {relation: 'replace'}, 1000)).toBe(false);
+    expect(malformed.goals.rejectionReason(malformedTicket)).toBe('schema_invalid');
+    expect(malformed.goals.view(malformedSession, 1000)).toMatchObject({estimateRevision: 0, prediction: null});
+
+    let sourceEpoch = 0;
+    const source: GoalContextSource = {
+      epoch: () => sourceEpoch,
+      read: (_key, _turnKey, query) => ({epoch: sourceEpoch, revision: 1, currentActionId: 'action',
+        finalAvailable: false, input: {goalSummary: null, activeSeconds: query.activeSeconds, runtime: query.runtime,
+          messages: [{kind: 'user', text: 'source task', truncated: false}], truncated: false}})
+    };
+    const changed = fixture(source);
+    const changedSession = changed.hook('UserPromptSubmit', 0);
+    const changedTicket = changed.request(1000).ticket;
+    sourceEpoch = 1;
+    expect(changed.goals.settle(changedTicket, answer(), 1000)).toBe(false);
+    expect(changed.goals.rejectionReason(changedTicket)).toBe('source_epoch_changed');
+    expect(changed.goals.view(changedSession, 1000)).toMatchObject({estimateRevision: 0, prediction: null});
+
+    const terminal = fixture();
+    const terminalSession = terminal.hook('UserPromptSubmit', 0);
+    const terminalTicket = terminal.request(1000).ticket;
+    terminal.goals.runtime(terminalSession, terminal.goals.currentTurnKey(terminalSession)!, 'failed', 1000);
+    expect(terminal.goals.settle(terminalTicket, answer(), 1000)).toBe(false);
+    expect(terminal.goals.rejectionReason(terminalTicket)).toBe('epoch_changed');
+    expect(terminal.goals.view(terminalSession, 1000)).toMatchObject({runtime: 'failed', estimateRevision: 0, prediction: null});
+  });
+
+  it('reports missing tickets without overwriting a consumed ticket reason', () => {
+    const f = fixture();
+    const session = f.hook('UserPromptSubmit', 0);
+    const missing = {};
+    expect(f.goals.settle(missing, answer(), 1000)).toBe(false);
+    expect(f.goals.rejectionReason(missing)).toBe('ticket_missing');
+
+    const consumed = f.request(1000).ticket;
+    expect(f.goals.settle(consumed, {relation: 'replace'}, 1000)).toBe(false);
+    expect(f.goals.settle(consumed, answer(), 1000)).toBe(false);
+    expect(f.goals.rejectionReason(consumed)).toBe('schema_invalid');
+    expect(f.goals.view(session, 1000)).toMatchObject({estimateRevision: 0, prediction: null});
+  });
 });

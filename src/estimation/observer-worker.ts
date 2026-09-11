@@ -4,6 +4,7 @@ import type {Invocation} from './owned-process.js';
 import {createOwnedProcessRunner} from './owned-process.js';
 import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from './subscription-session.js';
 import type {ObserverResult} from './observer-provider.js';
+import {reportObserverStage, type ObserverCallStage} from './observer-provider.js';
 import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {ForecastVersions} from './forecast-record.js';
 import type {ReleaseRecoveryEvent} from './release-accounting.js';
@@ -80,7 +81,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
     };
   };
 
-  async function invoke(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration: number): Promise<ObserverSubscriptionResult> {
+  async function invoke(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration: number,onStage?: (stage:ObserverCallStage)=>void): Promise<ObserverSubscriptionResult> {
     let view: ReturnType<ReleaseAccountingOwner['forConversation']> | undefined;
     let localRunner: ReturnType<typeof createOwnedProcessRunner> | undefined;
     let localSession: ReturnType<typeof createObserverSubscriptionSession> | undefined;
@@ -92,6 +93,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       await accounting.recordRecoveryEvent(event).catch(() => undefined);
     };
     try {
+      reportObserverStage(onStage,'admission');
       view = accounting.forConversation(conversationKey);
       localRunner = createOwnedProcessRunner();
       const prepareInvocation = async (value:ObserverInput, prepareSignal:AbortSignal):Promise<Invocation> => {
@@ -107,7 +109,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
         : {allowed: true, kind: 'ordinary' as const};
       if (!admission.allowed) return {...failure('admission_denied'),admissionReason:normalizeAdmissionReason('reason' in admission ? admission.reason : undefined)};
       admittedKind = admission.kind;
-      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize, admissionKind: admittedKind,
+      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize, admissionKind: admittedKind,...(onStage?{onStage}:{}),
         invocationRecord: admissionId => ({admissionId, conversationKey, turnGeneration, ownerUuid, providerKind: 'subscription', phase: 'bound', deadline: now() + 60_000, cleanupOutcome: 'pending'})});
       runner = localRunner;
       session = localSession;
@@ -128,6 +130,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       // only for proven no-dispatch exits.
       if (event) await recordRecoveryEvent({...event, conversationKey});
       let closeFailed = false;
+      reportObserverStage(onStage,'cleanup');
       try { await localSession.close(); }
       catch { closeFailed = true; }
       let childStatus: {active: boolean; disabled: boolean; poisoned: boolean};
@@ -157,6 +160,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
     } catch {
       if (admittedKind !== undefined) await recordRecoveryEvent({kind: admittedKind === 'half_open' ? 'half_open_failure' : 'recoverable_failure', at: now(), conversationKey});
       disabled = true;
+      reportObserverStage(onStage,'cleanup');
       try { await localSession?.close(); }
       catch { poisoned = true; }
       if (!localSession) {
@@ -168,17 +172,18 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       if (session === localSession) session = undefined;
       if (runner === localRunner) runner = undefined;
       active = false;
+      reportObserverStage(onStage,'finished');
     }
   }
 
   return {
-    observe(input, signal, conversationKey, turnGeneration=0): Promise<ObserverResult> {
+    observe(input, signal, conversationKey, turnGeneration=0,onStage): Promise<ObserverResult> {
       if (disabled || poisoned || closing) return Promise.resolve(neutralResult(failure('disabled')));
       if (active) return Promise.resolve(neutralResult(failure('busy')));
       if (!authorized(authorize)) return Promise.resolve(neutralResult(failure('disabled')));
       active = true;
       preparedProvenance = null;
-      const operation = invoke(input, signal, conversationKey, turnGeneration);
+      const operation = invoke(input, signal, conversationKey, turnGeneration,onStage);
       pending = operation;
       operation.finally(() => {
         if (pending === operation) pending = undefined;

@@ -22,6 +22,31 @@ const interpretation = {
   summary: 'Build a report',
   estimate: {remainingSeconds: 7200, errorPercent: 40},
 };
+it('reports call stages through durable settlement without exposing input or changing usage', async()=>{
+  const accounting=await owner(await directory());
+  const subject=worker(accounting,()=>simpleScript());
+  const stages:string[]=[];
+  try{
+    const result=await subject.observe(input,new AbortController().signal,'stage-test',0,stage=>stages.push(stage));
+    expect(result.status).toBe('interpreted');
+    expect(result.usage).toMatchObject({inputTokens:20,outputTokens:3});
+    expect(stages).toEqual(['admission','preparation','reservation','dispatch','provider_returned','settlement','cleanup','finished']);
+    expect(accounting.snapshot()).toMatchObject({inFlight:0,knownTokens:23});
+  }finally{await subject.close();}
+});
+it('a throwing stage recorder cannot block preparation failure cleanup', async()=>{
+  const accounting=await owner(await directory());
+  let prepared=false;
+  const subject=createAccountedObserverWorker({accounting,authorize:()=>true,prepare:()=>{prepared=true;throw new Error('controlled failure');}});
+  const stages:string[]=[];
+  try{
+    const result=await subject.observe(input,new AbortController().signal,'stage-failure',0,stage=>{stages.push(stage);throw new Error('recorder failure');});
+    expect(prepared).toBe(true);
+    expect(result.status).toBe('process_error');
+    expect(stages).toEqual(['admission','preparation','cleanup','finished']);
+    expect(accounting.snapshot()).toMatchObject({starts:0,inFlight:0});
+  }finally{await subject.close();}
+});
 it('preserves the local recovery cooldown reason without preparing a model invocation', async()=>{
   const accounting=await owner(await directory());
   for(const key of ['a','b','c']){

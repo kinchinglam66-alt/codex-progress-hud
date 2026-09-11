@@ -6,6 +6,7 @@ import {PaceMeasurements, type PaceContinuity, type PaceEvidence, type PaceGroup
 import type {PaceInterval, WorkBreakdown} from '../estimation/pace-correction.js';
 import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
 import {createHash} from 'node:crypto';
+import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
@@ -97,6 +98,7 @@ export class PassiveGoals {
   private readonly goals = new Map<string, Goal>();
   private readonly ended = new Set<string>();
   private tickets = new WeakMap<object, Ticket>();
+  private rejectionReasons = new WeakMap<object, ResultRejectionReason>();
   private settledAnchors = new WeakMap<object, number>();
   private settledPace = new WeakMap<object, SettledPace>();
   private readonly paceMeasurements = new PaceMeasurements();
@@ -355,35 +357,46 @@ export class PassiveGoals {
 
   settle(ticket: object, response: unknown, nowMs: number): boolean {
     const captured = this.tickets.get(ticket);
-    if (!captured) return false;
+    if (!captured) {
+      if (!this.rejectionReasons.has(ticket)) this.rejectionReasons.set(ticket,'ticket_missing');
+      return false;
+    }
     this.tickets.delete(ticket);
     const goal = this.goals.get(captured.sessionKey);
     if (goal?.pending === ticket) delete goal.pending;
     if(captured.sourceEpoch!==undefined){
-      try{if(this.source?.epoch(captured.sessionKey)!==captured.sourceEpoch)return false;}
-      catch{return false;}
+      try{if(this.source?.epoch(captured.sessionKey)!==captured.sourceEpoch)return this.reject(ticket,'source_epoch_changed');}
+      catch{return this.reject(ticket,'source_epoch_unavailable');}
     }
     if(captured.sourceMeasurementEpoch!==undefined){
-      try{if(this.source?.measurementEpoch?.(captured.sessionKey)!==captured.sourceMeasurementEpoch)return false;}
-      catch{return false;}
+      try{if(this.source?.measurementEpoch?.(captured.sessionKey)!==captured.sourceMeasurementEpoch)return this.reject(ticket,'measurement_epoch_changed');}
+      catch{return this.reject(ticket,'measurement_epoch_unavailable');}
     }
-    if (!this.clock(nowMs, goal) || nowMs < captured.requestedAt || goal !== captured.goal || goal.epoch !== captured.epoch ||
-        goal.runtime === 'interrupted' || goal.runtime === 'failed' || goal.runtime === 'stopped') return false;
+    const clockValid=this.clock(nowMs,goal);
+    if (!clockValid || nowMs < captured.requestedAt || goal !== captured.goal || goal.epoch !== captured.epoch ||
+        goal.runtime === 'interrupted' || goal.runtime === 'failed' || goal.runtime === 'stopped') {
+      const reason:ResultRejectionReason=!clockValid?'clock_invalid':
+        nowMs<captured.requestedAt?'response_before_request':goal!==captured.goal?'goal_replaced':
+        goal.epoch!==captured.epoch?'epoch_changed':'runtime_terminal';
+      return this.reject(ticket,reason);
+    }
     let aged=false;
     if(captured.sourceRevision!==undefined){
       const current=this.sourceContext(captured.sessionKey,goal,nowMs,true);
-      if(!current?.ready||goal.epoch!==captured.epoch)return false;
+      if(!current?.ready||goal.epoch!==captured.epoch)
+        return this.reject(ticket,!current?.ready?'source_not_ready':'epoch_changed');
       aged=current.revision!==captured.sourceRevision;
-      if(aged&&(captured.userFingerprint===undefined||current.userFingerprint!==captured.userFingerprint))return false;
+      if(aged&&(captured.userFingerprint===undefined||current.userFingerprint!==captured.userFingerprint))
+        return this.reject(ticket,captured.userFingerprint===undefined?'source_revision_changed':'source_identity_changed');
     }
     const parsed = observerResponseSchema.safeParse(response);
-    if (!parsed.success) return false;
+    if (!parsed.success) return this.reject(ticket,'schema_invalid');
     const result = parsed.data;
     if(aged){
       // A same-instruction numeric snapshot can age without becoming a new goal.
       // Do not apply its relation, summary, semantic state or summary watermark.
       if(result.estimate===null||result.relation==='unknown'||result.status==='completed'||
-        goal.runtime!=='running')return false;
+        goal.runtime!=='running')return this.reject(ticket,'aged_response_invalid');
       goal.prediction={...result.estimate,observedActiveSeconds:captured.activeSeconds};
       delete goal.changeReason;
       goal.predictionIdentity={};
@@ -410,7 +423,12 @@ export class PassiveGoals {
       goal.relationPending && result.summary !== null;
     if ((result.relation === 'continue' && goal.summary === null && !bootstrap) ||
         (result.relation === 'replace' && !goal.relationPending) ||
-        (result.status === 'completed' && (goal.runtime !== 'waiting'||goal.runtimeUncertain))) return false;
+        (result.status === 'completed' && (goal.runtime !== 'waiting'||goal.runtimeUncertain))) {
+      const reason:ResultRejectionReason=result.relation==='continue'&&goal.summary===null&&!bootstrap?
+        'continue_without_summary':result.relation==='replace'&&!goal.relationPending?
+        'replace_without_pending_relation':'completed_runtime_mismatch';
+      return this.reject(ticket,reason);
+    }
     let anchor = captured.activeSeconds;
     if (result.relation === 'replace' || bootstrap) {
       const base = goal.candidateBase;
@@ -478,6 +496,9 @@ export class PassiveGoals {
   /** Private-to-server settlement metadata; available even when ETA is null. */
   settledAnchor(ticket:object):number|undefined {return this.settledAnchors.get(ticket);}
 
+  /** Safe diagnostic for the last settlement attempt represented by an opaque ticket. */
+  rejectionReason(ticket:object):ResultRejectionReason|undefined {return this.rejectionReasons.get(ticket);}
+
   view(sessionKey: string, nowMs: number): PassiveGoalView|null {
     const goal = this.goals.get(sessionKey);
     if (!goal || !this.clock(nowMs, goal)) return null;
@@ -498,6 +519,8 @@ export class PassiveGoals {
   activeTimeKnown(sessionKey:string):boolean {return this.goals.has(sessionKey)&&this.source===undefined;}
   clear(): void {
     for(const goal of this.goals.values())this.paceMeasurements.clear(goal.measurementScope);
-    this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap(); this.settledAnchors = new WeakMap(); this.settledPace = new WeakMap();
+    this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap(); this.rejectionReasons = new WeakMap(); this.settledAnchors = new WeakMap(); this.settledPace = new WeakMap();
   }
+
+  private reject(ticket:object,reason:ResultRejectionReason):false {this.rejectionReasons.set(ticket,reason);return false;}
 }

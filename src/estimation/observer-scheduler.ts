@@ -1,5 +1,6 @@
 import type {ObserverInput} from './observer-contract.js';
 import type {ObserverResult} from './observer-provider.js';
+import type {ObserverCallStage} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
@@ -8,7 +9,8 @@ import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
   /** Authenticated local key is accounting metadata, never observer prompt data. */
-  observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number): Promise<ObserverResult>;
+  observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number,
+    onStage?: (stage:ObserverCallStage)=>void): Promise<ObserverResult>;
   status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
   disable(): void;
   close(): Promise<void>;
@@ -21,7 +23,7 @@ export interface ObserverWorkerSource {
   all(): readonly ObserverWorker[];
 }
 export interface ObserverObservation {
-  kind:'runtime'|'request'|'result'|'skip'; at:number; key:string; generation:number; activeSeconds:number;
+  kind:'runtime'|'request'|'result'|'skip'|'stage'; at:number; key:string; generation:number; activeSeconds:number;
   runtime:string; version:number; requestId?:number; requestedAt?:number; observedActiveSeconds?:number;
   accepted?:boolean; status?:string; relation?:string;
   triggerReason?:TriggerReason|string; lastRequestActiveSeconds?:number|null; eligibleActiveSeconds?:number|null;
@@ -33,6 +35,7 @@ export interface ObserverObservation {
   forecastDiagnostic?:'provenance_unavailable'|'invalid_provenance';
   usage?:ObserverResult['usage'];
   timings?:ObserverResult['timings'];
+  stage?:ObserverCallStage;
 }
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
@@ -111,6 +114,14 @@ export class ObserverScheduler {
   }
   private workerState(worker: ObserverWorker) {
     try {return worker.status();} catch {return {active: true, disabled: true, poisoned: true};}
+  }
+  private schedulerRejectionReason(flight:Flight,state:ReturnType<ObserverScheduler['workerState']>):ResultRejectionReason|undefined {
+    if(this.disabled)return 'scheduler_disabled';
+    if(flight.schedulerGeneration!==this.schedulerGeneration)return 'scheduler_stale';
+    if(flight.controller.signal.aborted)return 'scheduler_aborted';
+    if(state.disabled)return 'worker_disabled';
+    if(state.active||state.poisoned)return 'worker_stale';
+    return undefined;
   }
   private notify(): void {
     try {this.options.onChange?.();} catch { /* A display failure cannot restart a call. */ }
@@ -364,7 +375,8 @@ export class ObserverScheduler {
         lastRequestActiveSeconds:flight.lastRequestActiveSeconds,eligibleActiveSeconds:flight.eligibleActiveSeconds});
       this.notify();
       try {
-        flight.done = Promise.resolve(worker.observe(request.input, flight.controller.signal, key, view.generation))
+        flight.done = Promise.resolve(worker.observe(request.input, flight.controller.signal, key, view.generation,
+          stage=>this.record('stage',key,entry,{requestId:flight.requestId,stage},flight)))
           .then(result => this.settle(entry, flight, result), () => this.settle(entry, flight, null));
       } catch {this.settle(entry, flight, null);}
     }
@@ -376,7 +388,7 @@ export class ObserverScheduler {
     const state = this.workerState(flight.worker);
     if (state.active || state.poisoned) {
       this.options.goals.settle(flight.ticket, null, this.time());
-      this.recordResult(entry,flight,result,false);
+      this.recordResult(entry,flight,result,false,this.time(),null,this.schedulerRejectionReason(flight,state));
       this.flights.delete(flight.key); if (entry.flight === flight) delete entry.flight;
       void this.workerSource.release(flight.key).catch(() => undefined);
       this.notify(); return;
@@ -405,10 +417,13 @@ export class ObserverScheduler {
     const settledAt=this.time();
     const accepted = this.options.goals.settle(flight.ticket,
       eligible ? result!.interpretation : null, settledAt);
+    const hostRejection=accepted?undefined:this.options.goals.rejectionReason(flight.ticket);
+    const rejectionReason=this.schedulerRejectionReason(flight,state) ??
+      (eligible&&result?.status==='interpreted'?hostRejection:undefined);
     const live=this.options.goals.scheduling(flight.key,settledAt);
     const sameGoal=live!==null&&live.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity;
     const localResultAllowed=accepted||sameGoal;
-    const classification=this.classifyResult(result,accepted);
+    const classification=this.classifyResult(result,accepted,rejectionReason);
     if(sameGoal&&entry.version===flight.version&&result?.status==='process_error'&&
       ['near_expiry','overdue','periodic'].includes(flight.triggerReason))
       entry.timerFailures=Math.min(8,(entry.timerFailures??0)+1);
@@ -466,21 +481,22 @@ export class ObserverScheduler {
     if(localResultAllowed&&live?.view.prediction===null&&entry.bootstrapRecoveryUsed!==true&&entry.bootstrapRecoveryEligible!==true&&
       (classification.diagnostic==='unknown_response'||(classification.diagnostic==='rejected_result'&&result?.status==='interpreted')))
       entry.bootstrapRecoveryEligible=true;
-    this.recordResult(entry,flight,result,accepted,settledAt,live);
+    this.recordResult(entry,flight,result,accepted,settledAt,live,rejectionReason);
     void this.workerSource.release(flight.key).catch(() => undefined);
     this.notify();
   }
-  private classifyResult(result:ObserverResult|null,accepted:boolean):{diagnostic?:ResultDiagnostic;rejectionReason?:ResultRejectionReason} {
-    if(result===null||result.status==='process_error')return {diagnostic:'process_error'};
-    if(!accepted)return {diagnostic:'rejected_result',rejectionReason:'result_not_accepted'};
+  private classifyResult(result:ObserverResult|null,accepted:boolean,rejectionReason?:ResultRejectionReason):{diagnostic?:ResultDiagnostic;rejectionReason?:ResultRejectionReason} {
+    if(result===null||result.status==='process_error')return {diagnostic:'process_error',...(rejectionReason?{rejectionReason}:{})};
+    if(!accepted)return {diagnostic:'rejected_result',rejectionReason:rejectionReason??'result_not_accepted'};
     if(result.status==='interpreted'&&result.interpretation?.estimate===null)return {diagnostic:'unknown_response'};
     return {};
   }
   private recordResult(entry:Entry,flight:Flight,result:ObserverResult|null,accepted:boolean,
-    acceptedAt=this.time(),live:NonNullable<ReturnType<PassiveGoals['scheduling']>>|null=null):void {
+    acceptedAt=this.time(),live:NonNullable<ReturnType<PassiveGoals['scheduling']>>|null=null,
+    rejectionReason?:ResultRejectionReason):void {
     let forecast:Readonly<ForecastRecord>|undefined;
     let forecastDiagnostic:ObserverObservation['forecastDiagnostic'];
-    const classification=this.classifyResult(result,accepted);
+    const classification=this.classifyResult(result,accepted,rejectionReason);
     const snapshotAnchor=accepted?this.options.goals.settledAnchor(flight.ticket):flight.observedActiveSeconds;
     if(accepted && live){
       let versions:ForecastVersions|null=null;

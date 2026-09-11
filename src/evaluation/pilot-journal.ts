@@ -1,4 +1,5 @@
 import type {ObserverObservation} from '../estimation/observer-scheduler.js';
+import {observerCallStages} from '../estimation/observer-provider.js';
 import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
@@ -9,6 +10,7 @@ const triggerCodes=new Set(['initial','important_event','status_evidence','near_
 const forecastDiagnosticCodes=new Set(['provenance_unavailable','invalid_provenance']);
 const resultDiagnosticCodes=new Set(resultDiagnostics);
 const resultRejectionReasonCodes=new Set(resultRejectionReasons);
+const stageCodes=new Set(observerCallStages);
 const activeAnchor=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=31_536_000?value:undefined;
 
 /** Local research metadata only. Bounded asynchronous I/O never gates model work.
@@ -33,6 +35,7 @@ export function createPilotJournal(directory:string){
         key:createHmac('sha256',salt).update(value.key).digest('hex'),generation:value.generation,
         activeSeconds:value.activeSeconds,activeTimeKnown:value.activeTimeKnown,runtime:value.runtime,version:value.version,
         requestId:value.requestId,requestedAt:value.requestedAt,observedActiveSeconds:value.observedActiveSeconds,
+        stage:value.kind==='stage'&&value.stage!==undefined&&stageCodes.has(value.stage)?value.stage:undefined,
         triggerReason:typeof value.triggerReason==='string'&&triggerCodes.has(value.triggerReason)?value.triggerReason:undefined,
         lastRequestActiveSeconds:activeAnchor(value.lastRequestActiveSeconds),
         eligibleActiveSeconds:activeAnchor(value.eligibleActiveSeconds),

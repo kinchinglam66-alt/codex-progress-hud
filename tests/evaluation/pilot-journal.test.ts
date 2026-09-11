@@ -4,6 +4,25 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
 
+it('records allowlisted stages without closing an unresolved request or leaking raw details',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-stages-'));
+  try{
+    const journal=createPilotJournal(directory);
+    const base={at:1,key:'private',generation:0,activeSeconds:1,runtime:'running',version:1,requestId:9};
+    journal.record({...base,kind:'request'});
+    journal.record({...base,kind:'stage',stage:'settlement',...{details:'SECRET'}});
+    journal.record({...base,kind:'stage',stage:'SECRET_STAGE' as never});
+    await journal.close();
+    const names=await readdir(directory);
+    const raw=await readFile(resolve(directory,names[0]!),'utf8');
+    const rows=raw.trim().split('\n').map(line=>JSON.parse(line));
+    expect(rows[1]).toMatchObject({kind:'stage',stage:'settlement',requestId:9});
+    expect(rows[2]).not.toHaveProperty('stage');
+    expect(rows.at(-1)).toMatchObject({pendingRequests:1});
+    expect(raw).not.toContain('SECRET');
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
 it('persists bounded metadata, not raw context, with an opaque session-local identity',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-'));
   try {

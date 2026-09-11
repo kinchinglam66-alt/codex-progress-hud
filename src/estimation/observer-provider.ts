@@ -4,6 +4,13 @@ import type {SubscriptionUsage} from './codex-output.js';
 import type {AdmissionKind} from './subscription-accounting.js';
 import type {AdmissionReason} from '../core/observer-diagnostics.js';
 
+export const observerCallStages = ['admission','preparation','reservation','dispatch','provider_returned','settlement','cleanup','finished'] as const;
+export type ObserverCallStage = typeof observerCallStages[number];
+/** Diagnostic callbacks cannot authorize, interrupt or retry provider work. */
+export function reportObserverStage(listener:((stage:ObserverCallStage)=>void)|undefined, stage:ObserverCallStage):void {
+  try {listener?.(stage);} catch { /* Best-effort metadata only. */ }
+}
+
 export type ProviderBinding = {
   kind: 'subscription' | 'api';
   profileId: string;
