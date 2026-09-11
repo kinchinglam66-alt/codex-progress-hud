@@ -359,10 +359,10 @@ export function createProgressServer(options: ProgressServerOptions) {
       }}});
   const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals);
   const pruneSources=()=>{
-    const at=goalNow();selectedSource?.prune(key=>passiveGoals.retainSource(key,at));
+    const at=passiveObserver?.presentationTime() ?? goalNow();selectedSource?.prune(key=>passiveGoals.retainSource(key,at));
   };
   const store = new TaskStore({ now, nameForConversation: key => names.get(key),
-    goalForConversation: key => passiveGoals.view(key, goalNow()),
+    goalForConversation: key => passiveGoals.view(key, passiveObserver?.presentationTime() ?? goalNow()),
     observerForConversation:key=>passiveObserver?.diagnostics(key) });
   const scopedSnapshots = new ScopedSnapshots(store);
   const passiveObserver = options.observerWorkers === undefined && workerSource === undefined ? undefined : new ObserverScheduler({
@@ -1152,7 +1152,7 @@ export function createProgressServer(options: ProgressServerOptions) {
           sourceTimer.unref();
         }
         observerTimer = setInterval(() => {
-          try {passiveObserver.tick();} catch {passiveObserver.disable();}
+          passiveObserver.tickSafely();
         }, 1000);
         observerTimer.unref();
       }

@@ -11,4 +11,6 @@ export interface ObserverDiagnostics {
   estimateAgeSeconds:number|null;
   callsLastHour:number;
   retryPending:boolean;
+  stopReason?:'invalid_clock'|'scheduler_exception'|'accounting_error';
+  stoppedAt?:number;
 }

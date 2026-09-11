@@ -56,7 +56,7 @@ function invocation(): Invocation {
   return {
     executable: process.execPath,
     cwd: process.cwd(),
-    args: ['-e', `process.stdout.write(${JSON.stringify(observerOutput)})`],
+    args: ['-e', `process.stdin.resume();process.stdin.on('end',()=>process.stdout.write(${JSON.stringify(observerOutput)}))`],
     env: process.env,
     input: '',
   };
@@ -75,6 +75,8 @@ function owner(events: string[]): ReleaseAccountingOwner {
           return `reservation-${next++}`;
         },
         settle: async (_id, usage) => {events.push(`settle:${key}:${usage ? 'known' : 'unknown'}`);},
+        bindInvocation:async()=>{events.push(`bind:${key}`);},
+        updateInvocation:async(_id,patch)=>{events.push(`identity:${key}:${patch.phase}`);},
         cancelBeforeDispatch:async()=>{events.push(`not-dispatched:${key}`);},
         close: async () => {events.push(`view-close:${key}`); views.delete(view);},
       };
@@ -244,8 +246,15 @@ describe('desktop observer runtime composition', () => {
     expect(runtime.workers).toHaveLength(2);
     expect(new Set(runtime.workers).size).toBe(2);
     const results = await Promise.all(runtime.workers.map((worker, index) => worker.observe(input, new AbortController().signal, `conversation-${index}`)));
-    expect(results.every(result => result.status === 'interpreted')).toBe(true);
+    expect(results.map(result => ({status:result.status,outcomes:result.outcomes}))).toEqual([
+      expect.objectContaining({status:'interpreted'}),expect.objectContaining({status:'interpreted'})
+    ]);
     expect(events.filter(event => event.startsWith('reserve:'))).toHaveLength(2);
+    for(const key of ['conversation-0','conversation-1']){
+      expect(events.indexOf(`bind:${key}`)).toBeGreaterThan(events.indexOf(`reserve:${key}`));
+      expect(events.indexOf(`settle:${key}:known`)).toBeGreaterThan(events.indexOf(`identity:${key}:dispatching`));
+      expect(events).toContain(`identity:${key}:closed`);
+    }
     await runtime.close();
   });
 

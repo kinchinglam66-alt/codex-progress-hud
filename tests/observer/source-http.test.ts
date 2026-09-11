@@ -9,13 +9,13 @@ import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 import type {HudSnapshot} from '../../src/server/task-store.js';
 import type {ObserverObservation} from '../../src/estimation/observer-scheduler.js';
 
-it('dispatches from a persisted source user message before the long tool finishes',async()=>{
+it.each([false,true])('dispatches from a persisted source and retains it through a clock fault: %s',async testClockFault=>{
   const directory=await mkdtemp(join(tmpdir(),'hud-source-http-'));
   const root=join(directory,'sessions'),day=join(root,'2026','09','06'),tokenPath=join(directory,'auth.token');
   const id='01a0766f-e48a-70e0-b8a8-4abb83140175',turn='current';
-  let now=0;const calls:ObserverInput[]=[];
+  let now=0,clockFailed=false;const calls:ObserverInput[]=[];
   const observations:ObserverObservation[]=[];
-  const server=createProgressServer({port:0,tokenPath,observerSessionsRoot:root,now:()=>now,monotonicNow:()=>now,
+  const server=createProgressServer({port:0,tokenPath,observerSessionsRoot:root,now:()=>now,monotonicNow:()=>clockFailed?Number.NaN:now,
     onObserverObservation:record=>observations.push(record),
     observerWorkers:[{status:()=>({active:false,disabled:false,poisoned:false}),disable(){},async close(){},
       async observe(input){calls.push(input);return {status:'interpreted',interpretation:{relation:'replace',status:'running',
@@ -41,6 +41,11 @@ it('dispatches from a persisted source user message before the long tool finishe
     expect(calls[0]?.observation?.currentAction?.text).toBe('sleep 100');
     expect(observations.find(record=>record.kind==='request')?.activeTimeKnown).toBe(false);
     expect(calls[0]?.messages.some(message=>message.text.includes('hook body'))).toBe(false);
+    if(testClockFault){clockFailed=true;
+    await expect.poll(()=>observations.some(record=>record.status==='invalid_clock'),{timeout:2500}).toBe(true);
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.observer?.stopReason).toBe('invalid_clock');
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal?.runtime).toBe('running');
+    return;}
     // An abort must not deactivate the attached source: a verified persisted
     // next turn still needs to be discoverable without a new Hook.
     const interrupt=normalizeHookInput('Interrupt',{session_id:id,turn_id:turn},0,token).envelope;

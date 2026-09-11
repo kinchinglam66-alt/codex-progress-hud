@@ -14,6 +14,17 @@ import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 const observerTime = () => Math.floor(performance.now());
+it('keeps the stop diagnostic readable through HTTP during a persistent clock failure',async()=>{
+  let clock=0;const records:ObserverObservation[]=[];
+  const {client,hook}=await setup({monotonicNow:()=>clock,onObserverObservation:row=>records.push(row),observerWorkers:[{
+    observe:async()=>({status:'unavailable',interpretation:null,usage:null}),
+    status:()=>({active:false,disabled:false,poisoned:false}),disable(){},async close(){}
+  }]});
+  await hook('UserPromptSubmit','first');clock=Number.NaN;
+  await expect.poll(()=>records.some(row=>row.status==='invalid_clock'),{timeout:2500}).toBe(true);
+  const snapshot=await client.status() as HudSnapshot;
+  expect(snapshot.rows?.[0]?.observer).toMatchObject({state:'disabled',stopReason:'invalid_clock',stoppedAt:0});
+});
 it.each(['SessionEnd','shutdown'])('records an in-flight cancellation through real HTTP teardown: %s',async mode=>{
   let now=0,active=false,disabled=false,pending:Promise<ObserverResult>|undefined;
   const records:ObserverObservation[]=[];

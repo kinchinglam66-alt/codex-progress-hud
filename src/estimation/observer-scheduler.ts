@@ -63,6 +63,8 @@ export class ObserverScheduler {
   private readonly flights = new Map<string, Flight>();
   private readonly workerSource: ObserverWorkerSource;
   private disabled = false;
+  private stopReason: ObserverDiagnostics['stopReason'];
+  private stoppedAt: number | undefined;
   private capacityReached = false;
   private lastClock = 0;
   private requestSequence = 0;
@@ -96,6 +98,7 @@ export class ObserverScheduler {
   private workers(): readonly ObserverWorker[] { return this.workerSource.all(); }
   private workerInFlight(worker: ObserverWorker): boolean { return [...this.flights.values()].some(flight => flight.worker === worker); }
   private time(): number {
+    if(this.stopReason)return this.lastClock;
     const raw = this.options.now();
     if (!Number.isSafeInteger(raw) || raw < 0) throw new Error('INVALID_OBSERVER_CLOCK');
     this.lastClock = Math.max(raw, this.lastClock);
@@ -110,7 +113,12 @@ export class ObserverScheduler {
   private record(kind:ObserverObservation['kind'],key:string,entry:Entry,extra:Partial<ObserverObservation>={},flight?:Flight):void {
     if(!this.options.onObservation)return;
     try {
-      const at=this.time();
+      const at=this.stopReason ? this.lastClock : this.time();
+      if(this.stopReason&&kind==='skip'){
+        this.options.onObservation({kind,at,key,generation:0,activeSeconds:0,activeTimeKnown:false,
+          runtime:entry.runtime,version:entry.version,...extra});
+        return;
+      }
       // Rejected tickets may belong to a removed/replaced goal object, even if
       // a new object reuses its numeric generation. Do not mix its live clock in.
       const view=flight && extra.accepted!==true?null:this.options.goals.view(key,at);
@@ -224,6 +232,18 @@ export class ObserverScheduler {
     this.record('skip',key,entry,{status:reason});
     this.notify();
   }
+  tickSafely(): void {
+    try { this.tick(); }
+    catch (error) {
+      this.stopReason ??= error instanceof Error && error.message === 'INVALID_OBSERVER_CLOCK'
+        ? 'invalid_clock' : 'scheduler_exception';
+      this.stoppedAt ??= this.lastClock;
+      this.disable();
+      for (const [key,entry] of this.entries) this.skip(key,entry,this.stopReason);
+      this.notify();
+    }
+  }
+  presentationTime(): number { return this.time(); }
   tick(): void {
     if (this.disabled) {
       for(const [key,entry] of this.entries)this.skip(key,entry,'observer_disabled');
@@ -377,7 +397,10 @@ export class ObserverScheduler {
       entry.retryVersion=flight.version;
       if(flight.runtime==='waiting')entry.statusEvidence=true;
     }
-    if (mustDisable) this.disable();
+    if (mustDisable) {
+      this.stopReason ??= 'accounting_error';this.stoppedAt ??= this.lastClock;
+      this.disable();
+    }
     if(entry.version===flight.version&&localResultAllowed){
       entry.lastResultStatus=result?.status??'process_error';
       if(result?.status==='admission_denied')entry.lastAdmissionReason=normalizeAdmissionReason(result.admissionReason);
@@ -481,10 +504,13 @@ export class ObserverScheduler {
     })) throw new Error('OBSERVER_RECOVERY_CLOSE_UNCONFIRMED');
     this.recoveryGeneration = undefined;
     this.disabled = false;
+    this.stopReason = undefined;this.stoppedAt = undefined;
     this.notify();
   }
   diagnostics(key:string):ObserverDiagnostics {
-    const at=this.time(),entry=this.entries.get(key),view=this.options.goals.view(key,at);
+    if(this.stopReason)return {state:'disabled',stopReason:this.stopReason,stoppedAt:this.stoppedAt!,
+      estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
+    const at=this.stopReason ? this.lastClock : this.time(),entry=this.entries.get(key),view=this.options.goals.view(key,at);
     const health=this.options.goals.contextHealth(key);
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':entry?.flight?'estimating':
       this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
@@ -494,7 +520,7 @@ export class ObserverScheduler {
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
       entry?.lastResultStatus==='process_error'?'call_failed':
       view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending';
-    return {state,...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+    return {state,...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,
       callsLastHour:entry?.starts.filter(start=>at-start<3600000).length??0,
       retryPending:entry?.retryVersion!==undefined&&entry.retryVersion===entry.version};
@@ -509,7 +535,9 @@ export class ObserverScheduler {
   disable(): void {
     this.disabled = true;
     for (const flight of this.flights.values()) flight.controller.abort();
-    for (const worker of this.workers()) {try {worker.disable();} catch { /* Keep ownership until close. */ }}
+    const workers=new Set([...this.flights.values()].map(flight=>flight.worker));
+    try { for(const worker of this.workers())workers.add(worker); } catch { /* Enumeration failure must not escape the timer fault handler. */ }
+    for (const worker of workers) {try {worker.disable();} catch { /* Keep ownership until close. */ }}
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;

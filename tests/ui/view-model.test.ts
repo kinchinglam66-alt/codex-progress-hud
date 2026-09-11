@@ -3,6 +3,13 @@ import { buildConversationViews, buildHudView, createConversationViewProjector, 
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 import type { ConversationRow } from "../../src/server/conversation-projection.js";
+it('shows the current scheduler failure separately from historical unknown usage',()=>{
+  const row=overdueConversation('running','disabled');
+  row.observer!.stopReason='scheduler_exception';row.observer!.stoppedAt=1234;
+  const views=buildConversationViews([row]);
+  expect(JSON.stringify(views)).toContain('调度检查异常');
+  expect(JSON.stringify(views)).toContain('不等同于历史未知用量');
+});
 
 function task(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   return {

@@ -7,6 +7,45 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('retains a safe stop diagnosis when the tick clock fails',async()=>{
+  const records:ObserverObservation[]=[];
+  const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');f.time(Number.NaN);
+  expect(()=>f.scheduler.tickSafely()).not.toThrow();
+  expect(f.scheduler.diagnostics(key)).toMatchObject({state:'disabled',stopReason:'invalid_clock',stoppedAt:0});
+  expect(f.scheduler.presentationTime()).toBe(0);
+  expect(records.some(row=>row.kind==='skip'&&row.status==='invalid_clock')).toBe(true);
+  f.scheduler.tickSafely();expect(f.calls).toHaveLength(0);
+  await f.scheduler.close();
+});
+it('does not rethrow a worker enumeration failure while stopping',async()=>{
+  const contexts=new PassiveContextStore(),goals=new PassiveGoals(contexts);
+  const scheduler=new ObserverScheduler({contexts,goals,now:()=>0,workerSource:{
+    acquire(){throw Error('unavailable');},release:async()=>{},all(){throw Error('enumeration failed');}}});
+  const envelope=normalizeHookInput('UserPromptSubmit',{session_id:'one',turn_id:'first'},0,'protected-observer-scheduler-test-token-123456789').envelope;
+  goals.observe(envelope,true,0);scheduler.changed(envelope.sessionKey,'prompt');
+  expect(()=>scheduler.tickSafely()).not.toThrow();
+  expect(scheduler.diagnostics(envelope.sessionKey).stopReason).toBe('scheduler_exception');
+});
+it('drains an active call after a persistent clock failure',async()=>{
+  const f=fixture(1);f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
+  f.time(Number.NaN);f.scheduler.tickSafely();
+  f.calls[0]!.finish(result());await f.flush();
+  await expect(f.scheduler.close()).resolves.toBeUndefined();
+  expect(f.scheduler.stats().inFlight).toBe(0);
+});
+it('never exposes arbitrary exception contents in a stop diagnosis',async()=>{
+  const records:ObserverObservation[]=[];
+  const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');f.time(15000);
+  const scheduling=f.goals.scheduling.bind(f.goals);
+  f.goals.scheduling=()=>{throw new Error('secret-provider-token');};
+  expect(()=>f.scheduler.tickSafely()).not.toThrow();
+  const diagnostic=f.scheduler.diagnostics(key);
+  expect(diagnostic).toMatchObject({state:'disabled',stopReason:'scheduler_exception',stoppedAt:15000});
+  expect(records.some(row=>row.status==='scheduler_exception')).toBe(true);
+  expect(JSON.stringify({diagnostic,records})).not.toContain('secret-provider-token');
+  f.goals.scheduling=scheduling;
+  await f.scheduler.close();
+});
 it.each(['continue','unknown'] as const)('preserves outage exclusion after an inconclusive %s refresh',async relation=>{
   const f=selectedSourceFixture();f.hook();f.time(15000);f.scheduler.tick();
   const estimate=result();estimate.interpretation!.estimate={remainingSeconds:1000,errorPercent:30};

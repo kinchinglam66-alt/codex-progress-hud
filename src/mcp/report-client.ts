@@ -154,6 +154,7 @@ const aggregateSnapshotSchema = z.object({
     name: z.object({value:z.string().max(1024).nullable(),freshness:z.enum(['fresh','stale','unavailable'])}).strict(),
     observer:z.object({state:z.enum(['pending','history_loading','history_unavailable','estimating','insufficient_context','call_failed','setup_failed','rate_limited','admission_blocked','disabled','ready']),
       admissionReason:z.enum(admissionReasons).optional(),
+      stopReason:z.enum(['invalid_clock','scheduler_exception','accounting_error']).optional(),stoppedAt:z.number().int().nonnegative().optional(),
       estimateAgeSeconds:z.number().finite().nonnegative().nullable(),callsLastHour:z.number().int().nonnegative(),retryPending:z.boolean()}).strict().optional(),
     goal: z.object({
       generation: z.number().int().nonnegative(),
