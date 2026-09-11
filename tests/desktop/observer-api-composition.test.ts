@@ -14,13 +14,13 @@ async function setup() {
   await pilot.providerSettings.saveProviderSettings({...pilot.providerSettings.status(),draft:{selected:'api',api:{profileId:'fixture',name:'Fixture',baseUrl:'https://api.example.test/v1',protocol:'responses',model:'fixture',maxOutputTokens:100,dailyCallLimit:10}},secret:'synthetic-key'});
   return pilot;
 }
-it('production observations retry one transient failure, never more than once', async () => {
+it('production observations retain durable backoff instead of immediately repeating an unknown call', async () => {
   const pilot = await setup();
   transport.mockImplementation(async()=>new Response('{}',{status:503,headers:{'retry-after':'0'}}));
   try {
     await pilot.providerSettings.activateProvider({...pilot.providerSettings.status(),selected:'api'});
     const result = await pilot.workers[0]!.observe({goalSummary:'Fixture',activeSeconds:1,runtime:'running',messages:[{kind:'user',text:'Fixture',truncated:false}],truncated:false},new AbortController().signal,'fixture');
-    expect(transport).toHaveBeenCalledTimes(2);
+    expect(transport).toHaveBeenCalledTimes(1);
     expect(result.status).toBe('process_error');
   } finally {await pilot.close();}
 });

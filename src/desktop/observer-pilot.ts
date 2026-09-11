@@ -12,6 +12,7 @@ import {createObserverConsentStore,type ConsentProtection} from '../estimation/o
 import {createObserverAccountSettings} from './observer-account-settings.js';
 import {createObserverProviderHost, type ProviderInlineConsent, type ProviderWorkerOwner} from './observer-provider-host.js';
 import type {ObserverScheduler} from '../estimation/observer-scheduler.js';
+import type {ObserverWorker, ObserverWorkerSource} from '../estimation/observer-scheduler.js';
 import {createObserverApiProvider} from '../estimation/observer-api-provider.js';
 import {createObserverApiTransport} from './observer-api-transport.js';
 import {createApiAccounting, type ApiAccounting} from '../estimation/observer-api-accounting.js';
@@ -101,7 +102,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       } satisfies ObserverInlineConsent);
       if(attachedScheduler)runtime.schedulerRecovery.attachScheduler(attachedScheduler);
       currentRuntime=runtime;
-      return {workers:runtime.workers,close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime)currentRuntime=undefined;},
+      return {workers:runtime.workers, workerSource:runtime.workerSource, close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime)currentRuntime=undefined;},
         inspect:async inspectSignal=>{const snapshot=await accountSettings.inspect(inspectSignal);return {label:snapshot.accountLabel,fingerprint:snapshot.evidence.accountFingerprint};}};
     }catch(error){runtimes.delete(runtime);await runtime.close().catch(()=>undefined);throw error;}
   };
@@ -111,19 +112,25 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     apiAccounting??=createApiAccounting(resolve(options.dataDirectory,'observer-api-accounting.db'),Date.now);
     const transport=createObserverApiTransport(config===null?{}:{proxyUrl:config.proxyUrl});
     const make=(retry=true)=>createObserverApiProvider({config:apiConfig,generation,readKey,transport,accounting:apiAccounting!,instructions:assets.instructions,schema:assets.schema,maxAutoRetries:retry?1:0,retry});
-    const workers=[make(),make()] as const;
-    const ownedWorkers=[...workers];
+    const ownedWorkers = new Set<ObserverWorker>();
+    const byConversation = new Map<string, ObserverWorker>();
+    const releasing=new Set<string>();
+    const workerSource: ObserverWorkerSource = {
+      acquire(key) { if(releasing.has(key))throw Error('OBSERVER_WORKER_CLOSING');const existing=byConversation.get(key); if(existing)return existing; const worker=make(); byConversation.set(key,worker); ownedWorkers.add(worker); return worker; },
+      async release(key) { const worker=byConversation.get(key); if(!worker||releasing.has(key))return;releasing.add(key);try{await worker.close();if(worker.status().active)throw Error('OBSERVER_WORKER_CLOSE_UNCONFIRMED');if(byConversation.get(key)===worker)byConversation.delete(key);ownedWorkers.delete(worker);}finally{releasing.delete(key);} },
+      all() { return [...byConversation.values()]; },
+    };
     const fingerprint=createHash('sha256').update(JSON.stringify({profileId:apiConfig.profileId,baseUrl:apiConfig.baseUrl,model:apiConfig.model})).digest('hex');
     const trialInput:ObserverInput={goalSummary:'Synthetic provider trial. Do not use any real conversation context.',activeSeconds:0,runtime:'waiting',messages:[{kind:'user',text:'Return one valid observer response for this synthetic provider trial.',truncated:false}],truncated:false};
-    return {workers,inspect:async inspectSignal=>{inspectSignal.throwIfAborted();return {label:apiConfig.name,fingerprint};},
+    return {workers:workerSource.all(), workerSource, inspect:async inspectSignal=>{inspectSignal.throwIfAborted();return {label:apiConfig.name,fingerprint};},
       check:async checkSignal=>{const key=await readKey();if(!key)return {ok:false,message:'API 密钥不可用'};const response=await transport(apiConfig.baseUrl,{method:'GET',redirect:'error',signal:AbortSignal.any([checkSignal,AbortSignal.timeout(15_000)]),headers:{authorization:`Bearer ${key}`}});await response.body?.cancel().catch(()=>undefined);if(response.status===401||response.status===403)return {ok:false,message:'API 凭据被拒绝，请更新配置'};if(response.status>=500)return {ok:false,message:'API 服务不可用'};return {ok:true,message:`网络已到达（HTTP ${response.status}）；未验证 API 身份或运行推理`};},
-      trial:async trialSignal=>{const worker=make(false);ownedWorkers.push(worker);const result=await worker.observe(trialInput,trialSignal,'__provider_trial__');if(result.status!=='interpreted'||result.interpretation===null)throw Error('PROVIDER_TRIAL_FAILED');return result;},
-      close:async()=>{ownedWorkers.forEach(worker=>worker.disable());await Promise.all(ownedWorkers.map(worker=>worker.close()));await transport.close();}};
+      trial:async trialSignal=>{const worker=make(false);ownedWorkers.add(worker);const result=await worker.observe(trialInput,trialSignal,'__provider_trial__');if(result.status!=='interpreted'||result.interpretation===null)throw Error('PROVIDER_TRIAL_FAILED');return result;},
+      close:async()=>{ownedWorkers.forEach(worker=>worker.disable());await Promise.all([...ownedWorkers].map(worker=>worker.close()));await transport.close();}};
   };
   const host=await createObserverProviderHost({dataDirectory:options.dataDirectory,consentProtection:options.consentProtection,
     openSubscription,openApi,autoStartSubscription:config!==null, ...(config?.proxyUrl===undefined?{}:{proxyUrl:config.proxyUrl}),
     ...(accountSettings===undefined?{}:{subscriptionAccount:accountSettings,readSubscriptionAccount:async signal=>{const snapshot=await accountSettings.inspect(signal);return {label:snapshot.accountLabel,observedAt:snapshot.evidence.observedAt,expiresAt:snapshot.evidence.expiresAt};}})});
-  return {workers:host.workers,onObservation:journal.record,
+  return {workers:host.workers,workerSource:host.workerSource,onObservation:journal.record,
     schedulerRecovery:{attachScheduler(scheduler:Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>){attachedScheduler=scheduler;currentRuntime?.schedulerRecovery.attachScheduler(scheduler);}},
     recovery:{status:()=>currentRuntime?.recovery.status()??{state:'unauthorized' as const,revision:0,knownTokens:0,unknown:0,recoveryAllowed:false},preflight:()=>currentRuntime?.recovery.preflight()??Promise.resolve({state:'unauthorized' as const,revision:0,knownTokens:0,unknown:0,recoveryAllowed:false,allowed:false}),confirm:(revision:number)=>currentRuntime?.recovery.confirm(revision)??Promise.reject(new Error('OBSERVER_RECOVERY_UNAVAILABLE')),binding:()=>currentRuntime?.recovery.binding()},
     start:host.start,disable:()=>{host.disable();currentRuntime?.disable();},revokeConsent:async()=>{await currentRuntime?.revokeConsent();},

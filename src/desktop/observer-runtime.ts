@@ -10,10 +10,9 @@ import {createObserverRecoveryController, type ObserverRecoveryController, type 
 import {createObserverDiagnosticRunner, type ObserverDiagnostic} from '../estimation/observer-diagnostics.js';
 import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from '../estimation/subscription-session.js';
 import type {AccountedUsage} from '../estimation/subscription-accounting.js';
-import type {ObserverScheduler} from '../estimation/observer-scheduler.js';
+import type {ObserverScheduler, ObserverWorkerSource} from '../estimation/observer-scheduler.js';
 import {inspectRecoveryBootBoundary, type RecoveryBootBoundaryProof} from '../estimation/recovery-boot-boundary.js';
 
-const SLOT_COUNT = 2;
 const REFRESH_MS = 120000;
 const RECOVERY_INPUT: ObserverInput = Object.freeze({
   goalSummary: 'Synthetic recovery probe. Do not use any real conversation context.',
@@ -116,11 +115,12 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
   let schedulerRecovery: SchedulerRecoveryHandle | undefined;
   let preparedSchedulerGeneration: number | undefined;
   let recoveryDelegatesClosed = false;
-  const delegates: Array<ObserverWorker | undefined> = [];
+  const delegates = new Map<string, ObserverWorker>();
+  const releasingDelegates=new Set<string>();
 
   function disableDelegates(): void {
-    for (const delegate of delegates) {
-      try {delegate?.disable();} catch { /* Keep ownership until close confirms it. */ }
+    for (const delegate of delegates.values()) {
+      try {delegate.disable();} catch { /* Keep ownership until close confirms it. */ }
     }
   }
 
@@ -142,16 +142,16 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
 
   const gate = createObserverConsentGate({now, onInvalidate: () => { ready = false; }});
 
-  function slot(index: number): ObserverWorker {
+  function slot(key: string): ObserverWorker {
     return {
-      observe(input, signal, conversationKey): Promise<ObserverResult> {
-        const delegate = delegates[index];
+      observe(input, signal, conversationKey, turnGeneration): Promise<ObserverResult> {
+        const delegate = delegates.get(key);
         if (disabled || !ready || !delegate) return Promise.resolve(unavailable());
-        try {return delegate.observe(input, signal, conversationKey);}
+        try {return delegate.observe(input, signal, conversationKey, turnGeneration);}
         catch {return Promise.resolve(unavailable());}
       },
       status() {
-        const delegate = delegates[index];
+        const delegate = delegates.get(key);
         if (!delegate) return {active: false, disabled: true, poisoned: false, setupFailed};
         try {
           const state = delegate.status();
@@ -160,14 +160,14 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         catch {return {active: true, disabled: true, poisoned: true};}
       },
       disable() {
-        try {delegates[index]?.disable();} catch { /* Close retains the failed owner. */ }
+        try {delegates.get(key)?.disable();} catch { /* Close retains the failed owner. */ }
       },
       close() {
-        try {return delegates[index]?.close() ?? Promise.resolve();}
+        try {return delegates.get(key)?.close() ?? Promise.resolve();}
         catch {return Promise.reject(new Error('OBSERVER_WORKER_CLOSE_UNCONFIRMED'));}
       },
       provenance() {
-        const delegate=delegates[index];
+        const delegate=delegates.get(key);
         if (disabled || !ready || !delegate) return null;
         try {return delegate.provenance?.() ?? null;}
         catch {return null;}
@@ -175,7 +175,56 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     };
   }
 
-  const workers = Object.freeze(Array.from({length: SLOT_COUNT}, (_, index) => slot(index))) as readonly ObserverWorker[];
+  const workerSource: ObserverWorkerSource = {
+    acquire(conversationKey: string): ObserverWorker {
+      if (disabled || !ready || !accounting) throw new Error('OBSERVER_NOT_READY');
+      if(releasingDelegates.has(conversationKey))throw new Error('OBSERVER_WORKER_CLOSING');
+      const existing = delegates.get(conversationKey);
+      if (existing) {
+        const state=existing.status();
+        if(state.active)throw new Error('OBSERVER_WORKER_CLOSING');
+        if(!state.disabled&&!state.poisoned)return existing;
+        delegates.delete(conversationKey);
+      }
+      const delegate = createAccountedObserverWorker({
+        accounting,
+        prepare,
+        authorize: gate.authorized,
+        now,
+      });
+      delegates.set(conversationKey, delegate);
+      return delegate;
+    },
+    async release(conversationKey: string): Promise<void> {
+      const delegate = delegates.get(conversationKey);
+      if (!delegate) return;
+      if(releasingDelegates.has(conversationKey))return;
+      releasingDelegates.add(conversationKey);
+      try {
+        await delegate.close();
+        if(delegate.status().active)throw new Error('OBSERVER_WORKER_CLOSE_UNCONFIRMED');
+        if(delegates.get(conversationKey)===delegate)delegates.delete(conversationKey);
+      }finally{releasingDelegates.delete(conversationKey);}
+    },
+    all: () => [...delegates.values()],
+  };
+  // Legacy consumers receive stable handles, while production scheduling uses
+  // workerSource directly and therefore has no fixed concurrency ceiling.
+  const workers = Object.freeze(Array.from({length: 2}, () => ({
+    observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number): Promise<ObserverResult> {
+      if (disabled || !ready) return Promise.resolve(unavailable());
+      try { return workerSource.acquire(conversationKey).observe(input, signal, conversationKey, turnGeneration); }
+      catch { return Promise.resolve(unavailable()); }
+    },
+    status() {
+      if (disabled || !ready) return {active: false, disabled: true, poisoned: false, setupFailed};
+      const states = workerSource.all().map(worker => worker.status());
+      return {active: states.some(state => state.active), disabled: false, poisoned: states.some(state => state.poisoned)};
+    },
+    disable() { disableDelegates(); },
+    async close() { await Promise.all([...delegates.values()].map(delegate => delegate.close())); },
+    provenance() { return workerSource.all()[0]?.provenance?.() ?? null; },
+  }))) as readonly ObserverWorker[];
 
   function check(signal: AbortSignal): void {
     if (disabled || signal.aborted || !gate.authorized()) throw new Error('OBSERVER_NOT_READY');
@@ -198,19 +247,12 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
   }
 
   function installDelegates(owner: ReleaseAccountingOwner): void {
-    for (let index = 0; index < SLOT_COUNT; index++) {
-      delegates[index] = createAccountedObserverWorker({
-        accounting: owner,
-        prepare,
-        authorize: () => !disabled && ready && gate.authorized(),
-        now,
-      });
-    }
+    accounting = owner;
   }
 
   async function rebuildDelegates(): Promise<void> {
     if (disabled || !ready || !accounting) throw new Error('OBSERVER_RECOVERY_DISABLED');
-    const old = delegates.map(delegate => delegate);
+    const old = [...delegates.values()];
     for (const delegate of old) {
       try { delegate?.disable(); } catch { /* close below verifies ownership */ }
     }
@@ -220,12 +262,12 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
       try { const state = delegate.status(); return state.active || state.poisoned; }
       catch { return true; }
     })) throw new Error('OBSERVER_WORKER_CLOSE_UNCONFIRMED');
-    installDelegates(accounting);
+    delegates.clear();
     recoveryDelegatesClosed = false;
   }
 
   async function closeDelegatesForRecovery(): Promise<void> {
-    const old = delegates.map(delegate => delegate);
+    const old = [...delegates.values()];
     for (const delegate of old) {
       try { delegate?.disable(); } catch { /* close below verifies ownership */ }
     }
@@ -268,7 +310,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
           disable();
           throw new Error('OBSERVER_RECOVERY_BINDING_CHANGED');
         }
-        const states = delegates.map(delegate => {
+        const states = [...delegates.values()].map(delegate => {
           try { return delegate?.status() ?? {active: false, poisoned: false}; }
           catch { return {active: true, poisoned: true}; }
         });
@@ -437,7 +479,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
       await setup?.catch(() => undefined);
       await accountingOpen?.catch(() => undefined);
 
-      const workerResults = await Promise.allSettled(delegates.map(delegate => delegate?.close() ?? Promise.resolve()));
+        const workerResults = await Promise.allSettled([...delegates.values()].map(delegate => delegate.close()));
       await metadataTail.catch(() => undefined);
       let identityClosed = false;
       try {
@@ -446,8 +488,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
       } catch { /* Keep the accounting owner open until identity ownership is confirmed. */ }
 
       const workersClosed = workerResults.every(result => result.status === 'fulfilled');
-      const workersConfirmed = delegates.every(delegate => {
-        if (!delegate) return true;
+      const workersConfirmed = [...delegates.values()].every(delegate => {
         try {
           const state = delegate.status();
           return !state.active && !state.poisoned;
@@ -468,6 +509,6 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     cancel: () => recoveryController?.cancel() ?? releaseRecoveryGate(),
     binding: () => recoveryController?.binding(),
   };
-  return {workers, start, disable, close, revokeConsent, recoveryBoundary, recovery,
+  return {workers, workerSource, start, disable, close, revokeConsent, recoveryBoundary, recovery,
     schedulerRecovery: {attachScheduler(scheduler: SchedulerRecoveryHandle): void { schedulerRecovery = scheduler; }}};
 }

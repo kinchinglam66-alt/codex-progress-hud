@@ -9,20 +9,22 @@ import {
   validateClock,
   type AccountingRequest,
 } from './accounting-worker-protocol.js';
+import type {InvocationRecordPatch} from './invocation-ownership.js';
 
 if (!parentPort) throw new Error('RELEASE_WORKER_FAILED');
 const port = parentPort;
 const data = workerData as {directory: unknown; initialNow: unknown};
 const initialNow = validateClock(data.initialNow);
 let clock = initialNow;
+let clockAnchor = performance.now();
 let owner: ReleaseAccountingOwner | undefined;
-type RecoveryPolicyOwner = ReleaseAccountingRecoveryOwner & Required<Pick<ReleaseAccountingRecoveryOwner, 'recoveryAdmission' | 'recordRecoveryEvent'>>;
+type RecoveryPolicyOwner = ReleaseAccountingRecoveryOwner & Required<Pick<ReleaseAccountingRecoveryOwner, 'recoveryAdmission' | 'recordRecoveryEvent' | 'reconcileAutomatic'>>;
 const recoveryOwner = (): RecoveryPolicyOwner => {
   if (!owner || typeof owner.recoveryStatus !== 'function' || typeof owner.preflightRecovery !== 'function' ||
       typeof owner.confirmRecovery !== 'function' || typeof owner.reserveRecoveryTrial !== 'function' ||
       typeof owner.settleRecoveryTrial !== 'function' || typeof owner.finishRecovery !== 'function' ||
       typeof owner.cancelRecoveryTrial !== 'function' || typeof owner.cancelRecovery !== 'function' ||
-      typeof owner.recoveryAdmission !== 'function' || typeof owner.recordRecoveryEvent !== 'function') throw new Error('RELEASE_PROTOCOL_INVALID');
+      typeof owner.recoveryAdmission !== 'function' || typeof owner.recordRecoveryEvent !== 'function' || typeof owner.reconcileAutomatic !== 'function') throw new Error('RELEASE_PROTOCOL_INVALID');
   return owner as RecoveryPolicyOwner;
 };
 let confirmedSnapshot: ReturnType<typeof snapshotCopy> | undefined;
@@ -51,7 +53,8 @@ function responseRecovery(): ReturnType<typeof recoveryStatusCopy> {
 async function start(): Promise<void> {
   try {
     if (typeof data.directory !== 'string' || data.directory.length === 0 || data.directory.length > 4_096) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
-    owner = await openReleaseAccounting(data.directory, () => clock);
+    owner = await openReleaseAccounting(data.directory, () => clock, undefined, undefined,
+      () => clock + Math.floor(performance.now() - clockAnchor));
     confirmedSnapshot = snapshotCopy(owner.snapshot());
     post({kind: 'ready', version: ACCOUNTING_PROTOCOL_VERSION, snapshot: confirmedSnapshot, recovery: responseRecovery()});
   } catch (error) {
@@ -78,7 +81,10 @@ async function run(request: AccountingRequest): Promise<void> {
     post({kind: 'response', version: ACCOUNTING_PROTOCOL_VERSION, requestId: request.requestId, ok: false, result: null, error: 'RELEASE_CLOCK_REGRESSION', snapshot: responseSnapshot(), recovery: responseRecovery()});
     return;
   }
-  clock = request.clock;
+  if(request.clock > clock) {
+    clock = request.clock;
+    clockAnchor = performance.now();
+  }
   let result: unknown = null;
   let failure: unknown;
   try {
@@ -91,9 +97,12 @@ async function run(request: AccountingRequest): Promise<void> {
     else if (request.operation === 'recovery_cancel_trial') await recoveryOwner().cancelRecoveryTrial(request.attemptId, request.reservationId);
     else if (request.operation === 'recovery_cancel') await recoveryOwner().cancelRecovery(request.attemptId);
     else if (request.operation === 'recovery_reconcile_pending') result = await recoveryOwner().reconcileRecoveredPending(request.proof);
+    else if (request.operation === 'recovery_reconcile_automatic') result = await recoveryOwner().reconcileAutomatic();
     else if (request.operation === 'recovery_admission') result = await recoveryOwner().recoveryAdmission(request.clock, request.eligibleTask, request.conversationKey);
     else if (request.operation === 'recovery_admission_release') await owner.forConversation(request.conversationKey).releaseRecoveryAdmission?.();
-    else if (request.operation === 'recovery_event') await recoveryOwner().recordRecoveryEvent({kind: request.eventKind, at: request.clock});
+    else if (request.operation === 'recovery_event') await recoveryOwner().recordRecoveryEvent({kind: request.eventKind, at: request.clock, ...(request.conversationKey === undefined ? {} : {conversationKey: request.conversationKey})});
+    else if (request.operation === 'invocation_bind') await owner.forConversation(request.conversationKey).bindInvocation?.(request.reservationId, request.record);
+    else if (request.operation === 'invocation_update') await owner.forConversation(request.conversationKey).updateInvocation?.(request.reservationId, request.patch as InvocationRecordPatch);
     else {
       const view = owner.forConversation(request.conversationKey);
       if (request.operation === 'reserve') result = await view.reserve(request.admissionKind);

@@ -148,7 +148,7 @@ it('drives a disabled scheduler through successful recovery before ordinary obse
   let active = false;
   let disabled = false;
   const calls: Array<(result: ObserverResult) => void> = [];
-  const failure: ObserverResult = {status: 'process_error', interpretation: null, usage: null};
+  const failure: ObserverResult = {status: 'accounting_error', interpretation: null, usage: null};
   const success: ObserverResult = {
     status: 'interpreted',
     interpretation: {relation: 'continue', status: 'running', summary: 'ordinary observation', estimate: {remainingSeconds: 120, errorPercent: 20}},

@@ -29,6 +29,45 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it('replaces a retained poisoned lease after its child finally exits',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-retained-lease-'));
+    let alive=true;
+    const old=worker('old');old.status=()=>({active:alive,disabled:true,poisoned:true});
+    const fresh=worker('fresh');fresh.observe=async()=>({status:'interpreted',interpretation:{relation:'continue',status:'running',summary:'new',estimate:null},usage:null});
+    const owned:ProviderWorkerOwner={workers:[],workerSource:{acquire:()=>alive?old:fresh,release:async()=>{throw Error('close unconfirmed');},all:()=>alive?[old]:[fresh]},close:async()=>undefined,inspect:async()=>({label:'fixture',fingerprint:'fixture'})};
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owned,autoStartSubscription:true});
+    try{
+      await host.start(new AbortController().signal);host.workerSource!.acquire('same');
+      await expect(host.workerSource!.release('same')).rejects.toThrow('close unconfirmed');
+      alive=false;
+      const next=host.workerSource!.acquire('same');
+      const result=await next.observe({goalSummary:null,activeSeconds:1,runtime:'running',messages:[],truncated:false},new AbortController().signal,'same');
+      expect(result).toMatchObject({status:'interpreted',interpretation:{summary:'new'}});
+    }finally{await host.close();}
+  });
+  it('fences dynamically acquired workers after disable and forwards the actual turn generation',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-dynamic-fence-'));
+    const pending=deferred<any>(),released=deferred<void>();
+    const delegate=worker('dynamic');delegate.observe=vi.fn(()=>pending.promise);
+    const owned:ProviderWorkerOwner={workers:[],workerSource:{acquire:()=>delegate,release:()=>released.promise,all:()=>[delegate]},close:async()=>undefined,inspect:async()=>({label:'fixture',fingerprint:'fixture'})};
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owned,autoStartSubscription:true});
+    try{
+      await host.start(new AbortController().signal);
+      const lease=host.workerSource!.acquire('conversation');
+      const input={goalSummary:null,activeSeconds:1,runtime:'running' as const,messages:[],truncated:false};
+      const signal=new AbortController().signal;
+      const result=lease.observe(input,signal,'conversation',17);
+      expect(delegate.observe).toHaveBeenCalledWith(input,signal,'conversation',17);
+      const releasing=host.workerSource!.release('conversation');
+      expect(()=>host.workerSource!.acquire('conversation')).toThrow('PROVIDER_WORKER_CLOSING');
+      released.resolve();await releasing;
+      host.disable();expect(delegate.disable).toHaveBeenCalled();
+      pending.resolve({status:'interpreted',interpretation:{status:'running'},usage:null});
+      expect(await result).toMatchObject({status:'disabled',interpretation:null});
+      await lease.observe(input,signal,'conversation',18);
+      expect(delegate.observe).toHaveBeenCalledTimes(1);
+    }finally{await host.close();}
+  });
   it('keeps verified identity when interactive start fails after inspection',async()=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-interactive-account-'));
     const settings={inspect:async()=>({accountLabel:'retained@example.invalid',evidence:{accountFingerprint:'a'.repeat(64),routeFingerprint:'b'.repeat(64),assetsFingerprint:'c'.repeat(64),observedAt:0,expiresAt:300000}})} as any;

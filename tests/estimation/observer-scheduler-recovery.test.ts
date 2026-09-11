@@ -5,7 +5,7 @@ import {PassiveGoals} from '../../src/server/passive-goals.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
-const failure: ObserverResult = {status: 'process_error', interpretation: null, usage: null};
+const failure: ObserverResult = {status: 'accounting_error', interpretation: null, usage: null};
 const success: ObserverResult = {
   status: 'interpreted',
   interpretation: {relation: 'continue', status: 'running', summary: 'ordinary recovery observation', estimate: {remainingSeconds: 120, errorPercent: 20}},

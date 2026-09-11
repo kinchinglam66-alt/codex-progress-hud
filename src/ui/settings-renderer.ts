@@ -31,7 +31,7 @@ function render(value: SettingsStatus): void {
   state.textContent = value.state==='cooldown'?'冷却中':value.state==='warning'?'用量警告（有未知记录）':value.state;
   const next=value.nextEligibleAt??value.cooldownUntil;
   message.textContent=value.reason==='unresolved_previous_call'?
-    '旧估时调用尚未确认结束。请保存工作并重启电脑，再进行本地检查与恢复；未知用量会保留。':value.state==='cooldown'?
+    '旧估时调用正在自动检查与恢复，无需手动试探。无法确认进程身份的遗留调用通常在五分钟后释放占用；可识别且仍未结束的进程继续等待确认，未知用量会保留。':value.state==='cooldown'?
     typeof next==='number'&&Number.isSafeInteger(next)&&next>=0&&next<=8640000000000000?
       `下次可尝试：${new Date(next).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'})}（仅在有任务时）`:
       '等待满足恢复条件；空闲时不会发起试探。':

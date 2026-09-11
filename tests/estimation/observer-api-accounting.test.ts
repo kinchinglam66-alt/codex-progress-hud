@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -48,6 +49,66 @@ afterEach(async () => {
 });
 
 describe('durable API accounting', () => {
+  it('migrates legacy API rows without resetting known or unknown accounting', async () => {
+    const path = await databasePath();
+    const owner = createApiAccounting(path, () => 1_000_000);
+    const before = (await owner.reserve(binding, {...limits, dailyCallLimit: 3}))!;
+    await owner.markDispatch(before.id);
+    await owner.settle(before.id, null);
+    await owner.close();
+    const legacy = new DatabaseSync(path);
+    try {
+      legacy.exec(`BEGIN IMMEDIATE;
+        ALTER TABLE api_reservations DROP COLUMN invocation_json;
+        ALTER TABLE api_reservations DROP COLUMN recovery_outcome;
+        DROP TABLE api_accounting_meta;
+        CREATE TABLE api_accounting_meta (id INTEGER PRIMARY KEY CHECK(id=1), schema_version INTEGER NOT NULL CHECK(schema_version=1));
+        INSERT INTO api_accounting_meta VALUES(1,1); COMMIT;`);
+    } finally {legacy.close();}
+    const migrated = createApiAccounting(path, () => 1_000_001);
+    try {
+      expect(migrated.snapshot()).toMatchObject({starts: 1, unknown: 1, knownTokens: 0});
+      expect(migrated.snapshot().rows[0]).toMatchObject({id: before.id, usage: null, state: 'unknown'});
+      expect(migrated.snapshot().rows[0]?.invocation).toBeUndefined();
+    } finally {await migrated.close();}
+  });
+  it('persists HTTP ownership and local cleanup without inventing remote cancellation or usage', async () => {
+    const path = await databasePath();
+    const now = 1_000_000;
+    const accounting = createApiAccounting(path, () => now);
+    const reservation = (await accounting.reserve(binding, limits))!;
+    try {
+      await accounting.bindInvocation(reservation.id, {
+        admissionId: reservation.id, conversationKey: 'conversation-a', turnGeneration: binding.generation,
+        ownerUuid: randomUUID(), providerKind: 'api', phase: 'prepared', deadline: now + 60_000,
+        cleanupOutcome: 'pending',
+      });
+      await accounting.markDispatch(reservation.id);
+      await accounting.updateInvocation(reservation.id, {phase: 'closed', cleanupOutcome: 'confirmed'});
+      await accounting.settle(reservation.id, null);
+    } finally { await accounting.close(); }
+    const reopened = createApiAccounting(path, () => now);
+    try {
+      expect(reopened.snapshot()).toMatchObject({starts: 1, unknown: 1, unresolved: 0, knownTokens: 0});
+      expect(reopened.snapshot().rows[0]?.invocation).toMatchObject({
+        admissionId: reservation.id, conversationKey: 'conversation-a', providerKind: 'api',
+        phase: 'closed', cleanupOutcome: 'confirmed',
+      });
+      expect(reopened.snapshot().rows[0]?.usage).toBeNull();
+    } finally { await reopened.close(); }
+  });
+
+  it('rejects HTTP ownership for another admission before it can be dispatched', async () => {
+    const accounting = createApiAccounting(await databasePath(), () => 1_000_000);
+    try {
+      const reservation = (await accounting.reserve(binding, limits))!;
+      await expect(accounting.bindInvocation(reservation.id, {
+        admissionId: randomUUID(), conversationKey: 'conversation-a', turnGeneration: binding.generation,
+        ownerUuid: randomUUID(), providerKind: 'api', phase: 'prepared', deadline: 1_060_000,
+      })).rejects.toThrow();
+      expect(accounting.snapshot().rows[0]?.state).toBe('pending');
+    } finally { await accounting.close(); }
+  });
   it('admits only one concurrent reservation at the daily call cap', async () => {
     const path = await databasePath();
     const now = Date.parse('2026-09-10T23:59:00.000Z');
@@ -199,7 +260,7 @@ describe('durable API accounting', () => {
   it('serializes admission across separate SQLite owners', async () => {
     const path = await databasePath();
     const directory = dirname(path);
-    const source = pathToFileURL(join(process.cwd(), 'src/estimation/observer-api-accounting.ts')).href;
+    const source = pathToFileURL(join(process.cwd(), 'dist/estimation/observer-api-accounting.js')).href;
     const worker = join(directory, 'reserve-worker.mjs');
     const barrier = join(directory, 'start.reserve');
     const workerSource = `

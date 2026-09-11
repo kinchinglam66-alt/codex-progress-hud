@@ -27,7 +27,7 @@ import { createHmac } from 'node:crypto';
 import { createConversationNames } from './conversation-names.js';
 import { PassiveContextStore } from './passive-context-store.js';
 import { PassiveGoals } from './passive-goals.js';
-import { ObserverScheduler, type ObserverWorker, type ObserverObservation } from '../estimation/observer-scheduler.js';
+import { ObserverScheduler, type ObserverWorker, type ObserverWorkerSource, type ObserverObservation } from '../estimation/observer-scheduler.js';
 import {ScopedSnapshots} from './scoped-snapshots.js';
 import {createLocalSessionReader} from '../observer/local-session-reader.js';
 import {createConversationSource} from '../observer/conversation-source.js';
@@ -98,6 +98,7 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   passiveGoals?: PassiveGoals;
   /** Owned, authorized workers only. Omission leaves live observation unconfigured. */
   observerWorkers?: readonly ObserverWorker[];
+  observerWorkerSource?: ObserverWorkerSource;
   observerSchedulerRecovery?: {attachScheduler(scheduler: Pick<ObserverScheduler, 'prepareRecovery' | 'restoreRecovery'>): void};
   /** Explicit selected local source; omission preserves the legacy test adapter. */
   observerSessionsRoot?:string;
@@ -336,7 +337,8 @@ export function createProgressServer(options: ProgressServerOptions) {
   const passiveContexts = options.passiveContexts ?? new PassiveContextStore();
   if(options.observerSessionsRoot!==undefined&&options.passiveGoals!==undefined)throw Error('CONFLICTING_OBSERVER_SOURCE');
   let sourceToken:string|undefined;
-  const selectedSource=options.observerSessionsRoot===undefined||options.observerWorkers===undefined?undefined:
+  const workerSource = options.observerWorkerSource;
+  const selectedSource=options.observerSessionsRoot===undefined||(options.observerWorkers===undefined&&workerSource===undefined)?undefined:
     createConversationSource({source:createLocalSessionReader({root:options.observerSessionsRoot}),now:goalNow,wallNow:now,
       turnKeyFor:(hostId,turnId)=>{
         if(sourceToken===undefined)throw Error('SOURCE_IDENTITY_UNAVAILABLE');
@@ -363,8 +365,8 @@ export function createProgressServer(options: ProgressServerOptions) {
     goalForConversation: key => passiveGoals.view(key, goalNow()),
     observerForConversation:key=>passiveObserver?.diagnostics(key) });
   const scopedSnapshots = new ScopedSnapshots(store);
-  const passiveObserver = options.observerWorkers === undefined ? undefined : new ObserverScheduler({
-    contexts: passiveContexts, goals: passiveGoals, workers: options.observerWorkers, now: goalNow,
+  const passiveObserver = options.observerWorkers === undefined && workerSource === undefined ? undefined : new ObserverScheduler({
+    contexts: passiveContexts, goals: passiveGoals, ...(workerSource ? {workerSource} : {workers: options.observerWorkers!}), now: goalNow,
     ...(options.onObserverObservation?{onObservation:options.onObserverObservation}:{}),
     onChange: () => {if (!shuttingDown) {pruneSources();store.refreshPresentation();}}
   });

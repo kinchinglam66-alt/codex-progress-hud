@@ -6,6 +6,9 @@ import { openSubscriptionLedger } from "../../src/estimation/subscription-ledger
 import { createOwnedProcessRunner } from "../../src/estimation/owned-process.js";
 import {ObserverPreDispatchTransient} from '../../src/estimation/observer-call-failure.js';
 import { createSubscriptionSession, createObserverSubscriptionSession } from "../../src/estimation/subscription-session.js";
+import {randomUUID} from 'node:crypto';
+import type {Invocation} from '../../src/estimation/owned-process.js';
+import type {InvocationRecord, InvocationRecordPatch} from '../../src/estimation/invocation-ownership.js';
 
 const metrics={activeSeconds:20,progress:0.5,toolCount:2,validationFailures:0};
 const observerInput = {goalSummary: null, activeSeconds: 20, runtime: 'running',
@@ -260,4 +263,63 @@ it("close during settlement drains durable accounting and never returns an estim
   const closing=s.close();gate.resolve();
   expect(await pending).toMatchObject({status:"disabled",prediction:null});await closing;
   expect(d.ledger.snapshot()).toMatchObject({knownTokens:23,unresolved:0});
+});
+
+it('binds durable ownership before a real child and records each lifecycle phase', async () => {
+  const d = await setup(`process.stdin.resume();process.stdin.on('end',()=>process.stdout.write(${JSON.stringify(stream(interpretation))}))`);
+  const bound: InvocationRecord[] = [], updates: InvocationRecordPatch[] = [];
+  let observed: Invocation | undefined;
+  let record: InvocationRecord = {
+    admissionId: randomUUID(), conversationKey: 'ownership-test', turnGeneration: 7,
+    ownerUuid: randomUUID(), providerKind: 'subscription', phase: 'bound', deadline: Date.now() + 60_000,
+    cleanupOutcome: 'pending',
+  };
+  const ledger = {
+    ...d.ledger,
+    reserve: async () => { const id = await d.ledger.reserve(); if (!id) throw new Error('TEST_RESERVE_FAILED'); record = {...record, admissionId: id}; return id; },
+    bindInvocation: async (_id: string, value: InvocationRecord) => { bound.push({...value}); },
+    updateInvocation: async (_id: string, patch: InvocationRecordPatch) => { updates.push({...patch}); },
+  };
+  const identityRunner=createOwnedProcessRunner({timeoutMs:15000});
+  const runner = {
+    ...identityRunner,
+    run: async (...args: Parameters<typeof d.runner.run>) => { observed = args[0]; return identityRunner.run(...args); },
+  };
+  const s = createObserverSubscriptionSession({ledger, runner, prepare: d.prepare, authorize: () => true,
+    invocationRecord: () => ({...record})});
+  closers.push(() => s.close());
+  await expect(s.observe(observerInput, signal())).resolves.toMatchObject({status: 'interpreted'});
+  expect(bound).toEqual([record]);
+  expect(observed?.ownership).toEqual(record);
+  expect(updates).toEqual([
+    {phase: 'dispatching'},
+    {phase: 'dispatching', pid: expect.any(Number), creationIdentity: expect.stringMatching(/^\d+$/)},
+    {phase: 'settling'},
+    {phase: 'closed', cleanupOutcome: 'confirmed'},
+  ]);
+});
+
+it('records unconfirmed cleanup when the runner reports a non-closed child', async () => {
+  const d = await setup();
+  const updates: InvocationRecordPatch[] = [];
+  let record: InvocationRecord = {
+    admissionId: randomUUID(), conversationKey: 'unconfirmed-test', turnGeneration: 1,
+    ownerUuid: randomUUID(), providerKind: 'subscription', phase: 'bound', deadline: Date.now() + 60_000,
+    cleanupOutcome: 'pending',
+  };
+  const runner = {
+    ...d.runner,
+    run: async () => ({reason: 'cleanup_timeout' as const, exitCode: null, closed: false, stdout: '', stderr: ''}),
+  };
+  const ledger = {
+    ...d.ledger,
+    reserve: async () => { const id = await d.ledger.reserve(); if (!id) throw new Error('TEST_RESERVE_FAILED'); record = {...record, admissionId: id}; return id; },
+    bindInvocation: async () => undefined,
+    updateInvocation: async (_id: string, patch: InvocationRecordPatch) => { updates.push({...patch}); },
+  };
+  const s = createObserverSubscriptionSession({ledger, runner, prepare: d.prepare, authorize: () => true,
+    invocationRecord: () => ({...record})});
+  closers.push(() => s.close());
+  await expect(s.observe(observerInput, signal())).resolves.toMatchObject({status: 'process_error'});
+  expect(updates.at(-1)).toEqual({phase: 'closed', cleanupOutcome: 'unconfirmed'});
 });

@@ -7,7 +7,7 @@ import {createObserverSecretStore} from './observer-secret-store.js';
 import type {ConsentProtection} from '../estimation/observer-consent-store.js';
 import {createObserverConsentStore, type ObserverConsentStore} from '../estimation/observer-consent-store.js';
 import {observerApiConsentScope} from '../estimation/observer-consent.js';
-import type {ObserverWorker} from '../estimation/observer-scheduler.js';
+import type {ObserverWorker, ObserverWorkerSource} from '../estimation/observer-scheduler.js';
 import type {ProviderOwner} from './observer-provider-selection.js';
 import {createProviderSelection} from './observer-provider-selection.js';
 import type {ObserverAccountSettings} from './observer-account-settings.js';
@@ -27,6 +27,7 @@ const providerDraft = z.union([z.object({selected: z.literal('subscription'), ap
 
 export interface ProviderWorkerOwner extends ProviderOwner {
   workers: readonly ObserverWorker[];
+  workerSource?: ObserverWorkerSource;
   check?(signal: AbortSignal): Promise<{ok: boolean; message: string}>;
   trial?(signal: AbortSignal): Promise<unknown>;
 }
@@ -49,6 +50,7 @@ export interface ProviderMutation {generation: number; revision: number}
 export interface ProviderInlineConsent {kind: 'inline'; generation: number; revision: number}
 export interface ProviderSettingsHost {
   workers: readonly ObserverWorker[];
+  workerSource?: ObserverWorkerSource;
   status(): ProviderSettingsPublic;
   readProviderSettings(): Promise<ProviderSettingsPublic>;
   saveProviderSettings(input: ProviderMutation & {draft: unknown; secret?: string}): Promise<ProviderSettingsPublic>;
@@ -80,6 +82,8 @@ export interface ObserverProviderHostOptions {
 type PersistedState = {version: 1; generation: number; revision: number; state: 'inactive' | 'switching' | 'ready'; selected: ProviderConfig['selected']};
 const initialConfig: ProviderConfig = Object.freeze({version: 1, selected: 'subscription', api: null});
 const fixedFailure = (message = 'PROVIDER_ACTION_FAILED'): Error => new Error(message);
+const ownerWorkers = (owner:ProviderWorkerOwner|null|undefined): readonly ObserverWorker[] =>
+  owner ? [...new Set([...owner.workers,...(owner.workerSource?.all()??[])])] : [];
 
 async function readState(path: string): Promise<PersistedState | null | 'invalid'> {
   try {
@@ -235,15 +239,15 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
 
   function proxy(index: number): ObserverWorker {
     return {
-      async observe(input, signal, conversationKey) {
+      async observe(input, signal, conversationKey, turnGeneration) {
         const expected = dispatchGeneration;
         const owner = current;
-        const delegate = owner?.workers[index];
+        const delegate = state === 'ready' ? owner?.workerSource?.acquire(conversationKey) ?? owner?.workers[index] : undefined;
         if (state !== 'ready' || owner === null || delegate === undefined) return {status: 'disabled', interpretation: null, usage: null};
-        const result = await delegate.observe(input, signal, conversationKey);
+        const result = await delegate.observe(input, signal, conversationKey, turnGeneration);
         if (owner === current && expected === dispatchGeneration && (result.outcomes?.failureCode === 'unauthorized' || result.outcomes?.failureCode === 'forbidden')) {
           state='failed'; dispatchGeneration=++generation; current=null;
-          for (const worker of owner.workers) worker.disable();
+          for (const worker of ownerWorkers(owner)) worker.disable();
           await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(() => undefined);
         }
         if (expected !== dispatchGeneration || state !== 'ready' || owner !== current) return {...result, status: 'disabled', interpretation: null};
@@ -261,6 +265,40 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     };
   }
   const workers = Object.freeze([proxy(0), proxy(1)]);
+  const leases=new Map<string,{owner:ProviderWorkerOwner;delegate:ObserverWorker;proxy:ObserverWorker}>();
+  const releasingLeases=new Set<string>();
+  const workerSource: ObserverWorkerSource = {
+    acquire(key) {
+      if(releasingLeases.has(key))throw fixedFailure('PROVIDER_WORKER_CLOSING');
+      const owner=current,expected=dispatchGeneration;
+      if (state!=='ready'||!owner?.workerSource) throw fixedFailure('PROVIDER_UNAVAILABLE');
+      const existing=leases.get(key);
+      if(existing?.owner===owner) {
+        const status=existing.delegate.status();
+        if(status.active||(!status.disabled&&!status.poisoned))return existing.proxy;
+        // A failed close retains ownership until the child actually exits.
+        // Once inactive, let the runtime replace the unusable delegate.
+        leases.delete(key);
+      }
+      const delegate=owner.workerSource.acquire(key);
+      const guarded:ObserverWorker={
+        ...delegate,
+        async observe(input,signal,conversationKey,turnGeneration) {
+          if(current!==owner||state!=='ready'||expected!==dispatchGeneration)return {status:'disabled',interpretation:null,usage:null};
+          const result=await delegate.observe(input,signal,conversationKey,turnGeneration);
+          if(current===owner&&expected===dispatchGeneration&&(result.outcomes?.failureCode==='unauthorized'||result.outcomes?.failureCode==='forbidden')) {
+            state='failed';dispatchGeneration=++generation;current=null;
+            ownerWorkers(owner).forEach(worker=>worker.disable());
+            await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(()=>undefined);
+          }
+          return current===owner&&state==='ready'&&expected===dispatchGeneration ? result : {...result,status:'disabled',interpretation:null};
+        }
+      };
+      leases.set(key,{owner,delegate,proxy:guarded});return guarded;
+    },
+    async release(key) { const lease=leases.get(key);if(!lease||releasingLeases.has(key))return;releasingLeases.add(key);try{await lease.owner.workerSource?.release(key);if(leases.get(key)===lease)leases.delete(key);}finally{releasingLeases.delete(key);} },
+    all() { return [...leases.values()].map(lease=>lease.proxy); },
+  };
 
   async function start(signal: AbortSignal): Promise<void> {
     const {controller,token}=acquireAction();
@@ -389,7 +427,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         if (current !== null) {
           const previous = current;
           dispatchGeneration = ++generation; state = 'inactive'; current = null;
-          for (const worker of previous.workers) worker.disable();
+          for (const worker of ownerWorkers(previous)) worker.disable();
           await drainSelection();
           controller.signal.throwIfAborted();
           await writeState({version: 1, generation, revision, state: 'inactive', selected: active.selected});
@@ -435,7 +473,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     dispatchGeneration = ++generation; state = 'inactive'; current = null;
     try {
       await writeState({version:1,generation,revision,state:'inactive',selected:active.selected});
-      for (const worker of previous?.workers ?? []) worker.disable();
+      for (const worker of ownerWorkers(previous)) worker.disable();
       await drainSelection(); controller.signal.throwIfAborted();
       if (draft.selected !== 'api' || !(await keyConfigured(draft))) throw fixedFailure('PROVIDER_KEY_UNAVAILABLE');
       if (options.openApi === undefined) throw fixedFailure('PROVIDER_API_UNAVAILABLE');
@@ -457,7 +495,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     dispatchGeneration=++generation; state='switching'; current=null;
     const settings = options.subscriptionAccount;
     try { await writeState({version:1,generation,revision,state:'switching',selected:active.selected});
-      for(const worker of previous?.workers??[])worker.disable();
+      for(const worker of ownerWorkers(previous))worker.disable();
       await drainSelection(); controller.signal.throwIfAborted();
       if (!settings) throw fixedFailure('OBSERVER_SUBSCRIPTION_ACCOUNT_UNAVAILABLE');
       const kind=input.action; const outcome = kind === 'login' ? await settings.login(AbortSignal.any([signal,controller.signal])) : kind === 'device-auth' ? await settings.deviceAuth(AbortSignal.any([signal,controller.signal])) : await settings.logout(AbortSignal.any([signal,controller.signal]));
@@ -474,14 +512,14 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     closed = true;
     const previous=current;
     dispatchGeneration=++generation; state='inactive';
-    for(const worker of previous?.workers??[])worker.disable();
+    for(const worker of ownerWorkers(previous))worker.disable();
     composedStartController?.abort(); actionController?.abort();
     closing = (async () => { await Promise.all([action?.catch(() => undefined), composedStartPromise?.catch(() => undefined)]); await selection.close(); for (const owner of retained) await closeAuxiliary(owner); current = null; })().finally(() => { closing = undefined; });
     return closing;
   }
-  return {workers, status: () => ({
+  return {workers, workerSource, status: () => ({
     generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account, accountStatus,
     recipient: draft.selected==='api'&&draft.api?`${new URL(draft.api.baseUrl).origin}${new URL(draft.api.baseUrl).pathname} · ${draft.api.model}`:(options.recipient ?? 'Codex Progress HUD observer'), ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
   }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
-    disable: () => {dispatchGeneration = ++generation; state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of current?.workers??[]) worker.disable();}, close};
+    disable: () => {dispatchGeneration = ++generation; state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of ownerWorkers(current)) worker.disable();}, close};
 }

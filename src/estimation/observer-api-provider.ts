@@ -6,6 +6,7 @@ import {packObserverInput} from './observer-input.js';
 import type {ApiTransport} from '../desktop/observer-api-transport.js';
 import type {ObserverResult} from './observer-provider.js';
 import type {ObserverWorker} from './observer-scheduler.js';
+import {randomUUID,createHash} from 'node:crypto';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -16,7 +17,8 @@ export interface ObserverApiProviderOptions {
   generation: number;
   readKey: () => Promise<string | null>;
   transport: ApiTransport;
-  accounting: Pick<ApiAccounting, 'reserve' | 'markDispatch' | 'settle' | 'cancelBeforeDispatch'>;
+  accounting: Pick<ApiAccounting, 'reserve' | 'markDispatch' | 'settle' | 'cancelBeforeDispatch'> &
+    Partial<Pick<ApiAccounting, 'bindInvocation' | 'updateInvocation'>>;
   instructions: string;
   schema: unknown;
   /** Optional controller-supplied Task 4 limits; defaults are conservative. */
@@ -175,6 +177,7 @@ function retryable(code: FailureCode | undefined): boolean {
 
 /** API-owned request/parser lifecycle. Durable reservation ownership remains in Task 4. */
 export function createObserverApiProvider(options: ObserverApiProviderOptions): ObserverWorker {
+  const ownerUuid = randomUUID();
   const binding: ApiProviderBinding = {kind: 'api', profileId: options.config.profileId, generation: options.generation};
   const limits: ApiLimits = options.limits ?? {
     dailyCallLimit: options.config.dailyCallLimit,
@@ -199,16 +202,34 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
 
   const disable = () => {disabled = true; abortController?.abort();};
 
-  async function attempt(body: string, key: string, signal: AbortSignal): Promise<{value: ObserverResult; retry: boolean; retryDelayMs: number}> {
-    const reservation: ApiReservation | null = await options.accounting.reserve(binding, limits);
+  async function attempt(body: string, key: string, signal: AbortSignal, conversationKey: string, turnGeneration: number): Promise<{value: ObserverResult; retry: boolean; retryDelayMs: number}> {
+    const accountScope=createHash('sha256').update(JSON.stringify([options.config.baseUrl,key])).digest('hex');
+    const ownership={conversationKey,turnGeneration,ownerUuid,accountScope,providerKind:'api' as const,phase:'prepared' as const,deadline:now()+REQUEST_TIMEOUT_MS,cleanupOutcome:'pending' as const};
+    const reservation: ApiReservation | null = await options.accounting.reserve(binding, limits, ownership);
     if (reservation === null) return {value: result('admission_denied'), retry: false, retryDelayMs: 0};
     let dispatched = false;
     let settled = false;
+    let ownershipBound = reservation.ownershipBound===true;
+    let cleanupWritten = false;
+    const closeLocal = async () => {
+      if (ownershipBound && !cleanupWritten) {
+        // Only the local HTTP request has ended; provider-side cancellation is unknown.
+        await options.accounting.updateInvocation!(reservation.id, {phase: 'closed', cleanupOutcome: 'confirmed'});
+        cleanupWritten = true;
+      }
+    };
     let usage: ApiUsage | null = null;
     let failureCode: FailureCode | undefined;
     let retryPolicy: {delayMs?: number; exceeded: boolean} = {exceeded: false};
     try {
+      if (!ownershipBound && options.accounting.bindInvocation && options.accounting.updateInvocation) {
+        await options.accounting.bindInvocation(reservation.id, {
+          admissionId: reservation.id,...ownership,
+        });
+        ownershipBound = true;
+      }
       if (signal.aborted) {
+        await closeLocal();
         await options.accounting.cancelBeforeDispatch(reservation.id);
         return {value: {status: 'aborted', interpretation: null, usage: null, outcomes: {
           prediction: 'invalid', call: 'cancelled', usage: 'not_dispatched', framingValid: false,
@@ -241,6 +262,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
       catch {failureCode = response.status < 200 || response.status >= 300 ? statusFailureCode(response.status) : 'invalid_response'; throw new Error('response_json_failed');}
       const parsed = parseResponse(decoded, response.status, retryPolicy);
       usage = parsed.usage; failureCode = parsed.failureCode;
+      await closeLocal();
       await options.accounting.settle(reservation.id, usage); settled = true;
       if (failureCode === 'unauthorized' || failureCode === 'forbidden') configurationFailure = failureCode;
       const outcomes = {
@@ -248,15 +270,22 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
         framingValid: parsed.framingValid, closureConfirmed: true, dispatch: 'started' as const,
         accounting: 'durably_settled' as const, ...(failureCode ? {failureCode} : {}),
       };
+      if (signal.aborted || disabled) return {value: {status: 'aborted', interpretation: null, usage,
+        outcomes: {...outcomes, call: 'cancelled', failureCode: 'cancelled'}}, retry: false, retryDelayMs: 0};
       return {value: parsed.interpretation === null
         ? {status: 'process_error', interpretation: null, usage, outcomes}
         : {status: 'interpreted', interpretation: parsed.interpretation, usage, outcomes},
       retry: retryable(failureCode) && !parsed.retryAfterExceeded,
       retryDelayMs: parsed.retryAfterMs ?? 1_000};
     } catch {
-      if (!dispatched) throw new Error('accounting_error');
+      if (!dispatched) {
+        // No transport was called; release only this reservation and retain its start.
+        await closeLocal();
+        await options.accounting.cancelBeforeDispatch(reservation.id);
+        throw new Error('accounting_error');
+      }
       if (!settled) {
-        try {await options.accounting.settle(reservation.id, usage); settled = true;}
+        try {await closeLocal(); await options.accounting.settle(reservation.id, usage); settled = true;}
         catch {return {value: result('accounting_error', 'accounting_error'), retry: false, retryDelayMs: 0};}
       }
       const code = failureCode ?? 'network_error';
@@ -269,7 +298,7 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
     }
   }
 
-  async function observeImpl(input: ObserverInput, signal: AbortSignal): Promise<ObserverResult> {
+  async function observeImpl(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration: number): Promise<ObserverResult> {
     if (configurationFailure) return configurationBlocked(configurationFailure);
     if (disabled) return result('disabled');
     if (signal.aborted) return result('aborted', 'cancelled');
@@ -295,19 +324,21 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
         try {await sleep(current.retryDelayMs, signal);}
         catch {return current.value;}
       }
-      try {current = await attempt(body, key, signal);}
+      const previous=current;
+      try {current = await attempt(body, key, signal, conversationKey, turnGeneration);}
       catch {return result('accounting_error', 'accounting_error');}
+      if(index>0&&current.value.status==='admission_denied')return previous.value;
       if (!current.retry || index === maxRetries) return current.value;
     }
     return current.value;
   }
 
   return {
-    observe(input, signal) {
+    observe(input, signal, conversationKey, turnGeneration=options.generation) {
       if (disabled) return Promise.resolve(result('disabled'));
       if (active) return Promise.resolve(result('busy'));
       active = true; abortController = new AbortController();
-      pending = observeImpl(input, AbortSignal.any([signal, abortController.signal]))
+      pending = observeImpl(input, AbortSignal.any([signal, abortController.signal]), conversationKey, turnGeneration)
         .finally(() => {active = false; abortController = undefined;});
       return pending;
     },

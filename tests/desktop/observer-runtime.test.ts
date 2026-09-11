@@ -446,9 +446,11 @@ describe('desktop observer runtime composition', () => {
         now: () => 0,
       });
       await runtime.start(new AbortController().signal);
-      expect(runtime.workers[0]!.status()).toMatchObject({active: true, disabled: true, poisoned: true});
+      const delegate=runtime.workerSource.acquire('unconfirmed-delegate');
+      expect(delegate.status()).toMatchObject({active: true, disabled: true, poisoned: true});
       runtime.disable();
-      expect(runtime.workers[0]!.status()).toMatchObject({active: true, disabled: true, poisoned: true});
+      expect(runtime.workerSource.all()).toContain(delegate);
+      expect(delegate.status()).toMatchObject({active: true, disabled: true, poisoned: true});
       await expect(runtime.close()).rejects.toThrow('OBSERVER_CLOSE_UNCONFIRMED');
       expect(events).not.toContain('accounting-close');
     } finally {

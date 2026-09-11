@@ -42,7 +42,7 @@ it('keeps unknown history while allowing ordinary admission within the bounded a
   const ordinaryAfterRecovery = await view.reserve();
   expect(ordinaryAfterRecovery).toMatch(/^[0-9a-f-]{36}$/);
   await view.cancelBeforeDispatch(ordinaryAfterRecovery!);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', unknown: 1, recoveryAllowed: true});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', unknown: 1, recoveryAllowed: false});
 
   const preflight = await owner.preflightRecovery('account:route:assets');
   expect(preflight).toMatchObject({allowed: true, revision: 1});
@@ -61,11 +61,11 @@ it('keeps unknown history while allowing ordinary admission within the bounded a
   await owner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: true});
 
   expect(owner.snapshot().unknown).toBe(1);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'recovered', unknown: 1, recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', unknown: 1, recoveryAllowed: false});
   expect(await view.reserve()).toMatch(/^[0-9a-f-]{36}$/);
 });
 
-it('reports a recovered pending admission as blocked instead of normal', async () => {
+it('reports recovered pending history without globally blocking another conversation', async () => {
   const path = await directory();
   let owner = await open(path, () => 0);
   const first = owner.forConversation('fixture');
@@ -74,9 +74,10 @@ it('reports a recovered pending admission as blocked instead of normal', async (
   owners.pop();
 
   owner = await open(path, () => 1);
-  expect(await owner.forConversation('other').reserve()).toBeNull();
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', reason: 'unresolved_previous_call'});
+  expect(await owner.forConversation('other').reserve()).not.toBeNull();
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', reason: 'unresolved_previous_call'});
   expect(await owner.recoveryAdmission(1, true, 'other')).toMatchObject({allowed: false, reason: 'unresolved_previous_call'});
+  expect(await owner.recoveryAdmission(1, true, 'independent')).toMatchObject({allowed:true});
 });
 
 it('reports generic unsafe unknown status without unresolved prior-call guidance', async () => {
@@ -85,8 +86,8 @@ it('reports generic unsafe unknown status without unresolved prior-call guidance
   const reservation = await view.reserve();
   await view.settle(reservation!, null, 'unsafe_unknown');
 
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', reason: 'unsafe_unknown'});
-  expect(await owner.recoveryAdmission(0, true, 'another-call')).toMatchObject({allowed: false, reason: 'unsafe_unknown'});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', reason: 'unsafe_unknown'});
+  expect(await owner.recoveryAdmission(0, true, 'another-call')).toMatchObject({allowed: true, kind: 'ordinary'});
 });
 
 it('reconciles only previous-owner pending calls after a verified reboot and is idempotent', async () => {
@@ -102,14 +103,14 @@ it('reconciles only previous-owner pending calls after a verified reboot and is 
   const proof = {source: 'windows-win32-operating-system' as const, bootAt: 10_001, observedAt: now};
   await expect(owner.reconcileRecoveredPending(proof)).resolves.toBe(1);
   expect(owner.snapshot()).toMatchObject({starts: 1, inFlight: 0, unresolved: 0, unknown: 1, knownTokens: 0});
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', recoveryAllowed: true});
-  expect(await owner.forConversation('new-call').reserve()).toBeNull();
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
+  expect(await owner.forConversation('new-call').reserve()).not.toBeNull();
   await expect(owner.reconcileRecoveredPending(proof)).resolves.toBe(0);
 
   await owner.close();
   owners.pop();
   owner = await open(path, () => now);
-  expect(owner.snapshot()).toMatchObject({starts: 1, inFlight: 0, unknown: 1});
+  expect(owner.snapshot()).toMatchObject({starts: 2, inFlight: 1, unknown: 1});
 });
 
 it.each([
@@ -124,7 +125,7 @@ it.each([
   owners.pop();
   owner = await open(path, () => 60_001);
   await expect(owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', ...values})).rejects.toThrow('RELEASE_RECOVERY_INVALID');
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', reason: 'unresolved_previous_call'});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', reason: 'unresolved_previous_call'});
   expect(owner.snapshot()).toMatchObject({inFlight: 1, unknown: 0});
 });
 
@@ -139,11 +140,11 @@ it('reconciles two recovered pending calls in one operation without granting a t
 
   await expect(owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', bootAt: 10_001, observedAt: 20_000})).resolves.toBe(2);
   expect(owner.snapshot()).toMatchObject({starts: 2, inFlight: 0, unknown: 2, knownTokens: 0});
-  expect(await owner.recoveryAdmission(20_000, true, 'new-call')).toMatchObject({allowed: false});
-  expect(await owner.forConversation('new-call').reserve()).toBeNull();
+  expect(await owner.recoveryAdmission(20_000, true, 'new-call')).toMatchObject({allowed: true, kind: 'ordinary'});
+  expect(await owner.forConversation('new-call').reserve()).not.toBeNull();
 });
 
-it('requires the existing bounded trial after reboot reconciliation and preserves unknown usage after success', async () => {
+it('allows an ordinary estimate after reboot reconciliation and preserves unknown history after success', async () => {
   const path = await directory();
   let owner = await open(path, () => 0);
   await owner.forConversation('old-call').reserve();
@@ -152,25 +153,16 @@ it('requires the existing bounded trial after reboot reconciliation and preserve
 
   owner = await open(path, () => 20_000);
   await owner.reconcileRecoveredPending({source: 'windows-win32-operating-system', bootAt: 10_001, observedAt: 20_000});
-  expect(await owner.forConversation('new-call').reserve()).toBeNull();
-  const preflight = await owner.preflightRecovery('account:route:assets');
-  expect(preflight).toMatchObject({allowed: true, state: 'blocked'});
-  const confirmation = await owner.confirmRecovery({revision: preflight.revision, binding: 'account:route:assets'});
-  const trial = await owner.reserveRecoveryTrial(confirmation);
-  expect(trial).toMatch(/^[0-9a-f-]{36}$/);
-  await owner.settleRecoveryTrial(confirmation.attemptId, trial!, usage);
-  await owner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: true});
-  expect(owner.snapshot()).toMatchObject({starts: 2, unknown: 1, knownTokens: 10, inFlight: 0});
-  expect(owner.recoveryStatus()).toMatchObject({state: 'recovered', recoveryAllowed: false});
   const ordinary = await owner.forConversation('new-call').reserve();
   expect(ordinary).toMatch(/^[0-9a-f-]{36}$/);
-  await owner.forConversation('new-call').cancelBeforeDispatch(ordinary!);
+  await owner.forConversation('new-call').settle(ordinary!, usage);
+  expect(owner.snapshot()).toMatchObject({starts:2,unknown:1,knownTokens:10,inFlight:0,unresolved:0});
 
   await owner.close();
   owners.pop();
   owner = await open(path, () => 20_000);
   expect(owner.snapshot()).toMatchObject({unknown: 1, knownTokens: 10});
-  expect(owner.recoveryStatus()).toMatchObject({state: 'recovered', recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
 });
 
 it('never reconciles a current-owner pending call even with a future boot claim', async () => {
@@ -237,9 +229,9 @@ it('keeps a known-usage trial failure blocked and requires a new confirmation', 
   const trial = await owner.reserveRecoveryTrial(confirmation);
   await owner.settleRecoveryTrial(confirmation.attemptId, trial!, usage);
   await expect(owner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: false})).rejects.toThrow('RELEASE_RECOVERY_FAILED');
-  expect(owner.recoveryStatus()).toMatchObject({state: 'failed', recoveryAllowed: true});
-  expect(await view.reserve()).toBeNull();
-  expect((await owner.preflightRecovery('account:route:assets')).allowed).toBe(true);
+  expect(owner.recoveryStatus()).toMatchObject({state: 'failed', recoveryAllowed: false});
+  expect(await view.reserve()).not.toBeNull();
+  expect((await owner.preflightRecovery('account:route:assets')).allowed).toBe(false);
 });
 
 it('turns an unknown or cancelled trial into a durable failure without replaying it', async () => {
@@ -250,13 +242,10 @@ it('turns an unknown or cancelled trial into a durable failure without replaying
   const confirmation = await owner.confirmRecovery({revision: 1, binding: 'account:route:assets'});
   const trial = await owner.reserveRecoveryTrial(confirmation);
   await owner.cancelRecoveryTrial(confirmation.attemptId, trial!);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'failed', recoveryAllowed: true});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'failed', recoveryAllowed: false});
   await expect(owner.cancelRecoveryTrial(confirmation.attemptId, trial!)).rejects.toThrow('RELEASE_RECOVERY_INVALID');
-  const next = await owner.confirmRecovery({revision: 1, binding: 'account:route:assets'});
-  const nextTrial = await owner.reserveRecoveryTrial(next);
-  await owner.settleRecoveryTrial(next.attemptId, nextTrial!, null);
-  await owner.finishRecovery(next.attemptId, {success: false, closureConfirmed: true});
-  expect(owner.snapshot().unknown).toBe(2);
+  await expect(owner.confirmRecovery({revision: 1, binding: 'account:route:assets'})).rejects.toThrow('RELEASE_RECOVERY_NOT_ALLOWED');
+  expect(owner.snapshot().unknown).toBe(1);
   const ordinary = await view.reserve();
   expect(ordinary).toMatch(/^[0-9a-f-]{36}$/);
   await view.cancelBeforeDispatch(ordinary!);
@@ -275,9 +264,9 @@ it('marks an interrupted reserved trial unknown on reopen and never replays its 
 
   owner = await open(path, () => 0);
   expect(owner.snapshot().unknown).toBe(2);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked', recoveryAllowed: true});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
   const later = await owner.forConversation('later').reserve();
-  expect(later).toBeNull();
+  expect(later).not.toBeNull();
   expect(trial).toMatch(/^[0-9a-f-]{36}$/);
 });
 
@@ -292,7 +281,7 @@ it('invalidates a successful recovery as soon as a new unknown result is recorde
   await owner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: true});
   const ordinary = await first.reserve();
   await first.settle(ordinary!, null, 'safe_unknown');
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', revision: 2, recoveryAllowed: true});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', revision: 2, recoveryAllowed: false});
   const later = await first.reserve();
   expect(later).toMatch(/^[0-9a-f-]{36}$/);
   await first.cancelBeforeDispatch(later!);
@@ -355,7 +344,7 @@ it.each(['confirmed', 'reserved', 'known-settled', 'unknown-settled', 'known-fai
         knownTokens: boundary.startsWith('known') || boundary === 'succeeded' ? 10 : 0,
         inFlight: 0, unresolved: 0, poisoned: false
       });
-      expect(owner.recoveryStatus().recoveryAllowed).toBe(boundary !== 'succeeded');
+      expect(owner.recoveryStatus().recoveryAllowed).toBe(false);
     }
     if (boundary === 'succeeded') expect(await owner.forConversation('resumed').reserve()).not.toBeNull();
   }
@@ -407,7 +396,10 @@ it('rejects swapped terminal trial IDs between failed and succeeded recovery att
   await view.settle((await view.reserve())!, null, 'safe_unknown');
   const attempts: Array<{attemptId: string; trial: string}> = [];
   for (const success of [false, true]) {
-    const confirmation = await owner.confirmRecovery({revision: 1, binding: 'account:route:assets'});
+    // A new unknown event permits another optional diagnostic attempt; a failed
+    // attempt alone does not grant a new manual confirmation.
+    if (success) await view.settle((await view.reserve())!, null, 'safe_unknown');
+    const confirmation = await owner.confirmRecovery({revision: owner.recoveryStatus().revision, binding: 'account:route:assets'});
     const trial = (await owner.reserveRecoveryTrial(confirmation))!;
     await owner.settleRecoveryTrial(confirmation.attemptId, trial, usage);
     await owner.finishRecovery(confirmation.attemptId, {success, closureConfirmed: true});
@@ -450,11 +442,7 @@ it('prevents ordinary callers from claiming the recovery-trial namespace', async
 
 it('migrates actual v3 CHECK constraints and permits recovery without losing history', async () => {
   const path = await directory();
-  const initial = await open(path, () => 0);
-  await initial.close();
-  owners.pop();
   await mutateDatabase(path, db => db.exec(`
-    DROP TABLE recovery_events; DROP TABLE recovery_attempts; DROP TABLE admissions; DROP TABLE metadata;
     CREATE TABLE metadata(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL CHECK(version=3), cumulative_starts INTEGER NOT NULL, known_tokens INTEGER NOT NULL, unknown_count INTEGER NOT NULL, unknown_admission_ceiling INTEGER, last_admission INTEGER);
     CREATE TABLE admissions(id TEXT PRIMARY KEY, ordinal INTEGER NOT NULL UNIQUE, conversation TEXT NOT NULL, admitted_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','settled','unknown','not_dispatched')), input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL);
     CREATE INDEX admissions_conversation_time ON admissions(conversation,admitted_at);
@@ -474,21 +462,13 @@ it('migrates actual v3 CHECK constraints and permits recovery without losing his
   expect((await open(path, () => 0)).snapshot()).toMatchObject({starts: 2, unknown: 1, knownTokens: 10});
 });
 
-it('caps recovery trials at twelve per hour across failed attempts', async () => {
+it('allows automatic recovery admission without a synthetic trial quota', async () => {
   const owner = await open(await directory(), () => 0);
   const view = owner.forConversation('recovery-rate-limit');
   const id = await view.reserve();
   await view.settle(id!, null, 'safe_unknown');
-  const reservations: Array<string | null> = [];
-  for (let index = 0; index < 13; index++) {
-    const confirmation = await owner.confirmRecovery({revision: 1, binding: 'account:route:assets'});
-    const reservation = await owner.reserveRecoveryTrial(confirmation);
-    reservations.push(reservation);
-    if (reservation !== null) {
-      await owner.settleRecoveryTrial(confirmation.attemptId, reservation, usage);
-      await owner.finishRecovery(confirmation.attemptId, {success: false, closureConfirmed: true});
-    }
-  }
-  expect(reservations.slice(0, 12).every(value => value !== null)).toBe(true);
-  expect(reservations[12]).toBeNull();
+  expect(await owner.recoveryAdmission(0, true, 'next-conversation')).toMatchObject({allowed: true, kind: 'ordinary'});
+  const next = await owner.forConversation('next-conversation').reserve();
+  expect(next).toMatch(/^[0-9a-f-]{36}$/);
+  await owner.forConversation('next-conversation').cancelBeforeDispatch(next!);
 });

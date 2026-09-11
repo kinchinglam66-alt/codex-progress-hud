@@ -42,12 +42,13 @@ async function eventually(check: () => boolean): Promise<void> {
   throw new Error('TEST_EVENTUALLY_TIMEOUT');
 }
 
-function goal(scheduler: ObserverScheduler, goals: PassiveGoals, contexts: PassiveContextStore, key: string, now: number): void {
+function goal(scheduler: ObserverScheduler, goals: PassiveGoals, contexts: PassiveContextStore, key: string, now: number): string {
   const envelope = normalizeHookInput('UserPromptSubmit', {session_id: key, turn_id: 'turn-1', tool_use_id: `tool-${key}`}, now, token).envelope;
   envelope.content = {kind: 'user', text: 'task data', truncated: false};
   goals.observe(envelope, true, now);
   contexts.ingest(envelope, now);
   scheduler.changed(envelope.sessionKey, 'prompt');
+  return envelope.sessionKey;
 }
 
 function worker(owner: ReleaseAccountingOwner, output: string, now: () => number): ObserverWorker {
@@ -86,7 +87,7 @@ it('keeps a valid framed unknown result enabled and records durable warning thro
   scheduler.tick();
   await eventually(() => owner.snapshot().unknown === 1);
   expect(scheduler.stats().disabled).toBe(false);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: true});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
 });
 
 it('serializes half-open admission across two real workers and carries cooldown through restart', async () => {
@@ -126,22 +127,26 @@ it('serializes half-open admission across two real workers and carries cooldown 
   await owner.close();
 });
 
-it('persists unsafe missing usage as a blocking state across scheduler and owner restart', async () => {
+it('persists invocation-local missing-usage backoff across scheduler and owner restart', async () => {
   let now = 0;
   const path = await directory();
   let owner = await openReleaseAccounting(path, () => now);
+  closers.push(() => owner.close());
   const {scheduler, goals, contexts} = makeScheduler(owner, [unsafeOutput], () => now);
-  goal(scheduler, goals, contexts, 'unsafe-unknown', now);
+  const key=goal(scheduler, goals, contexts, 'unsafe-unknown', now);
   now = 15_000;
   scheduler.tick();
-  await eventually(() => scheduler.stats().disabled);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked'});
-  expect((await owner.recoveryAdmission(now, true, 'unsafe-unknown')).allowed).toBe(false);
+  await eventually(() => owner.snapshot().unknown === 1);
+  expect(scheduler.stats().disabled).toBe(false);
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning'});
+  expect(await owner.recoveryAdmission(now, true, key)).toMatchObject({allowed:false,reason:'retry_backoff',nextEligibleAt:75000});
   await scheduler.close();
   await owner.close();
   owner = await openReleaseAccounting(path, () => now);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked'});
-  await expect(owner.recoveryAdmission(now, true)).resolves.toMatchObject({allowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning'});
+  expect(await owner.recoveryAdmission(now,true,key)).toMatchObject({allowed:false,reason:'retry_backoff'});
+  expect(await owner.recoveryAdmission(now,true,'independent')).toMatchObject({allowed:true});
+  expect(owner.snapshot()).toMatchObject({starts:1,unknown:1,knownTokens:0,inFlight:0});
   await owner.close();
 });
 
@@ -149,6 +154,7 @@ it('releases a cancelled half-open claim and blocks an un-settled claim after re
   let now = 0;
   const path = await directory();
   let owner = await openReleaseAccounting(path, () => now);
+  closers.push(() => owner.close());
   for (const key of ['cancel-seed-a', 'cancel-seed-b', 'cancel-seed-c']) {
     const view = owner.forConversation(key);
     const id = await view.reserve();
@@ -172,8 +178,10 @@ it('releases a cancelled half-open claim and blocks an un-settled claim after re
   expect(await crashView.reserve('half_open')).not.toBeNull();
   await owner.close();
   owner = await openReleaseAccounting(path, () => now);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked'});
-  expect(await owner.recoveryAdmission(now, true, 'after-crash')).toMatchObject({allowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning'});
+  expect(await owner.recoveryAdmission(now, true, 'crashed-half-open')).toMatchObject({allowed: false,reason:'unresolved_previous_call'});
+  expect(await owner.recoveryAdmission(now, true, 'after-crash')).toMatchObject({allowed: true});
+  expect(owner.snapshot()).toMatchObject({inFlight:1,unknown:3});
   await owner.close();
 });
 
@@ -243,5 +251,7 @@ it('releases an unreserved half-open claim on restart but preserves a reserved c
   await owner.close();
   owner = await openReleaseAccounting(path, () => now);
   closers.push(() => owner.close());
-  expect(owner.recoveryStatus()).toMatchObject({state: 'blocked'});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning'});
+  expect(owner.snapshot()).toMatchObject({inFlight:1,unknown:3});
+  expect(await owner.recoveryAdmission(now,true,'after-restart')).toMatchObject({allowed:false,reason:'unresolved_previous_call'});
 });

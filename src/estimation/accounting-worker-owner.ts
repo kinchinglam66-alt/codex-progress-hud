@@ -13,6 +13,7 @@ import {
   parseWorkerMessage,
   recoveryConfirmationCopy,
   recoveryAdmissionCopy,
+  automaticReconcileSchema,
   recoveryPreflightCopy,
   recoveryStatusCopy,
   sanitizedError,
@@ -24,6 +25,7 @@ import {
   type AccountingResponse,
 } from './accounting-worker-protocol.js';
 import type {ReleaseRecoveryConfirmation, ReleaseRecoveryPreflight, ReleaseRecoveryStatus} from './release-accounting.js';
+import {copyInvocationPatch, copyInvocationRecord, type InvocationRecord, type InvocationRecordPatch} from './invocation-ownership.js';
 
 type Pending = {
   promise: Promise<unknown>;
@@ -201,6 +203,22 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
         catch (validationError) { return Promise.reject(validationError); }
         return viewTrack(send('settle', {conversationKey: key, reservationId: copiedId, usage: copiedUsage, settlement: classification}).then(() => undefined));
       },
+      bindInvocation(id: string, record: InvocationRecord): Promise<void> {
+        if (ownerClosed) return Promise.reject(error('RELEASE_OWNER_CLOSED'));
+        if (viewClosed) return Promise.reject(error('RELEASE_VIEW_CLOSED'));
+        let copiedId: string, copiedRecord: InvocationRecord;
+        try { copiedId = validateReservationId(id); copiedRecord = copyInvocationRecord(record); if (copiedRecord.admissionId !== copiedId || copiedRecord.conversationKey !== key) throw error('RELEASE_INVOCATION_INVALID'); }
+        catch (validationError) { return Promise.reject(validationError); }
+        return viewTrack(send('invocation_bind', {conversationKey: key, reservationId: copiedId, record: copiedRecord}).then(() => undefined));
+      },
+      updateInvocation(id: string, patch: InvocationRecordPatch): Promise<void> {
+        if (ownerClosed) return Promise.reject(error('RELEASE_OWNER_CLOSED'));
+        if (viewClosed) return Promise.reject(error('RELEASE_VIEW_CLOSED'));
+        let copiedId: string, copiedPatch: InvocationRecordPatch;
+        try { copiedId = validateReservationId(id); copiedPatch = copyInvocationPatch(patch); }
+        catch (validationError) { return Promise.reject(validationError); }
+        return viewTrack(send('invocation_update', {conversationKey: key, reservationId: copiedId, patch: copiedPatch}).then(() => undefined));
+      },
       cancelBeforeDispatch(id:string):Promise<void>{
         if(ownerClosed)return Promise.reject(error('RELEASE_OWNER_CLOSED'));
         if(viewClosed)return Promise.reject(error('RELEASE_VIEW_CLOSED'));
@@ -279,6 +297,13 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
     reconcileRecoveredPending(proof: RecoveryBootBoundaryProof): Promise<number> {
       return recoverySend('recovery_reconcile_pending', {proof}) as Promise<number>;
     },
+    reconcileAutomatic(): Promise<{released: number; nextCheckAt: number | null}> {
+      return recoverySend('recovery_reconcile_automatic', {}).then(value => {
+        const parsed = automaticReconcileSchema.safeParse(value);
+        if (!parsed.success) throw error('RELEASE_PROTOCOL_INVALID');
+        return {...parsed.data};
+      });
+    },
     recoveryAdmission(_current: number, eligibleTask: boolean, conversationKey?: string) {
       if (!conversationKey) return Promise.resolve({allowed: false, kind: 'ordinary' as const, nextEligibleAt: null, reason: 'no_eligible_task' as const});
       return recoverySend('recovery_admission', {eligibleTask, conversationKey}).then(value => recoveryAdmissionCopy(value as import('./release-accounting.js').ReleaseRecoveryAdmission));
@@ -287,7 +312,7 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
       return recoverySend('recovery_admission_release', {conversationKey}).then(() => undefined);
     },
     recordRecoveryEvent(event: ReleaseRecoveryEvent) {
-      return recoverySend('recovery_event', {eventKind: event.kind}).then(() => undefined);
+      return recoverySend('recovery_event', {eventKind: event.kind, ...(event.conversationKey === undefined ? {} : {conversationKey: event.conversationKey})}).then(() => undefined);
     },
     close(): Promise<void> {
       if (closePromise) return closePromise;

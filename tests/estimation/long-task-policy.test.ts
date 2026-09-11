@@ -15,7 +15,7 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...c,state:'paused'})).toBe(false);
     expect(canRequest({...c,state:'terminal'})).toBe(false);
     expect(canRequest({...c,goalInFlight:true})).toBe(false);
-    expect(canRequest({...c,globalInFlight:2})).toBe(false);
+    expect(canRequest({...c,globalInFlight:200})).toBe(true);
     expect(canRequest({...c,conversationStartsLastHour:12})).toBe(true);
     expect(canRequest({...c,contentReady:false})).toBe(false);
     expect(canRequest({...c,remainingSeconds:null})).toBe(false);
@@ -25,7 +25,7 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     const retry={...base,preDispatchRetry:true,hasNewInformation:false,lastRequestSeconds:15,elapsedSeconds:75};
     expect(canRequest(retry)).toBe(true);
     expect(canRequest({...retry,elapsedSeconds:74})).toBe(false);
-    expect(canRequest({...retry,globalInFlight:2})).toBe(false);
+    expect(canRequest({...retry,globalInFlight:200})).toBe(true);
     expect(canRequest({...retry,conversationStartsLastHour:12})).toBe(true);
     expect(canRequest({...retry,state:'paused'})).toBe(false);
     expect(canRequest({...retry,state:'terminal'})).toBe(false);
@@ -66,7 +66,7 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...c,lastRequestSeconds:null})).toBe(false);
     expect(canRequest({...c,elapsedSeconds:74})).toBe(false);
     expect(canRequest({...c,conversationStartsLastHour:12})).toBe(true);
-    expect(canRequest({...c,globalInFlight:2})).toBe(false);
+    expect(canRequest({...c,globalInFlight:200})).toBe(true);
     expect(canRequest({...c,state:'paused'})).toBe(false);
     expect(canRequest({...c,state:'waiting',statusEvidenceArrived:false,eventAtSeconds:60})).toBe(false);
   });
@@ -77,9 +77,9 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...base,state:'paused',statusEvidenceArrived:true,eventAtSeconds:5})).toBe(false);
     expect(canRequest({...base,state:'waiting',statusEvidenceArrived:true,eventAtSeconds:null})).toBe(false);
   });
-  it('retains concurrency limits without blocking a fresh goal on historical call counts',()=>{
+  it('retains same-conversation exclusion without a global concurrency ceiling',()=>{
     expect(canRequest({...base,goalInFlight:true})).toBe(false);
-    expect(canRequest({...base,globalInFlight:2})).toBe(false);
+    expect(canRequest({...base,globalInFlight:200})).toBe(true);
     expect(canRequest({...base,conversationStartsLastHour:120})).toBe(true);
     expect(canRequest({...base,globalInFlight:1,conversationStartsLastHour:11})).toBe(true);
   });

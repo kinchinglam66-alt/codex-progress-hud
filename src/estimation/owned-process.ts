@@ -1,11 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { isAbsolute } from "node:path";
+import type {InvocationRecord} from './invocation-ownership.js';
+import {captureInvocationProcessIdentity} from './invocation-process.js';
 
-export interface Invocation { executable: string; cwd: string; args: readonly string[]; env: NodeJS.ProcessEnv; input: string; onStdout?: (chunk: Uint8Array) => boolean; onStderr?: (chunk: Uint8Array) => boolean }
+export interface Invocation { executable: string; cwd: string; args: readonly string[]; env: NodeJS.ProcessEnv; input: string; ownership?: InvocationRecord; onSpawnIdentity?: (pid:number, creationIdentity:string)=>Promise<void>; onStdout?: (chunk: Uint8Array) => boolean; onStderr?: (chunk: Uint8Array) => boolean }
 type Reason = "exited" | "aborted" | "disabled" | "busy" | "unavailable" | "timeout" | "output_limit" | "spawn_error" | "stdin_error" | "cleanup_timeout" | "protocol_error";
 export interface OwnedProcessResult { reason: Reason; exitCode: number | null; closed: boolean; stdout: string; stderr: string }
 type Spawn = (executable: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
-interface Options { spawn?: Spawn; timeoutMs?: number; cleanupMs?: number }
+interface Options { spawn?: Spawn; timeoutMs?: number; cleanupMs?: number; captureIdentity?: typeof captureInvocationProcessIdentity }
 
 export function createOwnedLoginProcessRunner(options: Options = {}) {
   return createRunner({...options,timeoutMs:options.timeoutMs ?? 600000},600000);
@@ -96,7 +98,24 @@ function createRunner(options: Options, maximumTimeoutMs:number) {
         deadline = setTimeout(() => stop("timeout"),timeoutMs);
         signal.addEventListener("abort",onAbort,{once:true});
         if (signal.aborted) { onAbort(); return; }
-        try { child.stdin.end(invocation.input); } catch { stop("stdin_error"); }
+        const deliver = () => {
+          if (settled || stopReason || signal.aborted) return;
+          try { child.stdin.end(invocation.input); } catch { stop("stdin_error"); }
+        };
+        if (invocation.onSpawnIdentity) {
+          void (async () => {
+            try {
+              if (!child.pid) throw new Error('PROCESS_IDENTITY_UNAVAILABLE');
+              const identity=await (options.captureIdentity ?? captureInvocationProcessIdentity)(child.pid);
+              if (settled || stopReason || signal.aborted) return;
+              if (!identity) throw new Error('PROCESS_IDENTITY_UNAVAILABLE');
+              await invocation.onSpawnIdentity!(child.pid,identity);
+              deliver();
+            } catch { if (!settled && !stopReason) stop('spawn_error'); }
+          })();
+        } else if (invocation.ownership) {
+          stop('spawn_error'); // Owned inference must persist identity before dispatch.
+        } else deliver();
       });
     }
   };

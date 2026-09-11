@@ -4,6 +4,7 @@ import type {ObserverInput, ObserverResponse} from './observer-contract.js';
 import {packObserverInput} from './observer-input.js';
 import type { createOwnedProcessRunner, Invocation, OwnedProcessResult } from "./owned-process.js";
 import type {AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import type {InvocationRecord} from './invocation-ownership.js';
 import {ObserverPreDispatchTransient} from './observer-call-failure.js';
 import type {ObserverCallOutcomes, ObserverCallTimings, ObserverStatus, ObserverSubscriptionResult} from './observer-provider.js';
 export type {ObserverCallOutcomes, ObserverCallTimings, ObserverSubscriptionResult} from './observer-provider.js';
@@ -15,6 +16,7 @@ interface Dependencies<I = Metrics> {
   ledger:SubscriptionAccounting;
   runner:ReturnType<typeof createOwnedProcessRunner>;
   prepare:(input:I, signal:AbortSignal)=>Invocation|Promise<Invocation>;
+  invocationRecord?: (admissionId: string) => InvocationRecord;
 }
 interface SharedDependencies<I, P> extends Dependencies<I> {
   observerMode?:boolean;
@@ -22,13 +24,14 @@ interface SharedDependencies<I, P> extends Dependencies<I> {
   authorize: () => boolean;
   parseInput: (input: unknown) => {success: true; data: I} | {success: false};
   createParser: () => {push(chunk: Uint8Array): boolean; end(): CodexOutput<P>&Partial<Pick<ObserverOutput,'framingValid'|'predictionStatus'|'usageStatus'>>};
+  invocationRecord?: (admissionId: string) => InvocationRecord;
 }
 
 /** Internal offline orchestration seam. Dependencies are exclusively owned and
  * trusted, not task/model supplied. No default executable or live activation.
  * close drains this session; it does not implement a companion shutdown budget.
  */
-function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind}:SharedDependencies<I, P>) {
+function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind,invocationRecord}:SharedDependencies<I, P>) {
   let disabled=false, externallyDisabled=false, active=false;
   let pending:Promise<SessionResult<P>>|undefined, closing:Promise<void>|undefined;
   let preparation:AbortController|undefined;
@@ -46,7 +49,11 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
     try { id=await ledger.reserve(admissionKind); }
     catch { disable(); return result("accounting_error"); }
     if(id===null) return result("admission_denied");
+    const ownedInvocation = invocationRecord?.(id);
+    try { if (ownedInvocation) await ledger.bindInvocation?.(id, ownedInvocation); }
+    catch { disable(); return result('accounting_error'); }
     let usage:SubscriptionUsage|null=null, prediction:P|null=null;
+    let cleanupConfirmed = false;
     let settlementClassification: SettlementClassification = 'unsafe_unknown';
     let status:Status="process_error";
     if(disabled || signal.aborted || !authorized()) {
@@ -63,8 +70,16 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
       try {
         if(outcomes)outcomes.dispatch='unknown';
         const providerStarted=performance.now();
-        const process=await runner.run({...invocation,onStdout:parser.push},signal)
+        if (ownedInvocation) await ledger.updateInvocation?.(id, {phase: 'dispatching'});
+        const process=await runner.run({...invocation, ...(ownedInvocation ? {
+          ownership: ownedInvocation,
+          onSpawnIdentity: async (pid:number, creationIdentity:string) => {
+            if (!ledger.updateInvocation) throw new Error('INVOCATION_BINDING_UNAVAILABLE');
+            await ledger.updateInvocation(id,{pid,creationIdentity,phase:'dispatching'});
+          }
+        } : {}), onStdout:parser.push},signal)
           .finally(()=>{timings.providerMs=Math.round(performance.now()-providerStarted);});
+        cleanupConfirmed = process.closed === true;
         const output=parser.end();
         if(outcomes){
           outcomes.processReason=process.reason;
@@ -95,7 +110,10 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
     }
     const settlementStarted=performance.now();
     try {
+      if (ownedInvocation) await ledger.updateInvocation?.(id, {phase: 'settling'});
       await ledger.settle(id,usage?{inputTokens:usage.inputTokens,outputTokens:usage.outputTokens,cachedInputTokens:usage.cachedInputTokens}:null,settlementClassification);
+      if (ownedInvocation) await ledger.updateInvocation?.(id, {phase: 'closed', cleanupOutcome: cleanupConfirmed ? 'confirmed' : 'unconfirmed'});
+      if(outcomes)outcomes.accounting='durably_settled';
     } catch { disable(); return result("accounting_error",usage,null,outcomes); }
     finally {timings.settlementMs=Math.round(performance.now()-settlementStarted);}
     if(usage===null) {disabled=true;runner.disable();}

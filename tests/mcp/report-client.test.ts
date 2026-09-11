@@ -53,6 +53,17 @@ const health = {
 };
 
 describe("CompanionHttpClient", () => {
+  it.each([true,false,'true',null])('validates typed timing and runtime uncertainty diagnostics (%s)',async(value)=>{
+    const store=new TaskStore({now:()=>100});
+    store.apply({taskId:'test',event:{type:'tracking_started'}});
+    const snapshot=store.snapshot();
+    const goal={generation:0,estimateRevision:0,sampledAtMs:100,status:'unknown',runtime:'running',activeSeconds:0,prediction:null,timingUncertain:value,runtimeUncertain:value};
+    const row={conversationKey:'conversation',task:snapshot.selected!.task,eta:null,name:{value:null,freshness:'unavailable'},goal};
+    const {baseUrl,tokenPath}=await fixture((_request,response)=>json(response,200,{...snapshot,rows:[row]}));
+    const result=new CompanionHttpClient(baseUrl,tokenPath).status();
+    if(typeof value==='boolean')await expect(result).resolves.toMatchObject({rows:[{goal}]});
+    else await expect(result).rejects.toBeInstanceOf(HudClientError);
+  });
   it('accepts a bounded local admission diagnostic in the real snapshot response',async()=>{
     const store=new TaskStore();
     store.apply({taskId:'task',event:{type:'turn_started'}},0,

@@ -2,6 +2,7 @@ import {z} from 'zod';
 import type {AccountedUsage, AdmissionKind, SettlementClassification} from './subscription-accounting.js';
 import type {ReleaseAccountingSnapshot, ReleaseRecoveryAdmission, ReleaseRecoveryConfirmation, ReleaseRecoveryPreflight, ReleaseRecoveryStatus} from './release-accounting.js';
 import {recoveryBootBoundaryProofSchema} from './recovery-boot-boundary.js';
+import {invocationRecordSchema} from './invocation-ownership.js';
 
 export const ACCOUNTING_PROTOCOL_VERSION = 1 as const;
 export const MAX_ACCOUNTING_PENDING = 128;
@@ -45,6 +46,7 @@ export const recoveryStatusSchema = z.object({
 }).strict();
 export const recoveryPreflightSchema = recoveryStatusSchema.extend({allowed: z.boolean()}).strict();
 export const recoveryAdmissionSchema = z.object({allowed: z.boolean(), kind: z.enum(['ordinary', 'retry', 'half_open']), nextEligibleAt: safeClock.nullable(), reason: z.enum(['unresolved_previous_call', 'cooldown', 'retry_backoff', 'no_eligible_task', 'half_open_busy', 'unsafe_unknown']).optional()}).strict();
+export const automaticReconcileSchema = z.object({released: z.number().int().nonnegative().safe().max(MAX_SAFE), nextCheckAt: safeClock.nullable()}).strict();
 export const recoveryConfirmationSchema = z.object({attemptId: recoveryAttemptId, revision: z.number().int().nonnegative().safe().max(MAX_SAFE), binding: recoveryBinding}).strict();
 
 const requestBase = {
@@ -67,11 +69,14 @@ const recoveryCancelRequest = z.object({...requestBase, operation: z.literal('re
 const recoveryAbortRequest = z.object({...requestBase, operation: z.literal('recovery_cancel'), clock: safeClock, attemptId: recoveryAttemptId}).strict();
 const recoveryAdmissionRequest = z.object({...requestBase, operation: z.literal('recovery_admission'), clock: safeClock, eligibleTask: z.boolean(), conversationKey}).strict();
 const recoveryAdmissionReleaseRequest = z.object({...requestBase, operation: z.literal('recovery_admission_release'), clock: safeClock, conversationKey}).strict();
-const recoveryEventRequest = z.object({...requestBase, operation: z.literal('recovery_event'), clock: safeClock, eventKind: z.enum(['recoverable_failure', 'unknown_usage', 'known_success', 'half_open_reserved', 'half_open_failure', 'half_open_success'])}).strict();
+const recoveryEventRequest = z.object({...requestBase, operation: z.literal('recovery_event'), clock: safeClock, eventKind: z.enum(['recoverable_failure', 'unknown_usage', 'known_success', 'half_open_reserved', 'half_open_failure', 'half_open_success']), conversationKey: conversationKey.optional()}).strict();
+const invocationBindRequest = z.object({...requestBase, operation: z.literal('invocation_bind'), clock: safeClock, conversationKey, reservationId, record: invocationRecordSchema}).strict();
+const invocationUpdateRequest = z.object({...requestBase, operation: z.literal('invocation_update'), clock: safeClock, conversationKey, reservationId, patch: invocationRecordSchema.partial().pick({phase: true, deadline: true, pid: true, creationIdentity: true, cleanupOutcome: true}).strict()}).strict();
 const recoveryReconcileRequest = z.object({...requestBase, operation: z.literal('recovery_reconcile_pending'), clock: safeClock, proof: recoveryBootBoundaryProofSchema}).strict();
+const automaticReconcileRequest = z.object({...requestBase, operation: z.literal('recovery_reconcile_automatic'), clock: safeClock}).strict();
 const requestSchema = z.discriminatedUnion('operation', [reserveRequest, settleRequest, cancelRequest, shutdownRequest,
   recoveryStatusRequest, recoveryPreflightRequest, recoveryConfirmRequest, recoveryTrialReserveRequest,
-  recoveryTrialSettleRequest, recoveryFinishRequest, recoveryCancelRequest, recoveryAbortRequest, recoveryAdmissionRequest, recoveryAdmissionReleaseRequest, recoveryEventRequest, recoveryReconcileRequest]);
+  recoveryTrialSettleRequest, recoveryFinishRequest, recoveryCancelRequest, recoveryAbortRequest, recoveryAdmissionRequest, recoveryAdmissionReleaseRequest, recoveryEventRequest, recoveryReconcileRequest, automaticReconcileRequest, invocationBindRequest, invocationUpdateRequest]);
 
 const errorCodes = [
   'RELEASE_INVALID_CLOCK',
@@ -97,10 +102,11 @@ const errorCodes = [
   'RELEASE_RECOVERY_NOT_ALLOWED',
   'RELEASE_RECOVERY_STALE',
   'RELEASE_RECOVERY_FAILED',
+  'RELEASE_INVOCATION_INVALID',
 ] as const;
 export type AccountingErrorCode = typeof errorCodes[number];
 const errorCodeSchema = z.enum(errorCodes);
-const resultSchema = z.union([reservationId, z.number().int().nonnegative().safe().max(MAX_SAFE), z.null(), recoveryStatusSchema, recoveryPreflightSchema, recoveryAdmissionSchema, recoveryConfirmationSchema]);
+const resultSchema = z.union([reservationId, z.number().int().nonnegative().safe().max(MAX_SAFE), z.null(), recoveryStatusSchema, recoveryPreflightSchema, recoveryAdmissionSchema, recoveryConfirmationSchema, automaticReconcileSchema]);
 
 const responseSchema = z.object({
   kind: z.literal('response'),

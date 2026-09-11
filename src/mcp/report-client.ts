@@ -162,6 +162,8 @@ const aggregateSnapshotSchema = z.object({
       status: z.enum(['running','waiting','paused','interrupted','failed','stopped','completed','unknown']),
       runtime: z.enum(['running','waiting','paused','interrupted','failed','stopped']),
       activeSeconds: z.number().nonnegative(),
+      timingUncertain: z.boolean().optional(),
+      runtimeUncertain: z.boolean().optional(),
       prediction: z.object({remainingSeconds: z.number().nonnegative().max(31536000),
         errorPercent: z.number().nonnegative().max(1000),
         observedActiveSeconds: z.number().nonnegative().max(31536000)}).strict().nullable()

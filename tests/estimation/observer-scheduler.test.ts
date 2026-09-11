@@ -161,19 +161,26 @@ it('retains the current estimate after an unknown-usage refresh',async()=>{
   expect(records.find(row=>row.kind==='result'&&row.requestId===2)?.usage).toBeNull();
   await f.scheduler.close();
 });
-function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false) {
+function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false, dynamic = false) {
   let now = 0, id = 0;
   const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts);
   const calls: Array<{signal: AbortSignal; key: string; input: unknown; finish(value: ObserverResult, closed?: boolean): void}> = [];
-  const workers: ObserverWorker[] = Array.from({length: workerCount}, () => {
+  const makeWorker = (): ObserverWorker => {
     let active = false, disabled = false;
     return {observe: (input, signal, key) => {active = true; return new Promise<ObserverResult>(resolve => {
       calls.push({signal, key, input, finish(value, closed = true) {active = !closed; resolve(value);}});
     });}, disable() {disabled = true;}, async close() {disabled = true;},
       status: () => ({active, disabled, poisoned: false}),
       ...(withProvenance ? {provenance: () => {if(withProvenance==='throw')throw Error('diagnostic sink');return {input:'facts-v1',prompt:'prompt-v1',model:'model-v1',algorithm:'pace-v1'};}} : {})};
-  });
-  const scheduler = new ObserverScheduler({contexts, goals, workers, now: () => now, closeTimeoutMs,...(onObservation?{onObservation}:{})});
+  };
+  const workers: ObserverWorker[] = Array.from({length: workerCount}, makeWorker);
+  const owners = new Map<string, ObserverWorker>();
+  const workerSource = dynamic ? {
+    acquire(key: string) { const worker = owners.get(key) ?? makeWorker(); owners.set(key, worker); if (!workers.includes(worker)) workers.push(worker); return worker; },
+    async release(key: string) { owners.delete(key); },
+    all() { return workers; }
+  } : undefined;
+  const scheduler = new ObserverScheduler({contexts, goals, now: () => now, closeTimeoutMs, ...(workerSource ? {workerSource} : {workers}), ...(onObservation?{onObservation}:{})});
   const hook = (name: HookName, session = 'one', turn = 'first') => {
     const envelope = normalizeHookInput(name, {session_id: session, turn_id: turn, tool_use_id: String(++id)}, now,
       'protected-observer-scheduler-test-token-123456789').envelope;
@@ -370,7 +377,7 @@ it.each(['closure','dispatch','usage','call','status'])('keeps unknown-spend sto
   if(missing==='usage')value.outcomes!.usage='unknown';
   if(missing==='call')value.outcomes!.call='failed';
   if(missing==='status')value.status='process_error';
-  f.calls[0]!.finish(value);await f.flush();expect(f.scheduler.stats().disabled).toBe(true);
+  f.calls[0]!.finish(value);await f.flush();expect(f.scheduler.stats().disabled).toBe(false);
   await f.scheduler.close();
 });
 
@@ -418,7 +425,7 @@ it.each(['framing','closure','call','dispatch'])('rejects unknown usage without 
   if(missing==='call')response.outcomes!.call='failed';
   if(missing==='dispatch')response.outcomes!.dispatch='unknown';
   f.calls[0]!.finish(response);await f.flush();
-  expect(f.goals.view(key,15000)?.prediction).toBeNull();expect(f.scheduler.stats().disabled).toBe(true);
+  expect(f.goals.view(key,15000)?.prediction).not.toBeNull();expect(f.scheduler.stats().disabled).toBe(false);
   await f.scheduler.close();
 });
 
@@ -518,13 +525,14 @@ it('resets the summary for a new turn without requiring another tool result', as
   await f.scheduler.close();
 });
 
-it('holds at most two global slots for user-only goals and gives another conversation the freed slot', async () => {
-  const f = fixture();
+it('admits distinct user-only conversations without a global two-slot ceiling', async () => {
+  const f = fixture(2, 6000, undefined, false, true);
   for (const session of ['one', 'two', 'three']) {f.hook('UserPromptSubmit', session);}
-  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
-  f.scheduler.tick(); expect(f.calls).toHaveLength(2);
-  f.calls[0]!.finish(result()); await f.flush(); f.scheduler.tick(); expect(f.calls).toHaveLength(3);
-  expect(f.scheduler.stats().inFlight).toBe(2);
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(3);
+  expect(f.scheduler.stats().inFlight).toBe(3);
+  for (const call of f.calls) call.finish(result());
+  await f.flush();
+  await f.scheduler.close();
 });
 
 it.each(['paused','interrupted','stopped','failed'] as const)('does not start an initial user-only estimate while %s', state=>{
@@ -608,21 +616,23 @@ it('retains its original worker ownership when the caller mutates the configurat
   expect(closed).toBe(true);
 });
 
-it('does not reuse a slot after unconfirmed process closure', async () => {
-  const f = fixture(); f.hook('UserPromptSubmit'); f.hook('PostToolUse');
+it('retires an unconfirmed worker locally without disabling healthy conversations', async () => {
+  const f = fixture(2, 6000, undefined, false, true); f.hook('UserPromptSubmit'); f.hook('PostToolUse');
   f.time(15000); f.scheduler.tick();
   f.calls[0]!.finish(result(), false); await f.flush();
-  expect(f.scheduler.stats()).toMatchObject({disabled: true, inFlight: 1});
-  f.time(100000); f.hook('UserPromptSubmit', 'two'); f.hook('PostToolUse', 'two');
-  f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  expect(f.scheduler.stats()).toMatchObject({disabled: false, inFlight: 0});
+  f.time(130000); f.hook('UserPromptSubmit', 'two'); f.hook('PostToolUse', 'two');
+  f.time(145000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result()); await f.flush();
   await expect(f.scheduler.close()).rejects.toThrow('OBSERVER_CLOSE_UNCONFIRMED');
+  f.calls[0]!.finish(result(), true); await f.flush();
 });
 
 it('disables further admission after unknown usage even if a child has closed', async () => {
   const f = fixture(); f.hook('UserPromptSubmit'); f.hook('PostToolUse');
   f.time(15000); f.scheduler.tick();
   f.calls[0]!.finish({status: 'process_error', interpretation: null, usage: null}); await f.flush();
-  expect(f.scheduler.stats()).toMatchObject({disabled: true, inFlight: 0});
+  expect(f.scheduler.stats()).toMatchObject({disabled: false, inFlight: 0});
 });
 
 it('bounds shutdown when an owned worker never acknowledges cancellation', async () => {

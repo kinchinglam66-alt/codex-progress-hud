@@ -104,6 +104,7 @@ export interface DesktopTrayImage {
 
 export interface DesktopDependencies {
   observerWorkers?: ProgressServerOptions['observerWorkers'];
+  observerWorkerSource?: ProgressServerOptions['observerWorkerSource'];
   observerSchedulerRecovery?: ProgressServerOptions['observerSchedulerRecovery'];
   onObserverObservation?: ProgressServerOptions['onObserverObservation'];
   observerSetup?: {
@@ -220,7 +221,7 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     ...(observer?.providerSettings === undefined ? {} : {provider: observer.providerSettings}),
   });
   return {
-    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,observerSchedulerRecovery:observer.schedulerRecovery,onObserverObservation:observer.onObservation}:{}),
+    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,observerWorkerSource:observer.workerSource,observerSchedulerRecovery:observer.schedulerRecovery,onObserverObservation:observer.onObservation}:{}),
     ...(settingsController ? {settingsController} : {}),
     app: electron.app,
       createWindowController: ({ quitting, onHideSelectedTask }) => new WindowController({
@@ -249,7 +250,7 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     createProgressServer: options => {
       const names=createConversationNameService();
       return createProgressServer({...options,
-        ...(options.observerWorkers?{observerSessionsRoot:defaultCodexSessionsRoot()}:{}),
+        ...(options.observerWorkers||options.observerWorkerSource?{observerSessionsRoot:defaultCodexSessionsRoot()}:{}),
         readConversationName:names.read,closeConversationNames:names.close});
     },
     stateStore,
@@ -560,6 +561,7 @@ export async function runDesktop(
         assertStarting();
         progressServer = resolved.createProgressServer({
           ...(resolved.observerWorkers?{observerWorkers:resolved.observerWorkers}:{}),
+          ...(resolved.observerWorkerSource?{observerWorkerSource:resolved.observerWorkerSource}:{}),
           ...(resolved.observerSchedulerRecovery?{observerSchedulerRecovery:resolved.observerSchedulerRecovery}:{}),
           ...(resolved.onObserverObservation?{onObserverObservation:resolved.onObserverObservation}:{}),
           port: resolved.port,

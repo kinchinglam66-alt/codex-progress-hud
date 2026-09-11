@@ -3,17 +3,20 @@ import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {z} from 'zod';
 import type {AccountedUsage, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import {copyInvocationPatch, copyInvocationRecord, type InvocationRecord, type InvocationRecordPatch, invocationRecordSchema} from './invocation-ownership.js';
+import {inspectInvocationProcess} from './invocation-process.js';
 import {parseRecoveryBootBoundaryProof, RECOVERY_BOOT_BOUNDARY_MARGIN_MS, RECOVERY_BOOT_PROOF_MAX_AGE_MS, type RecoveryBootBoundaryProof} from './recovery-boot-boundary.js';
 
 const HOUR_MS = 3_600_000;
-const MAX_IN_FLIGHT = 2;
 const MAX_RECOVERY_TRIALS_PER_HOUR = 12;
 const MAX_ROWS = 4_096;
 const PAGE_SIZE = 4_096;
 const MAX_PAGE_COUNT = 2_048;
 const MAX_TOKENS_PER_FIELD = 1_000_000_000;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+const LEGACY_GRACE_MS = 300_000;
+const RETRY_DELAYS_MS = [60_000, 120_000, 300_000, 600_000, 1_800_000] as const;
 const DB_NAME = 'release-observer-accounting.sqlite';
 const LEGACY_FILES = ['release-observer-accounting.jsonl', 'release-observer-accounting.lock'];
 const conversationKey = z.string().min(1).max(512);
@@ -42,7 +45,7 @@ export interface ReleaseRecoveryStatus {
   cooldownUntil?: number | null | undefined;
 }
 export interface ReleaseRecoveryAdmission {allowed: boolean; kind: 'ordinary' | 'retry' | 'half_open'; nextEligibleAt: number | null; reason?: ReleaseRecoveryReason | 'cooldown' | 'retry_backoff' | 'no_eligible_task' | 'half_open_busy' | 'unsafe_unknown' | undefined}
-export type ReleaseRecoveryEvent = {kind: 'recoverable_failure' | 'unknown_usage' | 'known_success' | 'half_open_reserved' | 'half_open_failure' | 'half_open_success'; at: number};
+export type ReleaseRecoveryEvent = {kind: 'recoverable_failure' | 'unknown_usage' | 'known_success' | 'half_open_reserved' | 'half_open_failure' | 'half_open_success'; at: number; conversationKey?: string};
 export interface ReleaseRecoveryPreflight extends ReleaseRecoveryStatus {
   allowed: boolean;
 }
@@ -74,6 +77,7 @@ export interface ReleaseAccountingOwner {
   recoveryAdmission?(now: number, eligibleTask: boolean, conversationKey?: string): Promise<ReleaseRecoveryAdmission>;
   reconcileRecoveredPending?(proof: RecoveryBootBoundaryProof): Promise<number>;
   releaseRecoveryAdmission?(conversationKey: string): Promise<void>;
+  reconcileAutomatic?(): Promise<{released: number; nextCheckAt: number | null}>;
   recordRecoveryEvent?(event: ReleaseRecoveryEvent): Promise<void>;
   close(): Promise<void>;
 }
@@ -89,6 +93,7 @@ export interface ReleaseAccountingRecoveryOwner extends ReleaseAccountingOwner {
   recoveryAdmission(now: number, eligibleTask: boolean, conversationKey?: string): Promise<ReleaseRecoveryAdmission>;
   reconcileRecoveredPending(proof: RecoveryBootBoundaryProof): Promise<number>;
   releaseRecoveryAdmission(conversationKey: string): Promise<void>;
+  reconcileAutomatic?(): Promise<{released: number; nextCheckAt: number | null}>;
   recordRecoveryEvent(event: ReleaseRecoveryEvent): Promise<void>;
 }
 type Row = Record<string, unknown>;
@@ -167,6 +172,18 @@ function createSchema(db: Database): void {
     );
     CREATE INDEX admissions_conversation_time ON admissions(conversation, admitted_at);
     CREATE INDEX admissions_state_time ON admissions(state, admitted_at);
+    CREATE TABLE invocation_records (
+      admission_id TEXT PRIMARY KEY,
+      conversation TEXT NOT NULL,
+      turn_generation INTEGER NOT NULL CHECK (turn_generation >= 0),
+      owner_uuid TEXT NOT NULL,
+      provider_kind TEXT NOT NULL CHECK (provider_kind IN ('subscription', 'api')),
+      phase TEXT NOT NULL CHECK (phase IN ('prepared', 'bound', 'dispatching', 'settling', 'closed')),
+      deadline INTEGER NOT NULL CHECK (deadline >= 0),
+      pid INTEGER,
+      creation_identity TEXT,
+      cleanup_outcome TEXT CHECK (cleanup_outcome IN ('pending', 'confirmed', 'unconfirmed', 'failed'))
+    );
     CREATE TABLE recovery_attempts (
       id TEXT PRIMARY KEY,
       revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -185,12 +202,27 @@ function createSchema(db: Database): void {
       event TEXT NOT NULL CHECK (event IN ('confirmed', 'trial_reserved', 'trial_settled', 'succeeded', 'failed', 'interrupted', 'cancelled')),
       recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0)
     );
-    INSERT INTO metadata VALUES (1, ${SCHEMA_VERSION}, 0, 0, 0, NULL, NULL, 0, 0, 0);
+    ALTER TABLE metadata ADD COLUMN recovery_failure_count INTEGER NOT NULL DEFAULT 0 CHECK (recovery_failure_count >= 0);
+    ALTER TABLE metadata ADD COLUMN recovery_next_eligible INTEGER;
+    ALTER TABLE metadata ADD COLUMN recovery_cooldown_until INTEGER;
+    ALTER TABLE metadata ADD COLUMN recovery_cooldown_level INTEGER NOT NULL DEFAULT 0 CHECK (recovery_cooldown_level >= 0);
+    ALTER TABLE metadata ADD COLUMN recovery_half_open INTEGER NOT NULL DEFAULT 0 CHECK (recovery_half_open IN (0, 1));
+    CREATE TABLE conversation_retries (
+      conversation TEXT PRIMARY KEY,
+      failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
+      next_eligible INTEGER,
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+      claim_admission_id TEXT
+    );
+    INSERT INTO metadata (id, version, cumulative_starts, known_tokens, unknown_count, unknown_admission_ceiling, last_admission, recovery_revision, recovery_covered_revision, recovery_sequence)
+      VALUES (1, ${SCHEMA_VERSION}, 0, 0, 0, NULL, NULL, 0, 0, 0);
     PRAGMA user_version=${SCHEMA_VERSION};
   `);
   ensureRecoveryPolicy(db);
   ensureRecoverySafety(db);
   ensureSettlementClassification(db);
+  ensureConversationRetries(db);
+  ensureInvocationRecords(db);
 }
 function ensureRecoveryPolicy(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS recovery_policy (
@@ -231,10 +263,35 @@ function ensureSettlementClassification(db: Database): void {
   const columns = new Set<string>();
   for (const row of db.prepare('PRAGMA table_info(admissions)').iterate() as Iterable<Row>) if (typeof row.name === 'string') columns.add(row.name);
   if (!columns.has('settlement_classification')) db.exec("ALTER TABLE admissions ADD COLUMN settlement_classification TEXT NOT NULL DEFAULT 'legacy'");
-  const invalid = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE settlement_classification NOT IN ('legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'not_dispatched')").get() as Row;
+  const invalid = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE settlement_classification NOT IN ('legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'not_dispatched')").get() as Row;
   if (safeInteger(invalid.count) > 0) fail('RELEASE_SCHEMA_INVALID');
   const legacyUnknown = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'unknown' AND settlement_classification = 'legacy'").get() as Row;
   if (safeInteger(legacyUnknown.count) > 0) db.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();
+}
+function ensureInvocationRecords(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS invocation_records (
+    admission_id TEXT PRIMARY KEY, conversation TEXT NOT NULL, turn_generation INTEGER NOT NULL CHECK (turn_generation >= 0),
+    owner_uuid TEXT NOT NULL, provider_kind TEXT NOT NULL CHECK (provider_kind IN ('subscription', 'api')),
+    phase TEXT NOT NULL CHECK (phase IN ('prepared', 'bound', 'dispatching', 'settling', 'closed')),
+    deadline INTEGER NOT NULL CHECK (deadline >= 0), pid INTEGER, creation_identity TEXT,
+    cleanup_outcome TEXT CHECK (cleanup_outcome IN ('pending', 'confirmed', 'unconfirmed', 'failed'))
+  )`);
+}
+function ensureConversationRetries(db: Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS conversation_retries (
+    conversation TEXT PRIMARY KEY,
+    failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
+    next_eligible INTEGER,
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+    claim_admission_id TEXT
+  )`);
+  const columns = new Set<string>();
+  for (const row of db.prepare('PRAGMA table_info(conversation_retries)').iterate() as Iterable<Row>) if (typeof row.name === 'string') columns.add(row.name);
+  if (!columns.has('claim_admission_id')) db.exec('ALTER TABLE conversation_retries ADD COLUMN claim_admission_id TEXT');
+  const rows = db.prepare('SELECT conversation, failure_count, next_eligible, updated_at, claim_admission_id FROM conversation_retries').all() as Row[];
+  if (rows.length > MAX_ROWS || rows.some(row => !conversationKey.safeParse(row.conversation).success || !Number.isSafeInteger(row.failure_count) || Number(row.failure_count) < 0 ||
+    (row.next_eligible !== null && !Number.isSafeInteger(row.next_eligible)) || !Number.isSafeInteger(row.updated_at) ||
+    (row.claim_admission_id !== null && !z.string().uuid().safeParse(row.claim_admission_id).success))) fail('RELEASE_SCHEMA_INVALID');
 }
 function validateColumns(db: Database, table: string, expected: readonly string[]): void {
   const actual = new Set<string>();
@@ -343,6 +400,7 @@ function validateStoredDatabase(db: Database, initialNow: number,expectedVersion
   if (value(db.prepare('PRAGMA integrity_check').get() as Row, 'integrity_check') !== 'ok') fail('RELEASE_SCHEMA_INVALID');
   validateColumns(db, 'metadata', ['id', 'version', 'cumulative_starts', 'known_tokens', 'unknown_count', 'unknown_admission_ceiling', 'last_admission', ...(expectedVersion >= 4 ? ['recovery_revision', 'recovery_covered_revision', 'recovery_sequence'] : []), ...(expectedVersion >= 5 ? ['recovery_failure_count', 'recovery_next_eligible', 'recovery_cooldown_until', 'recovery_cooldown_level', 'recovery_half_open'] : [])]);
   validateColumns(db, 'admissions', ['id', 'ordinal', 'conversation', 'admitted_at', 'state', 'input_tokens', 'output_tokens', 'cached_input_tokens', ...(expectedVersion >= 4 ? ['recovery_attempt_id', 'settlement_classification'] : [])]);
+  if (expectedVersion >= 5) validateColumns(db, 'invocation_records', ['admission_id', 'conversation', 'turn_generation', 'owner_uuid', 'provider_kind', 'phase', 'deadline', 'pid', 'creation_identity', 'cleanup_outcome']);
   const metadata = db.prepare(`SELECT id, version, cumulative_starts, known_tokens, unknown_count, unknown_admission_ceiling, last_admission${expectedVersion >= 4 ? ', recovery_revision, recovery_covered_revision, recovery_sequence' : ''}${expectedVersion >= 5 ? ', recovery_failure_count, recovery_next_eligible, recovery_cooldown_until, recovery_cooldown_level, recovery_half_open' : ''} FROM metadata`).all() as Row[];
   if (metadata.length !== 1 || metadata[0]!.id !== 1 || metadata[0]!.version !== expectedVersion) fail('RELEASE_SCHEMA_INVALID');
   const cumulativeStarts = safeInteger(metadata[0]!.cumulative_starts);
@@ -362,7 +420,7 @@ function validateStoredDatabase(db: Database, initialNow: number,expectedVersion
     if (failureCount > 3 || cooldownLevel > 2 || halfOpen > 1) fail('RELEASE_SCHEMA_INVALID');
   }
   if (recoveryCoveredRevision > recoveryRevision) fail('RELEASE_SCHEMA_INVALID');
-  if (lastAdmission !== null && initialNow < lastAdmission) fail('RELEASE_CLOCK_REGRESSION');
+  // Future admissions may be caused by clock rollback; recovery uses monotonic grace.
   const pending: PendingReservation[] = [];
   const pendingConversations = new Set<string>();
   const admissions = new Map<string, StoredAdmission>();
@@ -380,15 +438,14 @@ function validateStoredDatabase(db: Database, initialNow: number,expectedVersion
     if (inputTokens > MAX_TOKENS_PER_FIELD || outputTokens > MAX_TOKENS_PER_FIELD || cachedInputTokens > MAX_TOKENS_PER_FIELD || cachedInputTokens > inputTokens) fail('RELEASE_SCHEMA_INVALID');
     const state = String(row.state);
     const settlementClassification = expectedVersion >= 4 ? String(row.settlement_classification) : 'legacy';
-    if (expectedVersion >= 4 && !['legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
-    if (expectedVersion >= 4 && state === 'unknown' && !['legacy', 'safe_unknown', 'unsafe_unknown'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
+    if (expectedVersion >= 4 && !['legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
+    if (expectedVersion >= 4 && state === 'unknown' && !['legacy', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
     if (expectedVersion >= 4 && state === 'not_dispatched' && !['legacy', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
     if (state !== 'settled' && (inputTokens !== MAX_TOKENS_PER_FIELD || outputTokens !== MAX_TOKENS_PER_FIELD || cachedInputTokens !== MAX_TOKENS_PER_FIELD)) fail('RELEASE_SCHEMA_INVALID');
     const attemptId = expectedVersion >= 4 && row.recovery_attempt_id !== null ? recoveryAttemptId.safeParse(row.recovery_attempt_id) : {success: row.recovery_attempt_id === undefined || row.recovery_attempt_id === null};
     if (!attemptId.success || (state === 'recovery_trial' ? row.recovery_attempt_id === null : row.recovery_attempt_id !== null && row.recovery_attempt_id !== undefined)) fail('RELEASE_SCHEMA_INVALID');
     admissions.set(id.data, {state, recoveryAttemptId: row.recovery_attempt_id === null || row.recovery_attempt_id === undefined ? null : String(row.recovery_attempt_id), ordinal: ordinal.data, conversation: conversation.data, settlementClassification});
     if (state === 'pending' || state === 'recovery_trial') {
-      if (pending.length >= MAX_IN_FLIGHT || pendingConversations.has(conversation.data)) fail('RELEASE_SCHEMA_INVALID');
       pending.push({id: id.data, conversation: conversation.data}); pendingConversations.add(conversation.data);
     } else if (state === 'unknown') { unknownRows++; maximumUnknownOrdinal = Math.max(maximumUnknownOrdinal, ordinal.data); }
     else if(state==='settled')rowKnownTokens += inputTokens + outputTokens;
@@ -429,6 +486,40 @@ function migrateLegacyVersion(db:Database,initialNow:number,version:2|3):void {
     DROP TABLE admissions_v2;DROP TABLE metadata_v2;`);
   ensureSettlementClassification(db);
   validateStoredDatabase(db,initialNow);
+}
+
+/** Version 4 already has durable recovery history. Version 5 adds only the
+ * automatic per-conversation retry metadata and keeps every admission row. */
+function migrateVersion4(db: Database): void {
+  db.exec(`ALTER TABLE metadata RENAME TO metadata_v4;
+    CREATE TABLE metadata (
+      id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL CHECK (version = ${SCHEMA_VERSION}),
+      cumulative_starts INTEGER NOT NULL CHECK (cumulative_starts >= 0),
+      known_tokens INTEGER NOT NULL CHECK (known_tokens >= 0),
+      unknown_count INTEGER NOT NULL CHECK (unknown_count >= 0),
+      unknown_admission_ceiling INTEGER, last_admission INTEGER,
+      recovery_revision INTEGER NOT NULL CHECK (recovery_revision >= 0),
+      recovery_covered_revision INTEGER NOT NULL CHECK (recovery_covered_revision >= 0),
+      recovery_sequence INTEGER NOT NULL CHECK (recovery_sequence >= 0),
+      recovery_failure_count INTEGER NOT NULL DEFAULT 0 CHECK (recovery_failure_count >= 0),
+      recovery_next_eligible INTEGER, recovery_cooldown_until INTEGER,
+      recovery_cooldown_level INTEGER NOT NULL DEFAULT 0 CHECK (recovery_cooldown_level >= 0),
+      recovery_half_open INTEGER NOT NULL DEFAULT 0 CHECK (recovery_half_open IN (0, 1))
+    );
+    INSERT INTO metadata (id,version,cumulative_starts,known_tokens,unknown_count,unknown_admission_ceiling,last_admission,recovery_revision,recovery_covered_revision,recovery_sequence)
+      SELECT id,${SCHEMA_VERSION},cumulative_starts,known_tokens,unknown_count,unknown_admission_ceiling,last_admission,recovery_revision,recovery_covered_revision,recovery_sequence FROM metadata_v4;
+    DROP TABLE metadata_v4;`);
+  db.exec(`CREATE TABLE IF NOT EXISTS conversation_retries (
+    conversation TEXT PRIMARY KEY,
+    failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
+    next_eligible INTEGER,
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+    claim_admission_id TEXT
+  );`);
+  ensureConversationRetries(db);
+  ensureInvocationRecords(db);
+  db.exec(`PRAGMA user_version=${SCHEMA_VERSION};
+    UPDATE metadata SET version=${SCHEMA_VERSION} WHERE id=1;`);
 }
 
 function appendRecoveryEvent(db: Database, attemptId: string, revision: number, event: string, at: number): void {
@@ -477,21 +568,14 @@ function recoverInterruptedHalfOpen(db: Database): void {
       db.prepare('UPDATE recovery_policy SET half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
       return;
     }
-    const pending = postClaim.state === 'pending' ? postClaim : undefined;
-    if (pending?.id !== undefined) {
-    const stored = db.prepare('SELECT unknown_count, cumulative_starts, recovery_revision FROM metadata WHERE id = 1').get() as Row;
-    const unknown = safeInteger(stored.unknown_count), revision = safeInteger(stored.recovery_revision);
-    if (unknown >= MAX_SAFE || revision >= MAX_SAFE) fail('RELEASE_COUNTER_OVERFLOW');
-    db.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = 'unsafe_unknown' WHERE id = ?").run(z.string().uuid().parse(pending.id));
-    db.prepare('UPDATE metadata SET unknown_count = ?, recovery_revision = ?, unknown_admission_ceiling = ? WHERE id = 1')
-      .run(unknown + 1, revision + 1, safeInteger(stored.cumulative_starts));
-    }
+    // The old global half-open owner is gone, not necessarily its invocation.
+    // Leave a pending admission for identity-aware/legacy-grace reconciliation.
   }
   db.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();
   db.prepare('UPDATE recovery_policy SET half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL, next_eligible = NULL, cooldown_until = NULL WHERE id = 1').run();
 }
 
-export async function openReleaseAccounting(directory: string, now: () => number): Promise<ReleaseAccountingRecoveryOwner> {
+export async function openReleaseAccounting(directory: string, now: () => number, inspectProcess = inspectInvocationProcess, monotonicNow = () => performance.now(), automaticNow = now): Promise<ReleaseAccountingRecoveryOwner> {
   if (typeof now !== 'function') fail('RELEASE_INVALID_CLOCK');
   validateRuntimeVersion();
   const initialNow = validateClock(now());
@@ -516,7 +600,8 @@ export async function openReleaseAccounting(directory: string, now: () => number
       else { configureExistingDatabase(db); transaction(db, () => {
         const version = pragmaNumber(db!, 'PRAGMA user_version', 'user_version');
         if (version === 2 || version === 3) migrateLegacyVersion(db!, initialNow, version);
-        else if (version === 4) { ensureRecoveryPolicy(db!); ensureRecoverySafety(db!); ensureSettlementClassification(db!); validateStoredDatabase(db!, initialNow); }
+        else if (version === 4) { ensureRecoveryPolicy(db!); ensureRecoverySafety(db!); ensureSettlementClassification(db!); validateStoredDatabase(db!, initialNow, 4); migrateVersion4(db!); }
+        else if (version === 5) { ensureRecoveryPolicy(db!); ensureRecoverySafety(db!); ensureSettlementClassification(db!); ensureConversationRetries(db!); ensureInvocationRecords(db!); validateStoredDatabase(db!, initialNow); }
         else validateStoredDatabase(db!, initialNow);
       recoverInterruptedRecovery(db!, initialNow);
       recoverInterruptedHalfOpen(db!);
@@ -529,10 +614,15 @@ export async function openReleaseAccounting(directory: string, now: () => number
   }
   const database = db;
   const recoveredPending = new Set(recoveredPendingIds);
-  let lastClock = initialNow, closed = false, poisoned = false;
+  const recoveryAcquiredAt = new Map(recoveredPendingIds.map(id => [id, initialNow] as const));
+  const acquiredMonotonic=monotonicNow();
+  const rollbackGrace=new Set<string>();
+  const storedLastAdmission=(database.prepare('SELECT last_admission FROM metadata WHERE id = 1').get() as Row).last_admission;
+  let lastClock = Math.max(initialNow,storedLastAdmission===null?0:safeInteger(storedLastAdmission)), closed = false, poisoned = false;
   let queue: Promise<unknown> = Promise.resolve(), closing: Promise<void> | undefined;
+  let automaticTimer: ReturnType<typeof setTimeout> | undefined;
   function serial<T>(operation: () => Promise<T>): Promise<T> { const result = queue.then(operation); queue = result.catch(() => undefined); return result; }
-  function time(): number { const current = validateClock(now()); if (current < lastClock) fail('RELEASE_CLOCK_REGRESSION'); lastClock = current; return current; }
+  function time(): number { const current = Math.max(validateClock(now()),lastClock); lastClock = current; return current; }
   function markPersistenceFailure(error: unknown): never { poisoned = true; throw errorCode(error, 'RELEASE_PERSIST_FAILED'); }
   function isLogicalSettlementError(error: unknown): boolean {
     return error instanceof Error && error.message === 'RELEASE_INVALID_SETTLEMENT';
@@ -561,19 +651,19 @@ export async function openReleaseAccounting(directory: string, now: () => number
     const failed = latest !== undefined && latest.revision === revision && latest.status === 'failed';
     const inCooldown = cooldownUntil !== null && lastClock < cooldownUntil;
     const needsRecovery = recoveredPending.size > 0 || (safeInteger(stored.unknown_count) > 0 && covered < revision) || active || failed;
-    const state: ReleaseRecoveryState = unsafeUnknown ? 'blocked' : active
+    const state: ReleaseRecoveryState = active
       ? (latest?.status === 'confirmed' ? 'awaiting_confirmation' : 'probing')
       : failed ? 'failed'
         : inCooldown ? 'cooldown'
-          : recentUnknown > 0 && needsRecovery ? 'warning'
-        : needsRecovery ? 'blocked'
+          : recentUnknown > 0 ? 'warning'
+        : needsRecovery ? 'warning'
           : latest?.status === 'succeeded' && latest.revision === revision ? 'recovered' : 'normal';
     return {
       state,
       revision,
       knownTokens: safeInteger(stored.known_tokens),
       unknown: safeInteger(stored.unknown_count),
-      recoveryAllowed: state === 'warning' || state === 'blocked' || state === 'failed',
+      recoveryAllowed: false,
       ...(recoveredPending.size > 0 ? {reason: 'unresolved_previous_call' as const} : unsafeUnknown ? {reason: 'unsafe_unknown' as const} : {}),
       nextEligibleAt: inCooldown ? cooldownUntil : nextEligibleAt,
       cooldownUntil,
@@ -582,12 +672,9 @@ export async function openReleaseAccounting(directory: string, now: () => number
   function pendingCount(): number { return safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state IN ('pending', 'recovery_trial')").get() as Row).count); }
   function ordinaryAdmissionBlocked(halfOpenAdmission = false): boolean {
     const status = recoveryStatusFromDatabase();
-    const policy = database.prepare('SELECT cooldown_until, half_open FROM recovery_policy WHERE id = 1').get() as Row;
-    const unresolvedCooldown = policy.cooldown_until !== null && safeInteger(metadata().unknown_count) > safeInteger(metadata().recovery_covered_revision);
-    const safety = database.prepare('SELECT unsafe_unknown FROM recovery_safety WHERE id = 1').get() as Row;
-    if (safeInteger(safety.unsafe_unknown) === 1) return true;
-    if (unresolvedCooldown && !halfOpenAdmission) return true;
-    return ['blocked', 'awaiting_confirmation', 'probing', 'failed'].includes(status.state);
+    const policy = database.prepare('SELECT half_open FROM recovery_policy WHERE id = 1').get() as Row;
+    if (safeInteger(policy.half_open) === 1 && !halfOpenAdmission) return true;
+    return ['awaiting_confirmation', 'probing'].includes(status.state);
   }
   function activeStartCount(): number { return safeInteger((database.prepare('SELECT COUNT(*) AS count FROM admissions WHERE admitted_at > ?').get(lastClock - HOUR_MS) as Row).count); }
   function reserveInTransaction(key: string, current: number, admissionKind: AdmissionKind): string | null {
@@ -596,14 +683,24 @@ export async function openReleaseAccounting(directory: string, now: () => number
     const policy = database.prepare('SELECT next_eligible, cooldown_until, half_open, half_open_conversation FROM recovery_policy WHERE id = 1').get() as Row;
     const nextEligible = policy.next_eligible === null ? null : safeInteger(policy.next_eligible);
     const cooldownUntil = policy.cooldown_until === null ? null : safeInteger(policy.cooldown_until);
+    const retry = database.prepare('SELECT next_eligible, claim_admission_id FROM conversation_retries WHERE conversation = ?').get(key) as Row | undefined;
     if (nextEligible !== null && current < nextEligible) return null;
+    if (retry !== undefined) {
+      if (admissionKind !== 'retry') return null;
+      if (retry.claim_admission_id !== null) return null;
+      if (retry.next_eligible !== null && current < safeInteger(retry.next_eligible)) return null;
+    } else if (admissionKind === 'retry') return null;
     if (admissionKind === 'half_open' && (safeInteger(policy.half_open) !== 1 || policy.half_open_conversation !== key)) return null;
     if (admissionKind !== 'half_open' && safeInteger(policy.half_open) === 1) return null;
-    if (ordinaryAdmissionBlocked(admissionKind === 'half_open') || recoveredPending.size > 0 || pendingCount() >= MAX_IN_FLIGHT || starts >= MAX_SAFE || known > MAX_SAFE - MAX_TOKENS_PER_FIELD * 2 * MAX_IN_FLIGHT) return null;
+    if (ordinaryAdmissionBlocked(admissionKind === 'half_open') || starts >= MAX_SAFE || known > MAX_SAFE - MAX_TOKENS_PER_FIELD * 2 * MAX_ROWS) return null;
     if (safeInteger((database.prepare('SELECT COUNT(*) AS count FROM admissions').get() as Row).count) >= MAX_ROWS) return null;
-    if (safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'pending' AND conversation = ?").get(key) as Row).count) > 0) return null;
+    if (safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state IN ('pending', 'recovery_trial') AND conversation = ?").get(key) as Row).count) > 0) return null;
     const id = randomUUID();
     database.prepare("INSERT INTO admissions (id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, 'legacy')").run(id, starts + 1, key, current, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD);
+    if (admissionKind === 'retry') {
+      const claimed = database.prepare('UPDATE conversation_retries SET claim_admission_id = ?, updated_at = ? WHERE conversation = ? AND claim_admission_id IS NULL').run(id, current, key);
+      if (claimed.changes !== 1) fail('RELEASE_RECOVERY_INVALID');
+    }
     const unresolvedUnknown = safeInteger(stored.unknown_count) > safeInteger(stored.recovery_covered_revision);
     const unknownCeiling = unresolvedUnknown ? starts + 1 : stored.unknown_admission_ceiling === null ? null : safeInteger(stored.unknown_admission_ceiling);
     database.prepare('UPDATE metadata SET cumulative_starts = ?, last_admission = ?, unknown_admission_ceiling = ? WHERE id = 1')
@@ -641,12 +738,24 @@ export async function openReleaseAccounting(directory: string, now: () => number
             transaction(database, () => {
               const row = database.prepare('SELECT conversation, state FROM admissions WHERE id = ?').get(copiedId) as Row | undefined;
               if (!row || row.state !== 'pending' || row.conversation !== key) fail('RELEASE_INVALID_SETTLEMENT');
+              const retry = database.prepare('SELECT failure_count, claim_admission_id FROM conversation_retries WHERE conversation = ?').get(key) as Row | undefined;
+              const ownsRetry = retry?.claim_admission_id === copiedId;
               if (copiedUsage === null) {
                 database.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = ? WHERE id = ?").run(classification, copiedId);
                 const stored = metadata(), current = safeInteger(stored.unknown_count), starts = safeInteger(stored.cumulative_starts), revision = safeInteger(stored.recovery_revision);
                 if (current >= MAX_SAFE || starts <= 0 || revision >= MAX_SAFE) fail('RELEASE_COUNTER_OVERFLOW');
                 database.prepare('UPDATE metadata SET unknown_count = ?, recovery_revision = ?, unknown_admission_ceiling = ? WHERE id = 1').run(current + 1, revision + 1, starts);
                 const at = time();
+                if(!retry && classification==='unsafe_unknown') {
+                  database.prepare('INSERT INTO conversation_retries(conversation,failure_count,next_eligible,updated_at,claim_admission_id) VALUES(?,1,?,?,NULL)')
+                    .run(key,at+RETRY_DELAYS_MS[0],at);
+                }
+                if (ownsRetry) {
+                  const failureCount = classification === 'unsafe_unknown' ? Math.min(5, safeInteger(retry.failure_count) + 1) : safeInteger(retry.failure_count);
+                  const nextEligible = classification === 'unsafe_unknown' ? at + RETRY_DELAYS_MS[failureCount - 1]! : at;
+                  database.prepare('UPDATE conversation_retries SET failure_count = ?, next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE conversation = ? AND claim_admission_id = ?')
+                    .run(failureCount, nextEligible, at, key, copiedId);
+                }
                 const recentUnknown = safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'unknown' AND admitted_at > ?").get(at - HOUR_MS) as Row).count);
                 const policy = database.prepare('SELECT cooldown_level, half_open FROM recovery_policy WHERE id = 1').get() as Row;
                 if (classification === 'unsafe_unknown') {
@@ -662,6 +771,11 @@ export async function openReleaseAccounting(directory: string, now: () => number
                 if (current > MAX_SAFE - total) fail('RELEASE_COUNTER_OVERFLOW');
                 database.prepare("UPDATE admissions SET state = 'settled', settlement_classification = ?, input_tokens = ?, output_tokens = ?, cached_input_tokens = ? WHERE id = ?").run(classification, copiedUsage.inputTokens, copiedUsage.outputTokens, copiedUsage.cachedInputTokens ?? 0, copiedId);
                 database.prepare('UPDATE metadata SET known_tokens = ? WHERE id = 1').run(current + total);
+                if (ownsRetry) {
+                  const at = time();
+                  if (classification === 'known_success') database.prepare('DELETE FROM conversation_retries WHERE conversation = ? AND claim_admission_id = ?').run(key, copiedId);
+                  else database.prepare('UPDATE conversation_retries SET next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE conversation = ? AND claim_admission_id = ?').run(at, at, key, copiedId);
+                }
                 const policy = database.prepare('SELECT half_open, cooldown_level FROM recovery_policy WHERE id = 1').get() as Row;
                 if (classification === 'known_success') {
                   if (safeInteger(policy.half_open) === 1) database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL, cooldown_until = NULL, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
@@ -680,6 +794,44 @@ export async function openReleaseAccounting(directory: string, now: () => number
           }
         }));
       },
+      bindInvocation(id: string, record: InvocationRecord): Promise<void> {
+        if (closed) return Promise.reject(new Error('RELEASE_OWNER_CLOSED'));
+        if (view.closed) return Promise.reject(new Error('RELEASE_VIEW_CLOSED'));
+        let copiedId: string, copiedRecord: InvocationRecord;
+        try { copiedId = z.string().uuid().parse(id); copiedRecord = copyInvocationRecord(record); if (copiedRecord.admissionId !== copiedId || copiedRecord.conversationKey !== key) fail('RELEASE_INVOCATION_INVALID'); }
+        catch { return Promise.reject(new Error('RELEASE_INVOCATION_INVALID')); }
+        return track(serial(async () => {
+          if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
+          try { transaction(database, () => {
+            const row = database.prepare('SELECT state, conversation FROM admissions WHERE id = ?').get(copiedId) as Row | undefined;
+            if (!row || row.state !== 'pending' || row.conversation !== key) fail('RELEASE_INVOCATION_INVALID');
+            database.prepare(`INSERT INTO invocation_records (admission_id, conversation, turn_generation, owner_uuid, provider_kind, phase, deadline, pid, creation_identity, cleanup_outcome)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(admission_id) DO UPDATE SET conversation=excluded.conversation, turn_generation=excluded.turn_generation, owner_uuid=excluded.owner_uuid,
+              provider_kind=excluded.provider_kind, phase=excluded.phase, deadline=excluded.deadline, pid=excluded.pid, creation_identity=excluded.creation_identity, cleanup_outcome=excluded.cleanup_outcome`)
+              .run(copiedId, copiedRecord.conversationKey, copiedRecord.turnGeneration, copiedRecord.ownerUuid, copiedRecord.providerKind, copiedRecord.phase,
+                copiedRecord.deadline, copiedRecord.pid ?? null, copiedRecord.creationIdentity ?? null, copiedRecord.cleanupOutcome ?? null);
+          }); } catch (error) { markPersistenceFailure(error); }
+        }));
+      },
+      updateInvocation(id: string, patch: InvocationRecordPatch): Promise<void> {
+        if (closed) return Promise.reject(new Error('RELEASE_OWNER_CLOSED'));
+        if (view.closed) return Promise.reject(new Error('RELEASE_VIEW_CLOSED'));
+        let copiedId: string, copiedPatch: InvocationRecordPatch;
+        try { copiedId = z.string().uuid().parse(id); copiedPatch = copyInvocationPatch(patch); }
+        catch { return Promise.reject(new Error('RELEASE_INVOCATION_INVALID')); }
+        return track(serial(async () => {
+          if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
+          try { transaction(database, () => {
+            const row = database.prepare('SELECT conversation FROM invocation_records WHERE admission_id = ?').get(copiedId) as Row | undefined;
+            if (!row || row.conversation !== key) fail('RELEASE_INVOCATION_INVALID');
+            const columns: string[] = [], values: Array<string | number | null> = [];
+            const fields: Array<[keyof InvocationRecordPatch, string]> = [['phase', 'phase'], ['deadline', 'deadline'], ['pid', 'pid'], ['creationIdentity', 'creation_identity'], ['cleanupOutcome', 'cleanup_outcome']];
+            for (const [field, column] of fields) if (copiedPatch[field] !== undefined) { columns.push(`${column} = ?`); values.push(copiedPatch[field]); }
+            if (columns.length > 0) database.prepare(`UPDATE invocation_records SET ${columns.join(', ')} WHERE admission_id = ?`).run(...values, copiedId);
+          }); } catch (error) { markPersistenceFailure(error); }
+        }));
+      },
       cancelBeforeDispatch(id:string):Promise<void> {
         if(closed)return Promise.reject(new Error('RELEASE_OWNER_CLOSED'));
         if(view.closed)return Promise.reject(new Error('RELEASE_VIEW_CLOSED'));
@@ -690,6 +842,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
             const row=database.prepare('SELECT conversation,state FROM admissions WHERE id=?').get(copiedId) as Row|undefined;
             if(!row||row.state!=='pending'||row.conversation!==key||recoveredPending.has(copiedId))fail('RELEASE_INVALID_SETTLEMENT');
             database.prepare("UPDATE admissions SET state='not_dispatched', settlement_classification='not_dispatched' WHERE id=?").run(copiedId);
+            database.prepare('UPDATE conversation_retries SET next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE conversation = ? AND claim_admission_id = ?').run(time(), time(), key, copiedId);
             const policy = database.prepare('SELECT half_open, half_open_conversation FROM recovery_policy WHERE id = 1').get() as Row;
             if (safeInteger(policy.half_open) === 1 && policy.half_open_conversation === key)
               database.prepare('UPDATE recovery_policy SET half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
@@ -772,7 +925,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
           const stored = metadata();
           if (!attempt || safeInteger(attempt.revision) !== revision || attempt.binding !== binding || safeInteger(stored.recovery_revision) !== revision) fail('RELEASE_RECOVERY_STALE');
           if (attempt.status !== 'confirmed') return null;
-          if (pendingCount() >= MAX_IN_FLIGHT || safeInteger(stored.cumulative_starts) >= MAX_SAFE) return null;
+          if (safeInteger(stored.cumulative_starts) >= MAX_SAFE) return null;
           if (safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE conversation = '__recovery_trial__' AND admitted_at > ?").get(time() - HOUR_MS) as Row).count) >= MAX_RECOVERY_TRIALS_PER_HOUR) return null;
           if (safeInteger((database.prepare('SELECT COUNT(*) AS count FROM admissions').get() as Row).count) >= MAX_ROWS) return null;
           const reservationId = randomUUID();
@@ -908,6 +1061,93 @@ export async function openReleaseAccounting(directory: string, now: () => number
       }
     });
   }
+  function scheduleAutomatic(nextCheckAt: number | null): void {
+    if (automaticTimer !== undefined) { clearTimeout(automaticTimer); automaticTimer = undefined; }
+    if (closed || nextCheckAt === null) return;
+    const current = Math.max(lastClock, validateClock(now()));
+    const delay = Math.max(0, Math.min(30_000, nextCheckAt - current));
+    automaticTimer = setTimeout(() => {
+      automaticTimer = undefined;
+      void reconcileAutomatic(true).catch(() => undefined);
+    }, delay);
+    (automaticTimer as ReturnType<typeof setTimeout> & {unref?: () => void}).unref?.();
+  }
+  async function reconcileAutomatic(fromTimer = false): Promise<{released: number; nextCheckAt: number | null}> {
+    return serial(async () => {
+      if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
+      try {
+        const candidate = validateClock(fromTimer ? automaticNow() : now());
+        if(candidate < lastClock) for(const id of recoveredPending)rollbackGrace.add(id);
+        const current = Math.max(candidate, lastClock);
+        lastClock = current;
+        const processStates=new Map<string,'closed'|'live'|'unconfirmed'>();
+        // No database transaction is held while inspecting or stopping a child.
+        await Promise.all([...recoveredPending].map(async id => {
+          const row=database.prepare('SELECT * FROM invocation_records WHERE admission_id = ?').get(id) as Row|undefined;
+          if (!row || row.pid === null || row.creation_identity === null) return;
+          const record=invocationRecordSchema.parse({admissionId:id,conversationKey:row.conversation,
+            turnGeneration:row.turn_generation,ownerUuid:row.owner_uuid,providerKind:row.provider_kind,
+            phase:row.phase,deadline:row.deadline,pid:row.pid,creationIdentity:row.creation_identity,
+            ...(row.cleanup_outcome === null ? {} : {cleanupOutcome:row.cleanup_outcome})});
+          processStates.set(id,await inspectProcess(record,current >= record.deadline).catch(()=> 'unconfirmed' as const));
+        }));
+        const result = transaction(database, () => {
+          const ids = [...recoveredPending];
+          if (ids.length === 0) return {released: 0, nextCheckAt: null};
+          const rows = database.prepare(`SELECT id, conversation, admitted_at, state FROM admissions WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) as Row[];
+          if (rows.some(row => typeof row.id !== 'string' || row.state !== 'pending')) fail('RELEASE_SCHEMA_INVALID');
+          let released = 0;
+          let nextCheckAt: number | null = null;
+          const toRelease: string[] = [];
+          for (const row of rows) {
+            const id = String(row.id);
+            const processState=processStates.get(id);
+            if (processState === 'closed') { toRelease.push(id); continue; }
+            if (processState === 'live' || processState === 'unconfirmed') {
+              const retryAt=current+30_000;
+              nextCheckAt=nextCheckAt === null ? retryAt : Math.min(nextCheckAt,retryAt);
+              continue;
+            }
+            const admittedAt = safeInteger(row.admitted_at);
+            const acquiredAt = recoveryAcquiredAt.get(id) ?? current;
+            if(admittedAt>acquiredAt)rollbackGrace.add(id);
+            const remaining=LEGACY_GRACE_MS-Math.max(0,monotonicNow()-acquiredMonotonic);
+            const deadline = rollbackGrace.has(id) ? current+Math.max(0,remaining) : admittedAt+LEGACY_GRACE_MS;
+            if (current >= deadline) toRelease.push(id);
+            else nextCheckAt = nextCheckAt === null ? deadline : Math.min(nextCheckAt, deadline);
+          }
+          if (toRelease.length > 0) {
+            const stored = metadata();
+            const unknown = safeInteger(stored.unknown_count), revision = safeInteger(stored.recovery_revision), starts = safeInteger(stored.cumulative_starts);
+            if (unknown > MAX_SAFE - toRelease.length || revision > MAX_SAFE - toRelease.length) fail('RELEASE_COUNTER_OVERFLOW');
+            for (const id of toRelease) {
+              database.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = 'abandoned_unconfirmed', recovery_attempt_id = NULL WHERE id = ?").run(id);
+              database.prepare("UPDATE invocation_records SET phase = 'closed', cleanup_outcome = ? WHERE admission_id = ?")
+                .run(processStates.get(id) === 'closed' ? 'confirmed' : 'unconfirmed',id);
+              const row = rows.find(candidate => candidate.id === id);
+              if (!row || typeof row.conversation !== 'string') fail('RELEASE_SCHEMA_INVALID');
+              database.prepare(`INSERT INTO conversation_retries (conversation, failure_count, next_eligible, updated_at, claim_admission_id)
+                VALUES (?, 0, ?, ?, NULL) ON CONFLICT(conversation) DO NOTHING`).run(row.conversation, current, current);
+              const retry=database.prepare('SELECT failure_count,claim_admission_id FROM conversation_retries WHERE conversation = ?').get(row.conversation) as Row;
+              if(retry.claim_admission_id===id) {
+                const count=Math.min(5,safeInteger(retry.failure_count)+1);
+                database.prepare('UPDATE conversation_retries SET failure_count = ?, next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE conversation = ? AND claim_admission_id = ?')
+                  .run(count,current+RETRY_DELAYS_MS[count-1]!,current,row.conversation,id);
+              }
+              recoveredPending.delete(id);
+              recoveryAcquiredAt.delete(id);
+            }
+            database.prepare('UPDATE metadata SET unknown_count = ?, recovery_revision = ?, unknown_admission_ceiling = ? WHERE id = 1')
+              .run(unknown + toRelease.length, revision + toRelease.length, starts);
+            released = toRelease.length;
+          }
+          return {released, nextCheckAt};
+        });
+        scheduleAutomatic(result.nextCheckAt);
+        return result;
+      } catch (error) { return markPersistenceFailure(error); }
+    });
+  }
   async function recoveryAdmission(currentValue: number, eligibleTask: boolean, conversationValue?: string): Promise<ReleaseRecoveryAdmission> {
     const current = validateClock(currentValue);
     const conversation = conversationValue === undefined ? undefined : conversationKey.safeParse(conversationValue).success ? conversationValue : fail('RELEASE_CONVERSATION_KEY_INVALID');
@@ -916,9 +1156,13 @@ export async function openReleaseAccounting(directory: string, now: () => number
       if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
       try {
         return transaction(database, () => {
-          if (recoveredPending.size > 0) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'unresolved_previous_call' as const};
-          const safety = database.prepare('SELECT unsafe_unknown FROM recovery_safety WHERE id = 1').get() as Row;
-          if (safeInteger(safety.unsafe_unknown) === 1) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'unsafe_unknown'};
+          if (conversation === undefined) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'no_eligible_task' as const};
+          const active = database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state IN ('pending', 'recovery_trial') AND conversation = ?").get(conversation) as Row;
+          if (safeInteger(active.count) > 0) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'unresolved_previous_call' as const};
+          const retry = database.prepare('SELECT next_eligible FROM conversation_retries WHERE conversation = ?').get(conversation) as Row | undefined;
+          if (retry?.next_eligible !== null && retry?.next_eligible !== undefined && current < safeInteger(retry.next_eligible))
+            return {allowed: false, kind: 'retry', nextEligibleAt: safeInteger(retry.next_eligible), reason: 'retry_backoff' as const};
+          const retryEligible = retry !== undefined;
           const policy = database.prepare('SELECT failure_count, next_eligible, cooldown_until, cooldown_level, half_open FROM recovery_policy WHERE id = 1').get() as Row;
           const cooldownUntil = policy.cooldown_until === null ? null : safeInteger(policy.cooldown_until);
           const nextEligibleAt = policy.next_eligible === null ? null : safeInteger(policy.next_eligible);
@@ -933,7 +1177,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
             if (safeInteger(metadata().unknown_count) > safeInteger(metadata().recovery_covered_revision)) return {allowed: false, kind: 'half_open', nextEligibleAt: cooldownUntil, reason: 'no_eligible_task'};
           }
           if (nextEligibleAt !== null && current < nextEligibleAt) return {allowed: false, kind: 'retry', nextEligibleAt, reason: 'retry_backoff'};
-          return {allowed: true, kind: safeInteger(policy.failure_count) > 0 ? 'retry' : 'ordinary', nextEligibleAt: null};
+          return {allowed: true, kind: retryEligible || safeInteger(policy.failure_count) > 0 ? 'retry' : 'ordinary', nextEligibleAt: null};
         });
       } catch (error) { return markPersistenceFailure(error); }
     });
@@ -970,10 +1214,24 @@ export async function openReleaseAccounting(directory: string, now: () => number
   }
   async function recordRecoveryEvent(event: ReleaseRecoveryEvent): Promise<void> {
     const at = validateClock(event?.at);
+    const eventConversation = event?.conversationKey === undefined ? undefined : conversationKey.safeParse(event.conversationKey).success ? event.conversationKey : fail('RELEASE_CONVERSATION_KEY_INVALID');
     return serial(async () => {
       if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
       try {
         transaction(database, () => {
+          if (eventConversation !== undefined && ['recoverable_failure', 'half_open_failure', 'known_success', 'half_open_success'].includes(event.kind)) {
+            if (event.kind === 'known_success' || event.kind === 'half_open_success') {
+              database.prepare('DELETE FROM conversation_retries WHERE conversation = ?').run(eventConversation);
+            } else {
+              const prior = database.prepare('SELECT failure_count FROM conversation_retries WHERE conversation = ?').get(eventConversation) as Row | undefined;
+              const failureCount = Math.min(5, (prior === undefined ? 0 : safeInteger(prior.failure_count)) + 1);
+              const retryDelays = [60_000, 120_000, 300_000, 600_000, 1_800_000] as const;
+              database.prepare(`INSERT INTO conversation_retries (conversation, failure_count, next_eligible, updated_at) VALUES (?, ?, ?, ?)
+                ON CONFLICT(conversation) DO UPDATE SET failure_count=excluded.failure_count, next_eligible=excluded.next_eligible, updated_at=excluded.updated_at`)
+                .run(eventConversation, failureCount, at + retryDelays[failureCount - 1]!, at);
+            }
+            return;
+          }
           const policy = database.prepare('SELECT failure_count, next_eligible, cooldown_level, half_open FROM recovery_policy WHERE id = 1').get() as Row;
           const failures = safeInteger(policy.failure_count), level = safeInteger(policy.cooldown_level), halfOpen = safeInteger(policy.half_open) === 1;
           if (event.kind === 'known_success' || event.kind === 'half_open_success') {
@@ -993,7 +1251,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
       } catch (error) { return markPersistenceFailure(error); }
     });
   }
-  return {
+  const owner = {
     forConversation(key: string): SubscriptionAccounting { const parsed = conversationKey.safeParse(key); if (!parsed.success || parsed.data === '__recovery_trial__') fail('RELEASE_CONVERSATION_KEY_INVALID'); return createView(parsed.data); },
     snapshot(): ReleaseAccountingSnapshot { const stored = metadata(); return {starts: safeInteger(stored.cumulative_starts), activeStarts: activeStartCount(), inFlight: pendingCount(), unresolved: pendingCount(), knownTokens: safeInteger(stored.known_tokens), unknown: safeInteger(stored.unknown_count), poisoned}; },
     recoveryStatus(): ReleaseRecoveryStatus { return recoveryStatusFromDatabase(); },
@@ -1006,12 +1264,21 @@ export async function openReleaseAccounting(directory: string, now: () => number
     cancelRecovery,
     recoveryAdmission,
     reconcileRecoveredPending,
+    reconcileAutomatic,
     releaseRecoveryAdmission(conversationKeyValue: string): Promise<void> {
       const parsed = conversationKey.safeParse(conversationKeyValue);
       if (!parsed.success || parsed.data === '__recovery_trial__') fail('RELEASE_CONVERSATION_KEY_INVALID');
       return createView(parsed.data).releaseRecoveryAdmission!();
     },
     recordRecoveryEvent,
-    close(): Promise<void> { if (closing) return closing; closed = true; closing = queue.then(() => { try { database.close(); } catch { throw new Error('RELEASE_CLOSE_FAILED'); } }); return closing; },
-  } satisfies ReleaseAccountingOwner;
+    close(): Promise<void> {
+      if (closing) return closing;
+      closed = true;
+      if (automaticTimer !== undefined) { clearTimeout(automaticTimer); automaticTimer = undefined; }
+      closing = queue.then(() => { try { database.close(); } catch { throw new Error('RELEASE_CLOSE_FAILED'); } });
+      return closing;
+    },
+  } satisfies ReleaseAccountingRecoveryOwner;
+  await reconcileAutomatic();
+  return owner;
 }

@@ -12,11 +12,13 @@ it('explains unresolved previous calls before and after a denied recovery check'
   vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
   vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>status,preflight:async()=>({...status,allowed:false})}});
   await import('../../src/ui/settings-renderer.js');
-  await vi.waitFor(()=>expect(elements.get('#message').textContent).toContain('重启'));
+  await vi.waitFor(()=>expect(elements.get('#message').textContent).toContain('自动检查'));
+  expect(elements.get('#message').textContent).not.toContain('重启');
   expect(elements.get('#message').textContent).not.toContain('额度');
   listeners.get('#check')!();
   await Promise.resolve();await Promise.resolve();
-  expect(elements.get('#message').textContent).toContain('重启');
+  expect(elements.get('#message').textContent).toContain('自动检查');
+  expect(elements.get('#message').textContent).not.toContain('重启');
   expect(elements.get('#recover').disabled).toBe(true);
 });
 

@@ -6,6 +6,39 @@ import { createOwnedProcessRunner, createOwnedLoginProcessRunner } from "../../s
 import { createCodexOutputParser } from "../../src/estimation/codex-output.js";
 const spec = (code: string) => ({ executable: process.execPath, cwd: process.cwd(), args:["-e",code], env:process.env, input:"" });
 afterEach(() => vi.useRealTimers());
+it('persists process identity before delivering inference input', async () => {
+  const child=Object.assign(new EventEmitter(),{pid:123,stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>true});
+  let release!:()=>void;
+  const persisted=new Promise<void>(resolve=>{release=resolve;});
+  const bind=vi.fn(()=>persisted);
+  const runner=createOwnedProcessRunner({spawn:()=>child as unknown as ChildProcessWithoutNullStreams,captureIdentity:async()=> '123456'});
+  const pending=runner.run({...spec(''),input:'payload',onSpawnIdentity:bind},new AbortController().signal);
+  await vi.waitFor(()=>expect(bind).toHaveBeenCalledWith(123,'123456'));
+  expect(child.stdin.writableEnded).toBe(false);
+  release();
+  await vi.waitFor(()=>expect(child.stdin.writableEnded).toBe(true));
+  child.emit('close',0);await pending;
+});
+it('never delivers input if cancelled while identity persistence is pending', async () => {
+  const child=Object.assign(new EventEmitter(),{pid:123,stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>true});
+  let release!:()=>void;
+  const persisted=new Promise<void>(resolve=>{release=resolve;});
+  const bind=vi.fn(()=>persisted),controller=new AbortController();
+  const runner=createOwnedProcessRunner({spawn:()=>child as unknown as ChildProcessWithoutNullStreams,captureIdentity:async()=> '123456'});
+  const pending=runner.run({...spec(''),input:'payload',onSpawnIdentity:bind},controller.signal);
+  await vi.waitFor(()=>expect(bind).toHaveBeenCalled());
+  controller.abort();child.emit('close',null);await pending;release();
+  await Promise.resolve();await Promise.resolve();
+  expect(child.stdin.writableEnded).toBe(false);
+});
+it('closes its child without input when durable identity binding fails', async () => {
+  const child=Object.assign(new EventEmitter(),{pid:123,stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:vi.fn(()=>{queueMicrotask(()=>child.emit('close',null));return true;})});
+  const runner=createOwnedProcessRunner({spawn:()=>child as unknown as ChildProcessWithoutNullStreams,captureIdentity:async()=> '123456'});
+  const result=await runner.run({...spec(''),input:'payload',onSpawnIdentity:async()=>{throw Error('store unavailable');}},new AbortController().signal);
+  expect(result).toMatchObject({reason:'spawn_error',closed:true});
+  expect(child.stdin.writableEnded).toBe(false);
+  expect(child.kill).toHaveBeenCalledOnce();
+});
 it('allows browser login time without extending ordinary model deadlines',async()=>{
   expect(()=>createOwnedProcessRunner({timeoutMs:60001})).toThrow('INVALID_PROCESS_DEADLINE');
   expect(()=>createOwnedLoginProcessRunner({timeoutMs:600001})).toThrow('INVALID_PROCESS_DEADLINE');

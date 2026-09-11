@@ -1,6 +1,6 @@
 # Automatic estimator recovery and uncapped cross-conversation concurrency
 
-Status: detailed design pending user review; implementation not started.
+Status: user approved 2026-09-11; implemented and automatically verified 2026-09-11.
 Base: main 2f54a4b. Supersedes the manual-confirmation and legacy-reboot-only
 requirements in the 2026-09-10 orphaned estimation recovery design for this scope.
 

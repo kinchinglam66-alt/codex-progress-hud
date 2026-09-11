@@ -40,18 +40,23 @@ it('preserves the local recovery cooldown reason without preparing a model invoc
     expect(accounting.snapshot().starts).toBe(3);
   }finally{await subject.close();}
 });
-it('surfaces an unresolved previous call from a reopened ledger without another dispatch',async()=>{
+it('blocks the unresolved conversation after reopen while independently preparing another conversation',async()=>{
   const path=await directory(), first=await owner(path);
   await first.forConversation('previous').reserve();
   await first.close();
   const reopened=await owner(path);
+  const prepare=vi.fn(()=>{throw new Error('controlled preparation failure');});
   const subject=createAccountedObserverWorker({accounting:reopened,authorize:()=>true,now:()=>0,
-    prepare:()=>{throw new Error('unexpected preparation');}});
+    prepare});
   try{
-    expect(await subject.observe(input,new AbortController().signal,'new')).toMatchObject({
+    expect(await subject.observe(input,new AbortController().signal,'previous')).toMatchObject({
       status:'admission_denied',admissionReason:'unresolved_previous_call',usage:null,
     });
     expect(reopened.snapshot()).toMatchObject({starts:1,inFlight:1,unknown:0});
+    expect(prepare).not.toHaveBeenCalled();
+    expect(await subject.observe(input,new AbortController().signal,'new')).toMatchObject({status:'process_error',usage:null});
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(reopened.snapshot()).toMatchObject({starts:1,inFlight:1,unknown:0,knownTokens:0});
   }finally{await subject.close();}
 });
 const stream = (includeUsage = true) => [

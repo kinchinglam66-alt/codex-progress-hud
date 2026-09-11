@@ -101,7 +101,7 @@ afterEach(async () => {
   for (const path of paths.splice(0)) await rm(path, {recursive: true, force: true});
 });
 
-it('shares two durable worker slots, denies a third until capacity frees, and keeps the other view usable after one session closes', async () => {
+it('admits three independent durable sessions and keeps each view usable after one closes', async () => {
   const path = await makeDirectory();
   const owner = await openOwner(path);
   const aGate = newGate(path, 'a-1');
@@ -116,15 +116,17 @@ it('shares two durable worker slots, denies a third until capacity frees, and ke
   const aPending = a.session.observe(observerInput, new AbortController().signal);
   const bPending = b.session.observe(observerInput, new AbortController().signal);
   await Promise.all([waitForFile(aGate.ready), waitForFile(bGate1.ready)]);
-  await expect(c.session.observe(observerInput, new AbortController().signal)).resolves.toMatchObject({status: 'admission_denied', usage: null});
-  await expect(access(cDeniedGate.launched)).rejects.toThrow();
+  const cPending = c.session.observe(observerInput, new AbortController().signal);
+  await waitForFile(cDeniedGate.ready);
+  await release(cDeniedGate);
+  await expect(cPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
 
   await release(aGate);
   await expect(aPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
-  const cPending = c.session.observe(observerInput, new AbortController().signal);
+  const cSecondPending = c.session.observe(observerInput, new AbortController().signal);
   await waitForFile(cGate.ready);
   await release(cGate);
-  await expect(cPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
+  await expect(cSecondPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
   await release(bGate1);
   await expect(bPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
 
@@ -133,7 +135,7 @@ it('shares two durable worker slots, denies a third until capacity frees, and ke
   await waitForFile(bGate2.ready);
   await release(bGate2);
   await expect(bSecond).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
-  expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 4, knownTokens: 92, unresolved: 0, unknown: 0}));
+  expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 5, knownTokens: 115, unresolved: 0, unknown: 0}));
 });
 
 it('poisons on a commit failure before admission and never launches the child', async () => {
@@ -195,7 +197,7 @@ it('settles known usage from the surviving session while an unknown exit permits
   expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 3, knownTokens: 46, unresolved: 0, unknown: 1}));
 });
 
-it('closing a running session cancels only its child and durably blocks after unsafe settlement', async () => {
+it('closing a running session preserves unknown usage and permits the surviving conversation to continue', async () => {
   const path = await makeDirectory();
   const owner = await openOwner(path);
   const closingGate = newGate(path, 'closing-1');
@@ -215,13 +217,14 @@ it('closing a running session cancels only its child and durably blocks after un
   await expect(survivorPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens: 20, outputTokens: 3}});
   expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 2, knownTokens: 23, unresolved: 0, unknown: 1}));
   const laterPending = survivor.session.observe(observerInput, new AbortController().signal);
-  await expect(laterPending).resolves.toMatchObject({status: 'admission_denied', usage: null});
-  await expect(access(laterBlockedGate.launched)).rejects.toThrow();
-  expect(owner.recoveryStatus?.()).toMatchObject({state: 'blocked', recoveryAllowed: true});
-  expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 2, knownTokens: 23, unresolved: 0, unknown: 1}));
+  await waitForFile(laterBlockedGate.ready);
+  await release(laterBlockedGate);
+  await expect(laterPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens:20,outputTokens:3}});
+  expect(owner.recoveryStatus?.()).toMatchObject({state: 'warning', recoveryAllowed: false});
+  expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 3, knownTokens: 46, unresolved: 0, unknown: 1}));
 });
 
-it.each(['nonzero', 'timeout', 'cancel', 'revoke'] as const)('does not relax a valid frame after %s and persists unsafe blocking across restart', async mode => {
+it.each(['nonzero', 'timeout', 'cancel', 'revoke'] as const)('retains unknown usage after %s and persists conversation backoff across restart', async mode => {
   const path = await makeDirectory();
   let authorized = true;
   const owner = await openOwner(path);
@@ -237,12 +240,14 @@ it.each(['nonzero', 'timeout', 'cancel', 'revoke'] as const)('does not relax a v
   const result = await pending;
   expect(result.usage).toBeNull();
   expect(result.outcomes?.usage).toBe('unknown');
-  expect(owner.recoveryStatus?.()).toMatchObject({state: 'blocked'});
+  expect(owner.recoveryStatus?.()).toMatchObject({state: 'warning'});
   await session.session.close();
   await owner.close();
 
   const reopened = await openReleaseAccounting(path, () => 0);
   closers.push(() => reopened.close());
-  expect(reopened.recoveryStatus()).toMatchObject({state: 'blocked'});
-  expect(await reopened.recoveryAdmission(0, true, `conversation-${mode}`)).toMatchObject({allowed: false, reason: 'unsafe_unknown'});
+  expect(reopened.recoveryStatus()).toMatchObject({state: 'warning'});
+  expect(await reopened.recoveryAdmission(0, true, `conversation-${mode}`)).toMatchObject({allowed: false, reason: 'retry_backoff',nextEligibleAt:60000});
+  expect(await reopened.recoveryAdmission(0, true, 'independent')).toMatchObject({allowed:true});
+  expect(reopened.snapshot()).toMatchObject({starts:1,unknown:1,knownTokens:0,inFlight:0});
 });

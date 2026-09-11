@@ -42,12 +42,12 @@ it.each(['settled','pending','unknown'] as const)('migrates v2 %s accounting wit
   });
   const owner=await open(path,()=>0);
   expect(owner.snapshot()).toMatchObject({starts:1,knownTokens:state==='settled'?12:0,unknown:state==='unknown'?1:0,unresolved:state==='pending'?1:0});
-  if(state==='pending') expect(await owner.forConversation('two').reserve()).toBeNull();
-  if(state==='unknown') { expect(await owner.forConversation('two').reserve()).toBeNull(); expect(owner.recoveryStatus()).toMatchObject({state:'blocked'}); }
+  if(state==='pending') { const peer = await owner.forConversation('two').reserve(); expect(peer).not.toBeNull(); await owner.forConversation('two').cancelBeforeDispatch(peer!); }
+  if(state==='unknown') { expect(await owner.forConversation('two').reserve()).not.toBeNull(); expect(owner.recoveryStatus()).toMatchObject({state:'warning'}); }
   if(state==='pending')await expect(owner.forConversation('one').cancelBeforeDispatch(id)).rejects.toThrow();
   await owner.close();
   await mutateDatabase(path,db=>{
-    expect(db.prepare('PRAGMA user_version').get()).toMatchObject({user_version:4});
+    expect(db.prepare('PRAGMA user_version').get()).toMatchObject({user_version:5});
     expect(db.prepare('SELECT id,state FROM admissions').get()).toMatchObject({id,state});
   });
 });
@@ -88,7 +88,7 @@ afterEach(async () => {
   for (const path of directories.splice(0)) await rm(path, {recursive: true, force: true});
 });
 
-it('admits two different conversations concurrently and denies a third or a duplicate conversation', async () => {
+it('admits distinct conversations without a global cap while denying a duplicate active conversation', async () => {
   let now = 0;
   const owner = await open(await directory(), () => now);
   const first = owner.forConversation('conversation-a');
@@ -98,12 +98,11 @@ it('admits two different conversations concurrently and denies a third or a dupl
   const [firstId, secondId, thirdId] = await Promise.all([first.reserve(), second.reserve(), third.reserve()]);
   expect(firstId).toMatch(/^[0-9a-f-]{36}$/);
   expect(secondId).toMatch(/^[0-9a-f-]{36}$/);
-  expect(thirdId).toBeNull();
+  expect(thirdId).toMatch(/^[0-9a-f-]{36}$/);
   expect(await first.reserve()).toBeNull();
   await first.settle(firstId!, usage);
   await second.settle(secondId!, usage);
-  now = 1;
-  expect(await third.reserve()).toMatch(/^[0-9a-f-]{36}$/);
+  await third.settle(thirdId!, usage);
 });
 
 it('keeps call counts across reopen without imposing a twelve-call quota', async () => {
@@ -240,7 +239,7 @@ it('reopens a valid peer settled before an unknown result despite distinct admis
   owners.pop();
 
   const reopened = await open(path, () => now);
-  expect(reopened.snapshot()).toEqual(expect.objectContaining({starts: 2, knownTokens: 12, unknown: 1, unresolved: 0}));
+  expect(reopened.snapshot()).toEqual(expect.objectContaining({starts: 2, knownTokens: 12, unknown: 1, unresolved: 0, inFlight: 0}));
   const later = await reopened.forConversation('conversation-later').reserve();
   expect(later).toMatch(/^[0-9a-f-]{36}$/);
   await reopened.forConversation('conversation-later').cancelBeforeDispatch(later!);
@@ -260,9 +259,9 @@ it('reopens with an unknown result and settles an earlier admitted pending peer'
   owners.pop();
 
   const reopened = await open(path, () => now);
-  expect(await reopened.forConversation('conversation-later').reserve()).toBeNull();
+  expect(await reopened.forConversation('conversation-later').reserve()).not.toBeNull();
   await reopened.forConversation('conversation-pending').settle(pendingId!, usage);
-  expect(reopened.snapshot()).toEqual(expect.objectContaining({starts: 2, knownTokens: 12, unknown: 1, unresolved: 0}));
+  expect(reopened.snapshot()).toEqual(expect.objectContaining({starts: 3, knownTokens: 12, unknown: 1, unresolved: 1, inFlight: 1}));
 });
 
 it('rejects duplicate and foreign settlements without changing totals', async () => {
@@ -295,7 +294,7 @@ it('allows a validated safe unknown alongside a later persisted settlement', asy
   expect(reopened.snapshot()).toMatchObject({starts: 2, knownTokens: 12, unknown: 1});
 });
 
-it('rejects persisted third and same-conversation overlapping reservations', async () => {
+it('retains persisted occupancy and denies same-conversation overlapping reservations', async () => {
   const thirdPath = await directory();
   await initialize(thirdPath);
   await mutateDatabase(thirdPath, db => {
@@ -306,7 +305,9 @@ it('rejects persisted third and same-conversation overlapping reservations', asy
     db.prepare('UPDATE metadata SET cumulative_starts = 3, last_admission = 0 WHERE id = 1').run();
     db.exec('COMMIT');
   });
-  await expect(openReleaseAccounting(thirdPath, () => 0)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
+  const thirdOwner = await openReleaseAccounting(thirdPath, () => 0);
+  expect(thirdOwner.snapshot()).toMatchObject({inFlight: 3});
+  await thirdOwner.close();
 
   const overlapPath = await directory();
   await initialize(overlapPath);
@@ -317,7 +318,9 @@ it('rejects persisted third and same-conversation overlapping reservations', asy
     db.prepare('UPDATE metadata SET cumulative_starts = 2, last_admission = 0 WHERE id = 1').run();
     db.exec('COMMIT');
   });
-  await expect(openReleaseAccounting(overlapPath, () => 0)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
+  const overlapOwner = await openReleaseAccounting(overlapPath, () => 0);
+  expect(await overlapOwner.forConversation('conversation-a').reserve()).toBeNull();
+  await overlapOwner.close();
 });
 
 it('accepts valid persisted call counts beyond twelve inside one rolling hour', async () => {
@@ -355,7 +358,7 @@ it('rejects conflicting owners without unlinking the existing owner lock', async
   expect(reopened.snapshot().starts).toBe(0);
 });
 
-it('rejects invalid clocks and regressions that would reopen an old admission window', async () => {
+it('rejects invalid clocks and clamps rollback admission timestamps across reopen', async () => {
   await expect(openReleaseAccounting(await directory(), () => -1)).rejects.toThrow();
   await expect(openReleaseAccounting(await directory(), () => 0.5)).rejects.toThrow();
   await expect(openReleaseAccounting(await directory(), () => Number.NaN)).rejects.toThrow();
@@ -368,9 +371,12 @@ it('rejects invalid clocks and regressions that would reopen an old admission wi
   const id = await view.reserve();
   await view.settle(id!, usage);
   now = 9;
-  await expect(view.reserve()).rejects.toThrow();
+  const rollbackReservation = await view.reserve();
+  expect(rollbackReservation).toMatch(/^[0-9a-f-]{36}$/);
+  await view.cancelBeforeDispatch(rollbackReservation!);
   await owner.close();
-  await expect(openReleaseAccounting(path, () => now)).rejects.toThrow();
+  const rollbackOwner = await open(path, () => now);
+  expect(await rollbackOwner.forConversation('conversation-a').reserve()).not.toBeNull();
 
   let reopenedClock = 100;
   const secondPath = await directory();
@@ -379,7 +385,13 @@ it('rejects invalid clocks and regressions that would reopen an old admission wi
   const secondId = await secondView.reserve();
   await secondView.settle(secondId!, usage);
   reopenedClock = 0;
-  await expect(secondView.reserve()).rejects.toThrow();
+  const clampedId = await secondView.reserve();
+  expect(clampedId).not.toBeNull();
+  await secondView.cancelBeforeDispatch(clampedId!);
+  await secondOwner.close();
+  await mutateDatabase(secondPath, db => {
+    expect(db.prepare('SELECT admitted_at FROM admissions WHERE id = ?').get(clampedId!)).toMatchObject({admitted_at:100});
+  });
 });
 
 it('fails closed before metadata counters can overflow', async () => {

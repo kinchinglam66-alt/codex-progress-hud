@@ -8,12 +8,17 @@ import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
   /** Authenticated local key is accounting metadata, never observer prompt data. */
-  observe(input: ObserverInput, signal: AbortSignal, conversationKey: string): Promise<ObserverResult>;
+  observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number): Promise<ObserverResult>;
   status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
   disable(): void;
   close(): Promise<void>;
   provenance?: () => ForecastVersions|null;
   recoveryStatus?: () => {state: string; nextEligibleAt?: number | null | undefined; cooldownUntil?: number | null | undefined} | undefined;
+}
+export interface ObserverWorkerSource {
+  acquire(conversationKey: string): ObserverWorker;
+  release(conversationKey: string): Promise<void>;
+  all(): readonly ObserverWorker[];
 }
 export interface ObserverObservation {
   kind:'runtime'|'request'|'result'|'skip'; at:number; key:string; generation:number; activeSeconds:number;
@@ -27,7 +32,7 @@ export interface ObserverObservation {
   usage?:ObserverResult['usage'];
   timings?:ObserverResult['timings'];
 }
-interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers: readonly ObserverWorker[]; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
+interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
   eventSequence: number; consumedEventSequence: number;
@@ -55,8 +60,8 @@ interface Flight {key: string; ticket: object; controller: AbortController; work
  */
 export class ObserverScheduler {
   private readonly entries = new Map<string, Entry>();
-  private readonly flights = new Map<ObserverWorker, Flight>();
-  private readonly workers: readonly ObserverWorker[];
+  private readonly flights = new Map<string, Flight>();
+  private readonly workerSource: ObserverWorkerSource;
   private disabled = false;
   private capacityReached = false;
   private lastClock = 0;
@@ -65,13 +70,31 @@ export class ObserverScheduler {
   private recoveryGeneration: number | undefined;
   private closing?: Promise<void>;
   constructor(private readonly options: Options) {
-    if (options.workers.length < 1 || options.workers.length > 2 || new Set(options.workers).size !== options.workers.length) {
-      throw new Error('INVALID_OBSERVER_WORKERS');
-    }
     const closeTimeout = options.closeTimeoutMs ?? 6000;
     if (!Number.isSafeInteger(closeTimeout) || closeTimeout < 1 || closeTimeout > 10000) throw new Error('INVALID_OBSERVER_CLOSE_TIMEOUT');
-    this.workers = [...options.workers];
+    if (options.workerSource) this.workerSource = options.workerSource;
+    else {
+      const workers = [...(options.workers ?? [])];
+      if (workers.length < 1 || new Set(workers).size !== workers.length) throw new Error('INVALID_OBSERVER_WORKERS');
+      const owners = new Map<string, ObserverWorker>();
+      this.workerSource = {
+        acquire: key => {
+          const existing = owners.get(key); if (existing) return existing;
+          const worker = workers.find(candidate => {
+            if ([...owners.values()].includes(candidate) || this.flights.has(key)) return false;
+            try { const state = candidate.status(); return !state.active && !state.disabled && !state.poisoned && state.setupFailed !== true; }
+            catch { return false; }
+          });
+          if (!worker) throw new Error('OBSERVER_WORKERS_BUSY');
+          owners.set(key, worker); return worker;
+        },
+        release: async key => { owners.delete(key); },
+        all: () => workers,
+      };
+    }
   }
+  private workers(): readonly ObserverWorker[] { return this.workerSource.all(); }
+  private workerInFlight(worker: ObserverWorker): boolean { return [...this.flights.values()].some(flight => flight.worker === worker); }
   private time(): number {
     const raw = this.options.now();
     if (!Number.isSafeInteger(raw) || raw < 0) throw new Error('INVALID_OBSERVER_CLOCK');
@@ -207,12 +230,11 @@ export class ObserverScheduler {
       return;
     }
     const now = this.time(); this.prune(now);
-    if (this.workers.some(worker => this.workerState(worker).poisoned)) {this.disable(); return;}
     for (const [key, entry] of [...this.entries]) {
       if(entry.ended)continue;
-      const worker = this.workers.find(candidate => {
+      let worker = this.workers().find(candidate => {
         const state = this.workerState(candidate);
-        if (this.flights.has(candidate) || state.active || state.disabled || state.poisoned) return false;
+        if (this.workerInFlight(candidate) || state.active || state.disabled || state.poisoned) return false;
         try {
           const recovery = candidate.recoveryStatus?.();
           return recovery?.nextEligibleAt !== undefined && recovery.nextEligibleAt !== null && now < recovery.nextEligibleAt ? false
@@ -270,12 +292,16 @@ export class ObserverScheduler {
         state: runtime, statusEvidenceArrived: entry.statusEvidence,
         goalInFlight: entry.flight !== undefined, globalInFlight: this.flights.size, conversationStartsLastHour: entry.starts.length});
       if(decision.blockReason){this.skip(key,entry,decision.blockReason);continue;}
+      if (!worker) {
+        try { worker = this.workerSource.acquire(key); }
+        catch { worker = undefined; }
+      }
       if(!worker){
-        const recoveryDeferred=this.workers.some(candidate=>{
-          const state=this.workerState(candidate);if(this.flights.has(candidate)||state.active||state.disabled||state.poisoned)return false;
+        const recoveryDeferred=this.workers().some(candidate=>{
+          const state=this.workerState(candidate);if(this.workerInFlight(candidate)||state.active||state.disabled||state.poisoned)return false;
           try{const recovery=candidate.recoveryStatus?.();return recovery?.nextEligibleAt!==undefined&&recovery.nextEligibleAt!==null&&now<recovery.nextEligibleAt||recovery?.cooldownUntil!==undefined&&recovery.cooldownUntil!==null&&now<recovery.cooldownUntil;}catch{return false;}
         });
-        this.skip(key,entry,this.workers.some(candidate=>this.workerState(candidate).setupFailed)?'setup_failed':recoveryDeferred?'recovery_cooldown':'worker_unavailable');continue;
+        this.skip(key,entry,this.workers().some(candidate=>this.workerState(candidate).setupFailed)?'setup_failed':recoveryDeferred?'recovery_cooldown':'worker_unavailable');continue;
       }
       const request = this.options.goals.request(key, now);
       if (!request) {this.skip(key,entry,'request_unavailable');continue;}
@@ -292,14 +318,14 @@ export class ObserverScheduler {
       delete entry.retryVersion;
       if (overdueReady&&state.predictionIdentity!==null)entry.overdueReservedPrediction=state.predictionIdentity;
       if (nearExpiryReady&&state.predictionIdentity!==null)entry.nearExpiryReservedPrediction=state.predictionIdentity;
-      entry.statusEvidence = false; this.flights.set(worker, flight);
+      entry.statusEvidence = false; this.flights.set(key, flight);
       // Rotate for fairness; reserve both local slot and hourly start before provider code.
       this.entries.delete(key); this.entries.set(key, entry);
       this.record('request',key,entry,{requestId:flight.requestId,triggerReason:flight.triggerReason,
         lastRequestActiveSeconds:flight.lastRequestActiveSeconds,eligibleActiveSeconds:flight.eligibleActiveSeconds});
       this.notify();
       try {
-        flight.done = Promise.resolve(worker.observe(request.input, flight.controller.signal, key))
+        flight.done = Promise.resolve(worker.observe(request.input, flight.controller.signal, key, view.generation))
           .then(result => this.settle(entry, flight, result), () => this.settle(entry, flight, null));
       } catch {this.settle(entry, flight, null);}
     }
@@ -312,9 +338,11 @@ export class ObserverScheduler {
     if (state.active || state.poisoned) {
       this.options.goals.settle(flight.ticket, null, this.time());
       this.recordResult(entry,flight,result,false);
-      this.disable(); this.notify(); return;
+      this.flights.delete(flight.key); if (entry.flight === flight) delete entry.flight;
+      void this.workerSource.release(flight.key).catch(() => undefined);
+      this.notify(); return;
     }
-    this.flights.delete(flight.worker);
+    this.flights.delete(flight.key);
     if (entry.flight === flight) delete entry.flight;
     const provenTransient = result?.status==='process_error' && result.outcomes?.dispatch==='not_started'
       && result.outcomes.closureConfirmed && result.outcomes.retryable==='pre_dispatch_transient';
@@ -330,8 +358,7 @@ export class ObserverScheduler {
       && proof.dispatch === 'started' && proof.prediction !== 'invalid';
     const trustedDurableFailure = result?.usage === null && proof?.accounting === 'durably_settled'
       && proof.closureConfirmed;
-    const mustDisable = !result || result.status === 'accounting_error' ||
-      (result.usage === null && !noDispatch && !safeUnknownUsage && !trustedDurableFailure);
+    const mustDisable = result?.status === 'accounting_error';
     // Capture external cancellation before the accounting safety stop aborts other flights.
     // A valid answer is not permission to make another call; goal tickets still reject stale answers.
     const eligible = flight.schedulerGeneration === this.schedulerGeneration && !this.disabled && !state.disabled && !flight.controller.signal.aborted
@@ -387,6 +414,7 @@ export class ObserverScheduler {
         delete entry.overdueEligibleActiveSeconds;delete entry.overdueReservedPrediction;}
     }
     this.recordResult(entry,flight,result,accepted,settledAt,live);
+    void this.workerSource.release(flight.key).catch(() => undefined);
     this.notify();
   }
   private recordResult(entry:Entry,flight:Flight,result:ObserverResult|null,accepted:boolean,
@@ -434,9 +462,9 @@ export class ObserverScheduler {
     const generation = ++this.schedulerGeneration;
     this.recoveryGeneration = generation;
     for (const flight of this.flights.values()) flight.controller.abort();
-    for (const worker of this.workers) {try {worker.disable();} catch { /* status verification below fails closed */ }}
+    for (const worker of this.workers()) {try {worker.disable();} catch { /* status verification below fails closed */ }}
     await Promise.allSettled([...this.flights.values()].flatMap(flight => flight.done ? [flight.done] : []));
-    if (this.flights.size > 0 || this.workers.some(worker => {
+    if (this.flights.size > 0 || this.workers().some(worker => {
       const state = this.workerState(worker);
       return state.active || state.poisoned;
     })) {
@@ -447,7 +475,7 @@ export class ObserverScheduler {
   }
   async restoreRecovery(generation: number): Promise<void> {
     if (this.recoveryGeneration !== generation) throw new Error('OBSERVER_RECOVERY_STALE');
-    if (this.flights.size > 0 || this.workers.some(worker => {
+    if (this.flights.size > 0 || this.workers().some(worker => {
       const state = this.workerState(worker);
       return state.active || state.disabled || state.poisoned;
     })) throw new Error('OBSERVER_RECOVERY_CLOSE_UNCONFIRMED');
@@ -459,7 +487,7 @@ export class ObserverScheduler {
     const at=this.time(),entry=this.entries.get(key),view=this.options.goals.view(key,at);
     const health=this.options.goals.contextHealth(key);
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':entry?.flight?'estimating':
-      this.workers.some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
+      this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
       entry?.lastResultStatus==='admission_denied'?'admission_blocked':
       ['hourly_limit','global_concurrency_limit'].includes(entry?.lastSkip??'')?'rate_limited':
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
@@ -481,15 +509,15 @@ export class ObserverScheduler {
   disable(): void {
     this.disabled = true;
     for (const flight of this.flights.values()) flight.controller.abort();
-    for (const worker of this.workers) {try {worker.disable();} catch { /* Keep ownership until close. */ }}
+    for (const worker of this.workers()) {try {worker.disable();} catch { /* Keep ownership until close. */ }}
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.disable();
     const drain = (async () => {
-      const results = await Promise.allSettled(this.workers.map(worker => Promise.resolve().then(() => worker.close())));
+      const results = await Promise.allSettled(this.workers().map(worker => Promise.resolve().then(() => worker.close())));
       await Promise.allSettled([...this.flights.values()].flatMap(flight => flight.done ? [flight.done] : []));
-      if (results.some(result => result.status === 'rejected') || this.workers.some(worker => this.workerState(worker).active)) {
+      if (results.some(result => result.status === 'rejected') || this.workers().some(worker => this.workerState(worker).active)) {
         throw new Error('OBSERVER_CLOSE_UNCONFIRMED');
       }
       this.flights.clear(); this.entries.clear();

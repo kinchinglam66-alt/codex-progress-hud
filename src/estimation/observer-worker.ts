@@ -9,6 +9,7 @@ import type {ForecastVersions} from './forecast-record.js';
 import type {ReleaseRecoveryEvent} from './release-accounting.js';
 import type {AdmissionKind} from './subscription-accounting.js';
 import {normalizeAdmissionReason} from '../core/observer-diagnostics.js';
+import {randomUUID} from 'node:crypto';
 
 export type {ObserverWorker} from './observer-scheduler.js';
 
@@ -59,6 +60,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
   let unconfirmedRunner: ReturnType<typeof createOwnedProcessRunner> | undefined;
   let closing: Promise<void> | undefined;
   let preparedProvenance: ForecastVersions|null = null;
+  const ownerUuid = randomUUID();
 
   const disable = (): void => {
     disabled = true;
@@ -78,7 +80,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
     };
   };
 
-  async function invoke(input: ObserverInput, signal: AbortSignal, conversationKey: string): Promise<ObserverSubscriptionResult> {
+  async function invoke(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration: number): Promise<ObserverSubscriptionResult> {
     let view: ReturnType<ReleaseAccountingOwner['forConversation']> | undefined;
     let localRunner: ReturnType<typeof createOwnedProcessRunner> | undefined;
     let localSession: ReturnType<typeof createObserverSubscriptionSession> | undefined;
@@ -105,7 +107,8 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
         : {allowed: true, kind: 'ordinary' as const};
       if (!admission.allowed) return {...failure('admission_denied'),admissionReason:normalizeAdmissionReason('reason' in admission ? admission.reason : undefined)};
       admittedKind = admission.kind;
-      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize, admissionKind: admittedKind});
+      localSession = createObserverSubscriptionSession({ledger: view, runner: localRunner, prepare:prepareInvocation, authorize, admissionKind: admittedKind,
+        invocationRecord: admissionId => ({admissionId, conversationKey, turnGeneration, ownerUuid, providerKind: 'subscription', phase: 'bound', deadline: now() + 60_000, cleanupOutcome: 'pending'})});
       runner = localRunner;
       session = localSession;
       let result: ObserverSubscriptionResult;
@@ -123,7 +126,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       // A retryable half-open transient owns the claim until this serialized
       // event atomically clears it and installs cooldown. Generic release is
       // only for proven no-dispatch exits.
-      if (event) await recordRecoveryEvent(event);
+      if (event) await recordRecoveryEvent({...event, conversationKey});
       let closeFailed = false;
       try { await localSession.close(); }
       catch { closeFailed = true; }
@@ -152,7 +155,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
       }
       return delivered(result);
     } catch {
-      if (admittedKind !== undefined) await recordRecoveryEvent({kind: admittedKind === 'half_open' ? 'half_open_failure' : 'recoverable_failure', at: now()});
+      if (admittedKind !== undefined) await recordRecoveryEvent({kind: admittedKind === 'half_open' ? 'half_open_failure' : 'recoverable_failure', at: now(), conversationKey});
       disabled = true;
       try { await localSession?.close(); }
       catch { poisoned = true; }
@@ -169,13 +172,13 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
   }
 
   return {
-    observe(input, signal, conversationKey): Promise<ObserverResult> {
+    observe(input, signal, conversationKey, turnGeneration=0): Promise<ObserverResult> {
       if (disabled || poisoned || closing) return Promise.resolve(neutralResult(failure('disabled')));
       if (active) return Promise.resolve(neutralResult(failure('busy')));
       if (!authorized(authorize)) return Promise.resolve(neutralResult(failure('disabled')));
       active = true;
       preparedProvenance = null;
-      const operation = invoke(input, signal, conversationKey);
+      const operation = invoke(input, signal, conversationKey, turnGeneration);
       pending = operation;
       operation.finally(() => {
         if (pending === operation) pending = undefined;

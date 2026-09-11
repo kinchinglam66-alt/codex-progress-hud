@@ -75,7 +75,6 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
   const eligibleActiveSeconds=activeClock?input.lastRequestActiveSeconds!+interval:null;
 
   if(input.state!=='running'&&!statusEvent)return decision('runtime_ineligible',null,null,eligibleActiveSeconds);
-  if(input.globalInFlight>=2)return decision('global_concurrency_limit',null,null,eligibleActiveSeconds);
   if(input.elapsedSeconds<15)return decision('initial_delay',null,15,eligibleActiveSeconds);
   if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<60)
     return decision('cooldown',null,input.lastRequestSeconds+60,eligibleActiveSeconds);

@@ -1,7 +1,8 @@
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
+import {copyInvocationRecord, copyInvocationPatch, type InvocationRecord, type InvocationRecordPatch} from './invocation-ownership.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 const MILLION = 1_000_000;
 const MAX_COUNTER = 10_000_000_000;
 
@@ -17,6 +18,7 @@ export interface ApiReservation {
   id: string;
   profileId: string;
   generation: number;
+  ownershipBound?: boolean;
 }
 
 export interface ApiPrices {
@@ -66,6 +68,8 @@ export interface ApiAccountingRow {
   createdAt: number;
   dispatchedAt: number | null;
   completedAt: number | null;
+  invocation?: InvocationRecord;
+  recoveryOutcome?: 'abandoned_unconfirmed';
 }
 
 export interface ApiAccountingSnapshot {
@@ -79,10 +83,12 @@ export interface ApiAccountingSnapshot {
 }
 
 export interface ApiAccounting {
-  reserve(binding: ApiProviderBinding, limits: ApiLimits): Promise<ApiReservation | null>;
+  reserve(binding: ApiProviderBinding, limits: ApiLimits, ownership?: Omit<InvocationRecord,'admissionId'>): Promise<ApiReservation | null>;
   markDispatch(id: string): Promise<void>;
   settle(id: string, usage: ApiUsage | null): Promise<void>;
   cancelBeforeDispatch(id: string): Promise<void>;
+  bindInvocation(id: string, record: InvocationRecord): Promise<void>;
+  updateInvocation(id: string, patch: InvocationRecordPatch): Promise<void>;
   snapshot(options?: ApiSnapshotOptions): ApiAccountingSnapshot;
   close(): Promise<void>;
 }
@@ -98,7 +104,7 @@ const RESERVATION_COLUMNS = [
   'reserved_input_tokens', 'reserved_output_tokens', 'usage_input_tokens',
   'usage_output_tokens', 'usage_cached_input_tokens', 'reserved_microusd',
   'actual_microusd', 'cost_state', 'prices_json', 'created_at',
-  'dispatched_at', 'completed_at',
+  'dispatched_at', 'completed_at', 'invocation_json', 'recovery_outcome',
 ] as const;
 
 function fail(code: string): never {
@@ -241,7 +247,9 @@ function initializeDatabase(database: DatabaseSync): void {
           prices_json TEXT,
           created_at INTEGER NOT NULL CHECK (created_at >= 0),
           dispatched_at INTEGER,
-          completed_at INTEGER
+          completed_at INTEGER,
+          invocation_json TEXT,
+          recovery_outcome TEXT CHECK(recovery_outcome IS NULL OR recovery_outcome='abandoned_unconfirmed')
         );
         CREATE INDEX api_reservations_day ON api_reservations(day_utc);
         INSERT INTO api_accounting_meta (id, schema_version) VALUES (1, ${SCHEMA_VERSION});
@@ -251,6 +259,21 @@ function initializeDatabase(database: DatabaseSync): void {
       fail('API_ACCOUNTING_CORRUPT');
     }
     validateColumns(database, 'api_accounting_meta', ['id', 'schema_version']);
+    const storedVersion = database.prepare('SELECT schema_version FROM api_accounting_meta WHERE id = 1').get() as SqlRow | undefined;
+    if (storedVersion?.schema_version === 1 || storedVersion?.schema_version === 2) {
+      transaction(database, () => {
+        const currentVersion=database.prepare('SELECT schema_version FROM api_accounting_meta WHERE id = 1').get() as SqlRow | undefined;
+        if (currentVersion?.schema_version === SCHEMA_VERSION) return;
+        if (currentVersion?.schema_version !== 1 && currentVersion?.schema_version !== 2) fail('API_ACCOUNTING_CORRUPT');
+        validateColumns(database, 'api_reservations', RESERVATION_COLUMNS.filter(column => column !== 'recovery_outcome' && (currentVersion.schema_version!==1||column!=='invocation_json')));
+        if(currentVersion.schema_version===1)database.exec('ALTER TABLE api_reservations ADD COLUMN invocation_json TEXT');
+        database.exec(`ALTER TABLE api_reservations ADD COLUMN recovery_outcome TEXT CHECK(recovery_outcome IS NULL OR recovery_outcome='abandoned_unconfirmed');
+          ALTER TABLE api_accounting_meta RENAME TO api_accounting_meta_old;
+          CREATE TABLE api_accounting_meta (id INTEGER PRIMARY KEY CHECK(id=1), schema_version INTEGER NOT NULL CHECK(schema_version=3));
+          INSERT INTO api_accounting_meta VALUES(1,3);
+          DROP TABLE api_accounting_meta_old;`);
+      });
+    }
     validateColumns(database, 'api_reservations', RESERVATION_COLUMNS);
     const meta = database.prepare('SELECT id, schema_version FROM api_accounting_meta').all() as SqlRow[];
     if (meta.length !== 1 || meta[0]?.id !== 1 || meta[0]?.schema_version !== SCHEMA_VERSION) fail('API_ACCOUNTING_CORRUPT');
@@ -281,6 +304,8 @@ function validateStoredRows(database: DatabaseSync): void {
     if (row.dispatched_at !== null && !isTimestamp(row.dispatched_at)) fail('API_ACCOUNTING_CORRUPT');
     if (row.completed_at !== null && !isTimestamp(row.completed_at)) fail('API_ACCOUNTING_CORRUPT');
     parseStoredPrices(row.prices_json);
+    readInvocation(row);
+    if(row.recovery_outcome!==null&&(row.recovery_outcome!=='abandoned_unconfirmed'||row.state!=='unknown'))fail('API_ACCOUNTING_CORRUPT');
     const state = row.state as ApiReservationState;
     const usageState = row.usage_state as ApiUsageState;
     if ((state === 'pending' && usageState !== 'pending') || (state === 'dispatched' && usageState !== 'pending') ||
@@ -347,10 +372,22 @@ function storedRow(row: SqlRow): ApiAccountingRow {
     createdAt: Number(row.created_at),
     dispatchedAt: row.dispatched_at === null ? null : Number(row.dispatched_at),
     completedAt: row.completed_at === null ? null : Number(row.completed_at),
+    ...(row.invocation_json == null ? {} : {invocation: readInvocation(row)!}),
+    ...(row.recovery_outcome==='abandoned_unconfirmed'?{recoveryOutcome:'abandoned_unconfirmed' as const}:{}),
   };
 }
 
-export function createApiAccounting(path: string, clock: ApiAccountingClock): ApiAccounting {
+function readInvocation(row: SqlRow): InvocationRecord | undefined {
+  if (row.invocation_json == null) return undefined;
+  try {
+    const value = copyInvocationRecord(JSON.parse(String(row.invocation_json)));
+    if (value.admissionId !== row.id || value.providerKind !== 'api' ||
+        value.pid !== undefined || value.creationIdentity !== undefined) fail('API_INVOCATION_INVALID');
+    return value;
+  } catch { return fail('API_INVOCATION_INVALID'); }
+}
+
+export function createApiAccounting(path: string, clock: ApiAccountingClock, monotonicClock=()=>performance.now()): ApiAccounting {
   const database = (() => {
     let candidate: DatabaseSync | undefined;
     try {
@@ -368,6 +405,55 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
   let accepting = true;
   let closed = false;
   let closing: Promise<void> | undefined;
+  let recoveryFailed=false;
+  let recoveryTimer:ReturnType<typeof setTimeout>|undefined;
+  const acquiredAt=nowMs(clock), acquiredMonotonic=monotonicClock();
+  const recovered=new Set((database.prepare("SELECT id FROM api_reservations WHERE state IN ('pending','dispatched')").all() as SqlRow[]).map(row=>String(row.id)));
+
+  function reconcileRecovered():void {
+    const at=nowMs(clock);
+    const done=transaction(database,()=>{
+      const completed:string[]=[];
+      for(const id of recovered) {
+        const row=database.prepare('SELECT * FROM api_reservations WHERE id = ?').get(id) as SqlRow|undefined;
+        if(!row||!['pending','dispatched'].includes(String(row.state))){completed.push(id);continue;}
+        const createdAt=Number(row.created_at);
+        const eligible=createdAt>acquiredAt||at<acquiredAt ? monotonicClock()-acquiredMonotonic>=300_000 : at-createdAt>=300_000;
+        if(!eligible)continue;
+        const invocation=readInvocation(row);
+        database.prepare("UPDATE api_reservations SET state='unknown',usage_state='unknown',recovery_outcome='abandoned_unconfirmed',completed_at=?,invocation_json=? WHERE id=? AND state IN ('pending','dispatched')")
+          .run(Math.max(at,createdAt),invocation?JSON.stringify({...invocation,phase:'closed',cleanupOutcome:'unconfirmed',recoveryOutcome:'abandoned_unconfirmed',recoveredAt:at}):null,id);
+        completed.push(id);
+      }
+      return completed;
+    });
+    done.forEach(id=>recovered.delete(id));
+  }
+  function scheduleRecovery():void {
+    if(!accepting||recovered.size===0||recoveryTimer!==undefined)return;
+    recoveryTimer=setTimeout(()=>{
+      recoveryTimer=undefined;
+      void enqueue(()=>reconcileRecovered()).catch(()=>{if(accepting)recoveryFailed=true;}).finally(scheduleRecovery);
+    },30_000);
+    recoveryTimer.unref?.();
+  }
+
+  // Retry claims are the pending invocation rows themselves, inserted atomically
+  // with ownership. Failure/backoff is derived from durable, never-reset history.
+  function conversationAdmission(profileId:string,key:string,at:number,accountScope?:string):{allowed:boolean;retry:boolean} {
+    const rows=database.prepare("SELECT * FROM api_reservations WHERE profile_id=? AND invocation_json IS NOT NULL AND json_extract(invocation_json,'$.conversationKey')=? AND json_extract(invocation_json,'$.accountScope') IS ? ORDER BY rowid").all(profileId,key,accountScope??null) as SqlRow[];
+    let failures=0,nextEligible=0,retry=false;
+    for(const row of rows) {
+      if(row.state==='pending'||row.state==='dispatched')return {allowed:false,retry:true};
+      if(row.state==='settled'){failures=0;nextEligible=0;retry=false;continue;}
+      if(row.state!=='unknown')continue;
+      const invocation=readInvocation(row)!;
+      retry=true;
+      if(invocation.recoveryOutcome!=='abandoned_unconfirmed'||invocation.retryAttempt===true)failures=Math.min(5,failures+1);
+      nextEligible=failures===0?0:(invocation.recoveredAt??Number(row.completed_at))+[60_000,120_000,300_000,600_000,1_800_000][failures-1]!;
+    }
+    return {allowed:at>=nextEligible,retry};
+  }
 
   function enqueue<T>(operation: () => T): Promise<T> {
     if (!accepting) return Promise.reject(new Error(closed ? 'API_ACCOUNTING_CLOSED' : 'API_ACCOUNTING_CLOSING'));
@@ -407,8 +493,10 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
   }
 
   const accounting: ApiAccounting = {
-    reserve(binding, limits) {
+    reserve(binding, limits, ownership) {
       return enqueue(() => {
+        if(recoveryFailed)fail('API_ACCOUNTING_RECOVERY_FAILED');
+        reconcileRecovered();
         validateBinding(binding);
         const checkedLimits = validateLimits(limits);
         const createdAt = nowMs(clock);
@@ -416,6 +504,14 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
         const reservedTokens = checkedLimits.maxInputTokens + checkedLimits.maxOutputTokens;
         if (!Number.isSafeInteger(reservedTokens)) fail('API_INVALID_LIMITS');
         return transaction(database, () => {
+          const id=randomUUID();
+          let invocation=ownership===undefined?undefined:copyInvocationRecord({...ownership,admissionId:id});
+          if(invocation) {
+            if(invocation.providerKind!=='api'||invocation.phase!=='prepared'||invocation.pid!==undefined||invocation.creationIdentity!==undefined||invocation.recoveryOutcome!==undefined)fail('API_INVOCATION_INVALID');
+            const admission=conversationAdmission(binding.profileId,invocation.conversationKey,createdAt,invocation.accountScope);
+            if(!admission.allowed)return null;
+            invocation={...invocation,retryAttempt:admission.retry};
+          }
           const oldUnpricedCost = Number((database.prepare("SELECT COUNT(*) AS count FROM api_reservations WHERE day_utc = ? AND cost_state <> 'enforced'").get(day) as SqlRow).count) > 0;
           const prices = checkedLimits.prices;
           const pricingComplete = prices !== undefined && prices.cachedInputMicrousdPerMillion !== undefined;
@@ -449,7 +545,6 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
             `).get(day) as SqlRow).total);
             if (!Number.isSafeInteger(usedCost) || reservedMicrousd === null || usedCost > checkedLimits.dailyMicrousdCap - reservedMicrousd) return null;
           }
-          const id = randomUUID();
           database.prepare(`
             INSERT INTO api_reservations (
               id, profile_id, generation, day_utc, state, usage_state,
@@ -459,9 +554,32 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
             ) VALUES (?, ?, ?, ?, 'pending', 'pending', ?, ?, NULL, NULL, NULL, ?, NULL, ?, ?, ?, NULL, NULL)
           `).run(id, binding.profileId, binding.generation, day, checkedLimits.maxInputTokens, checkedLimits.maxOutputTokens,
             reservedMicrousd, costState, prices ? JSON.stringify(prices) : null, createdAt);
-          return {id, profileId: binding.profileId, generation: binding.generation};
+          if(invocation)database.prepare('UPDATE api_reservations SET invocation_json=? WHERE id=?').run(JSON.stringify(invocation),id);
+          return {id, profileId: binding.profileId, generation: binding.generation,...(invocation?{ownershipBound:true}:{})};
         });
       });
+    },
+
+    bindInvocation(id, record) {
+      const copied = copyInvocationRecord(record);
+      return enqueue(() => transaction(database, () => {
+        const row = database.prepare('SELECT * FROM api_reservations WHERE id = ?').get(id) as SqlRow | undefined;
+        if (!row || row.state !== 'pending' || row.invocation_json !== null || copied.phase !== 'prepared') fail('API_INVOCATION_INVALID');
+        readInvocation({...row, invocation_json: JSON.stringify(copied)});
+        database.prepare('UPDATE api_reservations SET invocation_json = ? WHERE id = ?').run(JSON.stringify(copied), id);
+      }));
+    },
+
+    updateInvocation(id, patch) {
+      const copied = copyInvocationPatch(patch);
+      return enqueue(() => transaction(database, () => {
+        const row = database.prepare('SELECT * FROM api_reservations WHERE id = ?').get(id) as SqlRow | undefined;
+        if (!row || !['pending', 'dispatched'].includes(String(row.state))) fail('API_INVOCATION_INVALID');
+        const current = readInvocation(row);
+        if (!current || current.phase === 'closed' || copied.pid !== undefined || copied.creationIdentity !== undefined ||
+            copied.deadline !== undefined || copied.phase !== 'closed' || !['confirmed', 'unconfirmed', 'failed'].includes(copied.cleanupOutcome ?? '')) fail('API_INVOCATION_INVALID');
+        database.prepare('UPDATE api_reservations SET invocation_json = ? WHERE id = ?').run(JSON.stringify({...current, ...copied}), id);
+      }));
     },
 
     markDispatch(id) {
@@ -469,10 +587,15 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
         if (!text(id)) fail('API_INVALID_RESERVATION_ID');
         const dispatchedAt = nowMs(clock);
         transaction(database, () => {
-          const row = database.prepare('SELECT state FROM api_reservations WHERE id = ?').get(id) as SqlRow | undefined;
+          const row = database.prepare('SELECT * FROM api_reservations WHERE id = ?').get(id) as SqlRow | undefined;
           if (!row) fail('API_RESERVATION_NOT_FOUND');
           if (row.state === 'dispatched') return;
           if (row.state !== 'pending') fail('API_RESERVATION_NOT_PENDING');
+          const invocation = readInvocation(row);
+          if (invocation) {
+            if (invocation.phase !== 'prepared') fail('API_INVOCATION_INVALID');
+            database.prepare('UPDATE api_reservations SET invocation_json = ? WHERE id = ?').run(JSON.stringify({...invocation, phase: 'dispatching'}), id);
+          }
           database.prepare("UPDATE api_reservations SET state = 'dispatched', dispatched_at = ? WHERE id = ? AND state = 'pending'").run(dispatchedAt, id);
         });
       });
@@ -520,6 +643,7 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
     close() {
       if (closing) return closing;
       accepting = false;
+      clearTimeout(recoveryTimer);
       closing = queue.then(() => {
         closed = true;
         database.close();
@@ -527,5 +651,6 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock): Ap
       return closing;
     },
   };
+  try {reconcileRecovered();scheduleRecovery();}catch(error){database.close();throw error;}
   return accounting;
 }

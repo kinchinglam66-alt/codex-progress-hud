@@ -1,4 +1,8 @@
 import { expect, it, vi } from 'vitest';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createApiAccounting} from '../../src/estimation/observer-api-accounting.js';
 import { createObserverApiProvider } from '../../src/estimation/observer-api-provider.js';
 import type { ApiConfig } from '../../src/desktop/observer-provider-config.js';
 import type { ObserverInput } from '../../src/estimation/observer-contract.js';
@@ -16,6 +20,44 @@ const interpretation = {
   relation: 'continue', status: 'running', summary: 'Finish the report',
   estimate: {remainingSeconds: 600, errorPercent: 30},
 };
+
+it.each([false, true])('records durable HTTP dispatch and local cleanup (cancelled=%s)', async cancelled => {
+  const directory = await mkdtemp(join(tmpdir(), 'hud-api-ownership-'));
+  const accounting = createApiAccounting(join(directory, 'ledger.sqlite'), () => 1_000_000);
+  const controller = new AbortController();
+  let atDispatch: unknown;
+  const provider = createObserverApiProvider({config, generation: 3, readKey: async () => 'fixture',
+    accounting, instructions: 'fixture', schema: {}, retry: false, now: () => 1_000_000,
+    transport: async () => {
+      atDispatch = accounting.snapshot().rows[0]?.invocation;
+      if (cancelled) {controller.abort(); throw Error('local request cancelled');}
+      return responseFixture();
+    }});
+  try {
+    const result = await provider.observe(input, controller.signal, 'conversation-key');
+    expect(atDispatch).toMatchObject({conversationKey: 'conversation-key', turnGeneration: 3,
+      providerKind: 'api', phase: 'dispatching', deadline: 1_060_000, cleanupOutcome: 'pending',retryAttempt:false});
+    expect(accounting.snapshot().rows[0]?.invocation).toMatchObject({phase: 'closed', cleanupOutcome: 'confirmed'});
+    expect(accounting.snapshot().rows[0]?.usageState).toBe(cancelled ? 'unknown' : 'known');
+    expect(result.status).toBe(cancelled ? 'aborted' : 'interpreted');
+    expect(accounting.snapshot().unresolved).toBe(0);
+  } finally {await provider.close(); await accounting.close(); await rm(directory, {recursive: true, force: true});}
+});
+
+it('accounts a late HTTP response but suppresses its forecast after cancellation', async () => {
+  const controller = new AbortController();
+  const accounting = {reserve: async () => ({id: 'late-http', profileId: config.profileId, generation: 3}),
+    markDispatch: async () => undefined, settle: vi.fn(async () => undefined), cancelBeforeDispatch: async () => undefined};
+  const provider = createObserverApiProvider({config, generation: 3, readKey: async () => 'fixture',
+    accounting, instructions: 'fixture', schema: {}, retry: false,
+    transport: async () => {controller.abort(); return responseFixture();}});
+  const result = await provider.observe(input, controller.signal, 'conversation-key');
+  expect(result.status).toBe('aborted');
+  expect(result.interpretation).toBeNull();
+  expect(result.usage).toMatchObject({inputTokens: 12, outputTokens: 8});
+  expect(accounting.settle).toHaveBeenCalledTimes(1);
+  await provider.close();
+});
 
 function responseFixture(usage: unknown = {
   input_tokens: 12, output_tokens: 8,
