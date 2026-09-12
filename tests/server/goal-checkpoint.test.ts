@@ -1,0 +1,203 @@
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  createGoalCheckpointRepository,
+  type GoalCheckpointRecord
+} from "../../src/server/goal-checkpoint.js";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const directories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+});
+
+async function makeDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "goal-checkpoint-test-"));
+  directories.push(directory);
+  return directory;
+}
+
+function record(index = 1, savedAtMs = 1_700_000_000_000): GoalCheckpointRecord {
+  return {
+    sessionKey: `session-${index}`,
+    turnKey: `turn-${index}`,
+    generation: index,
+    estimateRevision: index + 1,
+    savedAtMs,
+    activeSeconds: 1200,
+    runtime: "running",
+    status: "running",
+    prediction: {
+      remainingSeconds: 800,
+      errorPercent: 30,
+      observedActiveSeconds: 1000
+    },
+    progressFloor: 42,
+    timingUncertain: true
+  };
+}
+
+function repository(directory: string, sourceIdentity = "source-a", now = 1_700_000_000_000) {
+  return createGoalCheckpointRepository({
+    directory,
+    sourceIdentity,
+    isOwner: async () => true,
+    now: () => now
+  });
+}
+
+async function checkpointPath(directory: string): Promise<string> {
+  return join(directory, "goal-checkpoint.json");
+}
+
+describe("goal checkpoint repository", () => {
+  it("round-trips strict value-only records and keeps prediction anchors", async () => {
+    const directory = await makeDirectory();
+    const source = repository(directory);
+
+    await source.save([record()]);
+
+    await expect(source.load()).resolves.toEqual([record()]);
+    const persisted = await readFile(await checkpointPath(directory), "utf8");
+    expect(JSON.parse(persisted)).toEqual({
+      schemaVersion: 1,
+      sourceIdentity: "source-a",
+      records: [record()]
+    });
+    expect(persisted).not.toContain(directory);
+    expect(persisted).not.toMatch(/summary|prompt|credential|password/i);
+  });
+
+  it("returns no records for a different opaque source identity", async () => {
+    const directory = await makeDirectory();
+    await repository(directory, "source-a").save([record()]);
+
+    await expect(repository(directory, "source-b").load()).resolves.toEqual([]);
+  });
+
+  it("rejects unknown fields and numeric values outside the checkpoint contract", async () => {
+    const directory = await makeDirectory();
+    const source = repository(directory);
+
+    await expect(source.save([{ ...record(), extra: "not allowed" } as GoalCheckpointRecord])).rejects.toThrow();
+    await expect(source.save([{ ...record(), activeSeconds: Number.NaN }])).rejects.toThrow();
+    await expect(source.save([{ ...record(), progressFloor: 100 }])).rejects.toThrow();
+    await expect(source.save([{
+      ...record(),
+      prediction: { ...record().prediction!, observedActiveSeconds: 1201 }
+    }])).rejects.toThrow();
+    await expect(source.save([{ ...record(), status: "completed" } as unknown as GoalCheckpointRecord])).rejects.toThrow();
+    await expect(source.save([{ ...record(), sessionKey: record().sessionKey, turnKey: record().turnKey }])).resolves.toBeUndefined();
+  });
+
+  it("rejects duplicate session-turn pairs and terminal-looking records", async () => {
+    const directory = await makeDirectory();
+    const source = repository(directory);
+    const first = record(1);
+
+    await expect(source.save([first, { ...first, generation: 2 }])).rejects.toThrow();
+    await expect(source.save([{ ...first, status: "unknown" }])).resolves.toBeUndefined();
+    await expect(source.save([{ ...first, runtime: "completed" } as unknown as GoalCheckpointRecord])).rejects.toThrow();
+  });
+
+  it("filters records older than seven days and rejects future timestamps", async () => {
+    const directory = await makeDirectory();
+    const path = await checkpointPath(directory);
+    const source = repository(directory);
+    await source.save([
+      record(1, 1_700_000_000_000 - 7 * DAY_MS),
+      record(2, 1_700_000_000_000 - 7 * DAY_MS - 1),
+      record(3, 1_700_000_000_000)
+    ]);
+
+    await expect(source.load()).resolves.toEqual([record(3), record(1, 1_700_000_000_000 - 7 * DAY_MS)]);
+    const future = JSON.parse(await readFile(path, "utf8")) as { records: GoalCheckpointRecord[] };
+    future.records[0] = { ...future.records[0]!, savedAtMs: 1_700_000_000_001 };
+    await writeFile(path, JSON.stringify({ schemaVersion: 1, sourceIdentity: "source-a", records: future.records }));
+    await expect(source.load()).rejects.toThrow(/future|timestamp|checkpoint/i);
+  });
+
+  it("retains only the newest 256 records in newest-first order", async () => {
+    const directory = await makeDirectory();
+    const source = repository(directory, "source-a", 1_700_000_000_300);
+    const records = Array.from({ length: 260 }, (_, index) => record(index, 1_700_000_000_000 + index));
+
+    await source.save(records);
+
+    await expect(source.load()).resolves.toEqual(records.slice(-256).reverse());
+  });
+
+  it("rejects oversized and unsupported checkpoint documents before parsing them", async () => {
+    const directory = await makeDirectory();
+    const path = await checkpointPath(directory);
+    const source = repository(directory);
+
+    await writeFile(path, "x".repeat(1024 * 1024 + 1));
+    await expect(source.load()).rejects.toThrow(/checkpoint|size|large|invalid/i);
+    await writeFile(path, JSON.stringify({ schemaVersion: 2, sourceIdentity: "source-a", records: [] }));
+    await expect(source.load()).rejects.toThrow(/schema|checkpoint|invalid/i);
+  });
+
+  it("refuses linked checkpoint targets", async () => {
+    const directory = await makeDirectory();
+    const realPath = join(directory, "real.json");
+    const path = await checkpointPath(directory);
+    await writeFile(realPath, "{}", "utf8");
+    try {
+      await symlink(realPath, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM" || (error as NodeJS.ErrnoException).code === "EACCES") return;
+      throw error;
+    }
+
+    await expect(repository(directory).load()).rejects.toThrow(/regular|link|trusted|checkpoint/i);
+    await expect(repository(directory).save([record()])).rejects.toThrow(/regular|link|trusted|checkpoint/i);
+  });
+
+  it("refuses a save after ownership is lost and preserves the prior file", async () => {
+    const directory = await makeDirectory();
+    let owner = true;
+    const source = createGoalCheckpointRepository({
+      directory,
+      sourceIdentity: "source-a",
+      isOwner: async () => owner,
+      now: () => 1_700_000_000_000
+    });
+    await source.save([record(1)]);
+    owner = false;
+
+    await expect(source.save([record(2)])).rejects.toThrow(/owner|ownership/i);
+    await expect(source.load()).resolves.toEqual([record(1)]);
+  });
+
+  it("snapshots input and serializes writes in invocation order", async () => {
+    const directory = await makeDirectory();
+    let releaseOwner: (() => void) | undefined;
+    const ownerGate = new Promise<void>(resolve => { releaseOwner = resolve; });
+    let firstOwnerCheck = true;
+    const source = createGoalCheckpointRepository({
+      directory,
+      sourceIdentity: "source-a",
+      isOwner: async () => {
+        if (firstOwnerCheck) {
+          firstOwnerCheck = false;
+          await ownerGate;
+        }
+        return true;
+      },
+      now: () => 1_700_000_000_000
+    });
+    const first = [record(1)];
+    const second = [record(2)];
+    const firstSave = source.save(first);
+    first[0] = record(3);
+    const secondSave = source.save(second);
+    releaseOwner!();
+
+    await Promise.all([firstSave, secondSave]);
+    await expect(source.load()).resolves.toEqual([record(2)]);
+  });
+});
