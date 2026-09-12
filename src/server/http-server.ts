@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z, ZodError } from "zod";
 import { readWindowDiagnostics } from "../diagnostics/window-state.js";
 import { type ProgressEnvelope } from "../core/schema.js";
@@ -31,6 +31,7 @@ import { ObserverScheduler, type ObserverWorker, type ObserverWorkerSource, type
 import {ScopedSnapshots} from './scoped-snapshots.js';
 import {createLocalSessionReader} from '../observer/local-session-reader.js';
 import {createConversationSource} from '../observer/conversation-source.js';
+import {createGoalCheckpointRepository,type GoalCheckpointRepository} from './goal-checkpoint.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
@@ -96,6 +97,9 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   /** Private in-process owner shared with the observer, never exposed over HTTP. */
   passiveContexts?: PassiveContextStore;
   passiveGoals?: PassiveGoals;
+  goalCheckpointRepository?: GoalCheckpointRepository;
+  /** Exclusive companion instance AND generation proof, not renderer input. */
+  isGoalCheckpointOwner?: ()=>Promise<boolean>;
   /** Owned, authorized workers only. Omission leaves live observation unconfigured. */
   observerWorkers?: readonly ObserverWorker[];
   observerWorkerSource?: ObserverWorkerSource;
@@ -382,6 +386,35 @@ export function createProgressServer(options: ProgressServerOptions) {
   let server: Server | undefined;
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
+  let checkpointRepository=options.goalCheckpointRepository;
+  let checkpointReady=false;
+  let checkpointState:'disabled'|'loading'|'ready'|'degraded'='disabled';
+  let checkpointTimer:ReturnType<typeof setTimeout>|undefined;
+  let checkpointInterval:ReturnType<typeof setInterval>|undefined;
+  let checkpointTail:Promise<void>=Promise.resolve();
+  let checkpointError:'read_failed'|'write_failed'|undefined;
+  const checkpointStatus=(state:typeof checkpointState,error?:typeof checkpointError)=>{
+    const changed=checkpointState!==state||checkpointError!==error;
+    checkpointState=state;checkpointError=error;
+    if(changed&&!shuttingDown)store.refreshPresentation();
+  };
+  const saveCheckpoint=():Promise<void>=>{
+    if(!checkpointReady||!checkpointRepository)return checkpointTail;
+    let records:ReturnType<PassiveGoals['checkpoint']>;
+    try{records=passiveGoals.checkpoint(goalNow(),now());}
+    catch{checkpointStatus('degraded','write_failed');return checkpointTail;}
+    const repository=checkpointRepository;
+    checkpointTail=checkpointTail.then(()=>repository.save(records)).then(()=>{
+      checkpointStatus('ready');
+    },()=>{checkpointStatus('degraded','write_failed');});
+    return checkpointTail;
+  };
+  const scheduleCheckpoint=()=>{
+    if(shuttingDown||!checkpointReady||!checkpointRepository||checkpointTimer!==undefined)return;
+    checkpointTimer=setTimeout(()=>{checkpointTimer=undefined;void saveCheckpoint();},1000);
+    checkpointTimer.unref();
+  };
+  store.on('changed',scheduleCheckpoint);
   let graceTimer: unknown;
   let graceHandles = new Set<string>();
   const leaseSweepTimer = setInterval(() => leaseStore.sweep(), 1_000);
@@ -414,6 +447,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   function snapshotPayload(snapshot = store.snapshot()): HudSnapshot & { capabilities?: HudCapabilities } {
     return {
       ...snapshot,
+      ...(checkpointState==='disabled'?{}:{checkpoint:{state:checkpointState,...(checkpointError?{error:checkpointError}:{})}}),
       hooks: {
         activitySeen: lastHookEventAt !== undefined,
         ...(lastHookEventAt === undefined ? {} : { lastEventAt: lastHookEventAt })
@@ -1138,6 +1172,20 @@ export function createProgressServer(options: ProgressServerOptions) {
     async listen(): Promise<void> {
       await tokenPromise;
       if (server !== undefined) return;
+      if(!checkpointReady){
+        if(!checkpointRepository&&selectedSource&&options.isGoalCheckpointOwner){
+          const root=resolve(options.observerSessionsRoot!);
+          checkpointRepository=createGoalCheckpointRepository({directory:dirname(options.tokenPath),
+            sourceIdentity:createHmac('sha256',sourceToken!).update(process.platform==='win32'?root.toLowerCase():root).digest('hex'),
+            isOwner:options.isGoalCheckpointOwner,now});
+        }
+        if(checkpointRepository){
+          checkpointState='loading';
+          try{passiveGoals.restoreCheckpoint(await checkpointRepository.load());checkpointState='ready';}
+          catch{checkpointState='degraded';checkpointError='read_failed';}
+          checkpointReady=true;
+        }
+      }
       server = createServer((request, response) => void handle(request, response));
       await new Promise<void>((resolve, reject) => {
         server?.once("error", reject);
@@ -1146,6 +1194,10 @@ export function createProgressServer(options: ProgressServerOptions) {
       const bound = server.address();
       if (bound === null || typeof bound === "string") throw new Error("unexpected server address");
       currentAddress = { host, port: bound.port, url: `http://${host}:${bound.port}` };
+      if(checkpointRepository){
+        checkpointInterval=setInterval(()=>{void saveCheckpoint();},5000);
+        checkpointInterval.unref();
+      }
       if (passiveObserver) {
         if(selectedSource){
           sourceTimer=setInterval(()=>{try{selectedSource.tick();}catch{/* source errors do not authorize model retries */}},250);
@@ -1160,8 +1212,11 @@ export function createProgressServer(options: ProgressServerOptions) {
     },
     async close(): Promise<void> {
       shuttingDown = true;
+      clearTimeout(checkpointTimer);clearInterval(checkpointInterval);
+      store.off('changed',scheduleCheckpoint);
       clearInterval(observerTimer);
       clearInterval(sourceTimer);
+      await saveCheckpoint();
       passiveObserver?.disable();
       passiveContexts.clear();
       passiveGoals.clear();

@@ -567,6 +567,11 @@ export async function runDesktop(
           port: resolved.port,
           awaitInitialLease: launchReason.kind === "manager",
           tokenPath: resolved.tokenPath,
+          isGoalCheckpointOwner: async () => {
+            const [settings,runtime]=await Promise.all([resolved.stateStore.readSettings({timeoutMs:500}),resolved.stateStore.readRuntime({timeoutMs:500})]);
+            return settings.generation===launchSettings.generation&&settings.desiredState==='on'&&
+              runtime!==null&&runtime?.instanceNonce===runtimeIdentity?.instanceNonce&&runtime?.pid===runtimeIdentity?.pid;
+          },
           uiDirectory: resolved.uiDirectory,
           health,
           bootstrap: () => ({ protocolVersion: PROTOCOL_VERSION, generation: launchSettings.generation }),

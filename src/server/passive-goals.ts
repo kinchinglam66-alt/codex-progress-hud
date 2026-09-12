@@ -7,11 +7,14 @@ import type {PaceInterval, WorkBreakdown} from '../estimation/pace-correction.js
 import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
 import {createHash} from 'node:crypto';
 import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
+import type {GoalCheckpointRecord} from './goal-checkpoint.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
 export interface SourceTurnTakeover {turnKey:string;startedAtMs:number;identity:string;taskHandle?:string;previousTurnKey?:string}
 export interface PassiveGoalView {
+  progressFloor?: number;
+  recoveryState?: 'pending'|'restored';
   timingUncertain?: boolean;
   runtimeUncertain?: boolean;
   generation: number;
@@ -23,6 +26,9 @@ export interface PassiveGoalView {
   changeReason?:'routine'|'scope_change'|'failure'|'unknown';
 }
 interface Goal {
+  progressFloor?: number;
+  recoveryPending?: boolean;
+  recovered?: boolean;
   terminalHook?: boolean;
   sourceStopped?: boolean;
   executionIdentity?: string;
@@ -96,6 +102,7 @@ export interface PassiveGoalScheduling {
  */
 export class PassiveGoals {
   private readonly goals = new Map<string, Goal>();
+  private readonly recovery = new Map<string, GoalCheckpointRecord>();
   private readonly ended = new Set<string>();
   private tickets = new WeakMap<object, Ticket>();
   private rejectionReasons = new WeakMap<object, ResultRejectionReason>();
@@ -103,6 +110,73 @@ export class PassiveGoals {
   private settledPace = new WeakMap<object, SettledPace>();
   private readonly paceMeasurements = new PaceMeasurements();
   constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource) {}
+
+  /** Validated value records only; no restored object can authorize inference. */
+  restoreCheckpoint(records:readonly GoalCheckpointRecord[]):void {
+    if(this.goals.size!==0||this.recovery.size!==0)throw Error('CHECKPOINT_ALREADY_INITIALIZED');
+    for(const record of records.slice(0,256))this.recovery.set(record.sessionKey,structuredClone(record));
+  }
+
+  checkpoint(nowMs:number,wallNowMs:number):GoalCheckpointRecord[] {
+    if(!this.clock(nowMs)||!Number.isSafeInteger(wallNowMs)||wallNowMs<0)throw Error('CHECKPOINT_CLOCK_INVALID');
+    const records=new Map(this.recovery);
+    for(const [sessionKey,goal] of this.goals){
+      if(goal.recoveryPending)continue;
+      if(!this.clock(nowMs,goal))throw Error('CHECKPOINT_CLOCK_INVALID');
+      if(!['running','waiting','paused'].includes(goal.runtime)||goal.status==='completed'){
+        records.delete(sessionKey);continue;
+      }
+      this.progress(goal,nowMs);
+      records.set(sessionKey,{sessionKey,turnKey:goal.turnKey,generation:goal.generation,
+        estimateRevision:goal.estimateRevision,savedAtMs:wallNowMs,activeSeconds:this.active(goal,nowMs),
+        runtime:goal.runtime as GoalCheckpointRecord['runtime'],status:goal.status as GoalCheckpointRecord['status'],
+        prediction:goal.prediction?{...goal.prediction}:null,progressFloor:goal.progressFloor??0,
+        timingUncertain:goal.timingUncertain??false});
+    }
+    return [...records.values()].map(record=>structuredClone(record));
+  }
+
+  private progress(goal:Goal,nowMs:number):void {
+    if(goal.runtime!=='running'||!goal.prediction)return;
+    const active=this.active(goal,nowMs),prediction=goal.prediction;
+    if(active<prediction.observedActiveSeconds)return;
+    const remaining=Math.max(0,prediction.remainingSeconds-(active-prediction.observedActiveSeconds));
+    const percent=active+remaining>0?Math.min(99,Math.floor(active/(active+remaining)*100)):0;
+    goal.progressFloor=Math.max(goal.progressFloor??0,percent);
+  }
+
+  private beginRecovery(sessionKey:string,goal:Goal,nowMs:number):void {
+    const saved=this.recovery.get(sessionKey);
+    if(!saved)return;
+    if(saved.turnKey!==goal.turnKey){this.recovery.delete(sessionKey);return;}
+    goal.elapsed=saved.activeSeconds;goal.since=nowMs;goal.candidateBase=0;
+    goal.generation=saved.generation;goal.estimateRevision=saved.estimateRevision;
+    goal.prediction=saved.prediction?{...saved.prediction}:null;
+    goal.predictionIdentity=goal.prediction?{}:null;goal.progressFloor=saved.progressFloor;
+    goal.runtime='waiting';goal.status='unknown';goal.runtimeUncertain=true;goal.timingUncertain=true;
+    goal.recoveryPending=true;
+  }
+
+  private finishRecovery(sessionKey:string,goal:Goal,nowMs:number):boolean {
+    if(!goal.recoveryPending)return true;
+    const saved=this.recovery.get(sessionKey);
+    if(!saved||!this.source?.execution||this.source.health?.(sessionKey)!=='ready')return false;
+    let evidence:ReturnType<NonNullable<GoalContextSource['execution']>>;
+    try{evidence=this.source.execution(sessionKey,goal.turnKey);}catch{return false;}
+    if(!evidence||evidence.state==='unknown')return false;
+    if(goal.terminalHook&&!evidence.outcome)return false;
+    delete goal.recoveryPending;this.recovery.delete(sessionKey);goal.recovered=true;
+    goal.since=nowMs;goal.lastObservedAt=nowMs;delete goal.runtimeUncertain;
+    // Native terminal evidence supersedes even a saved manual pause.
+    goal.runtime=saved.runtime==='paused'&&!evidence.outcome?'paused':evidence.state;
+    goal.sourceStopped=evidence.state!=='running';
+    goal.status=evidence.outcome??(goal.runtime==='running'?'unknown':goal.runtime);
+    if(evidence.outcome)goal.terminalSince=nowMs;
+    goal.executionIdentity=evidence.identity;
+    const sourceEpoch=this.source.epoch(sessionKey);
+    if(sourceEpoch!==null)goal.sourceEpoch=sourceEpoch;
+    return true;
+  }
 
   contextHealth(key:string):'loading'|'ready'|'error'|'missing'|undefined {
     try{return this.source?.health?.(key);}catch{return 'error';}
@@ -180,6 +254,7 @@ export class PassiveGoals {
   }
   private transition(goal: Goal, runtime: Runtime, now: number): void {
     if (runtime === goal.runtime) return;
+    this.progress(goal,now);
     goal.elapsed = this.active(goal, now);
     goal.since = now;
     goal.runtime = runtime;
@@ -188,6 +263,7 @@ export class PassiveGoals {
   }
 
   private startTurn(goal:Goal,turnKey:string,nowMs:number):void {
+    delete goal.recoveryPending;delete goal.recovered;goal.progressFloor=0;
     delete goal.terminalHook;delete goal.sourceStopped;delete goal.executionIdentity;delete goal.runtimeUncertain;delete goal.terminalSince;
     goal.turnKey=turnKey;goal.elapsed=0;goal.since=nowMs;goal.candidateBase=0;
     goal.relationPending=true;goal.summary=null;delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;
@@ -201,6 +277,11 @@ export class PassiveGoals {
         this.ended.has(envelope.sessionKey) || envelope.receivedAt > nowMs) return;
     const hook = envelope.hook;
     if (!['UserPromptSubmit', 'PostToolUse', 'Stop', 'Interrupt'].includes(hook)) return;
+    if(goal?.recoveryPending&&goal.turnKey===envelope.turnKey){
+      if(hook==='Interrupt'){
+        this.recovery.delete(envelope.sessionKey);delete goal.recoveryPending;
+      }else{if(hook==='Stop')goal.terminalHook=true;goal.lastObservedAt=nowMs;return;}
+    }
     if (goal === undefined) {
       if (hook !== 'UserPromptSubmit' && hook !== 'PostToolUse') return;
       if (this.goals.size >= 32) {
@@ -218,11 +299,13 @@ export class PassiveGoals {
         runtime: 'running', status: 'unknown', prediction: null, identity: {}, predictionIdentity: null,
         measurementScope: {}, lastObservedAt: nowMs};
       this.goals.set(envelope.sessionKey, goal);
+      this.beginRecovery(envelope.sessionKey,goal,nowMs);
+      if(goal.recoveryPending)return;
     }
     if (goal.turnKey === envelope.turnKey && (goal.terminalHook||goal.sourceStopped) &&
         (hook === 'PostToolUse' || hook === 'UserPromptSubmit')) return;
     if (hook === 'UserPromptSubmit') {
-      if (goal.turnKey !== envelope.turnKey) this.startTurn(goal,envelope.turnKey,nowMs);
+      if (goal.turnKey !== envelope.turnKey) {this.recovery.delete(envelope.sessionKey);this.startTurn(goal,envelope.turnKey,nowMs);}
     } else if (goal.turnKey === envelope.turnKey) {
       if (hook === 'Stop' || hook === 'Interrupt') {goal.terminalHook = true;delete goal.runtimeUncertain;}
       if (hook === 'Interrupt') {
@@ -239,6 +322,17 @@ export class PassiveGoals {
   runtime(sessionKey: string, turnKey: string, state: Runtime, nowMs: number): void {
     const goal = this.goals.get(sessionKey);
     if (!goal || !this.clock(nowMs, goal) || goal.turnKey !== turnKey || goal.runtime === 'interrupted' || goal.runtime === 'failed') return;
+    if(goal.recoveryPending){
+      const saved=this.recovery.get(sessionKey);
+      if(saved&&(state==='paused'||state==='waiting'||state==='running')){
+        this.recovery.set(sessionKey,{...saved,runtime:state,status:state});
+        goal.runtime=state==='paused'?'paused':'waiting';goal.status=state==='paused'?'paused':'unknown';
+        goal.since=nowMs;goal.lastObservedAt=nowMs;goal.runtimeUncertain=true;
+        if(state==='running')delete goal.terminalHook;
+        return;
+      }
+      this.recovery.delete(sessionKey);delete goal.recoveryPending;
+    }
     if (state === 'running') {delete goal.terminalHook;delete goal.sourceStopped;}
     delete goal.runtimeUncertain;
     this.transition(goal, state, nowMs);
@@ -256,13 +350,18 @@ export class PassiveGoals {
     if(!goal||!this.clock(nowMs,goal)||!this.source?.execution)return null;
     // A read already in flight may finish after manual pause/stop. Never let
     // its takeover mutate source ownership or restart the active clock.
-    if(goal.runtime==='paused'||goal.runtime==='stopped')return null;
+    if(goal.runtime==='stopped')return null;
+    if(goal.runtime==='paused'&&!goal.recoveryPending){
+      if(!goal.recovered)return null;
+      try{if(!this.source.execution(sessionKey,goal.turnKey)?.outcome)return null;}catch{return null;}
+    }
     if(this.source.takeover){
       try{
         const takeover=this.source.takeover(sessionKey,goal.turnKey);
-        if(takeover){const previousTurnKey=goal.turnKey;this.startTurn(goal,takeover.turnKey,nowMs);return {...takeover,previousTurnKey};}
+        if(takeover){const previousTurnKey=goal.turnKey;this.recovery.delete(sessionKey);this.startTurn(goal,takeover.turnKey,nowMs);return {...takeover,previousTurnKey};}
       }catch{/* source evidence is advisory until a verified snapshot is available */}
     }
+    if(!this.finishRecovery(sessionKey,goal,nowMs))return null;
     // A terminal runtime remains authoritative for the old turn; only the
     // verified takeover above may establish a new running turn after it.
     if(goal.runtime==='interrupted'||goal.runtime==='failed')return null;
@@ -307,7 +406,7 @@ export class PassiveGoals {
 
   request(sessionKey: string, nowMs: number): {ticket: object; input: ObserverInput}|null {
     const goal = this.goals.get(sessionKey);
-    if (!goal || !this.clock(nowMs, goal) || goal.pending || goal.runtime === 'interrupted' || goal.runtime === 'failed' || goal.runtime === 'stopped' ||
+    if (!goal || goal.recoveryPending || !this.clock(nowMs, goal) || goal.pending || goal.runtime === 'interrupted' || goal.runtime === 'failed' || goal.runtime === 'stopped' ||
         goal.status === 'completed') return null;
     const selected=this.source?this.sourceContext(sessionKey,goal,nowMs):null;
     if(this.source&&!selected)return null;
@@ -332,6 +431,7 @@ export class PassiveGoals {
   scheduling(sessionKey: string, nowMs: number): PassiveGoalScheduling|null {
     let view = this.view(sessionKey, nowMs);const goal = this.goals.get(sessionKey);
     if (!view || !goal) return null;
+    if(goal.recoveryPending)return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,sourceAvailable:false,ready:false,finalAvailable:false};
     if(this.source){
       const selected=this.sourceContext(sessionKey,goal,nowMs,true);
       view=this.view(sessionKey,nowMs)!;
@@ -392,6 +492,7 @@ export class PassiveGoals {
     const parsed = observerResponseSchema.safeParse(response);
     if (!parsed.success) return this.reject(ticket,'schema_invalid');
     const result = parsed.data;
+    this.progress(goal,nowMs);
     if(aged){
       // A same-instruction numeric snapshot can age without becoming a new goal.
       // Do not apply its relation, summary, semantic state or summary watermark.
@@ -411,7 +512,7 @@ export class PassiveGoals {
       // An inconclusive refresh is not evidence that the established goal
       // changed. New user turns remain fenced by relationPending and must not
       // inherit an unrelated countdown.
-      if(goal.relationPending){goal.prediction=null;goal.predictionIdentity=null;}
+      if(goal.relationPending&&!goal.recovered){goal.prediction=null;goal.predictionIdentity=null;}
       goal.lastObservedAt = nowMs;
       this.settledAnchors.set(ticket,captured.activeSeconds);
       this.acceptSettledPace(ticket,captured,goal);
@@ -430,7 +531,7 @@ export class PassiveGoals {
       return this.reject(ticket,reason);
     }
     let anchor = captured.activeSeconds;
-    if (result.relation === 'replace' || bootstrap) {
+    if ((result.relation === 'replace' || bootstrap)&&!goal.recovered) {
       const base = goal.candidateBase;
       goal.elapsed = this.active(goal, nowMs) - base;
       goal.since = nowMs;
@@ -451,7 +552,7 @@ export class PassiveGoals {
     // A refresh without a replacement estimate does not invalidate the same
     // goal's existing countdown or reset its active-time anchor.
     const retainPrediction = result.estimate === null && result.relation === 'continue' &&
-      !bootstrap && result.status !== 'completed';
+      (!bootstrap||goal.recovered) && result.status !== 'completed';
     if (!retainPrediction) {
       goal.prediction = result.estimate === null ? null : {...result.estimate, observedActiveSeconds: anchor};
       goal.changeReason=result.estimate===null?undefined:result.work?.changeReason;
@@ -502,12 +603,16 @@ export class PassiveGoals {
   view(sessionKey: string, nowMs: number): PassiveGoalView|null {
     const goal = this.goals.get(sessionKey);
     if (!goal || !this.clock(nowMs, goal)) return null;
+    this.progress(goal,nowMs);
     return {generation: goal.generation, estimateRevision: goal.estimateRevision, status: goal.status, runtime: goal.runtime,
+      ...(goal.progressFloor===undefined?{}:{progressFloor:goal.progressFloor}),
+      ...(goal.recoveryPending?{recoveryState:'pending' as const}:goal.recovered?{recoveryState:'restored' as const}:{}),
       ...(goal.timingUncertain?{timingUncertain:true}:{}),...(goal.runtimeUncertain?{runtimeUncertain:true}:{}),
       activeSeconds: this.active(goal, nowMs), prediction: goal.prediction && {...goal.prediction},
       ...(goal.prediction&&goal.changeReason?{changeReason:goal.changeReason}:{})};
   }
   end(sessionKey: string): void {
+    this.recovery.delete(sessionKey);
     const goal=this.goals.get(sessionKey);if (!goal) return;
     this.paceMeasurements.clear(goal.measurementScope);
     this.goals.delete(sessionKey);
@@ -518,6 +623,7 @@ export class PassiveGoals {
   }
   activeTimeKnown(sessionKey:string):boolean {return this.goals.has(sessionKey)&&this.source===undefined;}
   clear(): void {
+    this.recovery.clear();
     for(const goal of this.goals.values())this.paceMeasurements.clear(goal.measurementScope);
     this.goals.clear(); this.ended.clear(); this.tickets = new WeakMap(); this.rejectionReasons = new WeakMap(); this.settledAnchors = new WeakMap(); this.settledPace = new WeakMap();
   }

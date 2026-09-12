@@ -66,6 +66,8 @@ export function createConversationViewProjector() {
       if(!peak || peak.generation!==goal.generation || peak.taskId!==view.taskId){
         peak={taskId:view.taskId,generation:goal.generation,percent:null};peaks.set(view.key,peak);
       }
+      if(Number.isFinite(goal.progressFloor)&&goal.progressFloor!>0&&goal.progressFloor!<=99)
+        peak.percent=Math.max(peak.percent??0,Math.floor(goal.progressFloor!));
       const running=goal.runtime==='running';
       const delta=running&&Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0;
       const active=goal.activeSeconds+delta;

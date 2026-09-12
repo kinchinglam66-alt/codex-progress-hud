@@ -16,6 +16,20 @@ import { EventEmitter } from "node:events";
 
 const cleanups: Array<() => Promise<void>> = [];
 
+it('binds checkpoint writes to the current companion nonce and generation',async()=>{
+  const harness=desktopHarness();await runDesktop(harness.dependencies);
+  const owns=harness.serverOptions?.isGoalCheckpointOwner;
+  expect(owns).toBeTypeOf('function');expect(await owns!()).toBe(false);
+  const identity=vi.mocked(harness.dependencies.stateStore.writeRuntime).mock.calls[0]![0];
+  vi.mocked(harness.dependencies.stateStore.readRuntime).mockResolvedValue(identity);
+  expect(await owns!()).toBe(true);
+  vi.mocked(harness.dependencies.stateStore.readRuntime).mockResolvedValue({...identity,instanceNonce:'other-instance'});
+  expect(await owns!()).toBe(false);
+  vi.mocked(harness.dependencies.stateStore.readRuntime).mockResolvedValue(identity);
+  vi.mocked(harness.dependencies.stateStore.readSettings).mockResolvedValue({desiredState:'on',startWithWindows:false,generation:2});
+  expect(await owns!()).toBe(false);
+});
+
 it('passes private observer slots and recording to the server without making them HTTP data',async()=>{
   const harness=desktopHarness();
   const worker={observe:vi.fn(),status:()=>({active:false,disabled:true,poisoned:false}),disable:vi.fn(),close:async()=>{}};

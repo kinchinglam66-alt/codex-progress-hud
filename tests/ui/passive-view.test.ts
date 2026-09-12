@@ -13,6 +13,11 @@ function row(patch: Partial<PassiveGoalView> = {}) {
   return store.conversationRows(0)[0]!;
 }
 
+it('seeds a recreated renderer with the server recovery progress floor',()=>{
+  const value=row({activeSeconds:100,progressFloor:70,prediction:{remainingSeconds:900,observedActiveSeconds:100,errorPercent:30}});
+  expect(createConversationViewProjector()([value])[0]?.progressPercent).toBe(70);
+});
+
 it('uses display-only countdown overrides without altering progress or uncertainty',()=>{
   const value=row({activeSeconds:100,prediction:{remainingSeconds:100,observedActiveSeconds:100,errorPercent:30}});
   const before=structuredClone(value),project=createConversationViewProjector();

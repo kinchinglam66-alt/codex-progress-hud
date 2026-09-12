@@ -22,6 +22,7 @@ export interface TaskSummary extends Partial<TurnMetadata> {
 }
 
 export interface HudAggregateSnapshot {
+  checkpoint?: {state:'loading'|'ready'|'degraded';error?:'read_failed'|'write_failed'};
   turnTracking?: { identityUnavailable: boolean; orderingUncertain: boolean; capacityReached: boolean };
   revision: number;
   selectedTaskId: string | null;

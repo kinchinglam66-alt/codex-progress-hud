@@ -142,6 +142,7 @@ const etaSchema = z.object({
   signals: z.array(z.enum(["plan", "model", "calibration"]))
 }).strict();
 const aggregateSnapshotSchema = z.object({
+  checkpoint:z.object({state:z.enum(['loading','ready','degraded']),error:z.enum(['read_failed','write_failed']).optional()}).strict().optional(),
   turnTracking: z.object({ identityUnavailable: z.boolean(), orderingUncertain: z.boolean(), capacityReached: z.boolean() }).strict().optional(),
   revision: z.number().int().nonnegative(),
   selectedTaskId: z.string().nullable(),
@@ -166,6 +167,8 @@ const aggregateSnapshotSchema = z.object({
       activeSeconds: z.number().nonnegative(),
       timingUncertain: z.boolean().optional(),
       runtimeUncertain: z.boolean().optional(),
+      progressFloor:z.number().finite().min(0).max(99).optional(),
+      recoveryState:z.enum(['pending','restored']).optional(),
       prediction: z.object({remainingSeconds: z.number().nonnegative().max(31536000),
         errorPercent: z.number().nonnegative().max(1000),
         observedActiveSeconds: z.number().nonnegative().max(31536000)}).strict().nullable()
