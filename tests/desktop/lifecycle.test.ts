@@ -16,6 +16,19 @@ import { EventEmitter } from "node:events";
 
 const cleanups: Array<() => Promise<void>> = [];
 
+it('keeps runtime ownership until the server has finished its checkpoint flush',async()=>{
+  const harness=desktopHarness();await runDesktop(harness.dependencies);
+  const closing=deferred<void>();
+  harness.progressServer.close.mockImplementation(async()=>closing.promise);
+  harness.listeners.get('before-quit')?.({preventDefault:vi.fn()});
+  try{
+    await vi.waitFor(()=>expect(harness.progressServer.close).toHaveBeenCalledOnce());
+    expect(harness.dependencies.stateStore.clearRuntime).not.toHaveBeenCalled();
+  }finally{closing.resolve();}
+  await vi.waitFor(()=>expect(harness.dependencies.app.quit).toHaveBeenCalledOnce());
+  expect(harness.dependencies.stateStore.clearRuntime).toHaveBeenCalledOnce();
+});
+
 it('binds checkpoint writes to the current companion nonce and generation',async()=>{
   const harness=desktopHarness();await runDesktop(harness.dependencies);
   const owns=harness.serverOptions?.isGoalCheckpointOwner;

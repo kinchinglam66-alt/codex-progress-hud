@@ -433,10 +433,9 @@ export async function runDesktop(
         ? [["server close", () => progressServer?.close()] as [string, () => void | Promise<void>]]
         : []),
       ["tray dispose", () => trayController?.dispose() ?? tray?.destroy()],
-      ["window dispose", () => windowController?.dispose()],
-      ["runtime clear", () => resolved.stateStore.clearRuntime(runtimeIdentity)]
+      ["window dispose", () => windowController?.dispose()]
     ];
-    const attempts = steps.map(async ([name, step]) => {
+    const attempt = async ([name, step]:[string, () => void | Promise<void>]):Promise<void> => {
       let operation: Promise<void>;
       try {
         operation = Promise.resolve(step());
@@ -451,8 +450,10 @@ export async function runDesktop(
         cleanupFailed = true;
         reportError(error, `desktop cleanup: ${name}`);
       }
-    });
-    await Promise.all(attempts);
+    };
+    await Promise.all(steps.map(attempt));
+    // Keep ownership valid for the final checkpoint; a stuck close is still bounded above.
+    await attempt(["runtime clear", () => resolved.stateStore.clearRuntime(runtimeIdentity)]);
     cleanupComplete = true;
     if (recordShutdown) {
       record({
