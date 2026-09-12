@@ -3,10 +3,13 @@ import {lstat, open, opendir, realpath, type FileHandle} from "node:fs/promises"
 import type {Dirent, Stats} from "node:fs";
 import {isAbsolute, relative, resolve} from "node:path";
 import type {ConversationRecord, ReadBatch, RuntimeOutcome, RuntimeState} from "./conversation-record.js";
+import {createHistorySnapshot, type HistoryGap, type HistorySnapshot, type HistorySnapshotPage} from "./history-snapshot.js";
 
 const PASS_BYTES = 4 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
 const MAX_TEXT_BYTES = 64 * 1024;
+const SNAPSHOT_PAGE_BYTES = 4 * 1024 * 1024;
+const SNAPSHOT_MAX_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 4_096;
 const MAX_DEDUPE_KEYS = 4_096;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-(?:4|7)[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -70,7 +73,27 @@ interface ParseContext {
   seenOrder: string[];
   activeTurnId: string | null;
   historyTruncated: boolean;
+  options: ParseOptions;
+  gaps: Set<HistoryGap>;
 }
+
+interface ParseOptions {
+  preserveText: boolean;
+  inferTurnId: boolean;
+  dedupeLimit: number | null;
+}
+
+const LEGACY_PARSE_OPTIONS: ParseOptions = {
+  preserveText: false,
+  inferTurnId: true,
+  dedupeLimit: MAX_DEDUPE_KEYS
+};
+
+const SNAPSHOT_PARSE_OPTIONS: ParseOptions = {
+  preserveText: true,
+  inferTurnId: false,
+  dedupeLimit: null
+};
 
 interface PassResult {
   records: ConversationRecord[];
@@ -85,6 +108,20 @@ interface PassResult {
   historyTruncated: boolean;
   caughtUp: boolean;
   partialLine: boolean;
+}
+
+interface SnapshotState {
+  path: string;
+  identity: FileIdentity;
+  watermark: number;
+  nextOffset: number;
+  validation: string;
+  prefixValidation: string;
+  activeTurnId: string | null;
+  seen: Set<string>;
+  seenOrder: string[];
+  gaps: Set<HistoryGap>;
+  closed: boolean;
 }
 
 interface Envelope {
@@ -167,13 +204,15 @@ function optionalString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function boundedText(value: string): string {
+function boundedText(value: string, preserve = false): string {
+  if (preserve) return value;
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength <= MAX_TEXT_BYTES) return value;
   return new TextDecoder("utf-8").decode(bytes.subarray(0, MAX_TEXT_BYTES));
 }
 
-function boundedTextWithCompleteness(value: string): {text: string; complete: boolean} {
+function boundedTextWithCompleteness(value: string, preserve = false): {text: string; complete: boolean} {
+  if (preserve) return {text: value, complete: true};
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength <= MAX_TEXT_BYTES) return {text: value, complete: true};
   return {
@@ -182,11 +221,11 @@ function boundedTextWithCompleteness(value: string): {text: string; complete: bo
   };
 }
 
-function dataTextWithCompleteness(value: unknown): {text: string; complete: boolean} | undefined {
-  if (typeof value === "string") return boundedTextWithCompleteness(value);
+function dataTextWithCompleteness(value: unknown, preserve = false): {text: string; complete: boolean} | undefined {
+  if (typeof value === "string") return boundedTextWithCompleteness(value, preserve);
   if (value !== null && typeof value === "object") {
     try {
-      return boundedTextWithCompleteness(JSON.stringify(value));
+      return boundedTextWithCompleteness(JSON.stringify(value), preserve);
     } catch {
       throw new LocalSessionSourceError("source_malformed");
     }
@@ -194,11 +233,11 @@ function dataTextWithCompleteness(value: unknown): {text: string; complete: bool
   return undefined;
 }
 
-function dataText(value: unknown): string | undefined {
-  if (typeof value === "string") return boundedText(value);
+function dataText(value: unknown, preserve = false): string | undefined {
+  if (typeof value === "string") return boundedText(value, preserve);
   if (value !== null && typeof value === "object") {
     try {
-      return boundedText(JSON.stringify(value));
+      return boundedText(JSON.stringify(value), preserve);
     } catch {
       throw new LocalSessionSourceError("source_malformed");
     }
@@ -219,7 +258,7 @@ function itemObject(value: unknown): Item {
   return item as unknown as Item;
 }
 
-function turnIdFrom(value: Record<string, unknown>, fallback: string | null): string | null {
+function turnIdFrom(value: Record<string, unknown>, fallback: string | null, inferFallback = true): string | null {
   const direct = stringValue(value.turn_id) ?? stringValue(value.turnId);
   if (direct !== undefined) return direct;
   for (const key of ["internal_chat_message_metadata_passthrough", "metadata"]) {
@@ -230,11 +269,11 @@ function turnIdFrom(value: Record<string, unknown>, fallback: string | null): st
       if (nestedTurn !== undefined) return nestedTurn;
     }
   }
-  return fallback;
+  return inferFallback ? fallback : null;
 }
 
-function messageText(value: unknown): string | undefined {
-  if (typeof value === "string") return boundedText(value);
+function messageText(value: unknown, options: ParseOptions, markUnsupported: () => void): string | undefined {
+  if (typeof value === "string") return boundedText(value, options.preserveText);
   if (!Array.isArray(value)) throw new LocalSessionSourceError("source_malformed");
   const parts: string[] = [];
   for (const part of value) {
@@ -250,9 +289,11 @@ function messageText(value: unknown): string | undefined {
     if (type === "input_text" || type === "output_text" || type === "text") {
       if (typeof content.text !== "string") throw new LocalSessionSourceError("source_malformed");
       parts.push(content.text);
+      continue;
     }
+    markUnsupported();
   }
-  return boundedText(parts.join(""));
+  return boundedText(parts.join(""), options.preserveText);
 }
 
 function sourceId(threadId: string, offset: number, stable: unknown): string {
@@ -270,7 +311,7 @@ function dedupeHash(value: string): string {
 function addRecord(context: ParseContext, record: ConversationRecord, dedupeKey: string): ConversationRecord[] {
   const hash = dedupeHash(dedupeKey);
   if (context.seen.has(hash)) return [];
-  if (context.seen.size >= MAX_DEDUPE_KEYS) {
+  if (context.options.dedupeLimit !== null && context.seen.size >= context.options.dedupeLimit) {
     const oldest = context.seenOrder.shift();
     if (oldest !== undefined) context.seen.delete(oldest);
     context.historyTruncated = true;
@@ -295,11 +336,11 @@ function normalizeMessage(
   if (content === undefined) throw new LocalSessionSourceError("source_malformed");
   const record: ConversationRecord = {
     id: sourceId(context.threadId, offset, value.id ?? value.message_id),
-    turnId: turnIdFrom(value, context.activeTurnId),
+    turnId: turnIdFrom(value, context.activeTurnId, context.options.inferTurnId),
     atMs,
     kind: role
   };
-  const text = messageText(content);
+  const text = messageText(content, context.options, () => context.gaps.add("unsupported_payload"));
   if (text !== undefined) record.text = text;
   if(role==='assistant'&&value.phase==='commentary')record.assistantPhase='commentary';
   if(role==='assistant'&&value.phase==='final_answer')record.assistantPhase='final';
@@ -316,14 +357,14 @@ function normalizeTool(
   const actionId = stringValue(value.call_id) ?? stringValue(value.callId) ?? stringValue(value.id);
   if (actionId === undefined) throw new LocalSessionSourceError("source_malformed");
   const textValue = result
-    ? dataText(value.output ?? value.aggregated_output)
-    : dataText(value.input ?? value.arguments);
+    ? dataText(value.output ?? value.aggregated_output, context.options.preserveText)
+    : dataText(value.input ?? value.arguments, context.options.preserveText);
   if (result && value.output === undefined && value.aggregated_output === undefined) {
     throw new LocalSessionSourceError("source_malformed");
   }
   const record: ConversationRecord = {
     id: recordId(context.threadId, offset, value.id, result ? "tool_result" : "tool_start"),
-    turnId: turnIdFrom(value, context.activeTurnId),
+    turnId: turnIdFrom(value, context.activeTurnId, context.options.inferTurnId),
     atMs,
     kind: result ? "tool_result" : "tool_start",
     actionId
@@ -338,7 +379,7 @@ function normalizeTool(
   }
   if (textValue !== undefined) record.text = textValue;
   if (result) {
-    const bounded = dataTextWithCompleteness(value.output ?? value.aggregated_output);
+    const bounded = dataTextWithCompleteness(value.output ?? value.aggregated_output, context.options.preserveText);
     if (bounded !== undefined) {
       record.output = bounded.text;
       record.outputComplete = bounded.complete;
@@ -362,7 +403,7 @@ function delegatedTaskText(
       context.activeTurnId === null || passthrough.turn_id !== context.activeTurnId) return undefined;
   const match = /^<codex_delegation>\r?\n  <source_thread_id>([^<>\r\n]+)<\/source_thread_id>\r?\n  <input>([\s\S]+)<\/input>\r?\n<\/codex_delegation>$/u.exec(value.output);
   if (match === null || !UUID.test(match[1]!) || /<\/?codex_delegation\b/iu.test(match[2]!)) return undefined;
-  return boundedText(match[2]!);
+  return boundedText(match[2]!, context.options.preserveText);
 }
 
 function normalizeHostDelegation(
@@ -400,7 +441,8 @@ function normalizeCommand(
   }
   const record: ConversationRecord = {
     id: recordId(context.threadId, offset, value.id, result ? "tool_result" : "tool_start"),
-    turnId: turnIdFrom(value as unknown as Record<string, unknown>, context.activeTurnId),
+    turnId: turnIdFrom(value as unknown as Record<string, unknown>, context.activeTurnId,
+      context.options.inferTurnId),
     atMs,
     kind: result ? "tool_result" : "tool_start",
     actionId
@@ -420,15 +462,15 @@ function normalizeCommand(
   if (result && typeof value.exit_code === "number" && Number.isFinite(value.exit_code)) {
     record.exitCode = value.exit_code;
   }
-  const textValue = dataText(rawText);
+  const textValue = dataText(rawText, context.options.preserveText);
   if (textValue !== undefined) record.text = textValue;
   if (result && rawText !== undefined) {
     if (typeof rawText === "string") {
-      const bounded = boundedTextWithCompleteness(rawText);
+      const bounded = boundedTextWithCompleteness(rawText, context.options.preserveText);
       record.output = bounded.text;
       record.outputComplete = bounded.complete;
     } else {
-      const bounded = dataTextWithCompleteness(rawText);
+      const bounded = dataTextWithCompleteness(rawText, context.options.preserveText);
       if (bounded !== undefined) {
         record.output = bounded.text;
         record.outputComplete = bounded.complete;
@@ -453,10 +495,14 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
       return normalizeHostDelegation(context, payload, atMs, context.offset,
         normalizeTool(context, payload, atMs, context.offset, true));
     }
+    if (itemType !== "reasoning") context.gaps.add("unsupported_payload");
     return [];
   }
 
-  if (envelope.type !== "event_msg") return [];
+  if (envelope.type !== "event_msg") {
+    context.gaps.add(envelope.type === "compacted" ? "upstream_truncated" : "unsupported_payload");
+    return [];
+  }
   const eventType = payload.type;
   if (eventType === "task_started") {
     const turnId = turnIdFrom(payload, null);
@@ -472,7 +518,7 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     return addRecord(context, record, `runtime:running:${turnId}`);
   }
   if (eventType === "task_complete" || eventType === "task_failed" || eventType === "turn_aborted") {
-    const turnId = turnIdFrom(payload, context.activeTurnId);
+    const turnId = turnIdFrom(payload, context.activeTurnId, context.options.inferTurnId);
     const runtime: RuntimeState = eventType === "task_complete"
       ? "waiting"
       : eventType === "task_failed" ? "failed" : "interrupted";
@@ -501,6 +547,7 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
   if (itemType === "CommandExecution" || itemType === "command_execution") {
     return normalizeCommand(context, item, atMs, context.offset, eventType === "item_completed");
   }
+  context.gaps.add("unsupported_payload");
   return [];
 }
 
@@ -611,6 +658,14 @@ async function cursorValidation(file: FileHandle, offset: number, signal: AbortS
   return createHash("sha256").update(buffer.subarray(0, read.bytesRead)).digest("hex");
 }
 
+async function prefixValidation(file: FileHandle, length: number, signal: AbortSignal): Promise<string> {
+  if (length === 0) return "";
+  checkCancelled(signal);
+  const buffer = Buffer.allocUnsafe(length);
+  const read = await file.read(buffer, 0, length, 0);
+  return createHash("sha256").update(buffer.subarray(0, read.bytesRead)).digest("hex");
+}
+
 async function runPass(
   file: FileHandle,
   cursor: Cursor,
@@ -678,7 +733,9 @@ async function runPass(
           seen,
           seenOrder,
           activeTurnId,
-          historyTruncated
+          historyTruncated,
+          options: LEGACY_PARSE_OPTIONS,
+          gaps: new Set()
         };
         records.push(...parseLine(context, bytes));
         activeTurnId = context.activeTurnId;
@@ -708,7 +765,9 @@ async function runPass(
         seen,
         seenOrder,
         activeTurnId,
-        historyTruncated
+        historyTruncated,
+        options: LEGACY_PARSE_OPTIONS,
+        gaps: new Set()
       };
       records.push(...parseLine(context, remaining.subarray(0, newline)));
       activeTurnId = context.activeTurnId;
@@ -753,8 +812,153 @@ async function runPass(
   };
 }
 
+async function readSnapshotPage(
+  state: SnapshotState,
+  threadId: string,
+  signal: AbortSignal
+): Promise<HistorySnapshotPage> {
+  if (state.closed) throw new LocalSessionSourceError("source_closed");
+  checkCancelled(signal);
+  if (state.nextOffset >= state.watermark) {
+    return {
+      records: [],
+      nextOffset: state.watermark,
+      done: true,
+      coverage: {complete: state.gaps.size === 0, gaps: [...state.gaps]}
+    };
+  }
+
+  let file: FileHandle | undefined;
+  const records: ConversationRecord[] = [];
+  const pageEnd = Math.min(state.watermark, state.nextOffset + SNAPSHOT_PAGE_BYTES);
+  let readPosition = state.nextOffset;
+  let pending = Buffer.alloc(0);
+  let pendingStart = state.nextOffset;
+  let skippingOversized = false;
+
+  const consumeLine = (bytes: Buffer, offset: number): void => {
+    try {
+      const context: ParseContext = {
+        threadId,
+        offset,
+        seen: state.seen,
+        seenOrder: state.seenOrder,
+        activeTurnId: state.activeTurnId,
+        historyTruncated: false,
+        options: SNAPSHOT_PARSE_OPTIONS,
+        gaps: state.gaps
+      };
+      const parsed = parseLine(context, bytes);
+      state.activeTurnId = context.activeTurnId;
+      records.push(...parsed);
+      if (parsed.some(record => record.turnId === null)) state.gaps.add("unattributed_record");
+    } catch {
+      // Snapshot parsing is best-effort per record; malformed records remain visible
+      // as a coverage gap while later readable records continue to stream.
+      state.gaps.add("unreadable_record");
+    }
+  };
+
+  const consume = (input: Buffer, inputStart: number): void => {
+    let remaining = input;
+    let remainingStart = inputStart;
+    while (remaining.byteLength > 0) {
+      if (skippingOversized) {
+        const newline = remaining.indexOf(0x0a);
+        if (newline < 0) return;
+        state.nextOffset = remainingStart + newline + 1;
+        skippingOversized = false;
+        remaining = remaining.subarray(newline + 1);
+        remainingStart = state.nextOffset;
+        continue;
+      }
+
+      const newline = remaining.indexOf(0x0a);
+      if (newline < 0) {
+        if (pending.byteLength === 0) pendingStart = remainingStart;
+        pending = Buffer.concat([pending, remaining]);
+        if (pending.byteLength > SNAPSHOT_MAX_LINE_BYTES) {
+          state.gaps.add("unreadable_record");
+          pending = Buffer.alloc(0);
+          skippingOversized = true;
+        }
+        return;
+      }
+
+      const line = Buffer.concat([pending, remaining.subarray(0, newline)]);
+      const lineStart = pending.byteLength === 0 ? remainingStart : pendingStart;
+      pending = Buffer.alloc(0);
+      consumeLine(line, lineStart);
+      state.nextOffset = lineStart + line.byteLength + 1;
+      remaining = remaining.subarray(newline + 1);
+      remainingStart = state.nextOffset;
+    }
+  };
+
+  try {
+    file = await open(state.path, "r");
+    checkCancelled(signal);
+    const startStats = await file.stat();
+    if (!sameIdentity(state.identity, identityOf(startStats)) || startStats.size < state.watermark) {
+      throw new LocalSessionSourceError("source_identity_mismatch");
+    }
+    assertSessionIdentity(await firstLine(file, signal), threadId);
+    const actualPrefixValidation = await prefixValidation(file, Math.min(4 * 1024, state.watermark), signal);
+    if (actualPrefixValidation !== state.prefixValidation) {
+      throw new LocalSessionSourceError("source_identity_mismatch");
+    }
+    const actualValidation = await cursorValidation(file, state.nextOffset, signal);
+    if (state.nextOffset > 0 && actualValidation !== state.validation) {
+      throw new LocalSessionSourceError("source_identity_mismatch");
+    }
+
+    while (readPosition < state.watermark) {
+      checkCancelled(signal);
+      if (readPosition >= pageEnd && pending.byteLength === 0 && !skippingOversized) break;
+      const size = Math.min(64 * 1024, state.watermark - readPosition);
+      const chunk = Buffer.allocUnsafe(size);
+      const read = await file.read(chunk, 0, size, readPosition);
+      if (read.bytesRead === 0) throw new LocalSessionSourceError("source_identity_mismatch");
+      const chunkStart = readPosition;
+      readPosition += read.bytesRead;
+      consume(chunk.subarray(0, read.bytesRead), chunkStart);
+    }
+
+    if (readPosition >= state.watermark && (pending.byteLength > 0 || skippingOversized)) {
+      state.gaps.add("unreadable_record");
+      state.nextOffset = state.watermark;
+      pending = Buffer.alloc(0);
+      skippingOversized = false;
+    }
+
+    const endStats = await file.stat();
+    if (!sameIdentity(state.identity, identityOf(endStats)) || endStats.size < state.watermark) {
+      throw new LocalSessionSourceError("source_identity_mismatch");
+    }
+    state.validation = await cursorValidation(file, state.nextOffset, signal);
+    return {
+      records,
+      nextOffset: state.nextOffset,
+      done: state.nextOffset >= state.watermark,
+      coverage: {complete: state.gaps.size === 0, gaps: [...state.gaps]}
+    };
+  } catch (error) {
+    if (error instanceof LocalSessionSourceError) throw error;
+    throw new LocalSessionSourceError(errorCode(error));
+  } finally {
+    await file?.close().catch(() => undefined);
+  }
+}
+
+function snapshotIdentity(threadId: string, path: string, identity: FileIdentity): string {
+  return createHash("sha256")
+    .update(`${threadId}\0${normalizedPath(path)}\0${identity.device}:${identity.inode}:${identity.birthtimeMs}`, "utf8")
+    .digest("hex");
+}
+
 export function createLocalSessionReader({root}: {root: string}): {
   read(threadId: string, signal: AbortSignal): Promise<ReadBatch>;
+  snapshot(threadId: string, signal: AbortSignal): Promise<HistorySnapshot>;
   remove(threadId: string): void;
   close(): Promise<void>;
 } {
@@ -762,6 +966,14 @@ export function createLocalSessionReader({root}: {root: string}): {
   const cursors = new Map<string, Cursor>();
   const locks = new Map<string, Promise<ReadBatch>>();
   const pendingReads = new Set<Promise<ReadBatch>>();
+  const snapshotEpochs = new Map<string, {
+    path: string;
+    identity: FileIdentity;
+    watermark: number;
+    epoch: number;
+    prefixValidation: string;
+  }>();
+  let snapshotRevision = 0;
   let closed = false;
 
   async function canonicalRoot(signal: AbortSignal): Promise<string> {
@@ -861,6 +1073,83 @@ export function createLocalSessionReader({root}: {root: string}): {
       throw new LocalSessionSourceError(errorCode(error));
     }
     return {path, identity: identityOf(stats)};
+  }
+
+  async function snapshotOne(threadId: string, signal: AbortSignal): Promise<HistorySnapshot> {
+    if (closed) throw new LocalSessionSourceError("source_closed");
+    checkCancelled(signal);
+    if (!UUID.test(threadId)) throw new LocalSessionSourceError("source_invalid_thread");
+    const candidate = await discover(threadId, signal);
+    let file: FileHandle | undefined;
+    try {
+      file = await open(candidate.path, "r");
+      checkCancelled(signal);
+      const stats = await file.stat();
+      if (!sameIdentity(candidate.identity, identityOf(stats))) {
+        throw new LocalSessionSourceError("source_identity_mismatch");
+      }
+      assertSessionIdentity(await firstLine(file, signal), threadId);
+      const identity = identityOf(stats);
+      const currentPrefixValidation = await prefixValidation(file, Math.min(4 * 1024, stats.size), signal);
+      const previous = snapshotEpochs.get(threadId);
+      const sameEpoch = previous !== undefined && samePath(previous.path, candidate.path) &&
+        sameIdentity(previous.identity, identity) && stats.size >= previous.watermark &&
+        previous.prefixValidation === currentPrefixValidation;
+      const epoch = sameEpoch ? previous.epoch : (previous?.epoch ?? 0) + 1;
+      snapshotEpochs.set(threadId, {
+        path: candidate.path,
+        identity,
+        watermark: stats.size,
+        epoch,
+        prefixValidation: currentPrefixValidation
+      });
+      const states = new Set<SnapshotState>();
+      let sourceClosed = false;
+      return createHistorySnapshot({
+        identity: snapshotIdentity(threadId, candidate.path, identity),
+        sourceEpoch: epoch,
+        revision: ++snapshotRevision,
+        open: () => {
+          if (sourceClosed) throw new LocalSessionSourceError("source_closed");
+          const state: SnapshotState = {
+            path: candidate.path,
+            identity,
+            watermark: stats.size,
+            nextOffset: 0,
+            validation: "",
+            prefixValidation: currentPrefixValidation,
+            activeTurnId: null,
+            seen: new Set(),
+            seenOrder: [],
+            gaps: new Set(),
+            closed: false
+          };
+          states.add(state);
+          return {
+            readPage: (offset: number, pageSignal: AbortSignal) => {
+              if (offset !== state.nextOffset) {
+                throw new LocalSessionSourceError("source_identity_mismatch");
+              }
+              return readSnapshotPage(state, threadId, pageSignal);
+            },
+            close: async () => {
+              state.closed = true;
+              states.delete(state);
+            }
+          };
+        },
+        close: async () => {
+          sourceClosed = true;
+          for (const state of states) state.closed = true;
+          states.clear();
+        }
+      });
+    } catch (error) {
+      if (error instanceof LocalSessionSourceError) throw error;
+      throw new LocalSessionSourceError(errorCode(error));
+    } finally {
+      await file?.close().catch(() => undefined);
+    }
   }
 
   async function readOne(threadId: string, signal: AbortSignal): Promise<ReadBatch> {
@@ -987,6 +1276,7 @@ export function createLocalSessionReader({root}: {root: string}): {
 
   return {
     read,
+    snapshot: snapshotOne,
     remove(threadId: string): void {
       cursors.delete(threadId);
     },
