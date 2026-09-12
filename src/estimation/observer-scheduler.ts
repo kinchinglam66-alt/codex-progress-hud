@@ -3,6 +3,8 @@ import type {ObserverResult} from './observer-provider.js';
 import type {ObserverCallStage} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
+import type {HistorySnapshot} from '../observer/history-snapshot.js';
+import type {PreparedContext} from './prepared-context.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
@@ -11,6 +13,8 @@ export interface ObserverWorker {
   /** Authenticated local key is accounting metadata, never observer prompt data. */
   observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number,
     onStage?: (stage:ObserverCallStage)=>void): Promise<ObserverResult>;
+  prepareContext?(input:ObserverInput,history:{snapshot:HistorySnapshot;currentTurnId:string},signal:AbortSignal,
+    conversationKey:string,turnGeneration:number,observedAtMs:number):Promise<PreparedContext>;
   status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
   disable(): void;
   close(): Promise<void>;
@@ -39,7 +43,10 @@ export interface ObserverObservation {
   usage?:ObserverResult['usage'];
   timings?:ObserverResult['timings'];
   stage?:ObserverCallStage;
+  contextState?:ObserverContextState;
 }
+export type ObserverContextState='history_loading'|'context_preparing'|'context_full'|'context_compressed'|
+  'history_incomplete'|'capacity_unknown'|'context_too_large'|'compression_failed';
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
@@ -64,7 +71,8 @@ interface Entry {
 }
 interface Flight {key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
-  lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number; done?: Promise<void>}
+  lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
+  contextState?:ObserverContextState; done?: Promise<void>}
 
 /** Admission timing is local; durable spend admission belongs to each owned worker.
  * changed never dispatches synchronously on the task Hook/HTTP path.
@@ -146,6 +154,68 @@ export class ObserverScheduler {
         ...(view?{timingUncertain:view.timingUncertain,recoveryState:view.recoveryState,recoveryGapSeconds:view.recoveryGapSeconds}:{}),
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,...extra});
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
+  }
+  private contextState(flight:Flight,state:ObserverContextState):void {
+    flight.contextState=state;
+    this.record('stage',flight.key,this.entries.get(flight.key)!,{requestId:flight.requestId,contextState:state},flight);
+    this.notify();
+  }
+  private preparationFailureState(flight:Flight,error:unknown):ObserverContextState {
+    const code=error instanceof Error?error.message:'';
+    if(code==='capacity_unknown')return 'capacity_unknown';
+    if(code==='context_too_large'||code.startsWith('context_too_large:'))return 'context_too_large';
+    if(flight.contextState==='history_loading')return 'history_incomplete';
+    return 'compression_failed';
+  }
+  private failPreparation(entry:Entry,flight:Flight):void {
+    const settledAt=this.time();
+    try {this.options.goals.settle(flight.ticket,null,settledAt);}catch{/* opaque ticket cleanup is best effort */}
+    const rejection=this.options.goals.rejectionReason(flight.ticket);
+    this.flights.delete(flight.key);
+    if(entry.flight===flight)delete entry.flight;
+    this.recordResult(entry,flight,null,false,settledAt,null,this.schedulerRejectionReason(flight,this.workerState(flight.worker))??rejection);
+    void this.workerSource.release(flight.key).catch(() => undefined);
+    this.notify();
+  }
+  private async dispatch(entry:Entry,flight:Flight,input:ObserverInput):Promise<void> {
+    let prepared=input;
+    if(flight.worker.prepareContext){
+      this.contextState(flight,'history_loading');
+      try {
+        const opened=await this.options.goals.openHistory?.(flight.ticket,flight.controller.signal);
+        if(!opened)throw Error('history_unavailable');
+        this.contextState(flight,'context_preparing');
+        let handedToPlanner=false;
+        let promise:Promise<PreparedContext>;
+        try {
+          promise=flight.worker.prepareContext(input,opened,flight.controller.signal,flight.key,flight.generation,flight.requestedAt);
+          handedToPlanner=true;
+          const value=await promise;
+          if(!value){await opened.snapshot.close();throw Error('preparation_empty');}
+          prepared=value.input;
+          this.contextState(flight,value.representation.mode==='compressed'?'context_compressed':
+            value.representation.mode==='incomplete'||!value.representation.sourceComplete?'history_incomplete':'context_full');
+        }catch(error){
+          if(!handedToPlanner){try{await opened.snapshot.close();}catch{/* acquisition ownership was not transferred */}}
+          throw error;
+        }
+      }catch(error){
+        this.contextState(flight,this.preparationFailureState(flight,error));
+        this.failPreparation(entry,flight);
+        return;
+      }
+    }
+    const state=this.workerState(flight.worker);
+    if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time())||
+      state.disabled||state.active||state.poisoned){
+      this.failPreparation(entry,flight);
+      return;
+    }
+    try {
+      const result=await flight.worker.observe(prepared,flight.controller.signal,flight.key,flight.generation,
+        stage=>this.record('stage',flight.key,entry,{requestId:flight.requestId,stage},flight));
+      this.settle(entry,flight,result);
+    }catch{this.settle(entry,flight,null);}
   }
   private markEvent(entry:Entry,now:number,reason:TriggerReason):void {
     const hadPending=entry.eventSequence>entry.consumedEventSequence;
@@ -378,11 +448,7 @@ export class ObserverScheduler {
       this.record('request',key,entry,{requestId:flight.requestId,triggerReason:flight.triggerReason,
         lastRequestActiveSeconds:flight.lastRequestActiveSeconds,eligibleActiveSeconds:flight.eligibleActiveSeconds});
       this.notify();
-      try {
-        flight.done = Promise.resolve(worker.observe(request.input, flight.controller.signal, key, view.generation,
-          stage=>this.record('stage',key,entry,{requestId:flight.requestId,stage},flight)))
-          .then(result => this.settle(entry, flight, result), () => this.settle(entry, flight, null));
-      } catch {this.settle(entry, flight, null);}
+      flight.done = this.dispatch(entry,flight,request.input);
     }
   }
   private settle(entry: Entry, flight: Flight, result: ObserverResult|null): void {
@@ -532,7 +598,8 @@ export class ObserverScheduler {
       estimate:result?.interpretation?.estimate?{...result.interpretation.estimate}:null,
        ...(forecast?{forecast}:{}),...(forecastDiagnostic?{forecastDiagnostic}:{}),
        ...(classification.diagnostic?{resultDiagnostic:classification.diagnostic}:{}),
-       ...(classification.rejectionReason?{rejectionReason:classification.rejectionReason}:{}),
+      ...(classification.rejectionReason?{rejectionReason:classification.rejectionReason}:{}),
+      ...(flight.contextState?{contextState:flight.contextState}:{}),
       ...(result?.timings?{timings:{...result.timings}}:{}),
       usage:result?.usage?{...result.usage}:null},flight);
   }

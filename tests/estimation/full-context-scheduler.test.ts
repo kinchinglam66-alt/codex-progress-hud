@@ -1,0 +1,229 @@
+import {expect, it} from "vitest";
+import {normalizeHookInput} from "../../src/hooks/schema.js";
+import {PassiveContextStore} from "../../src/server/passive-context-store.js";
+import {PassiveGoals} from "../../src/server/passive-goals.js";
+import {createConversationSource} from "../../src/observer/conversation-source.js";
+import type {HistoryRecord, HistorySnapshot} from "../../src/observer/history-snapshot.js";
+import type {ReadBatch} from "../../src/observer/conversation-record.js";
+import {ObserverScheduler, type ObserverObservation, type ObserverWorker} from "../../src/estimation/observer-scheduler.js";
+import type {ObserverInput} from "../../src/estimation/observer-contract.js";
+import type {PreparedContext} from "../../src/estimation/prepared-context.js";
+
+const token = "protected-full-context-scheduler-test-token-123456789";
+const answer = {relation: "replace" as const, status: "running" as const, summary: "task", estimate: {remainingSeconds: 100, errorPercent: 20}};
+
+function history(records: ReadBatch["records"], closed: {value: number}): HistorySnapshot {
+  return {
+    identity: "verified-history",
+    sourceEpoch: 1,
+    revision: 1,
+    coverage: {complete: true, gaps: []},
+    async *records(_signal: AbortSignal): AsyncIterable<HistoryRecord> {
+      for (const [ordinal, record] of records.entries()) yield {ordinal, record};
+    },
+    async close(): Promise<void> { closed.value++; }
+  };
+}
+
+function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} = {}) {
+  let now = 0;
+  let resolveHistory!: (value: HistorySnapshot) => void;
+  let resolvePreparation!: (value: PreparedContext) => void;
+  let rejectPreparation!: (error: Error) => void;
+  const closed = {value: 0};
+  let disabled = false;
+  let observed = 0;
+  let prepared = 0;
+  let observedAt: number | undefined;
+  const observations: ObserverObservation[] = [];
+  let records: ReadBatch["records"] = [{id: "user", turnId: "first", atMs: 1, kind: "user", text: "work"}];
+  let resetNext = false;
+  let sourceTurnKey = "";
+  const source = createConversationSource({
+    source: {
+      read: async () => { const reset = resetNext; resetNext = false; return {records, caughtUp: true, partialLine: false, reset}; },
+      snapshot: async () => {
+        if (options.deferHistory) return new Promise<HistorySnapshot>(resolve => { resolveHistory = resolve; });
+        return history(records, closed);
+      },
+      remove: () => {},
+      close: async () => {}
+    },
+    now: () => now,
+    wallNow: () => now,
+    turnKeyFor: () => sourceTurnKey
+  });
+  const contexts = new PassiveContextStore();
+  const goals = new PassiveGoals(contexts, source.goals);
+  let prepareResult: PreparedContext = {
+    input: {goalSummary: null, activeSeconds: 0, runtime: "running", messages: [{kind: "user", text: "prepared", truncated: false}], truncated: false},
+    representation: {mode: "full", sourceComplete: true, originalRecords: 1, compressedThroughOrdinal: null, sizing: "conservative"}
+  };
+  const worker: ObserverWorker = {
+    prepareContext: async (input, _snapshot, _signal, _key, _generation, timestamp) => {
+      prepared++;
+      observedAt = timestamp;
+      if (options.deferPreparation) return new Promise<PreparedContext>((resolve, reject) => {
+        resolvePreparation = resolve;
+        rejectPreparation = reject;
+      });
+      return {...prepareResult, input};
+    },
+    observe: async (_input: ObserverInput) => {
+      observed++;
+      return {status: "interpreted", interpretation: answer, usage: null};
+    },
+    status: () => ({active: false, disabled, poisoned: false}),
+    disable: () => { disabled = true; },
+    close: async () => { disabled = true; }
+  };
+  const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => now,
+    onObservation: record => observations.push(record)});
+  const envelope = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "first"}, now, token).envelope;
+  goals.observe(envelope, true, now);
+  sourceTurnKey = envelope.turnKey!;
+  source.attach(envelope.sessionKey, "conversation-id", sourceTurnKey);
+  now = 500;
+  source.tick();
+  const flush = async () => {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  };
+  const start = async () => {
+    await flush();
+    scheduler.changed(envelope.sessionKey, "prompt");
+    now = 16_000;
+    scheduler.tick();
+    await flush();
+  };
+  return {
+    scheduler, source, goals, worker, envelope, observations, closed,
+    time: (value: number) => { now = value; },
+    setRecords: (value: ReadBatch["records"]) => { records = value; },
+    resetSource: () => { resetNext = true; },
+    setSourceTurn: (value: string) => { sourceTurnKey = value; },
+    resolveHistory: (value = history(records, closed)) => resolveHistory(value),
+    resolvePreparation: (value = prepareResult) => resolvePreparation(value),
+    rejectPreparation: (error = Error("context_too_large")) => rejectPreparation(error),
+    prepareResult: (value: PreparedContext) => { prepareResult = value; },
+    start, flush, counts: () => ({prepared, observed, observedAt, disabled})
+  };
+}
+
+it("does not observe until delayed source history preparation finishes", async () => {
+  const f = fixture({deferHistory: true});
+  await f.start();
+  expect(f.counts()).toMatchObject({prepared: 0, observed: 0});
+  f.resolveHistory();
+  await f.flush();
+  expect(f.counts()).toMatchObject({prepared: 1, observed: 1, observedAt: 16_000});
+  expect(f.observations.map(row => row.contextState)).toEqual(expect.arrayContaining(["history_loading", "context_preparing", "context_full"]));
+  await f.scheduler.close();
+});
+
+it("rejects preparation after a new authenticated turn without observing it", async () => {
+  const f = fixture({deferHistory: true});
+  await f.start();
+  const next = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "second"}, 16_000, token).envelope;
+  f.goals.observe(next, true, 16_000);
+  f.setSourceTurn(next.turnKey!);
+  f.source.attach(next.sessionKey, "conversation-id", next.turnKey!);
+  f.resolveHistory();
+  await f.flush();
+  expect(f.counts().observed).toBe(0);
+  await f.scheduler.close();
+});
+
+it("rejects preparation after a source epoch reset", async () => {
+  const f = fixture({deferHistory: true});
+  await f.start();
+  f.setRecords([{id: "user", turnId: "first", atMs: 1, kind: "user", text: "reset"}]);
+  f.resetSource();
+  f.source.changed(f.envelope.sessionKey);
+  f.time(16_500);
+  f.source.tick();
+  await f.flush();
+  f.scheduler.tick();
+  f.resolveHistory();
+  await f.flush();
+  expect(f.counts().observed).toBe(0);
+  await f.scheduler.close();
+});
+
+it("does not observe after the worker is disabled during preparation", async () => {
+  const f = fixture({deferPreparation: true});
+  await f.start();
+  expect(f.counts().prepared).toBe(1);
+  f.worker.disable();
+  f.resolvePreparation();
+  await f.flush();
+  expect(f.counts().observed).toBe(0);
+  await f.scheduler.close();
+});
+
+it("releases a ticket after preparation failure without exposing the raw error", async () => {
+  const f = fixture({deferPreparation: true});
+  await f.start();
+  f.rejectPreparation(Error("context_too_large: secret source text"));
+  await f.flush();
+  expect(f.counts().observed).toBe(0);
+  expect(f.observations.at(-1)).toMatchObject({kind: "result", contextState: "context_too_large"});
+  expect(f.observations.at(-1)).not.toHaveProperty("error");
+  await f.scheduler.close();
+});
+
+it("keeps history preparation independent for two conversations", async () => {
+  let now = 0;
+  const closed = {value: 0};
+  const pending = new Map<string, (snapshot: HistorySnapshot) => void>();
+  const turnKeys = new Map<string, string>();
+  const source = createConversationSource({
+    source: {
+      read: async (id) => ({records: [{id: `user-${id}`, turnId: "first", atMs: 1, kind: "user", text: id}], caughtUp: true, partialLine: false, reset: false}),
+      snapshot: async (id) => new Promise<HistorySnapshot>(resolve => { pending.set(id, resolve); }),
+      remove: () => {},
+      close: async () => {}
+    },
+    now: () => now,
+    wallNow: () => now,
+    turnKeyFor: host => turnKeys.get(host)!
+  });
+  const contexts = new PassiveContextStore();
+  const goals = new PassiveGoals(contexts, source.goals);
+  const observed: string[] = [];
+  const worker = (index: number): ObserverWorker => ({
+    prepareContext: async input => ({input, representation: {
+      mode: "full", sourceComplete: true, originalRecords: 1, compressedThroughOrdinal: null, sizing: "conservative"
+    }}),
+    observe: async (_input, _signal, key) => { observed.push(`${index}:${key}`); return {status: "interpreted", interpretation: answer, usage: null}; },
+    status: () => ({active: false, disabled: false, poisoned: false}),
+    disable: () => {}, close: async () => {}
+  });
+  const scheduler = new ObserverScheduler({contexts, goals, workers: [worker(1), worker(2)], now: () => now});
+  const envelopes = ["a", "b"].map(session => normalizeHookInput("UserPromptSubmit", {session_id: session, turn_id: "first"}, 0, token).envelope);
+  for (const envelope of envelopes) {
+    goals.observe(envelope, true, 0);
+    const host = `host-${envelope.sessionKey}`;
+    turnKeys.set(host, envelope.turnKey!);
+    source.attach(envelope.sessionKey, host, envelope.turnKey!);
+  }
+  now = 500;
+  source.tick();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  scheduler.changed(envelopes[0]!.sessionKey, "prompt");
+  scheduler.changed(envelopes[1]!.sessionKey, "prompt");
+  now = 16_000;
+  scheduler.tick();
+  await Promise.resolve();
+  expect(pending.size).toBe(2);
+  pending.get(`host-${envelopes[0]!.sessionKey}`)!(history([], closed));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await Promise.resolve(); await Promise.resolve();
+  expect(observed).toHaveLength(1);
+  pending.get(`host-${envelopes[1]!.sessionKey}`)!(history([], closed));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await Promise.resolve(); await Promise.resolve();
+  expect(observed).toHaveLength(2);
+  await scheduler.close();
+  await source.close();
+});
