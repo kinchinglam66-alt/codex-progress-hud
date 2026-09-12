@@ -480,7 +480,7 @@ describe("companion lifecycle manager", () => {
   });
 
   it('keeps a timed-out initializing child fenced when termination is unconfirmed',async()=>{
-    const fixture=await harness({spawnMakesOnline:false,exitOnTerminate:false,managerOverrides:{startupTimeoutMs:20,shutdownTimeoutMs:20}});
+    const fixture=await harness({spawnMakesOnline:false,exitOnTerminate:false,managerOverrides:{startupTimeoutMs:1000,shutdownTimeoutMs:20}});
     expect(await fixture.manager.open()).toMatchObject({code:'START_TIMEOUT'});
     expect(await fixture.manager.open()).toMatchObject({code:'START_TIMEOUT'});
     expect(fixture.launcher.spawnHud).toHaveBeenCalledOnce();

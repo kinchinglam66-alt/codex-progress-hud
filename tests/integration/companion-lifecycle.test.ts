@@ -16,7 +16,7 @@ import { createCompanionManager } from "../../src/lifecycle/companion-manager.js
 import type { OperationalLogEntry } from "../../src/diagnostics/logger.js";
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import type { ProcessLauncher, SpawnedHud } from "../../src/lifecycle/process-launcher.js";
-import { CompanionHttpClient } from "../../src/mcp/report-client.js";
+import { CompanionHttpClient,HudClientError } from "../../src/mcp/report-client.js";
 import { createProgressServer } from "../../src/server/http-server.js";
 import { LeaseStore } from "../../src/server/lease-store.js";
 import { holdLifecycleLock } from "../helpers/lifecycle-lock-holder.js";
@@ -170,6 +170,7 @@ process.on("disconnect", () => {
   const exitPromise = new Promise<void>((resolve) => {
     child.once("exit", () => resolve());
   });
+  const exited=exitPromise.then(()=>'exited' as const);
   let port: number;
   try {
     port = await new Promise<number>((resolve, reject) => {
@@ -198,6 +199,7 @@ process.on("disconnect", () => {
 
   return {
     pid: child.pid!,
+    exited,
     serviceUrl: `http://127.0.0.1:${port}`,
     tokenPath,
     async terminate(): Promise<void> {
@@ -1002,15 +1004,15 @@ describe("source-mode companion lifecycle", () => {
     };
     const delegatedClient = {
       identity: (options?: Parameters<CompanionHttpClient["identity"]>[0]) =>
-        client === undefined ? Promise.reject(new Error("offline")) : client.identity(options),
+        client === undefined ? Promise.reject(new HudClientError('OFFLINE','fixture not started')) : client.identity(options),
       health: (options?: Parameters<CompanionHttpClient["health"]>[0]) =>
-        client === undefined ? Promise.reject(new Error("offline")) : client.health(options),
+        client === undefined ? Promise.reject(new HudClientError('OFFLINE','fixture not started')) : client.health(options),
       show: (options?: Parameters<CompanionHttpClient["show"]>[0]) =>
-        client === undefined ? Promise.reject(new Error("offline")) : client.show(options),
+        client === undefined ? Promise.reject(new HudClientError('OFFLINE','fixture not started')) : client.show(options),
       hide: (options?: Parameters<CompanionHttpClient["hide"]>[0]) =>
-        client === undefined ? Promise.reject(new Error("offline")) : client.hide(options),
+        client === undefined ? Promise.reject(new HudClientError('OFFLINE','fixture not started')) : client.hide(options),
       shutdown: (options?: Parameters<CompanionHttpClient["shutdown"]>[0]) =>
-        client === undefined ? Promise.reject(new Error("offline")) : client.shutdown(options)
+        client === undefined ? Promise.reject(new HudClientError('OFFLINE','fixture not started')) : client.shutdown(options)
     };
     const manager = createCompanionManager({
       store: createLifecycleStateStore(paths),
