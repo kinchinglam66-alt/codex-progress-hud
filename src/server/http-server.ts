@@ -392,6 +392,8 @@ export function createProgressServer(options: ProgressServerOptions) {
   let checkpointTimer:ReturnType<typeof setTimeout>|undefined;
   let checkpointInterval:ReturnType<typeof setInterval>|undefined;
   let checkpointTail:Promise<void>=Promise.resolve();
+  let checkpointWriting=false;
+  let checkpointPending:ReturnType<PassiveGoals['checkpoint']>|undefined;
   let checkpointError:'read_failed'|'write_failed'|undefined;
   const checkpointStatus=(state:typeof checkpointState,error?:typeof checkpointError)=>{
     const changed=checkpointState!==state||checkpointError!==error;
@@ -404,9 +406,19 @@ export function createProgressServer(options: ProgressServerOptions) {
     try{records=passiveGoals.checkpoint(goalNow(),now());}
     catch{checkpointStatus('degraded','write_failed');return checkpointTail;}
     const repository=checkpointRepository;
-    checkpointTail=checkpointTail.then(()=>repository.save(records)).then(()=>{
-      checkpointStatus('ready');
-    },()=>{checkpointStatus('degraded','write_failed');});
+    // At most one write and one latest snapshot: slow storage cannot grow a backlog.
+    checkpointPending=records;
+    if(checkpointWriting)return checkpointTail;
+    checkpointWriting=true;
+    checkpointTail=Promise.resolve().then(async()=>{
+      try{
+        while(checkpointPending!==undefined){
+          const next=checkpointPending;checkpointPending=undefined;
+          try{await repository.save(next);checkpointStatus('ready');}
+          catch{checkpointStatus('degraded','write_failed');}
+        }
+      }finally{checkpointWriting=false;}
+    });
     return checkpointTail;
   };
   const scheduleCheckpoint=()=>{

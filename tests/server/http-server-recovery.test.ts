@@ -72,3 +72,21 @@ it('never replaces recovery data with an empty snapshot after a clock fault',asy
   try{await server.listen();await server.close();expect(saves).toBe(0);}
   finally{await server.close();await rm(directory,{recursive:true,force:true});}
 });
+
+it('coalesces checkpoint requests while storage is slow instead of replaying a backlog',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'hud-checkpoint-coalesce-'));
+  let saves=0,release!:()=>void;
+  const blocked=new Promise<void>(resolve=>{release=resolve;});
+  const server=createProgressServer({port:0,tokenPath:join(directory,'auth.token'),
+    goalCheckpointRepository:{load:async()=>[],save:async()=>{saves++;if(saves===1)await blocked;}}});
+  try{
+    await server.listen();
+    for(let n=0;n<3;n++){
+      server.store.refreshPresentation();
+      await new Promise(resolve=>setTimeout(resolve,1100));
+    }
+    expect(saves).toBe(1);
+    const closing=server.close();release();await closing;
+    expect(saves).toBe(2);
+  }finally{release();await server.close();await rm(directory,{recursive:true,force:true});}
+},10000);
