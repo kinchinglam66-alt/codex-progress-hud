@@ -4,6 +4,22 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
 
+it('records recovery uncertainty without accepting arbitrary diagnostic text',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-recovery-'));
+  try{
+    const journal=createPilotJournal(directory);
+    const base={kind:'runtime' as const,at:50,key:'private',generation:1,activeSeconds:100,runtime:'running',version:1};
+    journal.record({...base,recoveryState:'restored',recoveryGapSeconds:600,timingUncertain:true});
+    journal.record({...base,recoveryState:'SECRET' as never,recoveryGapSeconds:Infinity,timingUncertain:'SECRET' as never});
+    await journal.close();
+    const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+    const rows=raw.trim().split('\n').map(line=>JSON.parse(line));
+    expect(rows[0]).toMatchObject({recoveryState:'restored',recoveryGapSeconds:600,timingUncertain:true});
+    expect(rows[1]).not.toHaveProperty('recoveryState');expect(rows[1]).not.toHaveProperty('recoveryGapSeconds');
+    expect(raw).not.toContain('SECRET');
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
 it('records allowlisted stages without closing an unresolved request or leaking raw details',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-stages-'));
   try{

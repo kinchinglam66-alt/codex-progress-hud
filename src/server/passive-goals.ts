@@ -15,6 +15,7 @@ export interface SourceTurnTakeover {turnKey:string;startedAtMs:number;identity:
 export interface PassiveGoalView {
   progressFloor?: number;
   recoveryState?: 'pending'|'restored';
+  recoveryGapSeconds?: number|null;
   timingUncertain?: boolean;
   runtimeUncertain?: boolean;
   generation: number;
@@ -29,6 +30,7 @@ interface Goal {
   progressFloor?: number;
   recoveryPending?: boolean;
   recovered?: boolean;
+  recoveryGapSeconds?: number|null;
   terminalHook?: boolean;
   sourceStopped?: boolean;
   executionIdentity?: string;
@@ -103,6 +105,7 @@ export interface PassiveGoalScheduling {
 export class PassiveGoals {
   private readonly goals = new Map<string, Goal>();
   private readonly recovery = new Map<string, GoalCheckpointRecord>();
+  private recoveryWallNowMs: number|undefined;
   private readonly ended = new Set<string>();
   private tickets = new WeakMap<object, Ticket>();
   private rejectionReasons = new WeakMap<object, ResultRejectionReason>();
@@ -112,8 +115,9 @@ export class PassiveGoals {
   constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource) {}
 
   /** Validated value records only; no restored object can authorize inference. */
-  restoreCheckpoint(records:readonly GoalCheckpointRecord[]):void {
+  restoreCheckpoint(records:readonly GoalCheckpointRecord[],wallNowMs?:number):void {
     if(this.goals.size!==0||this.recovery.size!==0)throw Error('CHECKPOINT_ALREADY_INITIALIZED');
+    this.recoveryWallNowMs=wallNowMs;
     for(const record of records.slice(0,256))this.recovery.set(record.sessionKey,structuredClone(record));
   }
 
@@ -155,6 +159,9 @@ export class PassiveGoals {
     goal.predictionIdentity=goal.prediction?{}:null;goal.progressFloor=saved.progressFloor;
     goal.runtime='waiting';goal.status='unknown';goal.runtimeUncertain=true;goal.timingUncertain=true;
     goal.recoveryPending=true;
+    // This is the unobserved checkpoint-to-load interval, not proven work or downtime.
+    const gap=this.recoveryWallNowMs===undefined?NaN:(this.recoveryWallNowMs-saved.savedAtMs)/1000;
+    goal.recoveryGapSeconds=Number.isFinite(gap)&&gap>=0&&gap<=31_536_000?gap:null;
   }
 
   private finishRecovery(sessionKey:string,goal:Goal,nowMs:number):boolean {
@@ -263,7 +270,7 @@ export class PassiveGoals {
   }
 
   private startTurn(goal:Goal,turnKey:string,nowMs:number):void {
-    delete goal.recoveryPending;delete goal.recovered;goal.progressFloor=0;
+    delete goal.recoveryPending;delete goal.recovered;delete goal.recoveryGapSeconds;goal.progressFloor=0;
     delete goal.terminalHook;delete goal.sourceStopped;delete goal.executionIdentity;delete goal.runtimeUncertain;delete goal.terminalSince;
     goal.turnKey=turnKey;goal.elapsed=0;goal.since=nowMs;goal.candidateBase=0;
     goal.relationPending=true;goal.summary=null;delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;
@@ -607,6 +614,7 @@ export class PassiveGoals {
     return {generation: goal.generation, estimateRevision: goal.estimateRevision, status: goal.status, runtime: goal.runtime,
       ...(goal.progressFloor===undefined?{}:{progressFloor:goal.progressFloor}),
       ...(goal.recoveryPending?{recoveryState:'pending' as const}:goal.recovered?{recoveryState:'restored' as const}:{}),
+      ...(goal.recoveryGapSeconds===undefined?{}:{recoveryGapSeconds:goal.recoveryGapSeconds}),
       ...(goal.timingUncertain?{timingUncertain:true}:{}),...(goal.runtimeUncertain?{runtimeUncertain:true}:{}),
       activeSeconds: this.active(goal, nowMs), prediction: goal.prediction && {...goal.prediction},
       ...(goal.prediction&&goal.changeReason?{changeReason:goal.changeReason}:{})};

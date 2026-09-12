@@ -169,6 +169,7 @@ const aggregateSnapshotSchema = z.object({
       runtimeUncertain: z.boolean().optional(),
       progressFloor:z.number().finite().min(0).max(99).optional(),
       recoveryState:z.enum(['pending','restored']).optional(),
+      recoveryGapSeconds:z.number().finite().min(0).max(31_536_000).nullable().optional(),
       prediction: z.object({remainingSeconds: z.number().nonnegative().max(31536000),
         errorPercent: z.number().nonnegative().max(1000),
         observedActiveSeconds: z.number().nonnegative().max(31536000)}).strict().nullable()

@@ -28,6 +28,9 @@ export interface ObserverObservation {
   accepted?:boolean; status?:string; relation?:string;
   triggerReason?:TriggerReason|string; lastRequestActiveSeconds?:number|null; eligibleActiveSeconds?:number|null;
   activeTimeKnown?:boolean;
+  timingUncertain?:boolean;
+  recoveryState?:'pending'|'restored';
+  recoveryGapSeconds?:number|null;
   estimate?:{remainingSeconds:number;errorPercent:number}|null;
   resultDiagnostic?:ResultDiagnostic;
   rejectionReason?:ResultRejectionReason;
@@ -140,6 +143,7 @@ export class ObserverScheduler {
       const view=flight && extra.accepted!==true?null:this.options.goals.view(key,at);
       if(view || flight)this.options.onObservation({kind,at,key,generation:view?.generation??flight!.generation,
         activeSeconds:view?.activeSeconds??flight!.observedActiveSeconds,activeTimeKnown:view!==null&&this.options.goals.activeTimeKnown(key),
+        ...(view?{timingUncertain:view.timingUncertain,recoveryState:view.recoveryState,recoveryGapSeconds:view.recoveryGapSeconds}:{}),
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,...extra});
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
   }

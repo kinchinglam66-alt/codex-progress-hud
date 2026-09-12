@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {PassiveGoals, type GoalContextSource} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
+import {ObserverScheduler,type ObserverObservation} from '../../src/estimation/observer-scheduler.js';
 
 const token='checkpoint-test-token-not-a-live-credential';
 const wall=1_800_000_000_000;
@@ -30,6 +31,25 @@ function seeded() {
 }
 
 describe('same native turn restart recovery',()=>{
+  it.each([undefined,wall-1,Number.NaN,Number.POSITIVE_INFINITY])('does not invent a recovery gap from an invalid wall clock %s',reloadWall=>{
+    const before=seeded(),after=fixture();
+    after.goals.restoreCheckpoint(before.goals.checkpoint(100_000,wall),reloadWall);
+    after.goals.observe({...before.event,receivedAt:50},true,50);after.goals.reconcileSource(before.event.sessionKey,50);
+    expect(after.goals.view(before.event.sessionKey,50)).toMatchObject({activeSeconds:100,recoveryGapSeconds:null,timingUncertain:true});
+    const next=hook('one','two',100);after.goals.observe(next,true,100);
+    expect(after.goals.view(next.sessionKey,100)).not.toHaveProperty('recoveryGapSeconds');
+    expect(after.goals.view(next.sessionKey,100)).not.toHaveProperty('recoveryState');
+  });
+  it('marks recovered measurements and the unobserved wall-time gap without charging it',async()=>{
+    const before=seeded(),after=fixture(),events:ObserverObservation[]=[];
+    after.goals.restoreCheckpoint(before.goals.checkpoint(100_000,wall),wall+600_000);
+    after.goals.observe({...before.event,receivedAt:50},true,50);after.goals.reconcileSource(before.event.sessionKey,50);
+    const scheduler=new ObserverScheduler({goals:after.goals,contexts:new PassiveContextStore(),now:()=>50,onObservation:event=>events.push(event),
+      workers:[{status:()=>({active:false,disabled:true,poisoned:false}),disable(){},async close(){},async observe(){throw Error('must not infer');}}]});
+    try{scheduler.changed(before.event.sessionKey,'activity');
+      expect(events[0]).toMatchObject({activeSeconds:100,timingUncertain:true,recoveryState:'restored',recoveryGapSeconds:600});
+    }finally{await scheduler.close();}
+  });
   it('rejects an invalid or regressing checkpoint clock instead of saving an empty state',()=>{
     const f=seeded();
     expect(()=>f.goals.checkpoint(Number.NaN,wall)).toThrow();

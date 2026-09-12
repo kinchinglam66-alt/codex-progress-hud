@@ -43,6 +43,7 @@ it('restores the persisted native turn through two real servers without another 
     const view=((await client.status()) as HudSnapshot).rows![0]!.goal!;
     expect(view.activeSeconds).toBe(120);expect(view.prediction?.errorPercent).toBe(30);
     expect(view.timingUncertain).toBe(true);expect(calls).toBe(1);
+    expect(view.recoveryGapSeconds).toBe(600);
   }finally{await server.close();await rm(directory,{recursive:true,force:true});}
 },15000);
 

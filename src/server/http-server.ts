@@ -1181,7 +1181,7 @@ export function createProgressServer(options: ProgressServerOptions) {
         }
         if(checkpointRepository){
           checkpointState='loading';
-          try{passiveGoals.restoreCheckpoint(await checkpointRepository.load());checkpointState='ready';}
+          try{passiveGoals.restoreCheckpoint(await checkpointRepository.load(),now());checkpointState='ready';}
           catch{checkpointState='degraded';checkpointError='read_failed';}
           checkpointReady=true;
         }
