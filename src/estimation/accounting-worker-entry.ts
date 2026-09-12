@@ -105,7 +105,7 @@ async function run(request: AccountingRequest): Promise<void> {
     else if (request.operation === 'invocation_update') await owner.forConversation(request.conversationKey).updateInvocation?.(request.reservationId, request.patch as InvocationRecordPatch);
     else {
       const view = owner.forConversation(request.conversationKey);
-      if (request.operation === 'reserve') result = await view.reserve(request.admissionKind);
+      if (request.operation === 'reserve') result = await view.reserve(request.admissionKind, request.purpose);
       else if(request.operation==='not_dispatched') await view.cancelBeforeDispatch(request.reservationId);
       else await view.settle(request.reservationId, request.usage, request.settlement);
       await view.close().catch(error => { if (!failure) failure = error; });

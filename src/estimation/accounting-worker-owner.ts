@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {mkdir} from 'node:fs/promises';
 import {Worker} from 'node:worker_threads';
-import type {AccountedUsage, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import type {AccountedUsage, AccountingPurpose, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import type {ReleaseAccountingOwner, ReleaseAccountingSnapshot, ReleaseRecoveryEvent} from './release-accounting.js';
 import type {RecoveryBootBoundaryProof} from './recovery-boot-boundary.js';
 import {
@@ -190,9 +190,9 @@ export async function openThreadedReleaseAccounting(directory: string, now: () =
       return promise;
     }
     return {
-      reserve(admissionKind: AdmissionKind = 'ordinary'): Promise<string | null> {
+      reserve(admissionKind: AdmissionKind = 'ordinary', purpose: AccountingPurpose = 'eta'): Promise<string | null> {
         if (viewClosed || ownerClosed) return Promise.resolve(null);
-        return viewTrack(send('reserve', {conversationKey: key, admissionKind}) as Promise<string | null>);
+        return viewTrack(send('reserve', {conversationKey: key, admissionKind, ...(purpose === 'eta' ? {} : {purpose})}) as Promise<string | null>);
       },
       settle(id: string, inputUsage: AccountedUsage | null, classification: SettlementClassification = inputUsage === null ? 'unsafe_unknown' : 'known_success'): Promise<void> {
         if (ownerClosed) return Promise.reject(error('RELEASE_OWNER_CLOSED'));

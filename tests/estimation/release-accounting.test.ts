@@ -21,6 +21,21 @@ it('persists not-dispatched separately, releases concurrency and retains hourly 
   const thirteenth=await next.reserve();expect(thirteenth).not.toBeNull();
   await next.cancelBeforeDispatch(thirteenth!);
 });
+it('propagates compression purpose through threaded reserve and persists legacy eta defaults',async()=>{
+  const path=await directory(),owner=await open(path,()=>0),compression=owner.forConversation('compression');
+  const compressionId=(await compression.reserve('ordinary','context_compression'))!;
+  await compression.cancelBeforeDispatch(compressionId);
+  const legacy=owner.forConversation('legacy'),legacyId=(await legacy.reserve())!;
+  await legacy.cancelBeforeDispatch(legacyId);
+  await owner.close();
+  await mutateDatabase(path,db=>{
+    expect(db.prepare('SELECT purpose FROM admissions WHERE id=?').get(compressionId)).toEqual({purpose:'context_compression'});
+    expect(db.prepare('SELECT purpose FROM admissions WHERE id=?').get(legacyId)).toEqual({purpose:'eta'});
+  });
+  const reopened=await open(path,()=>0);
+  expect(reopened.snapshot()).toMatchObject({starts:2,unknown:0});
+  await reopened.close();
+});
 it('does not let another conversation or reopened owner cancel an uncertain reservation',async()=>{
   const path=await directory(),owner=await open(path,()=>0),id=(await owner.forConversation('one').reserve())!;
   await expect(owner.forConversation('two').cancelBeforeDispatch(id)).rejects.toThrow();await owner.close();

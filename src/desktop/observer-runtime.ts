@@ -44,6 +44,10 @@ export interface DesktopObserverIdentity {
 }
 
 export interface DesktopObserverContextPreparation {
+  /** Capacity-derived, host-attested allowance for the prepared observer
+   * invocation. It only widens stdin; output and argument limits remain owned
+   * by the process runner. */
+  inputBudgetBytes?: number;
   configure: (scope: PreparationScope, prepareCompression: TrustedCompressionPreparation,
     authorize: () => boolean, accounting: ReleaseAccountingOwner) => Promise<PreparationConfiguration>;
 }
@@ -215,6 +219,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         prepare,
         authorize: gate.authorized,
         now,
+        ...(contextPreparation?.inputBudgetBytes === undefined ? {} : {inputBudgetBytes: contextPreparation.inputBudgetBytes}),
       });
       const worker = contextPreparation === undefined ? delegate : withContextPreparation(delegate,
         scope => contextPreparation.configure(scope, prepareCompression, () => !disabled && ready && gate.authorized(), owner));

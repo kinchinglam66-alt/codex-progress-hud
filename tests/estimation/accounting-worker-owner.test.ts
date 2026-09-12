@@ -3,6 +3,7 @@ import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {randomUUID} from 'node:crypto';
 import {afterEach, expect, it} from 'vitest';
 import type {ReleaseAccountingOwner, ReleaseAccountingRecoveryOwner} from '../../src/estimation/release-accounting.js';
 
@@ -202,6 +203,28 @@ it('uses the real worker protocol for not-dispatched cancellation without usage 
   await owner.close();
   const restored=await openCompiled(path,()=>0);
   expect(restored.snapshot()).toMatchObject({starts:1,inFlight:0,unknown:0,knownTokens:0});
+});
+
+it('propagates compression purpose through the production worker into SQLite', async () => {
+  const path = await directory();
+  const owner = await openCompiled(path, () => 0);
+  const compression = owner.forConversation('compression');
+  const compressionId = (await compression.reserve('ordinary', 'context_compression'))!;
+  await compression.bindInvocation?.(compressionId, {admissionId: compressionId, conversationKey: 'compression', turnGeneration: 1,
+    ownerUuid: randomUUID(), providerKind: 'subscription', phase: 'bound', deadline: 60_000, purpose: 'context_compression'});
+  await compression.cancelBeforeDispatch(compressionId);
+  const legacy = owner.forConversation('legacy');
+  const legacyId = (await legacy.reserve())!;
+  await legacy.cancelBeforeDispatch(legacyId);
+  await owner.close();
+  owners.pop();
+  const {DatabaseSync} = await import('node:sqlite');
+  const db = new DatabaseSync(join(path, 'release-observer-accounting.sqlite'), {readOnly: true});
+  try {
+    expect(db.prepare('SELECT purpose FROM admissions WHERE id = ?').get(compressionId)).toEqual({purpose: 'context_compression'});
+    expect(db.prepare('SELECT purpose FROM invocation_records WHERE admission_id = ?').get(compressionId)).toEqual({purpose: 'context_compression'});
+    expect(db.prepare('SELECT purpose FROM admissions WHERE id = ?').get(legacyId)).toEqual({purpose: 'eta'});
+  } finally { db.close(); }
 });
 
 it('carries revision-bound recovery commands through the worker and rejects stale confirmations', async () => {

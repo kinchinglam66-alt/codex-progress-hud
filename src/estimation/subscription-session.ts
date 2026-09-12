@@ -1,6 +1,6 @@
 import { metricsSchema, type Metrics, type Prediction } from "./contracts.js";
 import { createCodexOutputParser, createObserverOutputParser, createCompressionOutputParser, type CodexOutput, type SubscriptionUsage, type ObserverOutput } from "./codex-output.js";
-import {validateCompressionRequest, validateCompressionSummary, type CompressionDispatchResult, type CompressionRequest, type CompressionSummary} from './context-compression.js';
+import {CompressionDispatchError, validateCompressionRequest, validateCompressionSummary, type CompressionDispatchResult, type CompressionRequest, type CompressionSummary} from './context-compression.js';
 import type {ObserverInput, ObserverResponse} from './observer-contract.js';
 import {packObserverInput} from './observer-input.js';
 import type { createOwnedProcessRunner, Invocation, OwnedProcessResult } from "./owned-process.js";
@@ -258,11 +258,13 @@ export function createSubscriptionCompressionSession(dependencies: CompressionSu
     async summarize(request: CompressionRequest, signal: AbortSignal): Promise<CompressionDispatchResult> {
       const result = await session.estimate(request, signal);
       if (result.status === 'estimated' && result.prediction !== null) {
-        return {summary: validateCompressionSummary(result.prediction, request), usage: result.usage};
+        try { return {summary: validateCompressionSummary(result.prediction, request), usage: result.usage}; }
+        catch { throw new CompressionDispatchError('COMPRESSION_COVERAGE_INVALID', result.usage); }
       }
-      if (result.status === 'aborted') throw new Error('COMPRESSION_ABORTED');
-      if (result.status === 'invalid_input') throw new Error('COMPRESSION_REQUEST_INVALID');
-      throw new Error('COMPRESSION_PROVIDER_FAILED');
+      if (result.status === 'aborted') throw new CompressionDispatchError('COMPRESSION_ABORTED', result.usage);
+      if (result.status === 'invalid_input') throw new CompressionDispatchError('COMPRESSION_REQUEST_INVALID', result.usage);
+      if (result.status === 'accounting_error') throw new CompressionDispatchError('COMPRESSION_ACCOUNTING_FAILED', result.usage);
+      throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED', result.usage);
     },
   };
 }

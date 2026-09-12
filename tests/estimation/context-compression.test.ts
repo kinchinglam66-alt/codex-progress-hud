@@ -126,6 +126,23 @@ it('settles usage for an invalid subscription summary and rejects malicious tool
   expect(tool.ledger.snapshot()).toMatchObject({starts: 1, unknown: 1, unresolved: 0});
 });
 
+it('preserves accounted usage and distinguishes a summary-session accounting failure', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'hud-compression-accounting-'));
+  directories.push(directory);
+  const ledger = await openSubscriptionLedger(directory, {maxStarts: 6, maxKnownTokens: 50_000});
+  const failingLedger = {...ledger, settle: async () => { throw new Error('journal unavailable'); }};
+  const session = createSubscriptionCompressionSession({
+    ledger: failingLedger, runner: createOwnedProcessRunner({timeoutMs: 1_000}), authorize: () => true,
+    prepare: () => ({executable: process.execPath, cwd: directory, args: ['-e', `process.stdout.write(${JSON.stringify(compressionStream(summary))})`], env: process.env, input: ''}),
+  });
+  sessions.push(session);
+  sessions.push({close: () => ledger.close()});
+  await expect(session.summarize(request, new AbortController().signal)).rejects.toMatchObject({
+    name: 'CompressionDispatchError', message: 'COMPRESSION_ACCOUNTING_FAILED', usage: {inputTokens: 4, outputTokens: 2},
+  });
+  expect(ledger.snapshot()).toMatchObject({starts: 1, knownTokens: 0, unknown: 0});
+});
+
 it('uses the API transport and compression purpose without granting tool authority', async () => {
   const settled: Array<{id: string; usage: unknown}> = [];
   const transport = vi.fn(async (_url: string, init: RequestInit) => {

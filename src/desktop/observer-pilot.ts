@@ -32,19 +32,27 @@ const rootOwnerSchema=z.object({version:z.literal(1),ownerFingerprint:z.string()
 const rootOwnerPath=(dataDirectory:string):string=>resolve(dataDirectory,'observer-accounting-root-owner.json');
 const SUBSCRIPTION_MODEL='gpt-5.6-luna';
 const conservativeByteSizer:RequestSizer={kind:'conservative',count:value=>Buffer.byteLength(value,'utf8')};
-const subscriptionCommandEnvelope=JSON.stringify({route:'codex-subscription',stdin:'json',stdout:'jsonl',command:[
-  'exec','--ignore-user-config','--strict-config','--ephemeral','--skip-git-repo-check','--sandbox','read-only','--json','-'
-]});
+// The identity runtime owns the actual argv. This is only a deliberately
+// bounded framing policy for planning, never a claim about invocation args.
+const SUBSCRIPTION_COMMAND_FRAMING_MAX_BYTES=16_384;
+const subscriptionFramingPolicy=JSON.stringify({policy:'trusted-subscription-framing-v1',maxBytes:SUBSCRIPTION_COMMAND_FRAMING_MAX_BYTES});
 
 function subscriptionSizer(assets:{instructions:string;schema:unknown},compressionAssets:{instructions:string;schema:unknown},input:unknown,compression:boolean):string {
   const serialized=serializeSubscriptionTransport(input,{instructions:compression?compressionAssets.instructions:assets.instructions,
-    schema:compression?compressionAssets.schema:assets.schema,commandEnvelope:subscriptionCommandEnvelope,compression});
-  return [serialized.stdin,serialized.instructions,serialized.schema,serialized.commandEnvelope].join('\n');
+    schema:compression?compressionAssets.schema:assets.schema,commandEnvelope:subscriptionFramingPolicy,compression});
+  const framingUpperBound=subscriptionFramingPolicy.padEnd(SUBSCRIPTION_COMMAND_FRAMING_MAX_BYTES,' ');
+  return [serialized.stdin,serialized.instructions,serialized.schema,framingUpperBound].join('\n');
 }
 
 function subscriptionCapacity(contextCapacity: ProviderConfig['contextCapacity']): ContextCapacity|null {
+  if (!contextCapacity || !Number.isSafeInteger(contextCapacity.outputReserveTokens) || contextCapacity.outputReserveTokens <= 0) return null;
   return resolveConfiguredCapacity({version:1,selected:'subscription',api:null,
-    ...(contextCapacity===undefined?{}:{contextCapacity})},SUBSCRIPTION_MODEL,0);
+    contextCapacity},SUBSCRIPTION_MODEL,contextCapacity.outputReserveTokens);
+}
+
+function inputBudgetBytes(capacity: ContextCapacity|null): number|undefined {
+  if (!capacity) return undefined;
+  return capacity.requestBytes ?? capacity.contextTokens - capacity.outputReserveTokens;
 }
 
 /**
@@ -121,12 +129,13 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     const accountingDirectory=subscriptionAccountingDirectory(options.dataDirectory,account.evidence.accountFingerprint,rootOwnerFingerprint);
     const summaryCache=createContextSummaryCache();
     const capacity=subscriptionCapacity(contextCapacity);
+    const preparedInputBudgetBytes=inputBudgetBytes(capacity);
     const cacheScope=JSON.stringify(['subscription',account.evidence.accountFingerprint,SUBSCRIPTION_MODEL,
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
-      contextPreparation:{configure:async(scope,prepareCompression,authorize,owner)=>{
-        const runner=createOwnedProcessRunner();
+      contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
+        const runner=createOwnedProcessRunner({...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes})});
         const view=owner.forConversation(scope.conversationKey);
         const session=createSubscriptionCompressionSession({
           ledger:view,runner,authorize,prepare:async(request,prepareSignal)=>(await prepareCompression(request,prepareSignal)).invocation,

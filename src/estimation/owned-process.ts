@@ -7,23 +7,26 @@ export interface Invocation { executable: string; cwd: string; args: readonly st
 type Reason = "exited" | "aborted" | "disabled" | "busy" | "unavailable" | "timeout" | "output_limit" | "spawn_error" | "stdin_error" | "cleanup_timeout" | "protocol_error";
 export interface OwnedProcessResult { reason: Reason; exitCode: number | null; closed: boolean; stdout: string; stderr: string }
 type Spawn = (executable: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
-interface Options { spawn?: Spawn; timeoutMs?: number; cleanupMs?: number; captureIdentity?: typeof captureInvocationProcessIdentity }
+export interface OwnedProcessOptions { spawn?: Spawn; timeoutMs?: number; cleanupMs?: number; captureIdentity?: typeof captureInvocationProcessIdentity; inputBudgetBytes?: number }
 
-export function createOwnedLoginProcessRunner(options: Options = {}) {
+export function createOwnedLoginProcessRunner(options: OwnedProcessOptions = {}) {
   return createRunner({...options,timeoutMs:options.timeoutMs ?? 600000},600000);
 }
 
 /** Direct-child supervision only; parent-crash/process-tree containment requires
  * a separately verified platform owner before installation. No public logging.
  */
-export function createOwnedProcessRunner(options: Options = {}) {
+export function createOwnedProcessRunner(options: OwnedProcessOptions = {}) {
   return createRunner(options,60000);
 }
 
-function createRunner(options: Options, maximumTimeoutMs:number) {
+function createRunner(options: OwnedProcessOptions, maximumTimeoutMs:number) {
   const timeoutMs = options.timeoutMs ?? 60_000, cleanupMs = options.cleanupMs ?? 5_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maximumTimeoutMs ||
     !Number.isInteger(cleanupMs) || cleanupMs < 1 || cleanupMs > 5_000) throw new Error("INVALID_PROCESS_DEADLINE");
+  const inputBudgetBytes = options.inputBudgetBytes ?? 16_384;
+  if (!Number.isSafeInteger(inputBudgetBytes) || inputBudgetBytes < 1 || inputBudgetBytes > 16 * 1024 * 1024)
+    throw new Error("INVALID_PROCESS_INPUT_BUDGET");
   const launch = options.spawn ?? spawn;
   let active = false, disabled = false, poisoned = false;
   let cancelActive: (() => void) | undefined;
@@ -36,7 +39,7 @@ function createRunner(options: Options, maximumTimeoutMs:number) {
       if (active) return Promise.resolve(empty("busy", false));
       if (signal.aborted) return Promise.resolve(empty("aborted"));
       if (!isAbsolute(invocation.executable) || !isAbsolute(invocation.cwd) ||
-        Buffer.byteLength(invocation.input) > 16_384 || invocation.args.length > 256 ||
+        Buffer.byteLength(invocation.input, 'utf8') > inputBudgetBytes || invocation.args.length > 256 ||
         invocation.args.some(arg => typeof arg !== "string" || arg.includes("\0"))) return Promise.reject(new Error("INVALID_PROCESS_INVOCATION"));
       active = true;
       return new Promise(resolve => {

@@ -64,6 +64,16 @@ it("never spawns a pre-aborted request", async () => {
   expect(await r.run(spec('throw Error("must not run")'),c.signal)).toMatchObject({reason:"aborted",closed:true});
   expect(r.status().active).toBe(false);
 });
+it("accepts a full prepared input above the legacy bound only with an attested budget", async () => {
+  const input = "x".repeat(20_000);
+  const defaultRunner = createOwnedProcessRunner();
+  await expect(defaultRunner.run({...spec('process.stdin.resume()'), input}, new AbortController().signal))
+    .rejects.toThrow("INVALID_PROCESS_INVOCATION");
+
+  const runner = createOwnedProcessRunner({inputBudgetBytes: 32_768});
+  const result = await runner.run({...spec('process.stdin.resume(); process.stdin.on("end",()=>process.stdout.write("ok"))'), input}, new AbortController().signal);
+  expect(result).toMatchObject({reason:"exited",exitCode:0,closed:true,stdout:"ok"});
+});
 it("cancels a real child and rejects a concurrent start", async () => {
   const r=createOwnedProcessRunner(); const c=new AbortController();
   const pending=r.run(spec('setInterval(()=>{},1000)'),c.signal);

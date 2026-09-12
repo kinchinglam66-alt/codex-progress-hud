@@ -20,6 +20,9 @@ export interface AccountedObserverWorkerOptions {
     Promise<Invocation | {invocation:Invocation;provenance?:ForecastVersions}>;
   authorize: () => boolean;
   now?: () => number;
+  /** Host-attested byte budget for prepared context. Defaults to the legacy
+   * process-input bound when the runtime cannot prove a larger allowance. */
+  inputBudgetBytes?: number;
 }
 
 const failure = (status: ObserverSubscriptionResult['status'] = 'process_error', usage: ObserverSubscriptionResult['usage'] = null): ObserverSubscriptionResult => ({
@@ -51,7 +54,7 @@ function authorized(authorize: () => boolean): boolean {
  * Preparation and authorization are trusted host seams; neither receives the
  * internal conversation key.
  */
-export function createAccountedObserverWorker({accounting, prepare, authorize, now = Date.now}: AccountedObserverWorkerOptions): ObserverWorker {
+export function createAccountedObserverWorker({accounting, prepare, authorize, now = Date.now, inputBudgetBytes}: AccountedObserverWorkerOptions): ObserverWorker {
   let active = false;
   let disabled = false;
   let poisoned = false;
@@ -95,7 +98,7 @@ export function createAccountedObserverWorker({accounting, prepare, authorize, n
     try {
       reportObserverStage(onStage,'admission');
       view = accounting.forConversation(conversationKey);
-      localRunner = createOwnedProcessRunner();
+      localRunner = createOwnedProcessRunner({...(inputBudgetBytes === undefined ? {} : {inputBudgetBytes})});
       const prepareInvocation = async (value:ObserverInput, prepareSignal:AbortSignal):Promise<Invocation> => {
         const prepared = await prepare(value, prepareSignal);
         if (typeof prepared === 'object' && prepared !== null && 'invocation' in prepared) {

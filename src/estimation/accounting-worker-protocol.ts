@@ -23,6 +23,7 @@ const usage = z.object({
   cachedInputTokens: z.number().int().nonnegative().safe().max(MAX_TOKENS_PER_FIELD).nullable(),
 }).strict().refine(value => value.cachedInputTokens === null || value.cachedInputTokens <= value.inputTokens);
 const admissionKind = z.enum(['ordinary', 'retry', 'half_open']);
+const accountingPurpose = z.enum(['eta', 'context_compression']);
 const settlementClassification = z.enum(['known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown']);
 
 export const accountingSnapshotSchema = z.object({
@@ -55,7 +56,7 @@ const requestBase = {
   requestId: reservationId,
 } as const;
 
-const reserveRequest = z.object({...requestBase, operation: z.literal('reserve'), conversationKey, clock: safeClock, admissionKind: admissionKind.optional()}).strict();
+const reserveRequest = z.object({...requestBase, operation: z.literal('reserve'), conversationKey, clock: safeClock, admissionKind: admissionKind.optional(), purpose: accountingPurpose.optional()}).strict();
 const settleRequest = z.object({...requestBase, operation: z.literal('settle'), conversationKey, clock: safeClock, reservationId, usage: usage.nullable(), settlement: settlementClassification.optional()}).strict();
 const cancelRequest=z.object({...requestBase,operation:z.literal('not_dispatched'),conversationKey,clock:safeClock,reservationId}).strict();
 const shutdownRequest = z.object({...requestBase, operation: z.literal('shutdown')}).strict();

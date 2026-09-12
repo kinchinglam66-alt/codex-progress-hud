@@ -2,7 +2,7 @@ import {access, open as openFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {z} from 'zod';
-import type {AccountedUsage, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import type {AccountedUsage, AccountingPurpose, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import {copyInvocationPatch, copyInvocationRecord, type InvocationRecord, type InvocationRecordPatch, invocationRecordSchema} from './invocation-ownership.js';
 import {inspectInvocationProcess} from './invocation-process.js';
 import {parseRecoveryBootBoundaryProof, RECOVERY_BOOT_BOUNDARY_MARGIN_MS, RECOVERY_BOOT_PROOF_MAX_AGE_MS, type RecoveryBootBoundaryProof} from './recovery-boot-boundary.js';
@@ -99,6 +99,10 @@ export interface ReleaseAccountingRecoveryOwner extends ReleaseAccountingOwner {
 type Row = Record<string, unknown>;
 
 function fail(code: string): never { throw new Error(code); }
+function validatePurpose(value: unknown): AccountingPurpose {
+  if (value === 'eta' || value === 'context_compression') return value;
+  return fail('RELEASE_SCHEMA_INVALID');
+}
 function validateClock(value: number): number { return clockValue.safeParse(value).success ? value : fail('RELEASE_INVALID_CLOCK'); }
 function validateRuntimeVersion(): void {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(process.versions.node);
@@ -168,7 +172,8 @@ function createSchema(db: Database): void {
       output_tokens INTEGER NOT NULL CHECK (output_tokens BETWEEN 0 AND 1000000000),
       cached_input_tokens INTEGER NOT NULL CHECK (cached_input_tokens BETWEEN 0 AND 1000000000 AND cached_input_tokens <= input_tokens),
       settlement_classification TEXT NOT NULL DEFAULT 'legacy',
-      recovery_attempt_id TEXT
+      recovery_attempt_id TEXT,
+      purpose TEXT NOT NULL DEFAULT 'eta' CHECK (purpose IN ('eta', 'context_compression'))
     );
     CREATE INDEX admissions_conversation_time ON admissions(conversation, admitted_at);
     CREATE INDEX admissions_state_time ON admissions(state, admitted_at);
@@ -182,7 +187,8 @@ function createSchema(db: Database): void {
       deadline INTEGER NOT NULL CHECK (deadline >= 0),
       pid INTEGER,
       creation_identity TEXT,
-      cleanup_outcome TEXT CHECK (cleanup_outcome IN ('pending', 'confirmed', 'unconfirmed', 'failed'))
+      cleanup_outcome TEXT CHECK (cleanup_outcome IN ('pending', 'confirmed', 'unconfirmed', 'failed')),
+      purpose TEXT NOT NULL DEFAULT 'eta' CHECK (purpose IN ('eta', 'context_compression'))
     );
     CREATE TABLE recovery_attempts (
       id TEXT PRIMARY KEY,
@@ -268,14 +274,27 @@ function ensureSettlementClassification(db: Database): void {
   const legacyUnknown = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'unknown' AND settlement_classification = 'legacy'").get() as Row;
   if (safeInteger(legacyUnknown.count) > 0) db.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();
 }
+function ensureAdmissionPurpose(db: Database): void {
+  const columns = new Set<string>();
+  for (const row of db.prepare('PRAGMA table_info(admissions)').iterate() as Iterable<Row>) if (typeof row.name === 'string') columns.add(row.name);
+  if (!columns.has('purpose')) db.exec("ALTER TABLE admissions ADD COLUMN purpose TEXT NOT NULL DEFAULT 'eta' CHECK (purpose IN ('eta', 'context_compression'))");
+  const invalid = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE purpose NOT IN ('eta', 'context_compression')").get() as Row;
+  if (safeInteger(invalid.count) > 0) fail('RELEASE_SCHEMA_INVALID');
+}
 function ensureInvocationRecords(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS invocation_records (
     admission_id TEXT PRIMARY KEY, conversation TEXT NOT NULL, turn_generation INTEGER NOT NULL CHECK (turn_generation >= 0),
     owner_uuid TEXT NOT NULL, provider_kind TEXT NOT NULL CHECK (provider_kind IN ('subscription', 'api')),
     phase TEXT NOT NULL CHECK (phase IN ('prepared', 'bound', 'dispatching', 'settling', 'closed')),
     deadline INTEGER NOT NULL CHECK (deadline >= 0), pid INTEGER, creation_identity TEXT,
-    cleanup_outcome TEXT CHECK (cleanup_outcome IN ('pending', 'confirmed', 'unconfirmed', 'failed'))
+    cleanup_outcome TEXT CHECK (cleanup_outcome IN ('pending', 'confirmed', 'unconfirmed', 'failed')),
+    purpose TEXT NOT NULL DEFAULT 'eta' CHECK (purpose IN ('eta', 'context_compression'))
   )`);
+  const columns = new Set<string>();
+  for (const row of db.prepare('PRAGMA table_info(invocation_records)').iterate() as Iterable<Row>) if (typeof row.name === 'string') columns.add(row.name);
+  if (!columns.has('purpose')) db.exec("ALTER TABLE invocation_records ADD COLUMN purpose TEXT NOT NULL DEFAULT 'eta' CHECK (purpose IN ('eta', 'context_compression'))");
+  const invalid = db.prepare("SELECT COUNT(*) AS count FROM invocation_records WHERE purpose NOT IN ('eta', 'context_compression')").get() as Row;
+  if (safeInteger(invalid.count) > 0) fail('RELEASE_SCHEMA_INVALID');
 }
 function ensureConversationRetries(db: Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS conversation_retries (
@@ -395,12 +414,12 @@ function validateRecoveryEvidence(db: Database, initialNow: number, recoveryRevi
     if (matching.length !== 1) fail('RELEASE_SCHEMA_INVALID');
   }
 }
-function validateStoredDatabase(db: Database, initialNow: number,expectedVersion=SCHEMA_VERSION): PendingReservation[] {
+function validateStoredDatabase(db: Database, initialNow: number,expectedVersion=SCHEMA_VERSION,requirePurpose=expectedVersion===SCHEMA_VERSION): PendingReservation[] {
   if (pragmaNumber(db, 'PRAGMA user_version', 'user_version') !== expectedVersion || pragmaNumber(db, 'PRAGMA page_count', 'page_count') > MAX_PAGE_COUNT) fail('RELEASE_SCHEMA_INVALID');
   if (value(db.prepare('PRAGMA integrity_check').get() as Row, 'integrity_check') !== 'ok') fail('RELEASE_SCHEMA_INVALID');
   validateColumns(db, 'metadata', ['id', 'version', 'cumulative_starts', 'known_tokens', 'unknown_count', 'unknown_admission_ceiling', 'last_admission', ...(expectedVersion >= 4 ? ['recovery_revision', 'recovery_covered_revision', 'recovery_sequence'] : []), ...(expectedVersion >= 5 ? ['recovery_failure_count', 'recovery_next_eligible', 'recovery_cooldown_until', 'recovery_cooldown_level', 'recovery_half_open'] : [])]);
-  validateColumns(db, 'admissions', ['id', 'ordinal', 'conversation', 'admitted_at', 'state', 'input_tokens', 'output_tokens', 'cached_input_tokens', ...(expectedVersion >= 4 ? ['recovery_attempt_id', 'settlement_classification'] : [])]);
-  if (expectedVersion >= 5) validateColumns(db, 'invocation_records', ['admission_id', 'conversation', 'turn_generation', 'owner_uuid', 'provider_kind', 'phase', 'deadline', 'pid', 'creation_identity', 'cleanup_outcome']);
+  validateColumns(db, 'admissions', ['id', 'ordinal', 'conversation', 'admitted_at', 'state', 'input_tokens', 'output_tokens', 'cached_input_tokens', ...(expectedVersion >= 4 ? ['recovery_attempt_id', 'settlement_classification'] : []), ...(requirePurpose ? ['purpose'] : [])]);
+  if (expectedVersion >= 5) validateColumns(db, 'invocation_records', ['admission_id', 'conversation', 'turn_generation', 'owner_uuid', 'provider_kind', 'phase', 'deadline', 'pid', 'creation_identity', 'cleanup_outcome', ...(requirePurpose ? ['purpose'] : [])]);
   const metadata = db.prepare(`SELECT id, version, cumulative_starts, known_tokens, unknown_count, unknown_admission_ceiling, last_admission${expectedVersion >= 4 ? ', recovery_revision, recovery_covered_revision, recovery_sequence' : ''}${expectedVersion >= 5 ? ', recovery_failure_count, recovery_next_eligible, recovery_cooldown_until, recovery_cooldown_level, recovery_half_open' : ''} FROM metadata`).all() as Row[];
   if (metadata.length !== 1 || metadata[0]!.id !== 1 || metadata[0]!.version !== expectedVersion) fail('RELEASE_SCHEMA_INVALID');
   const cumulativeStarts = safeInteger(metadata[0]!.cumulative_starts);
@@ -426,7 +445,7 @@ function validateStoredDatabase(db: Database, initialNow: number,expectedVersion
   const admissions = new Map<string, StoredAdmission>();
   let rowCount = 0, unknownRows = 0, rowKnownTokens = 0, maximumAdmission: number | null = null, maximumOrdinal = 0, maximumUnknownOrdinal = 0;
   const admissionSelect = expectedVersion >= 4
-    ? 'SELECT id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification, recovery_attempt_id FROM admissions ORDER BY ordinal'
+    ? `SELECT id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification, recovery_attempt_id${requirePurpose ? ', purpose' : ''} FROM admissions ORDER BY ordinal`
     : 'SELECT id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens FROM admissions ORDER BY ordinal';
   for (const row of db.prepare(admissionSelect).iterate() as Iterable<Row>) {
     rowCount++;
@@ -437,6 +456,8 @@ function validateStoredDatabase(db: Database, initialNow: number,expectedVersion
     const inputTokens = safeInteger(row.input_tokens), outputTokens = safeInteger(row.output_tokens), cachedInputTokens = safeInteger(row.cached_input_tokens);
     if (inputTokens > MAX_TOKENS_PER_FIELD || outputTokens > MAX_TOKENS_PER_FIELD || cachedInputTokens > MAX_TOKENS_PER_FIELD || cachedInputTokens > inputTokens) fail('RELEASE_SCHEMA_INVALID');
     const state = String(row.state);
+    const purpose = requirePurpose ? String(row.purpose) : 'eta';
+    if (!['eta', 'context_compression'].includes(purpose)) fail('RELEASE_SCHEMA_INVALID');
     const settlementClassification = expectedVersion >= 4 ? String(row.settlement_classification) : 'legacy';
     if (expectedVersion >= 4 && !['legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
     if (expectedVersion >= 4 && state === 'unknown' && !['legacy', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
@@ -517,6 +538,16 @@ function migrateVersion4(db: Database): void {
     claim_admission_id TEXT
   );`);
   ensureConversationRetries(db);
+  ensureAdmissionPurpose(db);
+  ensureInvocationRecords(db);
+  db.exec(`PRAGMA user_version=${SCHEMA_VERSION}; UPDATE metadata SET version=${SCHEMA_VERSION} WHERE id=1;`);
+}
+
+/** Current schema records the validated accounting purpose on both admissions
+ * and invocation ownership. Existing rows are legacy ETA records by contract. */
+function migrateVersion5(db: Database, initialNow: number): void {
+  validateStoredDatabase(db, initialNow, 5, false);
+  ensureAdmissionPurpose(db);
   ensureInvocationRecords(db);
   db.exec(`PRAGMA user_version=${SCHEMA_VERSION};
     UPDATE metadata SET version=${SCHEMA_VERSION} WHERE id=1;`);
@@ -601,7 +632,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
         const version = pragmaNumber(db!, 'PRAGMA user_version', 'user_version');
         if (version === 2 || version === 3) migrateLegacyVersion(db!, initialNow, version);
         else if (version === 4) { ensureRecoveryPolicy(db!); ensureRecoverySafety(db!); ensureSettlementClassification(db!); validateStoredDatabase(db!, initialNow, 4); migrateVersion4(db!); }
-        else if (version === 5) { ensureRecoveryPolicy(db!); ensureRecoverySafety(db!); ensureSettlementClassification(db!); ensureConversationRetries(db!); ensureInvocationRecords(db!); validateStoredDatabase(db!, initialNow); }
+        else if (version === 5) { ensureRecoveryPolicy(db!); ensureRecoverySafety(db!); ensureSettlementClassification(db!); ensureConversationRetries(db!); migrateVersion5(db!, initialNow); }
         else validateStoredDatabase(db!, initialNow);
       recoverInterruptedRecovery(db!, initialNow);
       recoverInterruptedHalfOpen(db!);
@@ -677,7 +708,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     return ['awaiting_confirmation', 'probing'].includes(status.state);
   }
   function activeStartCount(): number { return safeInteger((database.prepare('SELECT COUNT(*) AS count FROM admissions WHERE admitted_at > ?').get(lastClock - HOUR_MS) as Row).count); }
-  function reserveInTransaction(key: string, current: number, admissionKind: AdmissionKind): string | null {
+  function reserveInTransaction(key: string, current: number, admissionKind: AdmissionKind, purpose: AccountingPurpose): string | null {
     database.prepare("DELETE FROM admissions WHERE state IN ('settled','not_dispatched') AND admitted_at <= ? AND id NOT IN (SELECT trial_reservation_id FROM recovery_attempts WHERE trial_reservation_id IS NOT NULL)").run(current - HOUR_MS);
     const stored = metadata(), starts = safeInteger(stored.cumulative_starts), known = safeInteger(stored.known_tokens);
     const policy = database.prepare('SELECT next_eligible, cooldown_until, half_open, half_open_conversation FROM recovery_policy WHERE id = 1').get() as Row;
@@ -696,7 +727,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     if (safeInteger((database.prepare('SELECT COUNT(*) AS count FROM admissions').get() as Row).count) >= MAX_ROWS) return null;
     if (safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state IN ('pending', 'recovery_trial') AND conversation = ?").get(key) as Row).count) > 0) return null;
     const id = randomUUID();
-    database.prepare("INSERT INTO admissions (id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, 'legacy')").run(id, starts + 1, key, current, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD);
+    database.prepare("INSERT INTO admissions (id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification, purpose) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, 'legacy', ?)").run(id, starts + 1, key, current, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, purpose);
     if (admissionKind === 'retry') {
       const claimed = database.prepare('UPDATE conversation_retries SET claim_admission_id = ?, updated_at = ? WHERE conversation = ? AND claim_admission_id IS NULL').run(id, current, key);
       if (claimed.changes !== 1) fail('RELEASE_RECOVERY_INVALID');
@@ -711,12 +742,15 @@ export async function openReleaseAccounting(directory: string, now: () => number
     const view = {key, closed: false, pending: new Set<Promise<unknown>>(), closing: undefined as Promise<void> | undefined};
     function track<T>(operation: Promise<T>): Promise<T> { view.pending.add(operation); operation.finally(() => view.pending.delete(operation)).catch(() => undefined); return operation; }
     return {
-      reserve(admissionKind: AdmissionKind = 'ordinary'): Promise<string | null> {
+      reserve(admissionKind: AdmissionKind = 'ordinary', purpose: AccountingPurpose = 'eta'): Promise<string | null> {
         if (closed || view.closed) return Promise.resolve(null);
+        let copiedPurpose: AccountingPurpose;
+        try { copiedPurpose = validatePurpose(purpose); }
+        catch (error) { return Promise.reject(error); }
         return track(serial(async () => {
           if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
           const current = time();
-          try { const id = transaction(database, () => reserveInTransaction(key, current, admissionKind)); if (id) recoveredPending.delete(id); return id; }
+          try { const id = transaction(database, () => reserveInTransaction(key, current, admissionKind, copiedPurpose)); if (id) recoveredPending.delete(id); return id; }
           catch (error) { return markPersistenceFailure(error); }
         }));
       },
@@ -805,12 +839,13 @@ export async function openReleaseAccounting(directory: string, now: () => number
           try { transaction(database, () => {
             const row = database.prepare('SELECT state, conversation FROM admissions WHERE id = ?').get(copiedId) as Row | undefined;
             if (!row || row.state !== 'pending' || row.conversation !== key) fail('RELEASE_INVOCATION_INVALID');
-            database.prepare(`INSERT INTO invocation_records (admission_id, conversation, turn_generation, owner_uuid, provider_kind, phase, deadline, pid, creation_identity, cleanup_outcome)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            const purpose = validatePurpose(copiedRecord.purpose ?? 'eta');
+            database.prepare(`INSERT INTO invocation_records (admission_id, conversation, turn_generation, owner_uuid, provider_kind, phase, deadline, pid, creation_identity, cleanup_outcome, purpose)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(admission_id) DO UPDATE SET conversation=excluded.conversation, turn_generation=excluded.turn_generation, owner_uuid=excluded.owner_uuid,
-              provider_kind=excluded.provider_kind, phase=excluded.phase, deadline=excluded.deadline, pid=excluded.pid, creation_identity=excluded.creation_identity, cleanup_outcome=excluded.cleanup_outcome`)
+              provider_kind=excluded.provider_kind, phase=excluded.phase, deadline=excluded.deadline, pid=excluded.pid, creation_identity=excluded.creation_identity, cleanup_outcome=excluded.cleanup_outcome, purpose=excluded.purpose`)
               .run(copiedId, copiedRecord.conversationKey, copiedRecord.turnGeneration, copiedRecord.ownerUuid, copiedRecord.providerKind, copiedRecord.phase,
-                copiedRecord.deadline, copiedRecord.pid ?? null, copiedRecord.creationIdentity ?? null, copiedRecord.cleanupOutcome ?? null);
+                copiedRecord.deadline, copiedRecord.pid ?? null, copiedRecord.creationIdentity ?? null, copiedRecord.cleanupOutcome ?? null, purpose);
           }); } catch (error) { markPersistenceFailure(error); }
         }));
       },
@@ -931,7 +966,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
           const reservationId = randomUUID();
           const now = time();
           const starts = safeInteger(stored.cumulative_starts);
-          database.prepare("INSERT INTO admissions (id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification, recovery_attempt_id) VALUES (?, ?, ?, ?, 'recovery_trial', ?, ?, ?, 'legacy', ?)")
+          database.prepare("INSERT INTO admissions (id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification, recovery_attempt_id, purpose) VALUES (?, ?, ?, ?, 'recovery_trial', ?, ?, ?, 'legacy', ?, 'eta')")
             .run(reservationId, starts + 1, '__recovery_trial__', now, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, attemptId);
           database.prepare('UPDATE metadata SET cumulative_starts = ?, last_admission = ? WHERE id = 1').run(starts + 1, now);
           database.prepare("UPDATE recovery_attempts SET status = 'trial_reserved', trial_reservation_id = ?, updated_at = ? WHERE id = ?")
