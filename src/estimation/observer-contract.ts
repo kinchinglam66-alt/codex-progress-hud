@@ -9,6 +9,18 @@ const eventSchema = z.object({ordinal, kind:z.enum(['user','assistant','tool_sta
 const packingLossSchema = z.object({suppliedMessages:ordinal,retainedMessages:ordinal,
   droppedByKind:z.object({user:ordinal,assistant:ordinal,tool:ordinal}).strict(),
   clippedMessages:ordinal}).strict();
+const representationSchema=z.object({
+  mode:z.enum(['full','compressed','incomplete']),
+  sourceComplete:z.boolean(),
+  originalRecords:ordinal,
+  compressedThroughOrdinal:ordinal.nullable(),
+  sizing:z.enum(['tokenizer','conservative']),
+}).strict();
+const historySummarySchema=z.object({
+  text:z.string().min(1),
+  firstOrdinal:ordinal,
+  lastOrdinal:ordinal,
+}).strict().refine(value=>value.firstOrdinal<=value.lastOrdinal);
 const workPartSchema=z.object({
   workClass:z.enum(['file_processing','batch_processing','other']),
   unit:z.enum(['file','batch','unknown']),
@@ -40,7 +52,7 @@ const observationSchema = z.object({
   sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   summaryThroughSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   activeTimeKnown: z.boolean(), historyComplete: z.boolean(),
-  currentAction: z.object({text: z.string().min(1).max(2048), elapsedSeconds: seconds}).strict().nullable(),
+  currentAction: z.object({text: z.string().min(1), elapsedSeconds: seconds}).strict().nullable(),
   previousEstimate: z.object({remainingSeconds: seconds,
     errorPercent: z.number().finite().min(0).max(1000), observedActiveSeconds: seconds}).strict().nullable(),
   omittedCategories: z.array(z.enum(['user', 'assistant', 'tool', 'summary'])).max(4)
@@ -50,10 +62,10 @@ export const observerInputSchema = z.object({
   activeSeconds: seconds,
   runtime: z.enum(['running', 'waiting', 'paused']),
   messages: z.array(z.object({kind: z.enum(['user', 'assistant', 'tool']),
-    text: z.string().min(1).max(4096), truncated: z.boolean(), scope:z.enum(['current','background']).optional(), event:eventSchema.optional()}).strict()
+    text: z.string().min(1), truncated: z.boolean(), scope:z.enum(['current','background']).optional(), event:eventSchema.optional()}).strict()
     .refine(message=>!message.event || (message.kind==='tool'
       ? message.event.kind==='tool_start'||message.event.kind==='tool_result'
-      : message.event.kind===message.kind && message.event.pairOrdinal===undefined && message.event.counterpartMissing===undefined))).min(1).max(128),
+      : message.event.kind===message.kind && message.event.pairOrdinal===undefined && message.event.counterpartMissing===undefined))).min(1),
   truncated: z.boolean(),
   paceMeasurements:z.array(z.object({
     measurementRef,
@@ -64,8 +76,10 @@ export const observerInputSchema = z.object({
     clock:z.literal('tool_execution'),
   }).strict()).max(8).optional(),
   packingLoss:packingLossSchema.optional(),
-  observation: observationSchema.optional()
-}).strict().refine(value => value.messages.reduce((total, message) => total + message.text.length, 0) <= 65536)
+  observation: observationSchema.optional(),
+  representation:representationSchema.optional(),
+  historySummary:historySummarySchema.optional(),
+}).strict()
   .refine(value => !value.packingLoss || (value.packingLoss.retainedMessages === value.messages.length &&
     value.packingLoss.clippedMessages === value.messages.filter(m=>m.truncated).length &&
     value.packingLoss.suppliedMessages === value.packingLoss.retainedMessages +
@@ -73,5 +87,9 @@ export const observerInputSchema = z.object({
   .refine(value => !value.observation ||
     (value.observation.summaryThroughSequence <= value.observation.sequence &&
       (!value.observation.previousEstimate ||
-        value.observation.previousEstimate.observedActiveSeconds <= value.activeSeconds)));
+        value.observation.previousEstimate.observedActiveSeconds <= value.activeSeconds)))
+  .refine(value => !value.representation ||
+    (value.representation.mode==='compressed'
+      ? value.representation.compressedThroughOrdinal!==null
+      : value.representation.compressedThroughOrdinal===null));
 export type ObserverInput = z.infer<typeof observerInputSchema>;

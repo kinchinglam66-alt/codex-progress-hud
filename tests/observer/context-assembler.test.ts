@@ -24,7 +24,7 @@ it('preserves factual event pairs without transmitting source identifiers',()=>{
   expect(records).toEqual(before);
 });
 
-it('uses the same retention through filtering and repeat packing with honest loss counts',()=>{
+it('preserves large source history through assembly and repeat packing with honest loss counts',()=>{
   const records=[user('u1','Original objective '+ '目标'.repeat(1500)),
     ...Array.from({length:140},(_,i)=>({id:`tool${i}`,turnId:'turn1',kind:'tool_result' as const,atMs:i,text:'日志'.repeat(2500)})),
     user('u2','Newest amendment '+ 'password=x '.repeat(300))];
@@ -34,8 +34,9 @@ it('uses the same retention through filtering and repeat packing with honest los
   expect(packet.messages.at(-1)?.text).toContain('Newest amendment');
   expect(packet.packingLoss!.suppliedMessages).toBe(142);
   expect(packet.packingLoss!.retainedMessages).toBe(packet.messages.length);
-  expect(Object.values(packet.packingLoss!.droppedByKind).reduce((a,b)=>a+b,0)).toBe(142-packet.messages.length);
-  expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16384);
+  expect(Object.values(packet.packingLoss!.droppedByKind).reduce((a,b)=>a+b,0)).toBe(0);
+  expect(packet.messages).toHaveLength(142);
+  expect(Buffer.byteLength(packed)).toBeGreaterThan(256*1024);
   expect(packObserverInput(JSON.parse(packed))).toBe(packed);
 });
 
@@ -51,11 +52,11 @@ it('does not pair anonymous actions or leak associations between conversations',
   expect(other.packingLoss?.droppedByKind).toEqual({user:0,assistant:0,tool:0});
 });
 
-it('reports removed source messages separately from clipped retained messages',()=>{
+it('retains non-empty source messages without clipping them',()=>{
   const packet=assembleContext([user('u','Task'),user('blank','   '),user('long','长'.repeat(5000))],base);
-  expect(packet.packingLoss).toEqual({suppliedMessages:3,retainedMessages:2,
-    droppedByKind:{user:1,assistant:0,tool:0},clippedMessages:1});
-  expect(packet.observation.omittedCategories).toContain('user');
+  expect(packet.packingLoss).toEqual({suppliedMessages:3,retainedMessages:3,
+    droppedByKind:{user:0,assistant:0,tool:0},clippedMessages:0});
+  expect(packet.observation.omittedCategories).toEqual([]);
   expect(packObserverInput(JSON.parse(packObserverInput(packet)))).toBe(packObserverInput(packet));
 });
 
@@ -72,12 +73,13 @@ it('assigns separate pairs to reused tool IDs within one turn',()=>{
   expect(JSON.parse(packObserverInput(input)).messages.slice(1).every((m:any)=>m.event.counterpartMissing)).toBe(true);
 });
 
-it('records equal-length credential filtering as omitted content',()=>{
+it('preserves equal-length credential-like source text as task content',()=>{
   const packet=assembleContext([user('u','password=abcdefghij')],base);
-  expect(packet.truncated).toBe(true);
-  expect(packet.messages[0]?.truncated).toBe(true);
-  expect(packet.packingLoss?.clippedMessages).toBe(1);
-  expect(packet.observation.omittedCategories).toContain('user');
+  expect(packet.truncated).toBe(false);
+  expect(packet.messages[0]?.text).toBe('password=abcdefghij');
+  expect(packet.messages[0]?.truncated).toBe(false);
+  expect(packet.packingLoss?.clippedMessages).toBe(0);
+  expect(packet.observation.omittedCategories).toEqual([]);
 });
 
 it('does not guess a match for overlapping starts with the same action ID',()=>{
@@ -95,8 +97,8 @@ it('retains original goal and newest amendment before repetitive tool output',()
   const result=assembleContext(records,base);
   expect(result.messages.some(m=>m.text==='Build CSV import')).toBe(true);
   expect(result.messages.some(m=>m.text==='Also reject duplicate rows')).toBe(true);
-  expect(result.truncated).toBe(true);
-  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(16384);
+  expect(result.truncated).toBe(false);
+  expect(result.messages).toHaveLength(142);
 });
 
 it('retains a promoted delegation requirement with the latest amendment under packing pressure',()=>{
@@ -108,7 +110,7 @@ it('retains a promoted delegation requirement with the latest amendment under pa
   const decoded=JSON.parse(packed) as {messages:Array<{text:string}>};
   expect(decoded.messages.some(message=>message.text.includes('actual task text'))).toBe(true);
   expect(decoded.messages.some(message=>message.text.includes('LATEST AMENDMENT'))).toBe(true);
-  expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16384);
+  expect(JSON.parse(packed).messages).toHaveLength(142);
 });
 
 it('provides running action elapsed time and explicitly partial work clock',()=>{
@@ -129,21 +131,22 @@ it('clears finished actions and excludes runtime events from message bodies',()=
   expect(result.messages.every(m=>m.text.length>0)).toBe(true);
 });
 
-it('filters credentials from both action metadata and messages before inference',()=>{
+it('preserves credential-like text from action metadata and messages',()=>{
   const secret='sk-abcdefghijklmnop123456';
   const result=assembleContext([user('u1',`Fix request api_key=${secret}`),{id:'c1',actionId:'a1',
     turnId:'turn1',atMs:5000,kind:'tool_start',text:`fetch Bearer ${secret}`}],base);
-  expect(JSON.stringify(result)).not.toContain(secret);
-  expect(JSON.stringify(result)).toContain('REDACTED');
+  expect(JSON.stringify(result)).toContain(secret);
+  expect(JSON.stringify(result)).not.toContain('REDACTED');
 });
 
-it('bounds a multilingual packet including large action and summary metadata',()=>{
+it('preserves a multilingual packet including large action metadata',()=>{
   const packet=assembleContext([user('u1','用户目标'.repeat(1024)),{id:'a',actionId:'action',
     turnId:'turn1',atMs:1000,kind:'tool_start',text:'执行命令'.repeat(1024)}],
     {...base,summary:'目标摘要'.repeat(512)});
-  expect(Buffer.byteLength(JSON.stringify(packet))).toBeLessThanOrEqual(16384);
-  expect(packet.truncated).toBe(true);
-  expect(packet.observation.omittedCategories).toContain('tool');
+  expect(Buffer.byteLength(JSON.stringify(packet))).toBeGreaterThan(16*1024);
+  expect(packet.truncated).toBe(false);
+  expect(packet.observation.currentAction?.text).toBe('执行命令'.repeat(1024));
+  expect(packet.observation.omittedCategories).toEqual([]);
 });
 
 it('does not describe an unfinished historical tool as the current action',()=>{
@@ -152,11 +155,10 @@ it('does not describe an unfinished historical tool as the current action',()=>{
   expect(packet.observation.currentAction).toBeNull();
 });
 
-it('omits embedded host context while retaining the surrounding user objective',()=>{
+it('preserves wrapper-looking prose as task text',()=>{
   const packet=assembleContext([user('u1','Build a report\n<environment_context><cwd>PRIVATE_LOCAL_PATH</cwd></environment_context>\nUse CSV output')],base);
-  expect(JSON.stringify(packet)).not.toContain('PRIVATE_LOCAL_PATH');
-  expect(packet.messages[0]?.text).toContain('Build a report');
-  expect(packet.messages[0]?.text).toContain('Use CSV output');
-  expect(packet.observation.omittedCategories).toContain('user');
-  expect(packet.truncated).toBe(true);
+  expect(JSON.stringify(packet)).toContain('PRIVATE_LOCAL_PATH');
+  expect(packet.messages[0]?.text).toContain('<environment_context><cwd>PRIVATE_LOCAL_PATH</cwd></environment_context>');
+  expect(packet.observation.omittedCategories).toEqual([]);
+  expect(packet.truncated).toBe(false);
 });

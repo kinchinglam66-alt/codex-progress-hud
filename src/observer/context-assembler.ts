@@ -1,5 +1,4 @@
 import type {ConversationRecord} from './conversation-record.js';
-import {extractPassiveContent} from '../hooks/passive-content.js';
 import type {ObserverInput} from '../estimation/observer-contract.js';
 import {retainObserverInput} from '../estimation/observer-retention.js';
 
@@ -22,15 +21,6 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
     .every(n=>Number.isFinite(n)&&n>=0)||options.summaryThroughSequence>options.sequence)throw Error('INVALID_CONTEXT_CLOCK');
   const omitted=new Set<ObservationMetadata['omittedCategories'][number]>();
   let truncated=false;
-  const clean=(text:string,category:ObservationMetadata['omittedCategories'][number])=>{
-    // Recognized host wrappers are not task prose. Conservative omission also
-    // applies to quoted wrappers; flag the loss rather than claiming full context.
-    const selected=text.replace(/<(environment_context|in-app-browser-context|codex_internal_context|app-context|permissions|skills_instructions)\b[^>]*>[\s\S]*?(?:<\/\1(?:\s+instructions)?\s*>|$)/giu,'');
-    if(selected!==text){truncated=true;omitted.add(category);}
-    const content=extractPassiveContent('Stop',{last_assistant_message:selected});
-    if(!content || content.truncated || content.text!==selected){truncated=true;omitted.add(category);}
-    return content?.text??'';
-  };
   const messages:ObserverInput['messages']=[];
   const loss={suppliedMessages:0,retainedMessages:0,droppedByKind:{user:0,assistant:0,tool:0},clippedMessages:0};
   const pairs=new Map<string,number[]>();
@@ -44,7 +34,7 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
     if(!record.text||record.kind==='runtime')continue;
     const kind=record.kind==='user'?'user':record.kind==='assistant'?'assistant':'tool';
     loss.suppliedMessages++;
-    const text=clean(record.text,kind);
+    const text=record.text;
     let pairOrdinal:number|undefined;
     if(kind==='tool'&&record.actionId&&record.turnId!==null){
       const key=JSON.stringify([record.turnId,record.actionId]);
@@ -59,7 +49,7 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
       }
     }
     if(!Number.isFinite(record.atMs)||record.atMs<0||record.atMs>Number.MAX_SAFE_INTEGER)throw Error('INVALID_CONTEXT_CLOCK');
-    if(text)messages.push({kind,text,truncated:text!==record.text,
+    if(text)messages.push({kind,text,truncated:false,
       ...(options.currentTurnId===undefined||record.turnId===options.currentTurnId?{scope:'current' as const}:{scope:'background' as const}),event:{
       ordinal,kind:record.kind,atMs:record.atMs,...(pairOrdinal===undefined?{}:{pairOrdinal})}});
     else loss.droppedByKind[kind]++;
@@ -67,11 +57,7 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
   }
   if(!messages.length)throw Error('CONTEXT_MISSING');
   const action=[...actions.values()].at(-1);
-  if(action && action.text.length>1024){
-    action.text=Array.from(action.text).slice(0,1024).join('');
-    truncated=true;omitted.add('tool');
-  }
-  let summary=options.summary===null?null:clean(options.summary,'summary');
+  let summary=options.summary;
   if(summary&&summary.length>2048){summary=summary.slice(0,2048).replace(/[\uD800-\uDBFF]$/u,'');truncated=true;omitted.add('summary');}
   const result:AssembledContext={goalSummary:summary||null,activeSeconds:options.activeSeconds,
     runtime:options.runtime??'running',messages,truncated,packingLoss:loss,observation:{sequence:options.sequence,

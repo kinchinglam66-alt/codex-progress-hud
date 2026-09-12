@@ -33,56 +33,9 @@ function refresh(packet:ObserverInput):void {
   }
 }
 
-/** Shared deterministic selection after filtering; metadata participates in byte budget. */
+/** Refresh pairing and packing metadata on an owned packet. Text and evidence
+ * selection belong to source preparation/capacity layers, not this legacy API. */
 export function retainObserverInput(packet:ObserverInput):ObserverInput {
-  const messages=packet.messages;
-  // Only local configuration can raise the packet budget, never task text.
-  const configured=process.env.CODEX_PROGRESS_HUD_CONTEXT_KIB;
-  const maxBytes=(configured==='32'?32:configured==='64'?64:16)*1024;
-  const current=messages.filter(m=>m.scope!=='background');
-  const firstUser=current.find(m=>m.kind==='user')??messages.find(m=>m.kind==='user');
-  const lastUser=[...messages].reverse().find(m=>m.kind==='user');
-  const lastAssistant=[...messages].reverse().find(m=>m.kind==='assistant');
-  const protectedMessages=new Set([firstUser,lastUser,lastAssistant]);
-  const latestTool=[...current].reverse().find(m=>m.kind==='tool');
-  const latestResult=[...current].reverse().find(m=>m.kind==='tool'&&m.event?.kind==='tool_result');
-  for(const evidence of [latestTool,latestResult]){
-    if(!evidence)continue;
-    protectedMessages.add(evidence);
-    const pair=evidence.event?.pairOrdinal;
-    if(pair!==undefined){
-      for(const message of current){
-        if(message.kind==='tool'&&message.event?.pairOrdinal===pair)protectedMessages.add(message);
-      }
-    }
-  }
-  const encode=()=>{refresh(packet);return JSON.stringify(packet);};
-  while(Buffer.byteLength(encode(),'utf8')>maxBytes||messages.length>128||
-    messages.reduce((n,m)=>n+m.text.length,0)>65536){
-    if(packet.paceMeasurements&&packet.paceMeasurements.length>0){
-      const index=packet.paceMeasurements.reduce((selected,current,index,array)=>
-        current.sampleCount<array[selected]!.sampleCount?index:selected,0);
-      packet.paceMeasurements.splice(index,1);
-      noteObserverOmission(packet,'summary');
-      continue;
-    }
-    // Preserve amendments ahead of tool logs and old assistant statements.
-    let index=messages.findIndex(m=>m.scope==='background'&&!protectedMessages.has(m));
-    if(index<0)index=messages.findIndex(m=>m.kind==='tool'&&!protectedMessages.has(m));
-    if(index<0)index=messages.findIndex(m=>m.kind==='assistant'&&!protectedMessages.has(m));
-    // Compress verbose retained evidence before sacrificing concise amendments.
-    if(index<0&&(messages.length>128||!messages.some(m=>m.text.length>512)))
-      index=messages.findIndex(m=>!protectedMessages.has(m));
-    if(index>=0&&messages.length>1){
-      const removed=messages.splice(index,1)[0]!;
-      noteObserverDrop(packet,removed);continue;
-    }
-    const candidate=[...messages].sort((a,b)=>b.text.length-a.text.length).find(m=>Array.from(m.text).length>32);
-    if(!candidate)throw Error('CONTEXT_LIMIT');
-    const chars=Array.from(candidate.text),size=Math.max(8,Math.floor(chars.length/3));
-    candidate.text=chars.slice(0,size).join('')+'\n[…]\n'+chars.slice(-size).join('');
-    candidate.truncated=true;noteObserverOmission(packet,candidate.kind);
-  }
   refresh(packet);
   return packet;
 }
