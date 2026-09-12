@@ -1,6 +1,6 @@
 # Same-turn HUD restart recovery
 
-Status: conceptual design approved; written specification awaiting user review.
+Status: written specification approved by user on 2026-09-12; implementation underway.
 Baseline: main b44baadaf6c1d34e211f5def2d0d6e20c952728b.
 
 ## Problem and evidence boundary
