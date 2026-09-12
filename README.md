@@ -1,18 +1,19 @@
 # Codex Progress HUD
 
-A local, privacy-first overlay for Codex task progress and honest remaining-time ranges. Community project; not affiliated with OpenAI.
+A local overlay for Codex task progress and honest remaining-time ranges, with user-configured model processing. Community project; not affiliated with OpenAI.
 
 > Development status: this checkout contains an unreleased passive-tracking
 > migration. Public model-reporting tools and the reporting skill have been
-> removed from the candidate. Bounded task content can be processed locally; see
-> the [candidate privacy boundary](PRIVACY.md#development-candidate-passive-task-content).
+> removed from the candidate. The full-context branch sends readable conversation
+> text to the selected estimator without task-text redaction; see the
+> [full-context boundary](docs/FULL-CONTEXT-ESTIMATION.md) and [privacy policy](PRIVACY.md).
 > Local independent-model activation, numeric ETA delivery and pause freezing have
 > been exercised. Full installed acceptance and long-task accuracy validation are
 > still incomplete. This is a source update, not a new signed or tagged release.
 
 ## Current development candidate
 
-- Passive, bounded conversation observation and multiple task rows identified by
+- Passive conversation observation and multiple task rows identified by
   their Codex chat names; completed and idle goals are excluded from active rows.
 - An isolated, explicitly authorized estimator produces task-state interpretations
   and remaining-time estimates without asking the main task model to report progress.
@@ -21,7 +22,7 @@ A local, privacy-first overlay for Codex task progress and honest remaining-time
 - Explicit runtime version/hash validation, isolated authentication and durable
   usage accounting. Model requests consume the user's selected service allowance.
 
-The latest local regression passed 1,456 tests. This establishes tested behavior,
+An earlier development regression passed 1,456 tests. This establishes historical tested behavior,
 not ETA accuracy: representative long-task scoring and complete multi-conversation
 live acceptance remain outstanding. See [development status](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/DEVELOPMENT-STATUS.md).
 

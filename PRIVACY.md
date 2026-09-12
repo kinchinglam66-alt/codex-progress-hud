@@ -2,6 +2,41 @@
 
 Codex Progress HUD is local-first. It has no project-operated cloud service or telemetry.
 
+## Full-context development branch (2026-09-12)
+
+This section supersedes the historical candidate and disconnected-adapter
+descriptions below for the full-context implementation. It is not an installation
+or release announcement.
+
+When independent estimation is enabled, the HUD reads the authenticated current
+conversation's existing local source, including readable user, assistant and tool
+records from before attachment. It sends that context to the user's selected
+subscription or API provider. Task text is **not redacted**: confidential material
+already present in the conversation can be sent again. A different API endpoint
+can be a different recipient from the service executing the main task.
+
+Only model/request capacity overflow triggers old-history compression, using the
+same selected estimator service. Compression adds model calls and can lose detail.
+The plugin does not promise zero provider retention; service/account policies
+still apply. Pausing or hiding the HUD is not a substitute for disabling estimation.
+
+The history path does not fetch arbitrary attachment paths or import plugin auth
+files, environment secrets, other conversations, or hidden model reasoning. It
+does not create persistent raw conversation copies. The existing Codex source
+remains managed by Codex. Discardable process-memory caches contain summaries;
+local accounting and research journals contain allowlisted counters/status codes,
+not raw task text. Diagnostic exports should still be reviewed before sharing.
+
+Earlier turns are background; the ETA horizon remains the current turn's remaining
+active work. Missing/unreadable history and compressed history are identified
+separately. See [full-context operation](docs/FULL-CONTEXT-ESTIMATION.md).
+
+## Historical release and earlier candidate notes
+
+The remaining sections document earlier behavior, not the current full-context
+data flow. In particular, their text-filtering, fixed retention and no-external-call
+claims must not be applied to the full-context estimator.
+
 ## Control and processing
 
 Codex’s plugin page is the sole global enable/disable/uninstall control. Enablement loads capabilities; it does not force model calls. Tracking is cooperative model reporting. Hooks are optional best-effort compatibility signals, not a prerequisite or unconditional automatic-tracking mechanism. Window visibility and per-task controls are presentation/timing controls only; they do not change plugin state or Codex execution.

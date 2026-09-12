@@ -1,5 +1,29 @@
 # Threat model
 
+## Full-context branch delta (2026-09-12)
+
+The estimator now receives readable conversation text without task-text redaction,
+including earlier turns. This supersedes the historical filtering and disconnected
+observer statements below. The selected external provider is an explicit data
+recipient; confidential task content may be transmitted again. Provider retention
+is outside this project's control.
+
+Source access is bound to an authenticated conversation, immutable byte watermark,
+source epoch and current-turn ticket. History loading/compression cannot grant tool
+authority. Generation changes cancel preparation; old results cannot update a new
+turn or provider. Full/compressed/incomplete metadata is strictly validated. Source
+identity hashes, plugin auth material and arbitrary referenced files are not prompt
+inputs. Independent model output remains untrusted, including compressed summaries.
+
+Capacity is provider-supplied or explicitly configured for the exact model. Missing
+capacity is a visible failure, not permission to truncate. Resource-bound unreadable
+records are marked as gaps. Summaries can omit or distort details even after schema
+validation; this is a remaining accuracy risk, not proof of correct compression.
+Cancellation can race remote billing, so unknown usage is retained, never counted
+as zero. See [current data flow](FULL-CONTEXT-ESTIMATION.md).
+
+## Historical architecture notes
+
 ## Assets and boundaries
 
 Assets are local task metadata, the bearer token, lifecycle/progress integrity, and user attention. Electron, renderer, MCP server, Hook commands, Codex host, companion, and same-user processes are separate trust boundaries. Model output and MCP arguments are untrusted.
