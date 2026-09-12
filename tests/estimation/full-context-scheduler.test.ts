@@ -57,7 +57,9 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
   const goals = new PassiveGoals(contexts, source.goals);
   let prepareResult: PreparedContext = {
     input: {goalSummary: null, activeSeconds: 0, runtime: "running", messages: [{kind: "user", text: "prepared", truncated: false}], truncated: false},
-    representation: {mode: "full", sourceComplete: true, originalRecords: 1, compressedThroughOrdinal: null, sizing: "conservative"}
+    representation: {mode: "full", sourceComplete: true, originalRecords: 1, compressedThroughOrdinal: null, sizing: "conservative"},
+    metrics: {originalTextBytes: 11, originalTextTokenEstimate: 3, preparedRequestBytes: 321,
+      preparedTokenEstimate: 87, compressionCalls: 0, cachedCompressionCalls: 0}
   };
   const worker: ObserverWorker = {
     prepareContext: async (input, _snapshot, _signal, _key, _generation, timestamp) => {
@@ -106,6 +108,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
     resolvePreparation: (value = prepareResult) => resolvePreparation(value),
     rejectPreparation: (error = Error("context_too_large")) => rejectPreparation(error),
     prepareResult: (value: PreparedContext) => { prepareResult = value; },
+    preparedContext: () => prepareResult,
     start, flush, counts: () => ({prepared, observed, observedAt, disabled})
   };
 }
@@ -118,6 +121,10 @@ it("does not observe until delayed source history preparation finishes", async (
   await f.flush();
   expect(f.counts()).toMatchObject({prepared: 1, observed: 1, observedAt: 16_000});
   expect(f.observations.map(row => row.contextState)).toEqual(expect.arrayContaining(["history_loading", "context_preparing", "context_full"]));
+  expect(f.observations.filter(row => row.contextMetrics)).toEqual(expect.arrayContaining([
+    expect.objectContaining({kind: "stage", contextMetrics: f.preparedContext().metrics})
+  ]));
+  expect(f.observations.at(-1)).toMatchObject({contextMetrics: f.preparedContext().metrics});
   expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe("context_full");
   await f.scheduler.close();
 });

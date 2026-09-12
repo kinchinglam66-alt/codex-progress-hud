@@ -4,7 +4,7 @@ import type {ObserverCallStage} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
-import type {PreparedContext} from './prepared-context.js';
+import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverContextState, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
 export type {ObserverContextState} from '../core/observer-diagnostics.js';
@@ -45,6 +45,7 @@ export interface ObserverObservation {
   timings?:ObserverResult['timings'];
   stage?:ObserverCallStage;
   contextState?:ObserverContextState;
+  contextMetrics?:ContextPreparationMetrics;
 }
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
@@ -72,7 +73,7 @@ interface Entry {
 interface Flight {key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
-  contextState?:ObserverContextState; done?: Promise<void>}
+  contextState?:ObserverContextState; contextMetrics?:ContextPreparationMetrics; done?: Promise<void>}
 
 /** Admission timing is local; durable spend admission belongs to each owned worker.
  * changed never dispatches synchronously on the task Hook/HTTP path.
@@ -155,11 +156,16 @@ export class ObserverScheduler {
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,...extra});
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
   }
-  private contextState(flight:Flight,state:ObserverContextState):void {
+  private contextState(flight:Flight,state:ObserverContextState,metrics?:ContextPreparationMetrics):void {
     flight.contextState=state;
+    if(metrics)flight.contextMetrics={originalTextBytes:metrics.originalTextBytes,
+      originalTextTokenEstimate:metrics.originalTextTokenEstimate,preparedRequestBytes:metrics.preparedRequestBytes,
+      preparedTokenEstimate:metrics.preparedTokenEstimate,compressionCalls:metrics.compressionCalls,
+      cachedCompressionCalls:metrics.cachedCompressionCalls};
     const entry=this.entries.get(flight.key);
     if(entry)entry.contextState=state;
-    this.record('stage',flight.key,entry!,{requestId:flight.requestId,contextState:state},flight);
+    this.record('stage',flight.key,entry!,{requestId:flight.requestId,contextState:state,
+      ...(flight.contextMetrics?{contextMetrics:{...flight.contextMetrics}}:{})},flight);
     this.notify();
   }
   private preparationFailureState(flight:Flight,error:unknown):ObserverContextState {
@@ -196,7 +202,7 @@ export class ObserverScheduler {
           if(!value){await opened.snapshot.close();throw Error('preparation_empty');}
           prepared=value.input;
           this.contextState(flight,value.representation.mode==='compressed'?'context_compressed':
-            value.representation.mode==='incomplete'||!value.representation.sourceComplete?'history_incomplete':'context_full');
+            value.representation.mode==='incomplete'||!value.representation.sourceComplete?'history_incomplete':'context_full',value.metrics);
         }catch(error){
           if(!handedToPlanner){try{await opened.snapshot.close();}catch{/* acquisition ownership was not transferred */}}
           throw error;
@@ -603,6 +609,7 @@ export class ObserverScheduler {
        ...(classification.diagnostic?{resultDiagnostic:classification.diagnostic}:{}),
       ...(classification.rejectionReason?{rejectionReason:classification.rejectionReason}:{}),
       ...(flight.contextState?{contextState:flight.contextState}:{}),
+      ...(flight.contextMetrics?{contextMetrics:{...flight.contextMetrics}}:{}),
       ...(result?.timings?{timings:{...result.timings}}:{}),
       usage:result?.usage?{...result.usage}:null},flight);
   }
