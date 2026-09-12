@@ -29,6 +29,26 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it('aborts context preparation when the provider generation is disabled',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-context-generation-'));
+    const pending=deferred<any>();let received:AbortSignal|undefined;
+    const delegate=worker('context');
+    delegate.prepareContext=async(_input,_history,signal)=>{received=signal;return pending.promise;};
+    const owned:ProviderWorkerOwner={workers:[delegate],workerSource:{acquire:()=>delegate,release:async()=>{},all:()=>[delegate]},close:async()=>{},inspect:async()=>({label:'fixture',fingerprint:'fixture'})};
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owned,autoStartSubscription:true});
+    try{
+      await host.start(new AbortController().signal);
+      const lease=host.workerSource!.acquire('key');
+      const input={goalSummary:null,activeSeconds:0,runtime:'running' as const,messages:[{kind:'user' as const,text:'test',truncated:false}],truncated:false};
+      const snapshot={identity:'source',sourceEpoch:1,revision:1,coverage:{complete:true,gaps:[]},async *records(){},close:async()=>{}};
+      const request=lease.prepareContext!(input,{snapshot,currentTurnId:'turn'},new AbortController().signal,'key',1,1);
+      const rejected=expect(request).rejects.toThrow();
+      host.disable();
+      const wasAborted=received?.aborted;
+      pending.resolve({input,representation:{mode:'full',sourceComplete:true,originalRecords:1,compressedThroughOrdinal:null,sizing:'conservative'}});
+      await rejected;expect(wasAborted).toBe(true);
+    }finally{await host.close();}
+  });
   it('saves and activates model capacity without re-entering subscription credentials',async()=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-context-capacity-'));
     const openSubscription=vi.fn<ObserverProviderHostOptions['openSubscription']>(async()=>owner('subscription'));

@@ -8,6 +8,16 @@ const base={goalSummary:null,activeSeconds:90,runtime:'running' as const,truncat
 
 afterEach(()=>vi.unstubAllEnvs());
 
+it('rejects contradictory history representation and missing compression coverage',()=>{
+  const input={...base,messages:[{kind:'user' as const,text:'task',truncated:false}],
+    representation:{mode:'full' as const,sourceComplete:true,originalRecords:1,compressedThroughOrdinal:null,sizing:'conservative' as const}};
+  expect(observerInputSchema.safeParse(input).success).toBe(true);
+  expect(observerInputSchema.safeParse({...input,representation:{...input.representation,sourceComplete:false}}).success).toBe(false);
+  expect(observerInputSchema.safeParse({...input,representation:{...input.representation,mode:'compressed',compressedThroughOrdinal:4}}).success).toBe(false);
+  expect(observerInputSchema.safeParse({...input,historySummary:{text:'summary',firstOrdinal:0,lastOrdinal:4}}).success).toBe(false);
+  expect(observerInputSchema.safeParse({...input,representation:{...input.representation,originalRecords:0}}).success).toBe(false);
+});
+
 it('round-trips every large readable message without clipping or filtering',()=>{
   const credentialLike='sk-test-not-a-real-key';
   const messages=Array.from({length:201},(_,index)=>({

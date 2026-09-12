@@ -54,6 +54,7 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     const requirements:Entry[]=[],active=new Map<string,Entry>();
     let latestPair:Entry[]=[];
     let currentSeen=false,laterTurn=false,overflow=false,originalRecords=0;
+    let originalTextBytes=0,originalTextTokenEstimate=0,compressionCalls=0,cachedCompressionCalls=0;
     const fits=(input:ObserverInput,budget=capacity)=>requestFits(options.serialize(input),budget,options.sizer);
     const suffixBudget={...capacity,contextTokens:capacity.outputReserveTokens+
       Math.max(1,Math.floor((capacity.contextTokens-capacity.outputReserveTokens)/2)),
@@ -71,17 +72,24 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
       const {record}=entry;
       if(record.turnId===options.currentTurnId)currentSeen=true;
       else if(currentSeen&&record.turnId!==null)laterTurn=true;
-      if(laterTurn||record.kind==='runtime'||!record.text)continue;
-      originalRecords++;
+      if(laterTurn)continue;
       if(record.turnId===options.currentTurnId){
-        if(record.kind==='user')requirements.push(entry);
-        if(record.kind==='tool_start'&&record.actionId)active.set(record.actionId,entry);
+        if(record.kind==='runtime'&&record.runtime!=='running')active.clear();
+        if(record.kind==='user'&&record.text)requirements.push(entry);
+        if(record.kind==='tool_start'&&record.actionId&&record.text)active.set(record.actionId,entry);
         if(record.kind==='tool_result'){
           const start=record.actionId?active.get(record.actionId):undefined;
-          latestPair=start?[start,entry]:[entry];
+          latestPair=[...(start?[start]:[]),...(record.text?[entry]:[])];
           if(record.actionId)active.delete(record.actionId);
         }
       }
+      if(record.kind==='runtime'||!record.text)continue;
+      originalRecords++;
+      originalTextBytes+=Buffer.byteLength(record.text,'utf8');
+      const textCount=options.sizer.count(record.text);
+      if(!Number.isSafeInteger(textCount)||textCount<0)throw Error('invalid_context_sizing');
+      originalTextTokenEstimate+=textCount;
+      if(!Number.isSafeInteger(originalTextBytes)||!Number.isSafeInteger(originalTextTokenEstimate))throw Error('context_too_large');
       retained.push(entry);
       if(!overflow&&!fits(assemble(retained,false)))overflow=true;
       if(overflow)trim();
@@ -106,6 +114,7 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
           capacity,request
         })).digest('hex'):undefined;
         const cached=cacheKey?options.summaryCache?.get(cacheKey):undefined;
+        if(cached)cachedCompressionCalls++;else compressionCalls++;
         const answer=cached??await options.compressor.summarize(request,signal);
         signal.throwIfAborted();
         if(!answer||typeof answer.text!=='string'||!answer.text.trim()||
@@ -130,11 +139,17 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     }
     const selected=overflow?combined():retained;
     const input=assemble(selected,snapshot.coverage.complete);
+    const currentAction=[...active.values()].at(-1)?.record;
+    if(input.observation)input.observation.currentAction=currentAction?.text?
+      {text:currentAction.text,elapsedSeconds:Math.max(0,(options.observedAtMs-currentAction.atMs)/1000)}:null;
     input.representation!.originalRecords=originalRecords;
     if(summary){input.historySummary=summary;input.representation!.mode='compressed';
       input.representation!.compressedThroughOrdinal=summary.lastOrdinal;input.truncated=true;}
-    if(!fits(input))throw Error('context_too_large');
-    return {input,representation:input.representation!};
+    const serialized=options.serialize(input);
+    if(!requestFits(serialized,capacity,options.sizer))throw Error('context_too_large');
+    return {input,representation:input.representation!,metrics:{sizing:options.sizer.kind,originalTextBytes,originalTextTokenEstimate,
+      preparedRequestBytes:Buffer.byteLength(serialized,'utf8'),preparedTokenEstimate:options.sizer.count(serialized),
+      compressionCalls,cachedCompressionCalls}};
   } finally {await snapshot.close();}
 
   function assemble(entries:Array<{ordinal:number;record:ConversationRecord}>,complete:boolean):ObserverInput {

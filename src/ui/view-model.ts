@@ -2,7 +2,11 @@ import type { HudSnapshot } from "../server/task-store.js";
 import type { TaskStatus } from "../core/types.js";
 import type { ConversationRow } from "../server/conversation-projection.js";
 import {projectCountdown} from './countdown.js';
-import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics} from '../core/observer-diagnostics.js';
+import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics,type ObserverContextState} from '../core/observer-diagnostics.js';
+
+const contextLabels:Record<ObserverContextState,string>={history_loading:'正在读取完整对话',context_preparing:'正在准备完整上下文',
+  context_full:'已使用完整可读上下文',context_compressed:'早期历史已压缩',history_incomplete:'部分历史不可读，估时依据不完整',
+  capacity_unknown:'模型容量未知，请在设置中填写',context_too_large:'上下文超出模型容量，无法完整发送',compression_failed:'历史压缩失败，等待后续重试'};
 
 const observerLabels:Record<ObserverDiagnostics['state'],string>={pending:'等待首次估时',history_loading:'正在加载任务历史',
   history_unavailable:'任务历史暂不可用，正在重试读取',
@@ -21,12 +25,14 @@ function observerLabel(observer:ObserverDiagnostics):string{
     const reasons={invalid_clock:'调度时钟异常',scheduler_exception:'调度检查异常',accounting_error:'本次记账异常'};
     return `估时已停用：${reasons[observer.stopReason]}（不等同于历史未知用量）`;
   }
+  if(observer.contextState&&['pending','estimating','process_error','call_failed'].includes(observer.state)&&
+    !['context_full','context_compressed'].includes(observer.contextState))return contextLabels[observer.contextState];
   return observer.state==='admission_blocked'?admissionLabels[normalizeAdmissionReason(observer.admissionReason)]:observerLabels[observer.state];
 }
 function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number){
   const age=observer.estimateAgeSeconds===null?null:observer.estimateAgeSeconds+(Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
   return {freshnessLabel:age===null?'':age<60?'估值刚刚更新':age<3600?`估值更新于 ${Math.floor(age/60)} 分钟前`:`估值更新于 ${Math.floor(age/3600)} 小时前`,
-    diagnosticLabel:`${observerLabel(observer)} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
+    diagnosticLabel:`${observerLabel(observer)}${observer.contextState&&observerLabel(observer)!==contextLabels[observer.contextState]?` · ${contextLabels[observer.contextState]}`:''} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
 }
 
 export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = [],displayedSeconds:ReadonlyMap<string,number>=new Map()) {

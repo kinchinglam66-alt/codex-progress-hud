@@ -13,4 +13,16 @@ export interface ContextRepresentation {
 export interface PreparedContext {
   input:ObserverInput;
   representation:ContextRepresentation;
+  metrics?:ContextPreparationMetrics;
+}
+
+/** Original text counters exclude protocol overhead; prepared counters include it. */
+export interface ContextPreparationMetrics {
+  sizing:'tokenizer'|'conservative';
+  originalTextBytes:number;
+  originalTextTokenEstimate:number;
+  preparedRequestBytes:number;
+  preparedTokenEstimate:number;
+  compressionCalls:number;
+  cachedCompressionCalls:number;
 }

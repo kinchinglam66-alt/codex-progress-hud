@@ -146,6 +146,10 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   let current: ProviderWorkerOwner | null = null;
   let inlineSubscriptionConsent: ProviderInlineConsent | undefined;
   let dispatchGeneration = generation;
+  let dispatchController=new AbortController();
+  function setDispatchGeneration(value:number):void {
+    dispatchController.abort();dispatchController=new AbortController();dispatchGeneration=value;
+  }
   const apiConsentStore: ObserverConsentStore = createObserverConsentStore(join(options.dataDirectory,'observer-api-consent.json'),options.consentProtection);
   const secretStore = createObserverSecretStore(secretPath(options.dataDirectory), options.consentProtection);
 
@@ -246,7 +250,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         if (state !== 'ready' || owner === null || delegate === undefined) return {status: 'disabled', interpretation: null, usage: null};
         const result = await delegate.observe(input, signal, conversationKey, turnGeneration, onStage);
         if (owner === current && expected === dispatchGeneration && (result.outcomes?.failureCode === 'unauthorized' || result.outcomes?.failureCode === 'forbidden')) {
-          state='failed'; dispatchGeneration=++generation; current=null;
+          state='failed'; setDispatchGeneration(++generation); current=null;
           for (const worker of ownerWorkers(owner)) worker.disable();
           await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(() => undefined);
         }
@@ -281,18 +285,28 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         leases.delete(key);
       }
       const delegate=owner.workerSource.acquire(key);
+      const preparationSignal=dispatchController.signal;
       const guarded:ObserverWorker={
         ...delegate,
         async observe(input,signal,conversationKey,turnGeneration,onStage) {
           if(current!==owner||state!=='ready'||expected!==dispatchGeneration)return {status:'disabled',interpretation:null,usage:null};
           const result=await delegate.observe(input,signal,conversationKey,turnGeneration,onStage);
           if(current===owner&&expected===dispatchGeneration&&(result.outcomes?.failureCode==='unauthorized'||result.outcomes?.failureCode==='forbidden')) {
-            state='failed';dispatchGeneration=++generation;current=null;
+            state='failed';setDispatchGeneration(++generation);current=null;
             ownerWorkers(owner).forEach(worker=>worker.disable());
             await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(()=>undefined);
           }
           return current===owner&&state==='ready'&&expected===dispatchGeneration ? result : {...result,status:'disabled',interpretation:null};
         }
+      };
+      if(delegate.prepareContext)guarded.prepareContext=async(input,history,signal,conversationKey,turnGeneration,observedAtMs)=>{
+        const combined=AbortSignal.any([signal,preparationSignal]);
+        if(current!==owner||state!=='ready'||expected!==dispatchGeneration||combined.aborted){
+          await history.snapshot.close();throw fixedFailure('CONTEXT_PROVIDER_CHANGED');
+        }
+        const result=await delegate.prepareContext!(input,history,combined,conversationKey,turnGeneration,observedAtMs);
+        if(current!==owner||state!=='ready'||expected!==dispatchGeneration||combined.aborted)throw fixedFailure('CONTEXT_PROVIDER_CHANGED');
+        return result;
       };
       leases.set(key,{owner,delegate,proxy:guarded});return guarded;
     },
@@ -318,9 +332,9 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         combined.throwIfAborted();
         if (owner === null) throw fixedFailure();
         current = owner as ProviderWorkerOwner;
-        dispatchGeneration = ++generation;
+        setDispatchGeneration(++generation);
         state = 'ready';
-      } catch { current = null; state = 'inactive'; dispatchGeneration = ++generation; await drainSelection(); }
+      } catch { current = null; state = 'inactive'; setDispatchGeneration(++generation); await drainSelection(); }
     }
     } finally { releaseAction(token); }
   }
@@ -357,13 +371,13 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     const next = input.selected === 'subscription' && draft.selected !== 'subscription' ? initialConfig : draft;
     const {controller,token}=acquireAction();
     const nextGeneration = ++generation;
-    dispatchGeneration = nextGeneration;
+    setDispatchGeneration(nextGeneration);
     state = 'switching'; current = null;
     try {
     await writeState({version: 1, generation, revision, state: 'switching', selected: next.selected});
     const hasKey = next.selected !== 'api' || await keyConfigured(next);
     if (!hasKey) {
-      state = 'inactive'; dispatchGeneration = ++generation;
+      state = 'inactive'; setDispatchGeneration(++generation);
       await writeState({version: 1, generation, revision, state: 'inactive', selected: active.selected});
       throw fixedFailure('PROVIDER_KEY_UNAVAILABLE');
     }
@@ -380,9 +394,9 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         controller.signal.throwIfAborted();
         await writeState({version: 1, generation, revision, state: 'ready', selected: active.selected});
         controller.signal.throwIfAborted();
-        current = owner as ProviderWorkerOwner; state = 'ready'; dispatchGeneration = generation;
+        current = owner as ProviderWorkerOwner; state = 'ready'; setDispatchGeneration(generation);
       } catch {
-        current = null; state = 'inactive'; dispatchGeneration = ++generation;
+        current = null; state = 'inactive'; setDispatchGeneration(++generation);
         await writeState({version: 1, generation, revision, state: 'inactive', selected: active.selected});
         await drainSelection();
         throw fixedFailure('PROVIDER_ACTIVATION_FAILED');
@@ -426,7 +440,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         // A credential replacement must never overlap an active observer.
         if (current !== null) {
           const previous = current;
-          dispatchGeneration = ++generation; state = 'inactive'; current = null;
+          setDispatchGeneration(++generation); state = 'inactive'; current = null;
           for (const worker of ownerWorkers(previous)) worker.disable();
           await drainSelection();
           controller.signal.throwIfAborted();
@@ -470,7 +484,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     checkMutation(input);
     const {controller,token}=acquireAction(); let owner:ProviderWorkerOwner|undefined;
     const previous = current;
-    dispatchGeneration = ++generation; state = 'inactive'; current = null;
+    setDispatchGeneration(++generation); state = 'inactive'; current = null;
     try {
       await writeState({version:1,generation,revision,state:'inactive',selected:active.selected});
       for (const worker of ownerWorkers(previous)) worker.disable();
@@ -492,7 +506,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     checkMutation(input);
     const {controller,token}=acquireAction();
     const previous=current;
-    dispatchGeneration=++generation; state='switching'; current=null;
+    setDispatchGeneration(++generation); state='switching'; current=null;
     const settings = options.subscriptionAccount;
     try { await writeState({version:1,generation,revision,state:'switching',selected:active.selected});
       for(const worker of ownerWorkers(previous))worker.disable();
@@ -511,7 +525,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     if (closing) return closing;
     closed = true;
     const previous=current;
-    dispatchGeneration=++generation; state='inactive';
+    setDispatchGeneration(++generation); state='inactive';
     for(const worker of ownerWorkers(previous))worker.disable();
     composedStartController?.abort(); actionController?.abort();
     closing = (async () => { await Promise.all([action?.catch(() => undefined), composedStartPromise?.catch(() => undefined)]); await selection.close(); for (const owner of retained) await closeAuxiliary(owner); current = null; })().finally(() => { closing = undefined; });
@@ -521,5 +535,5 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account, accountStatus,
     recipient: draft.selected==='api'&&draft.api?`${new URL(draft.api.baseUrl).origin}${new URL(draft.api.baseUrl).pathname} · ${draft.api.model}`:(options.recipient ?? 'Codex Progress HUD observer'), ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
   }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
-    disable: () => {dispatchGeneration = ++generation; state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of ownerWorkers(current)) worker.disable();}, close};
+    disable: () => {setDispatchGeneration(++generation); state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of ownerWorkers(current)) worker.disable();}, close};
 }

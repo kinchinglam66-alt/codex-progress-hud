@@ -34,6 +34,14 @@
         </div>
         <details id="provider-advanced">
           <summary>高级提供方控制</summary>
+          <fieldset>
+            <legend>模型上下文容量（无可信自动信息时填写）</legend>
+            <label>容量对应的完整模型名称 <input id="context-model" autocomplete="off" /></label>
+            <label>上下文窗口 token <input id="context-tokens" type="number" min="1" /></label>
+            <label>输出预留 token <input id="context-output-reserve" type="number" min="0" /></label>
+            <label>请求字节上限（可留空） <input id="context-request-bytes" type="number" min="1" /></label>
+            <p class="note">请按提供方实际能力填写，不确定时留空。容量只对指定模型生效；容量未知会显示诊断，不会静默截断。先保存草稿，再启用提供方。任务文本不脱敏；仅超出容量时才压缩早期历史。</p>
+          </fieldset>
           <label>名称 <input id="api-name" value="OpenAI API" autocomplete="off" /></label>
           <label>推理强度 <select id="api-reasoning-effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select></label>
           <label>最大输出 token <input id="api-max-output-tokens" type="number" min="1" value="2048" /></label>

@@ -4,14 +4,23 @@ import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
 import {resolve} from 'node:path';
-import {resultDiagnostics,resultRejectionReasons} from '../core/observer-diagnostics.js';
+import {resultDiagnostics,resultRejectionReasons,observerContextStates} from '../core/observer-diagnostics.js';
 
 const triggerCodes=new Set(['initial','important_event','status_evidence','near_expiry','overdue','periodic','pre_dispatch_retry','bootstrap_recovery']);
 const forecastDiagnosticCodes=new Set(['provenance_unavailable','invalid_provenance']);
 const resultDiagnosticCodes=new Set(resultDiagnostics);
 const resultRejectionReasonCodes=new Set(resultRejectionReasons);
 const stageCodes=new Set(observerCallStages);
+const contextStateCodes=new Set(observerContextStates);
 const activeAnchor=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=31_536_000?value:undefined;
+function contextMetrics(value:unknown){
+  if(!value||typeof value!=='object')return undefined;
+  const data=value as Record<string,unknown>;
+  if(data.sizing!=='tokenizer'&&data.sizing!=='conservative')return undefined;
+  const fields=['originalTextBytes','originalTextTokenEstimate','preparedRequestBytes','preparedTokenEstimate','compressionCalls','cachedCompressionCalls'] as const;
+  if(fields.some(key=>typeof data[key]!=='number'||!Number.isSafeInteger(data[key])||(data[key] as number)<0))return undefined;
+  return {sizing:data.sizing,...Object.fromEntries(fields.map(key=>[key,data[key]]))};
+}
 
 /** Local research metadata only. Bounded asynchronous I/O never gates model work.
  * Missing terminal summary means an unclean recording shutdown, not completion. */
@@ -39,6 +48,8 @@ export function createPilotJournal(directory:string){
         recoveryGapSeconds:value.recoveryGapSeconds===null?null:activeAnchor(value.recoveryGapSeconds),
         requestId:value.requestId,requestedAt:value.requestedAt,observedActiveSeconds:value.observedActiveSeconds,
         stage:value.kind==='stage'&&value.stage!==undefined&&stageCodes.has(value.stage)?value.stage:undefined,
+        contextState:value.contextState!==undefined&&contextStateCodes.has(value.contextState)?value.contextState:undefined,
+        contextMetrics:contextMetrics(value.contextMetrics),
         triggerReason:typeof value.triggerReason==='string'&&triggerCodes.has(value.triggerReason)?value.triggerReason:undefined,
         lastRequestActiveSeconds:activeAnchor(value.lastRequestActiveSeconds),
         eligibleActiveSeconds:activeAnchor(value.eligibleActiveSeconds),

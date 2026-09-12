@@ -110,6 +110,13 @@ it('keeps valid ETA and separately shows freshness and static diagnostics',()=>{
   expect(view.diagnosticLabel).toContain('估时调用失败');
   expect(view.diagnosticLabel).toContain('小时内尝试 2 次');
 });
+it('explains missing capacity without overwriting rate-limit or existing ETA states',()=>{
+  const value=row({prediction:null});value.observer={state:'process_error',contextState:'capacity_unknown',estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
+  expect(buildConversationViews([value])[0]?.etaLabel).toContain('设置');
+  value.observer.state='rate_limited';
+  const limited=buildConversationViews([value])[0]!;
+  expect(limited.etaLabel).toContain('可用额度');expect(limited.diagnosticLabel).toContain('容量');
+});
 it('shows recovery guidance for an old pending call without claiming quota exhaustion',()=>{
   const value=row({prediction:null});
   value.observer={state:'admission_blocked',admissionReason:'unresolved_previous_call',estimateAgeSeconds:null,callsLastHour:1,retryPending:false};

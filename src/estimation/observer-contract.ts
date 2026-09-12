@@ -91,5 +91,16 @@ export const observerInputSchema = z.object({
   .refine(value => !value.representation ||
     (value.representation.mode==='compressed'
       ? value.representation.compressedThroughOrdinal!==null
-      : value.representation.compressedThroughOrdinal===null));
+      : value.representation.compressedThroughOrdinal===null))
+  .refine(value=>{
+    const representation=value.representation;
+    if(!representation)return value.historySummary===undefined;
+    if(representation.originalRecords<value.messages.length)return false;
+    if(value.observation&&value.observation.historyComplete!==representation.sourceComplete)return false;
+    if(representation.mode==='compressed')return value.historySummary!==undefined&&
+      value.historySummary.lastOrdinal===representation.compressedThroughOrdinal;
+    if(value.historySummary!==undefined)return false;
+    return representation.mode==='full'?representation.sourceComplete&&representation.originalRecords===value.messages.length:
+      !representation.sourceComplete;
+  });
 export type ObserverInput = z.infer<typeof observerInputSchema>;

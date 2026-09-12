@@ -4,6 +4,23 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
 
+it('records context representation state but never raw context',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-context-'));
+  try{
+    const journal=createPilotJournal(directory);
+    const base={kind:'stage' as const,at:50,key:'private',generation:1,activeSeconds:100,runtime:'running',version:1};
+    const contextMetrics={sizing:'conservative' as const,originalTextBytes:10000,originalTextTokenEstimate:10000,
+      preparedRequestBytes:5000,preparedTokenEstimate:5000,compressionCalls:2,cachedCompressionCalls:1};
+    journal.record({...base,contextState:'context_compressed',...{contextMetrics,rawContext:'SYNTHETIC_SECRET'}});
+    journal.record({...base,contextState:'SYNTHETIC_SECRET' as never});
+    await journal.close();
+    const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+    expect(JSON.parse(raw.split('\n')[0]!)).toMatchObject({contextState:'context_compressed'});
+    expect(JSON.parse(raw.split('\n')[0]!)).toMatchObject({contextMetrics});
+    expect(raw).not.toContain('SYNTHETIC_SECRET');
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
 it('records recovery uncertainty without accepting arbitrary diagnostic text',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-recovery-'));
   try{

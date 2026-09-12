@@ -4,6 +4,26 @@ import {resolve} from 'node:path';
 
 afterEach(()=>{vi.unstubAllGlobals();vi.resetModules();});
 
+it('edits subscription capacity without requiring login or a new secret',async()=>{
+  const listeners=new Map<string,()=>void>(),elements=new Map<string,any>();
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke',
+    '#provider-source','#provider-save','#context-model','#context-tokens','#context-output-reserve','#context-request-bytes'])
+    elements.set(id,{textContent:'',value:'',disabled:false,addEventListener:(type:string,fn:()=>void)=>listeners.set(id+':'+type,fn)});
+  const contextCapacity={model:'test-model',contextTokens:100000,outputReserveTokens:4096,requestBytes:null};
+  const draft={selected:'subscription',api:null,contextCapacity};
+  const snapshot={generation:1,revision:1,selected:'subscription',state:'ready',active:draft,draft,keyConfigured:false};
+  const saveProviderSettings=vi.fn(async(_payload:unknown)=>snapshot);
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'normal',revision:1,knownTokens:0,unknown:0,recoveryAllowed:false}),
+    readProviderSettings:async()=>snapshot,saveProviderSettings}});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#context-tokens').value).toBe('100000'));
+  elements.get('#context-tokens').value='200000';
+  listeners.get('#provider-save:click')!();
+  await vi.waitFor(()=>expect(saveProviderSettings).toHaveBeenCalled());
+  expect(saveProviderSettings.mock.calls[0]?.[0]).toMatchObject({draft:{...draft,contextCapacity:{...contextCapacity,contextTokens:200000}}});
+});
+
 it('explains unresolved previous calls before and after a denied recovery check',async()=>{
   const listeners=new Map<string,()=>void>(), elements=new Map<string,any>();
   for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke'])

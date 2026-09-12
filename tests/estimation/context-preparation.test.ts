@@ -36,6 +36,8 @@ it('preserves complete earlier and current text without compression when it fits
   expect(result.representation.mode).toBe('full');
   expect(result.input.truncated).toBe(false);
   expect(input.compressor.summarize).not.toHaveBeenCalled();
+  expect(result.metrics).toMatchObject({originalTextBytes:records.reduce((sum,r)=>sum+Buffer.byteLength(r.text??''),0),compressionCalls:0,cachedCompressionCalls:0});
+  expect(result.metrics?.preparedRequestBytes).toBe(Buffer.byteLength(JSON.stringify(result.input)));
 });
 
 it('compresses older history only after overflow and retains current requirements and latest result',async()=>{
@@ -107,6 +109,13 @@ it('preserves the observation timestamp for known-wait action age',async()=>{
   const action={...record('act','current','tool_start','sleep 100'),actionId:'a'};
   const result=await prepareContext(options(source([record('req','current','user','wait'),action])));
   expect(result.input.observation?.currentAction?.elapsedSeconds).toBe(5);
+});
+
+it('clears completed tool actions even when the tool result has no readable text',async()=>{
+  const action={...record('act','current','tool_start','sleep 100'),actionId:'a'};
+  const end={...record('end','current','tool_result',''),actionId:'a'};
+  const result=await prepareContext(options(source([record('req','current','user','wait'),action,end])));
+  expect(result.input.observation?.currentAction).toBeNull();
 });
 
 it('preserves validated local pace evidence alongside full history',async()=>{

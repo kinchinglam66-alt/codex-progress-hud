@@ -1,6 +1,6 @@
 type SettingsState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'checking' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' | 'unconfigured' | 'unauthorized' | 'repair_environment';
 interface SettingsStatus {state: SettingsState; reason?:string; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
-interface ProviderDraft {selected: 'subscription'|'api'; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
+interface ProviderDraft {selected: 'subscription'|'api'; contextCapacity?:{model:string;contextTokens:number;outputReserveTokens:number;requestBytes:number|null}; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
 interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';recipient?:string}
 interface SettingsApi {
   getStatus(): Promise<SettingsStatus>; preflight(): Promise<SettingsStatus & {allowed: boolean; challenge?: string}>; confirm(revision: number, challenge: string): Promise<SettingsStatus>; revokeConsent(): Promise<SettingsStatus & {consentRevoked:boolean}>;
@@ -133,13 +133,23 @@ const DEFAULT_REASONING_EFFORT = 'medium';
 const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
 const DEFAULT_DAILY_CALL_LIMIT = 24;
 const SUBSCRIPTION_RECIPIENT = 'OpenAI / ChatGPT 订阅账户';
+const contextModel=document.querySelector<HTMLInputElement>('#context-model');
+const contextTokens=document.querySelector<HTMLInputElement>('#context-tokens');
+const contextReserve=document.querySelector<HTMLInputElement>('#context-output-reserve');
+const contextBytes=document.querySelector<HTMLInputElement>('#context-request-bytes');
+
+function capacityFromInputs():Pick<ProviderDraft,'contextCapacity'> {
+  if(!contextTokens?.value&&!contextModel?.value&&!contextReserve?.value&&!contextBytes?.value)return {};
+  return {contextCapacity:{model:contextModel?.value.trim()??'',contextTokens:Number(contextTokens?.value),
+    outputReserveTokens:Number(contextReserve?.value),requestBytes:contextBytes?.value?Number(contextBytes.value):null}};
+}
 
 function providerDraftFromInputs(): ProviderDraft {
-  if (providerSource?.value === 'subscription') return {selected: 'subscription', api: null};
+  if (providerSource?.value === 'subscription') return {selected: 'subscription', api: null,...capacityFromInputs()};
   const effort=reasoningEffort?.value || DEFAULT_REASONING_EFFORT;
   const maxTokens=Number(maxOutputTokens?.value || DEFAULT_MAX_OUTPUT_TOKENS);
   const callLimit=Number(dailyCallLimit?.value || DEFAULT_DAILY_CALL_LIMIT);
-  return {selected: 'api', api: {profileId: profileId?.value.trim() || DEFAULT_PROFILE_ID, name: providerName?.value.trim() || DEFAULT_PROVIDER_NAME, baseUrl: baseUrl?.value.trim() ?? '', protocol: protocol?.value || 'responses', model: model?.value.trim() ?? '', ...(effort ? {reasoningEffort: effort} : {}),
+  return {selected: 'api',...capacityFromInputs(), api: {profileId: profileId?.value.trim() || DEFAULT_PROFILE_ID, name: providerName?.value.trim() || DEFAULT_PROVIDER_NAME, baseUrl: baseUrl?.value.trim() ?? '', protocol: protocol?.value || 'responses', model: model?.value.trim() ?? '', ...(effort ? {reasoningEffort: effort} : {}),
     maxOutputTokens: Number.isSafeInteger(maxTokens) && maxTokens > 0 ? maxTokens : DEFAULT_MAX_OUTPUT_TOKENS, dailyCallLimit: Number.isSafeInteger(callLimit) && callLimit > 0 ? callLimit : DEFAULT_DAILY_CALL_LIMIT}};
 }
 function setProviderBusy(value: boolean): void {
@@ -159,13 +169,18 @@ function renderProviderView(): void {
   if (providerApiFields) providerApiFields.hidden = source !== 'api';
   if (recipient) recipient.textContent = source === 'api' ? liveApiRecipient() : SUBSCRIPTION_RECIPIENT;
   if (providerUsageNotice) providerUsageNotice.textContent = source === 'api'
-    ? `API 估时会向 ${recipient?.textContent ?? '所示提供方'} 发送任务摘要，调用可能产生费用。`
-    : '订阅估时会消耗所示账户的订阅额度；不会复制主 Codex 凭据。';
+    ? `API 估时会向 ${recipient?.textContent ?? '所示提供方'} 发送完整可读对话；任务文本不脱敏，估时和必要的历史压缩均可能产生费用。`
+    : '订阅估时会消耗所示账户的订阅额度；发送完整可读对话，任务文本不脱敏，必要的历史压缩也消耗额度；不会复制主 Codex 凭据。';
   if (providerStart) providerStart.textContent = source === 'api' ? '保存并开始' : providerSnapshot?.account ? '开始估时' : providerSnapshot?.accountStatus==='signed_out' ? '登录并开始' : '检查账户并开始';
 }
 function renderProvider(value: ProviderSettings): void {
   providerSnapshot = value;
   if (providerSource) providerSource.value = value.draft.selected;
+  const capacity=value.draft.contextCapacity;
+  if(contextModel)contextModel.value=capacity?.model??'';
+  if(contextTokens)contextTokens.value=capacity?String(capacity.contextTokens):'';
+  if(contextReserve)contextReserve.value=capacity?String(capacity.outputReserveTokens):'';
+  if(contextBytes)contextBytes.value=capacity?.requestBytes===null||capacity?.requestBytes===undefined?'':String(capacity.requestBytes);
   const draft = value.draft.api;
   if (draft) {
     if (profileId) profileId.value = draft.profileId; if (providerName) providerName.value = draft.name; if (baseUrl) baseUrl.value = draft.baseUrl;
@@ -187,7 +202,9 @@ function markDirty(): void {
   if (dirty && providerSnapshot) {
     const original = providerSnapshot.draft;
     const fields = original.api ? (({keyConfigured: _metadata, ...rest}) => rest)(original.api) : null;
-    dirty.textContent = JSON.stringify(providerDraftFromInputs()) === JSON.stringify({selected:original.selected, api:fields}) ? '已保存' : '有未保存更改';
+    const {contextCapacity,...current}=providerDraftFromInputs();
+    dirty.textContent = JSON.stringify(current) === JSON.stringify({selected:original.selected,api:fields}) &&
+      JSON.stringify(contextCapacity??null)===JSON.stringify(original.contextCapacity??null) ? '已保存' : '有未保存更改';
   }
 }
 function providerInputChanged(): void { markDirty(); renderProviderView(); }
@@ -204,7 +221,7 @@ async function providerAction(operation: () => Promise<unknown>, success: string
   catch (error) { if (generation !== providerActionGeneration) return; const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : error instanceof Error && error.message === 'PROVIDER_INLINE_CONSENT_REQUIRED' ? '请先同意接收方和用量说明。' : '提供方操作失败；估时保持停用。'; message.textContent = text; }
   finally { if (generation === providerActionGeneration) setProviderBusy(false); }
 }
-for (const control of [profileId, providerName, baseUrl, model, protocol, reasoningEffort, maxOutputTokens, dailyCallLimit]) control?.addEventListener('input', providerInputChanged);
+for (const control of [profileId, providerName, baseUrl, model, protocol, reasoningEffort, maxOutputTokens, dailyCallLimit,contextModel,contextTokens,contextReserve,contextBytes]) control?.addEventListener('input', providerInputChanged);
 providerSource?.addEventListener('input', providerInputChanged);
 providerSource?.addEventListener('change', providerInputChanged);
 apiKey?.addEventListener('input', () => { if (providerConsent) providerConsent.checked = false; });
