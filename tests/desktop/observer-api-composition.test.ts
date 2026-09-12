@@ -4,7 +4,10 @@ import {tmpdir} from 'node:os';
 import {afterEach, expect, it, vi} from 'vitest';
 const transport = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<Response>>());
 vi.mock('../../src/desktop/observer-api-transport.js', () => ({createObserverApiTransport: () => Object.assign(transport, {close: async () => undefined})}));
-vi.mock('../../src/estimation/observer-api-assets.js', () => ({loadObserverApiAssets: async () => ({instructions:'fixture', schema:{type:'object'}})}));
+vi.mock('../../src/estimation/observer-api-assets.js', () => ({
+  loadObserverApiAssets: async () => ({instructions:'fixture', schema:{type:'object'}}),
+  loadObserverCompressionAssets: async () => ({instructions:'compression fixture', schema:{type:'object'}}),
+}));
 import {loadDesktopObserverPilot} from '../../src/desktop/observer-pilot.js';
 const directories: string[] = [];
 afterEach(async () => {transport.mockReset(); await Promise.all(directories.splice(0).map(path => rm(path,{recursive:true,force:true})));});

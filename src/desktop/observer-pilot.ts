@@ -14,14 +14,38 @@ import {createObserverProviderHost, type ProviderInlineConsent, type ProviderWor
 import type {ObserverScheduler} from '../estimation/observer-scheduler.js';
 import type {ObserverWorker, ObserverWorkerSource} from '../estimation/observer-scheduler.js';
 import {createObserverApiProvider} from '../estimation/observer-api-provider.js';
+import {createObserverApiCompressionAdapter} from '../estimation/observer-api-provider.js';
 import {createObserverApiTransport} from './observer-api-transport.js';
 import {createApiAccounting, type ApiAccounting} from '../estimation/observer-api-accounting.js';
-import type {ApiConfig} from './observer-provider-config.js';
-import {loadObserverApiAssets} from '../estimation/observer-api-assets.js';
+import {resolveConfiguredCapacity, type ApiConfig, type ProviderConfig} from './observer-provider-config.js';
+import {loadObserverApiAssets, loadObserverCompressionAssets} from '../estimation/observer-api-assets.js';
 import type {ObserverInput} from '../estimation/observer-contract.js';
+import {createContextSummaryCache} from '../estimation/context-preparation.js';
+import {serializeCompressionTransport, serializeObserverTransport, serializeSubscriptionTransport, type CompressionRequest} from '../estimation/context-compression.js';
+import {createSubscriptionCompressionSession} from '../estimation/subscription-session.js';
+import {createOwnedProcessRunner} from '../estimation/owned-process.js';
+import {randomUUID} from 'node:crypto';
+import type {ContextCapacity, RequestSizer} from '../estimation/context-capacity.js';
+import {withContextPreparation, type PreparationConfiguration, type PreparationScope} from '../estimation/context-worker.js';
 
 const rootOwnerSchema=z.object({version:z.literal(1),ownerFingerprint:z.string().regex(/^[a-f0-9]{64}$/).nullable()}).strict();
 const rootOwnerPath=(dataDirectory:string):string=>resolve(dataDirectory,'observer-accounting-root-owner.json');
+const SUBSCRIPTION_MODEL='gpt-5.6-luna';
+const conservativeByteSizer:RequestSizer={kind:'conservative',count:value=>Buffer.byteLength(value,'utf8')};
+const subscriptionCommandEnvelope=JSON.stringify({route:'codex-subscription',stdin:'json',stdout:'jsonl',command:[
+  'exec','--ignore-user-config','--strict-config','--ephemeral','--skip-git-repo-check','--sandbox','read-only','--json','-'
+]});
+
+function subscriptionSizer(assets:{instructions:string;schema:unknown},compressionAssets:{instructions:string;schema:unknown},input:unknown,compression:boolean):string {
+  const serialized=serializeSubscriptionTransport(input,{instructions:compression?compressionAssets.instructions:assets.instructions,
+    schema:compression?compressionAssets.schema:assets.schema,commandEnvelope:subscriptionCommandEnvelope,compression});
+  return [serialized.stdin,serialized.instructions,serialized.schema,serialized.commandEnvelope].join('\n');
+}
+
+function subscriptionCapacity(contextCapacity: ProviderConfig['contextCapacity']): ContextCapacity|null {
+  return resolveConfiguredCapacity({version:1,selected:'subscription',api:null,
+    ...(contextCapacity===undefined?{}:{contextCapacity})},SUBSCRIPTION_MODEL,0);
+}
 
 /**
  * The legacy accounting root has one immutable owner. A current consent grant
@@ -87,13 +111,37 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
   const runtimes=new Set<ReturnType<typeof createDesktopObserverRuntime>>();
   let attachedScheduler: Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>|undefined;
   let currentRuntime: ReturnType<typeof createDesktopObserverRuntime>|undefined;
-  const openSubscription=async(signal:AbortSignal, inlineConsent?:ProviderInlineConsent):Promise<ProviderWorkerOwner>=>{
+  const openSubscription=async(signal:AbortSignal, inlineConsent?:ProviderInlineConsent, contextCapacity?:ProviderConfig['contextCapacity']):Promise<ProviderWorkerOwner>=>{
     if(identityOptions===undefined||accountSettings===undefined)throw Error('OBSERVER_SUBSCRIPTION_UNAVAILABLE');
+    const [assets,compressionAssets]=await Promise.all([
+      loadObserverApiAssets(options.resourcesDirectory), loadObserverCompressionAssets(options.resourcesDirectory),
+    ]);
     const rootOwnerFingerprint=await ensureSubscriptionRootOwner(options.dataDirectory,()=>consentStore.read());
     const account=await accountSettings.inspect(signal);
     const accountingDirectory=subscriptionAccountingDirectory(options.dataDirectory,account.evidence.accountFingerprint,rootOwnerFingerprint);
+    const summaryCache=createContextSummaryCache();
+    const capacity=subscriptionCapacity(contextCapacity);
+    const cacheScope=JSON.stringify(['subscription',account.evidence.accountFingerprint,SUBSCRIPTION_MODEL,
+      identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
-      openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore});
+      openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
+      contextPreparation:{configure:async(scope,prepareCompression,authorize,owner)=>{
+        const runner=createOwnedProcessRunner();
+        const view=owner.forConversation(scope.conversationKey);
+        const session=createSubscriptionCompressionSession({
+          ledger:view,runner,authorize,prepare:async(request,prepareSignal)=>(await prepareCompression(request,prepareSignal)).invocation,
+          invocationRecord:admissionId=>({admissionId,conversationKey:scope.conversationKey,turnGeneration:scope.turnGeneration,
+            ownerUuid:randomUUID(),providerKind:'subscription',phase:'bound',deadline:Date.now()+60_000,cleanupOutcome:'pending'}),
+        });
+        return {
+          capacity,sizer:conservativeByteSizer,
+          serialize:input=>subscriptionSizer(assets,compressionAssets,input,false),
+          serializeCompression:request=>subscriptionSizer(assets,compressionAssets,request,true),
+          compressor:{summarize:async(request,compressionSignal)=>(await session.summarize(request,compressionSignal)).summary},
+          summaryCache,cacheScope,
+          close:async()=>{await session.close();},
+        };
+      }} });
     runtimes.add(runtime);
     try{
       await runtime.start(signal, inlineConsent === undefined ? undefined : {
@@ -107,11 +155,33 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     }catch(error){runtimes.delete(runtime);await runtime.close().catch(()=>undefined);throw error;}
   };
   let apiAccounting: ApiAccounting|undefined;
-  const openApi=async(apiConfig:ApiConfig,readKey:()=>Promise<string|null>,signal:AbortSignal,generation:number):Promise<ProviderWorkerOwner>=>{
-    const assets=await loadObserverApiAssets(options.resourcesDirectory);
+  const openApi=async(apiConfig:ApiConfig,readKey:()=>Promise<string|null>,signal:AbortSignal,generation:number, contextCapacity?:ProviderConfig['contextCapacity']):Promise<ProviderWorkerOwner>=>{
+    const [assets,compressionAssets]=await Promise.all([
+      loadObserverApiAssets(options.resourcesDirectory), loadObserverCompressionAssets(options.resourcesDirectory),
+    ]);
     apiAccounting??=createApiAccounting(resolve(options.dataDirectory,'observer-api-accounting.db'),Date.now);
     const transport=createObserverApiTransport(config===null?{}:{proxyUrl:config.proxyUrl});
-    const make=(retry=true)=>createObserverApiProvider({config:apiConfig,generation,readKey,transport,accounting:apiAccounting!,instructions:assets.instructions,schema:assets.schema,maxAutoRetries:retry?1:0,retry});
+    const summaryCache=createContextSummaryCache();
+    const capacity=resolveConfiguredCapacity({version:1,selected:'api',api:apiConfig,
+      ...(contextCapacity===undefined?{}:{contextCapacity})},apiConfig.model,apiConfig.maxOutputTokens);
+    const cacheScope=JSON.stringify(['api',apiConfig.profileId,apiConfig.keyRef,apiConfig.baseUrl,apiConfig.model,
+      apiConfig.reasoningEffort??null,apiConfig.maxOutputTokens,generation]);
+    const make=(retry=true)=>{
+      const provider=createObserverApiProvider({config:apiConfig,generation,readKey,transport,accounting:apiAccounting!,instructions:assets.instructions,schema:assets.schema,maxAutoRetries:retry?1:0,retry});
+      return withContextPreparation(provider,async(scope)=>{
+        const compressor=createObserverApiCompressionAdapter({config:apiConfig,generation,readKey,transport,accounting:apiAccounting!,
+          instructions:compressionAssets.instructions,schema:compressionAssets.schema,conversationKey:scope.conversationKey,
+          turnGeneration:scope.turnGeneration,sourceEpoch:scope.sourceEpoch,authorize:()=>true});
+        const serialize=(input:unknown)=>serializeObserverTransport(input,{model:apiConfig.model,instructions:assets.instructions,
+          schema:assets.schema,maxOutputTokens:apiConfig.maxOutputTokens,reasoningEffort:apiConfig.reasoningEffort});
+        const serializeCompression=(request:CompressionRequest)=>serializeCompressionTransport(request,{model:apiConfig.model,
+          instructions:compressionAssets.instructions,schema:compressionAssets.schema,maxOutputTokens:apiConfig.maxOutputTokens,
+          reasoningEffort:apiConfig.reasoningEffort});
+        return {capacity,sizer:conservativeByteSizer,serialize,serializeCompression,
+          compressor:{summarize:async(request,compressionSignal)=>(await compressor.summarize(request,compressionSignal))},summaryCache,cacheScope,
+          close:async()=>{}} satisfies PreparationConfiguration;
+      });
+    };
     const ownedWorkers = new Set<ObserverWorker>();
     const byConversation = new Map<string, ObserverWorker>();
     const releasing=new Set<string>();

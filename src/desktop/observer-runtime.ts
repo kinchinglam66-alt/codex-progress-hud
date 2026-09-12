@@ -13,6 +13,8 @@ import {createObserverSubscriptionSession, type ObserverSubscriptionResult} from
 import type {AccountedUsage} from '../estimation/subscription-accounting.js';
 import type {ObserverScheduler, ObserverWorkerSource} from '../estimation/observer-scheduler.js';
 import {inspectRecoveryBootBoundary, type RecoveryBootBoundaryProof} from '../estimation/recovery-boot-boundary.js';
+import {withContextPreparation, type PreparationConfiguration, type PreparationScope} from '../estimation/context-worker.js';
+import type {CompressionRequest} from '../estimation/context-compression.js';
 
 const REFRESH_MS = 120000;
 const RECOVERY_INPUT: ObserverInput = Object.freeze({
@@ -31,9 +33,26 @@ export interface DesktopObserverIdentity {
     invocation: Invocation;
     provenance?: ForecastVersions;
   }>;
+  /** Trusted, pinned summary invocation; never a general-purpose model call. */
+  prepareCompression?(request: CompressionRequest, signal: AbortSignal): Promise<{
+    accountLabel: string;
+    evidence: ObserverAttestation;
+    invocation: Invocation;
+  }>;
   disable(): void;
   close(): Promise<void>;
 }
+
+export interface DesktopObserverContextPreparation {
+  configure: (scope: PreparationScope, prepareCompression: TrustedCompressionPreparation,
+    authorize: () => boolean, accounting: ReleaseAccountingOwner) => Promise<PreparationConfiguration>;
+}
+
+type TrustedCompressionPreparation = (request: CompressionRequest, signal: AbortSignal) => Promise<{
+  accountLabel: string;
+  evidence: ObserverAttestation;
+  invocation: Invocation;
+}>;
 
 export interface DesktopObserverRuntimeOptions {
   identity: DesktopObserverIdentity;
@@ -42,6 +61,7 @@ export interface DesktopObserverRuntimeOptions {
   now?: () => number;
   consentStore?: ObserverConsentStore;
   inspectRecoveryBootBoundary?: () => Promise<RecoveryBootBoundaryProof>;
+  contextPreparation?: DesktopObserverContextPreparation;
 }
 
 export interface ObserverInlineConsent {
@@ -94,7 +114,8 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * exposes two stable, initially unavailable slots so the scheduler can be
  * wired before first-use setup without creating an admission path early.
  */
-export function createDesktopObserverRuntime({identity, openAccounting, dialog, now = Date.now, consentStore, inspectRecoveryBootBoundary: inspectBootBoundary}: DesktopObserverRuntimeOptions) {
+export function createDesktopObserverRuntime({identity, openAccounting, dialog, now = Date.now, consentStore,
+  inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
   let setupFailed = false;
@@ -187,14 +208,18 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         if(!state.disabled&&!state.poisoned)return existing;
         delegates.delete(conversationKey);
       }
+      const owner = accounting;
+      if (!owner) throw new Error('OBSERVER_NOT_READY');
       const delegate = createAccountedObserverWorker({
-        accounting,
+        accounting: owner,
         prepare,
         authorize: gate.authorized,
         now,
       });
-      delegates.set(conversationKey, delegate);
-      return delegate;
+      const worker = contextPreparation === undefined ? delegate : withContextPreparation(delegate,
+        scope => contextPreparation.configure(scope, prepareCompression, () => !disabled && ready && gate.authorized(), owner));
+      delegates.set(conversationKey, worker);
+      return worker;
     },
     async release(conversationKey: string): Promise<void> {
       const delegate = delegates.get(conversationKey);
@@ -246,6 +271,23 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     metadataTail = queued.next;
     return queued.result;
   }
+
+  const prepareCompression: TrustedCompressionPreparation = (request, signal) => {
+    const queued = serial(metadataTail, async () => {
+      check(signal);
+      if (identity.prepareCompression === undefined) throw new Error('OBSERVER_COMPRESSION_UNAVAILABLE');
+      const prepared = await identity.prepareCompression(request, signal);
+      check(signal);
+      gate.update(prepared.evidence);
+      if (!gate.authorized() || authorizedBinding === undefined || binding(prepared.evidence) !== authorizedBinding) {
+        disable();
+        throw new Error('OBSERVER_IDENTITY_CHANGED');
+      }
+      return prepared;
+    });
+    metadataTail = queued.next;
+    return queued.result;
+  };
 
   function installDelegates(owner: ReleaseAccountingOwner): void {
     accounting = owner;
