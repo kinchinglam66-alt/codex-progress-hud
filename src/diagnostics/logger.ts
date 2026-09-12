@@ -34,6 +34,11 @@ export interface OperationalLogEntry {
   protocolVersion?: number;
   httpStatusCategory?: "2xx" | "4xx" | "5xx" | "network";
   elapsedMs?: number;
+  role?: "manager" | "desktop";
+  attemptId?: string;
+  generation?: number;
+  childPid?: number;
+  childOutcome?: "spawned" | "attached" | "termination_requested" | "terminated" | "exited" | "unknown";
 }
 
 export interface OperationalLogger {
@@ -75,6 +80,15 @@ const HTTP_STATUS_CATEGORIES = new Set<NonNullable<OperationalLogEntry["httpStat
   "5xx",
   "network"
 ]);
+const ROLES = new Set<NonNullable<OperationalLogEntry["role"]>>(["manager", "desktop"]);
+const CHILD_OUTCOMES = new Set<NonNullable<OperationalLogEntry["childOutcome"]>>([
+  "spawned",
+  "attached",
+  "termination_requested",
+  "terminated",
+  "exited",
+  "unknown"
+]);
 
 function positiveInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
@@ -96,6 +110,11 @@ function sanitizeEntry(entry: OperationalLogEntry): OperationalLogEntry {
   const protocolVersion = entry.protocolVersion;
   const httpStatusCategory = entry.httpStatusCategory;
   const elapsedMs = entry.elapsedMs;
+  const role = entry.role;
+  const attemptId = entry.attemptId;
+  const generation = entry.generation;
+  const childPid = entry.childPid;
+  const childOutcome = entry.childOutcome;
   const parsedAt = new Date(at);
   if (Number.isNaN(parsedAt.getTime()) || parsedAt.toISOString() !== at) {
     throw new TypeError("at must be a canonical ISO timestamp");
@@ -115,6 +134,19 @@ function sanitizeEntry(entry: OperationalLogEntry): OperationalLogEntry {
     throw new TypeError("HTTP status category must be allowed");
   }
   optionalNonNegativeNumber(elapsedMs, "elapsedMs");
+  if (role !== undefined && !ROLES.has(role)) throw new TypeError("role must be allowed");
+  if (attemptId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(attemptId)) {
+    throw new TypeError("attempt identity must be a UUID");
+  }
+  if (generation !== undefined && (!Number.isSafeInteger(generation) || generation < 0)) {
+    throw new TypeError("generation must be a non-negative integer");
+  }
+  if (childPid !== undefined && (!Number.isSafeInteger(childPid) || childPid <= 0)) {
+    throw new TypeError("child PID must be a positive integer");
+  }
+  if (childOutcome !== undefined && !CHILD_OUTCOMES.has(childOutcome)) {
+    throw new TypeError("child outcome must be allowed");
+  }
 
   return {
     at,
@@ -125,7 +157,12 @@ function sanitizeEntry(entry: OperationalLogEntry): OperationalLogEntry {
     ...(httpStatusCategory === undefined
       ? {}
       : { httpStatusCategory }),
-    ...(elapsedMs === undefined ? {} : { elapsedMs })
+    ...(elapsedMs === undefined ? {} : { elapsedMs }),
+    ...(role === undefined ? {} : { role }),
+    ...(attemptId === undefined ? {} : { attemptId }),
+    ...(generation === undefined ? {} : { generation }),
+    ...(childPid === undefined ? {} : { childPid }),
+    ...(childOutcome === undefined ? {} : { childOutcome })
   };
 }
 

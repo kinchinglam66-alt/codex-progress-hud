@@ -462,28 +462,155 @@ describe("companion lifecycle manager", () => {
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
   });
 
+  it("coalesces startup across independent managers sharing one data directory", async () => {
+    const first = await harness();
+    const secondLauncher = {
+      spawnHud: vi.fn(async () => {
+        first.setOnline(true);
+        return { pid: compatibleHealth.pid, terminate: first.terminate };
+      })
+    };
+    const secondLogger = { write: vi.fn(async (_entry: OperationalLogEntry) => undefined) };
+    const second = createCompanionManager({
+      store: first.store,
+      client: first.client,
+      launcher: secondLauncher,
+      sleep: async () => undefined,
+      now: () => 0,
+      logger: secondLogger,
+      diagnostics: {
+        directory: join(first.directory, "diagnostics-second-manager"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: first.paths.installManifestPath,
+        dataDirectoryPath: first.directory
+      }
+    });
+    let initialIdentityCalls = 0;
+    let releaseInitialIdentities!: () => void;
+    const initialIdentities = new Promise<void>((resolve) => { releaseInitialIdentities = resolve; });
+    let readinessHealthCalls = 0;
+    let releaseReadiness!: () => void;
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve; });
+    first.client.identity.mockImplementation(async () => {
+      if (first.launcher.spawnHud.mock.calls.length === 0 && secondLauncher.spawnHud.mock.calls.length === 0) {
+        initialIdentityCalls += 1;
+        if (initialIdentityCalls === 2) releaseInitialIdentities();
+        await initialIdentities;
+        throw new HudClientError("OFFLINE", "not reachable");
+      }
+      return { service: "codex-progress-hud" as const, protocolVersion: 3 as const };
+    });
+    first.client.health.mockImplementation(async () => {
+      if (readinessHealthCalls < 2) {
+        readinessHealthCalls += 1;
+        if (readinessHealthCalls === 2) releaseReadiness();
+        await readiness;
+      }
+      return compatibleHealth;
+    });
+
+    const results = await Promise.all([
+      first.manager.ensureForWrite("progress_report"),
+      second.ensureForWrite("progress_report")
+    ]);
+
+    expect(results[0]).toMatchObject({ kind: "ready" });
+    expect(results[1]).toMatchObject({ kind: "ready" });
+    expect(first.launcher.spawnHud.mock.calls.length + secondLauncher.spawnHud.mock.calls.length).toBe(1);
+    const startupReady = [
+      ...vi.mocked(first.logger.write).mock.calls,
+      ...vi.mocked(secondLogger.write).mock.calls
+    ].filter(([entry]) => entry.event === "startup_ready");
+    expect(startupReady).toHaveLength(2);
+    expect(startupReady.map(([entry]) => entry.childOutcome).sort()).toEqual(["attached", "spawned"]);
+    expect(startupReady.every(([entry]) => entry.childPid === compatibleHealth.pid)).toBe(true);
+  });
+
+  it("abandons a losing startup probe when disable commits a new generation", async () => {
+    const fixture = await harness({ spawnMakesOnline: false });
+    const heldClaim = {
+      tryAcquire: vi.fn(async () => ({
+        kind: "held" as const,
+        claim: { generation: 1, ownerNonce: "other-manager", expiresAt: 8_000 }
+      }))
+    };
+    const manager = createCompanionManager({
+      store: fixture.store,
+      client: fixture.client,
+      launcher: fixture.launcher,
+      sleep: async () => undefined,
+      now: () => 0,
+      startupClaims: heldClaim,
+      logger: { write: async () => undefined },
+      diagnostics: {
+        directory: join(fixture.directory, "diagnostics-loser"),
+        pluginVersion: "0.2.0",
+        mcpVersion: "0.2.0",
+        host: "127.0.0.1",
+        port: 17_837,
+        installManifestPath: fixture.paths.installManifestPath,
+        dataDirectoryPath: fixture.directory
+      }
+    });
+    let readinessEntered!: () => void;
+    const readinessEntry = new Promise<void>((resolve) => { readinessEntered = resolve; });
+    let releaseReadiness!: () => void;
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve; });
+    let identityCalls = 0;
+    fixture.client.identity.mockImplementation(async () => {
+      identityCalls += 1;
+      if (identityCalls === 2) {
+        readinessEntered();
+        await readiness;
+      }
+      throw new HudClientError("OFFLINE", "not reachable");
+    });
+
+    const opening = manager.ensureForWrite("progress_report");
+    await readinessEntry;
+    const closing = manager.close();
+    releaseReadiness();
+
+    await expect(opening).resolves.toMatchObject({ kind: "error", code: "MANUALLY_DISABLED" });
+    await expect(closing).resolves.toMatchObject({ desiredState: "off", observedState: "stopped" });
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+    expect(heldClaim.tryAcquire).toHaveBeenCalledOnce();
+  });
+
   it("records startup using only category fields", async () => {
     const { manager, logger } = await harness();
 
     await manager.open();
 
-    expect(vi.mocked(logger.write).mock.calls.map(([entry]) => entry)).toEqual([
-      {
-        at: "1970-01-01T00:00:00.000Z",
-        level: "info",
-        event: "startup_requested",
-        lifecycleState: "starting",
-        protocolVersion: 3
-      },
-      {
-        at: "1970-01-01T00:00:00.000Z",
-        level: "info",
-        event: "startup_ready",
-        lifecycleState: "running",
-        protocolVersion: 3,
-        elapsedMs: 0
-      }
-    ]);
+    const entries = vi.mocked(logger.write).mock.calls.map(([entry]) => entry);
+    expect(entries).toHaveLength(2);
+    const [requested, ready] = entries;
+    if (requested === undefined || ready === undefined) throw new Error("startup log entries missing");
+    expect(requested).toMatchObject({
+      at: "1970-01-01T00:00:00.000Z",
+      level: "info",
+      event: "startup_requested",
+      lifecycleState: "starting",
+      protocolVersion: 3,
+      role: "manager",
+      generation: 1
+    });
+    expect(ready).toMatchObject({
+      at: "1970-01-01T00:00:00.000Z",
+      level: "info",
+      event: "startup_ready",
+      lifecycleState: "running",
+      protocolVersion: 3,
+      role: "manager",
+      generation: 1,
+      childPid: compatibleHealth.pid,
+      childOutcome: "spawned",
+      elapsedMs: 0
+    });
+    expect(ready.attemptId).toBe(requested.attemptId);
   });
 
   it("does not wait for a permanently pending logger before startup", async () => {
@@ -1885,5 +2012,49 @@ describe("process launcher", () => {
     expect(spawned.pid).toBe(9123);
     await spawned.terminate();
     expect(child.kill).toHaveBeenCalledOnce();
+  });
+
+  it("captures child exit outcome without relying on executable-name process lookup", async () => {
+    const makeChild = (pid: number) => {
+      let onExit: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined;
+      const child = {
+        pid,
+        unref: vi.fn<() => void>(),
+        kill: vi.fn<() => boolean>(() => true),
+        once: vi.fn((event: string, listener: (...args: any[]) => void) => {
+          if (event === "exit") onExit = listener;
+          return child;
+        }),
+        emitExit: () => onExit?.(0, null)
+      };
+      return child;
+    };
+    const naturalChild = makeChild(9123);
+    const terminatedChild = makeChild(9124);
+    const children = [naturalChild, terminatedChild];
+    const launcher = createProcessLauncher(vi.fn(() => children.shift()!), {});
+
+    const naturallyExited = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
+    expect(naturallyExited.outcome?.()).toBe("running");
+    naturalChild.emitExit();
+    expect(naturallyExited.outcome?.()).toBe("exited");
+
+    const terminated = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
+    await terminated.terminate();
+    expect(terminatedChild.kill).toHaveBeenCalledOnce();
+    expect(terminated.outcome?.()).toBe("termination_requested");
+    terminatedChild.emitExit();
+    expect(terminated.outcome?.()).toBe("terminated");
+
+    const killFailure = new Error("kill failed");
+    const failingChild = {
+      pid: 9125,
+      unref: vi.fn<() => void>(),
+      kill: vi.fn<() => boolean>(() => { throw killFailure; })
+    };
+    const failingLauncher = createProcessLauncher(vi.fn(() => failingChild), {});
+    const failing = await failingLauncher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
+    await expect(failing.terminate()).rejects.toBe(killFailure);
+    expect(failing.outcome?.()).toBe("unknown");
   });
 });

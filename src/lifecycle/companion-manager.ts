@@ -1,4 +1,5 @@
 import { access } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import {
   createOperationalLogger,
@@ -20,6 +21,7 @@ import {
 import { classifyLifecycle } from "./classify.js";
 import type { ProcessLauncher, SpawnedHud } from "./process-launcher.js";
 import { LifecycleStateTimeoutError } from "./state-lock.js";
+import { createStartupClaimStore, type StartupClaimLease, type StartupClaimStore } from "./startup-claim.js";
 import { PROTOCOL_VERSION } from "./types.js";
 import type {
   DiagnosticReport,
@@ -77,6 +79,7 @@ export interface CompanionManagerDependencies {
   recoveryCooldownMs?: number;
   startupTimeoutMs?: number;
   shutdownTimeoutMs?: number;
+  startupClaims?: StartupClaimStore;
   logger?: OperationalLogger;
   diagnostics: {
     directory: string;
@@ -163,6 +166,15 @@ type ReadinessResult =
   | { kind: "offline" }
   | { kind: "terminal"; code: HudErrorCode };
 
+type StartupChildOutcome = "spawned" | "attached" | "termination_requested" | "terminated" | "exited" | "unknown";
+interface StartupLogContext {
+  role: "manager";
+  attemptId: string;
+  generation: number;
+  childPid?: number;
+  childOutcome?: StartupChildOutcome;
+}
+
 export function createCompanionManager(
   dependencies: CompanionManagerDependencies
 ): CompanionManager {
@@ -185,6 +197,10 @@ export function createCompanionManager(
   const recoveryCooldownMs = dependencies.recoveryCooldownMs ?? 30_000;
   const startupTimeoutMs = dependencies.startupTimeoutMs ?? 8_000;
   const shutdownTimeoutMs = dependencies.shutdownTimeoutMs ?? 5_000;
+  const startupClaims = dependencies.startupClaims ?? createStartupClaimStore(
+    dependencies.diagnostics.dataDirectoryPath,
+    { now }
+  );
   type RunningResult = Exclude<EnsureResult, { kind: "suppressed" }>;
   let startupPromise: Promise<RunningResult> | undefined;
   let startupGeneration: number | undefined;
@@ -197,12 +213,12 @@ export function createCompanionManager(
   let legacyMigrationClosed = false;
   let legacyMigrationFlight: Promise<void> | undefined;
 
-  function record(entry: Omit<OperationalLogEntry, "at">): void {
+  function record(entry: Omit<OperationalLogEntry, "at">, context?: StartupLogContext): void {
     try {
       const at = new Date(now()).toISOString();
       recentOperationalEvents.push({ code: entry.event, at });
       if (recentOperationalEvents.length > 20) recentOperationalEvents.shift();
-      void logger.write({ at, ...entry }).catch(() => undefined);
+      void logger.write({ at, ...entry, ...(context ?? {}) }).catch(() => undefined);
     } catch {
       // Operational logging is best effort and must not alter lifecycle behavior.
     }
@@ -210,7 +226,8 @@ export function createCompanionManager(
 
   function recordCompatibilityFailure(
     code: HudErrorCode,
-    lifecycleState: "port_conflict" | "incompatible"
+    lifecycleState: "port_conflict" | "incompatible",
+    context?: StartupLogContext
   ): void {
     if (code !== "PORT_CONFLICT" && code !== "VERSION_MISMATCH") return;
     record({
@@ -218,15 +235,16 @@ export function createCompanionManager(
       event: code === "PORT_CONFLICT" ? "port_conflict" : "protocol_mismatch",
       lifecycleState,
       protocolVersion: PROTOCOL_VERSION
-    });
+    }, context);
   }
 
   function recordStartupFailure(
     code: HudErrorCode,
-    lifecycleState: "stopped" | "port_conflict" | "incompatible"
+    lifecycleState: "stopped" | "port_conflict" | "incompatible",
+    context?: StartupLogContext
   ): void {
     if (lifecycleState === "port_conflict" || lifecycleState === "incompatible") {
-      recordCompatibilityFailure(code, lifecycleState);
+      recordCompatibilityFailure(code, lifecycleState, context);
     }
     record({
       level: "error",
@@ -234,7 +252,7 @@ export function createCompanionManager(
       lifecycleState,
       protocolVersion: PROTOCOL_VERSION,
       elapsedMs: Math.max(0, now() - startStartedAt)
-    });
+    }, context);
   }
 
   function remember(code: HudErrorCode | "OFFLINE"): void {
@@ -498,7 +516,120 @@ export function createCompanionManager(
     return SPAWN_DEADLINE;
   }
 
-  async function start(generation: number, deadline: number): Promise<RunningResult> {
+  async function waitForStartupClaim(
+    generation: number,
+    deadline: number,
+    context: StartupLogContext,
+    initialClaim: Extract<Awaited<ReturnType<StartupClaimStore["tryAcquire"]>>, { kind: "held" }>
+  ): Promise<StartupClaimLease | RunningResult> {
+    let claim = initialClaim.claim;
+    let delayIndex = 0;
+    for (let attempt = 0; attempt < STARTUP_DELAYS.length; attempt += 1) {
+      if (!(await currentOnGeneration(generation, deadline))) return staleStartupResult(generation, deadline);
+      const readiness = await readinessProbe(deadline);
+      if (readiness.kind === "ready" && claim.generation === generation) {
+        if (!(await currentOnGeneration(generation, deadline))) return staleStartupResult(generation, deadline);
+        if (!(await dependencies.store.writeRuntime(readiness.health, generation, stateOptions(deadline)))) {
+          return staleStartupResult(generation, deadline);
+        }
+        record({
+          level: "info",
+          event: "startup_ready",
+          lifecycleState: readiness.health.visibility === "visible" ? "running" : "hidden",
+          protocolVersion: PROTOCOL_VERSION,
+          elapsedMs: Math.max(0, now() - startStartedAt)
+        }, { ...context, childPid: readiness.health.pid, childOutcome: "attached" });
+        return {
+          kind: "ready",
+          generation,
+          snapshot: withDesiredState("on", {
+            observedState: readiness.health.visibility === "visible" ? "running" : "hidden",
+            health: readiness.health
+          })
+        };
+      }
+      if (readiness.kind === "terminal") {
+        remember(readiness.code);
+        const observedState = readiness.code === "PORT_CONFLICT"
+          ? "port_conflict" as const
+          : readiness.code === "VERSION_MISMATCH"
+            ? "incompatible" as const
+            : "stopped" as const;
+        const snapshot = withDesiredState("on", { observedState, code: readiness.code });
+        recordStartupFailure(readiness.code, observedState === "stopped" ? "stopped" : observedState, context);
+        return { kind: "error", code: readiness.code, snapshot };
+      }
+      if (now() >= deadline) break;
+      if (claim.expiresAt <= now()) {
+        const replacement = await startupClaims.tryAcquire(generation, deadline);
+        if (replacement.kind === "acquired") return replacement.lease;
+        claim = replacement.claim;
+        continue;
+      }
+      const remaining = Math.min(deadline - now(), claim.expiresAt - now());
+      if (remaining <= 0) continue;
+      const delay = STARTUP_DELAYS[delayIndex] ?? 1000;
+      delayIndex += 1;
+      await sleep(Math.min(delay, remaining));
+    }
+    remember("START_TIMEOUT");
+    recordStartupFailure("START_TIMEOUT", "stopped", context);
+    return {
+      kind: "error",
+      code: "START_TIMEOUT",
+      snapshot: { desiredState: "on", observedState: "stopped", code: "START_TIMEOUT" }
+    };
+  }
+
+  async function start(
+    generation: number,
+    deadline: number,
+    context: StartupLogContext
+  ): Promise<RunningResult> {
+    const startupTimedOut = (): RunningResult => {
+      remember("START_TIMEOUT");
+      recordStartupFailure("START_TIMEOUT", "stopped", context);
+      return {
+        kind: "error",
+        code: "START_TIMEOUT",
+        snapshot: { observedState: "stopped", code: "START_TIMEOUT" }
+      };
+    };
+    if (now() >= deadline) return startupTimedOut();
+    let claim: Awaited<ReturnType<StartupClaimStore["tryAcquire"]>>;
+    try {
+      claim = await startupClaims.tryAcquire(generation, deadline);
+    } catch {
+      if (now() >= deadline) return startupTimedOut();
+      remember("INTERNAL_ERROR");
+      recordStartupFailure("INTERNAL_ERROR", "stopped", context);
+      return {
+        kind: "error",
+        code: "INTERNAL_ERROR",
+        snapshot: { observedState: "stopped", code: "INTERNAL_ERROR" }
+      };
+    }
+    if (claim.kind === "held") {
+      const coordinated = await waitForStartupClaim(generation, deadline, context, claim);
+      if (!("release" in coordinated)) return coordinated;
+      try {
+        return await startOwned(generation, deadline, context);
+      } finally {
+        await coordinated.release().catch(() => undefined);
+      }
+    }
+    try {
+      return await startOwned(generation, deadline, context);
+    } finally {
+      await claim.lease.release().catch(() => undefined);
+    }
+  }
+
+  async function startOwned(
+    generation: number,
+    deadline: number,
+    context: StartupLogContext
+  ): Promise<RunningResult> {
     const settings = await dependencies.store.readSettings(stateOptions(deadline));
     const manifest = await dependencies.store.readInstallManifest(stateOptions(deadline));
     const unavailable = withDesiredState(settings.desiredState, {
@@ -507,7 +638,7 @@ export function createCompanionManager(
     });
     if (manifest === null || !isAbsolute(manifest.executablePath) || !isAbsolute(manifest.installDirectory)) {
       remember("COMPANION_NOT_INSTALLED");
-      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
+      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped", context);
       return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
     }
     const executablePath = resolve(manifest.executablePath);
@@ -519,13 +650,13 @@ export function createCompanionManager(
       isAbsolute(containment)
     ) {
       remember("COMPANION_NOT_INSTALLED");
-      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
+      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped", context);
       return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
     }
     const executableExists = await resultBeforeDeadline(pathExists(executablePath), deadline);
     if (executableExists === OPERATION_DEADLINE) {
       remember("START_TIMEOUT");
-      recordStartupFailure("START_TIMEOUT", "stopped");
+      recordStartupFailure("START_TIMEOUT", "stopped", context);
       return {
         kind: "error",
         code: "START_TIMEOUT",
@@ -537,7 +668,7 @@ export function createCompanionManager(
     }
     if (!executableExists) {
       remember("COMPANION_NOT_INSTALLED");
-      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped");
+      recordStartupFailure("COMPANION_NOT_INSTALLED", "stopped", context);
       return { kind: "error", code: "COMPANION_NOT_INSTALLED", snapshot: unavailable };
     }
 
@@ -546,7 +677,7 @@ export function createCompanionManager(
       spawned = await spawnBeforeDeadline(executablePath, generation, deadline);
     } catch {
       remember("INTERNAL_ERROR");
-      recordStartupFailure("INTERNAL_ERROR", "stopped");
+      recordStartupFailure("INTERNAL_ERROR", "stopped", context);
       const snapshot = withDesiredState(settings.desiredState, {
         observedState: "stopped",
         code: "INTERNAL_ERROR"
@@ -555,7 +686,7 @@ export function createCompanionManager(
     }
     if (spawned === SPAWN_DEADLINE) {
       remember("START_TIMEOUT");
-      recordStartupFailure("START_TIMEOUT", "stopped");
+      recordStartupFailure("START_TIMEOUT", "stopped", context);
       return {
         kind: "error",
         code: "START_TIMEOUT",
@@ -569,7 +700,7 @@ export function createCompanionManager(
     if (!(await currentOnGeneration(generation, deadline))) {
       if (!(await retireStaleSpawn(spawned, undefined, deadline))) {
         remember("START_TIMEOUT");
-        recordStartupFailure("START_TIMEOUT", "stopped");
+        recordStartupFailure("START_TIMEOUT", "stopped", context);
         return {
           kind: "error",
           code: "START_TIMEOUT",
@@ -602,7 +733,7 @@ export function createCompanionManager(
         observedState,
         code: readiness.code
       });
-      recordStartupFailure(readiness.code, observedState);
+      recordStartupFailure(readiness.code, observedState, context);
       return { kind: "error", code: readiness.code, snapshot };
     }
     if (readiness.kind === "offline") {
@@ -611,14 +742,14 @@ export function createCompanionManager(
         observedState: "stopped",
         code: "START_TIMEOUT"
       });
-      recordStartupFailure("START_TIMEOUT", "stopped");
+      recordStartupFailure("START_TIMEOUT", "stopped", context);
       return { kind: "error", code: "START_TIMEOUT", snapshot };
     }
     const health = readiness.health;
     if (!(await dependencies.store.writeRuntime(health, generation, stateOptions(deadline)))) {
       if (!(await retireStaleSpawn(spawned, health, deadline))) {
         remember("START_TIMEOUT");
-        recordStartupFailure("START_TIMEOUT", "stopped");
+        recordStartupFailure("START_TIMEOUT", "stopped", context);
         return {
           kind: "error",
           code: "START_TIMEOUT",
@@ -637,7 +768,7 @@ export function createCompanionManager(
       lifecycleState: health.visibility === "visible" ? "running" : "hidden",
       protocolVersion: PROTOCOL_VERSION,
       elapsedMs: Math.max(0, now() - startStartedAt)
-    });
+    }, { ...context, childPid: health.pid, childOutcome: "spawned" });
     return {
       kind: "ready",
       generation,
@@ -652,14 +783,19 @@ export function createCompanionManager(
   function sharedStart(generation: number, deadline = now() + startupTimeoutMs): Promise<RunningResult> {
     if (startupPromise !== undefined) return startupPromise;
     startStartedAt = now();
+    const context: StartupLogContext = {
+      role: "manager",
+      attemptId: randomUUID(),
+      generation
+    };
     record({
       level: "info",
       event: "startup_requested",
       lifecycleState: "starting",
       protocolVersion: PROTOCOL_VERSION
-    });
+    }, context);
     startupGeneration = generation;
-    startupPromise = start(generation, deadline).finally(() => {
+    startupPromise = start(generation, deadline, context).finally(() => {
       startupPromise = undefined;
       startupGeneration = undefined;
     });

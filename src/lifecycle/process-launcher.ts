@@ -3,6 +3,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 export interface SpawnedHud {
   pid: number;
   terminate(): Promise<void>;
+  outcome?(): "running" | "termination_requested" | "exited" | "terminated" | "unknown";
 }
 
 export interface ProcessLauncher {
@@ -13,7 +14,9 @@ type SpawnProcess = (
   executablePath: string,
   arguments_: string[],
   options: SpawnOptions
-) => Pick<ChildProcess, "pid" | "unref" | "kill">;
+) => Pick<ChildProcess, "pid" | "unref" | "kill"> & {
+  once?: (event: string, listener: (...args: any[]) => void) => unknown;
+};
 
 export function createProcessLauncher(
   spawnProcess: SpawnProcess = spawn,
@@ -37,10 +40,31 @@ export function createProcessLauncher(
       );
       if (child.pid === undefined) throw new Error("HUD process did not provide a PID");
       child.unref();
+      let childOutcome: "running" | "termination_requested" | "exited" | "terminated" | "unknown" = "running";
+      let terminationRequested = false;
+      child.once?.("error", () => {
+        if (childOutcome === "running" || childOutcome === "termination_requested") childOutcome = "unknown";
+      });
+      child.once?.("exit", () => {
+        childOutcome = terminationRequested ? "terminated" : "exited";
+      });
       return {
         pid: child.pid,
+        outcome: () => childOutcome,
         async terminate(): Promise<void> {
-          child.kill();
+          let killed: boolean;
+          try {
+            killed = child.kill();
+          } catch (error) {
+            childOutcome = "unknown";
+            throw error;
+          }
+          if (!killed) {
+            childOutcome = "unknown";
+            return;
+          }
+          terminationRequested = true;
+          if (childOutcome === "running") childOutcome = "termination_requested";
         }
       };
     }

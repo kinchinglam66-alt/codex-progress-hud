@@ -96,6 +96,38 @@ describe("operational logger", () => {
     expect(content).not.toContain("raw prompt/session/title/path secret");
   });
 
+  it("persists bounded lifecycle correlation fields without sensitive extras", async () => {
+    const directory = await logDirectory();
+    const logger = createOperationalLogger({ logDirectory: directory, maxBytes: 256 * 1024, maxFiles: 3 });
+
+    await logger.write({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_ready",
+      role: "manager",
+      attemptId: "123e4567-e89b-12d3-a456-426614174000",
+      generation: 7,
+      childPid: 9123,
+      childOutcome: "termination_requested",
+      token: "secret",
+      sourcePath: "C:\\private\\source.ts"
+    } as unknown as OperationalLogEntry);
+
+    const content = await readFile(join(directory, "companion.log"), "utf8");
+    expect(JSON.parse(content.trim())).toEqual({
+      at: "2026-09-02T00:00:00.000Z",
+      level: "info",
+      event: "startup_ready",
+      role: "manager",
+      attemptId: "123e4567-e89b-12d3-a456-426614174000",
+      generation: 7,
+      childPid: 9123,
+      childOutcome: "termination_requested"
+    });
+    expect(content).not.toContain("secret");
+    expect(content).not.toContain("private");
+  });
+
   it("serializes only category fields from an entry carrying sensitive extras", async () => {
     const directory = await logDirectory();
     const logger = createOperationalLogger({
