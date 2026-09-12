@@ -294,6 +294,25 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     await enableScheduler();
   }
 
+  async function reconcileRecoveredCalls(signal:AbortSignal):Promise<boolean> {
+    check(signal);
+    if(accounting?.recoveryStatus?.()?.reason!=='unresolved_previous_call')return true;
+    if(typeof accounting.reconcileRecoveredPending!=='function')return false;
+    let proof:Awaited<ReturnType<typeof inspectRecoveryBootBoundary>>;
+    try{proof=await (inspectBootBoundary??(()=>inspectRecoveryBootBoundary({now})))();}
+    catch{return false;}
+    check(signal);
+    // Bind the asynchronous probe to the same authorized account. This helper
+    // never starts a trial and never treats companion restart as OS reboot.
+    const snapshot=await identity.inspect(signal);
+    check(signal);gate.update(snapshot.evidence);
+    if(!gate.authorized()||binding(snapshot.evidence)!==authorizedBinding){
+      disable();throw Error('OBSERVER_RECOVERY_BINDING_CHANGED');
+    }
+    try{await accounting.reconcileRecoveredPending(proof);return true;}
+    catch{return false;}
+  }
+
   function recoveryBoundary(): RecoveryRuntimeBoundary {
     return {
       enabled: () => !disabled && ready && gate.authorized(),
@@ -317,15 +336,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         });
         const closureConfirmed = states.every(state => !state.active && !state.poisoned);
         if (!closureConfirmed) return {binding: current, closureConfirmed: false, reason: 'unresolved_previous_call'};
-        if (accounting?.recoveryStatus?.()?.reason === 'unresolved_previous_call') {
-          if (typeof accounting.reconcileRecoveredPending !== 'function') return {binding: current, closureConfirmed: false, reason: 'unresolved_previous_call'};
-          try {
-            const proof = await (inspectBootBoundary ?? (() => inspectRecoveryBootBoundary({now})))();
-            await accounting.reconcileRecoveredPending(proof);
-          } catch {
-            return {binding: current, closureConfirmed: false, reason: 'unresolved_previous_call'};
-          }
-        }
+        if(!await reconcileRecoveredCalls(signal))return {binding:current,closureConfirmed:false,reason:'unresolved_previous_call'};
         return {binding: current, closureConfirmed: true};
       },
       async runTrial(reservationId: string, signal: AbortSignal) {
@@ -433,6 +444,8 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
           return;
         }
         accounting = owner;
+        await reconcileRecoveredCalls(combined);
+        check(combined);
         installDelegates(owner);
         if (typeof owner.recoveryStatus === 'function' && typeof owner.preflightRecovery === 'function' &&
             typeof owner.confirmRecovery === 'function' && typeof owner.reserveRecoveryTrial === 'function' &&

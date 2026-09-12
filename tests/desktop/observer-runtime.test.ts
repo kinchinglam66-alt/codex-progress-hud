@@ -197,9 +197,38 @@ describe('desktop observer runtime composition', () => {
     });
     try {
       await runtime.start(new AbortController().signal);
-      await expect(runtime.recoveryBoundary().check(new AbortController().signal)).resolves.toMatchObject({binding: expect.any(String), closureConfirmed: true});
       expect(accounting.reconcileRecoveredPending).toHaveBeenCalledOnce();
+      await expect(runtime.recoveryBoundary().check(new AbortController().signal)).resolves.toMatchObject({binding: expect.any(String), closureConfirmed: true});
+      expect(accounting.reconcileRecoveredPending).toHaveBeenCalledTimes(2);
     } finally { await runtime.close(); }
+  });
+
+  it('keeps startup available when same-boot orphan reconciliation cannot prove closure',async()=>{
+    const events:string[]=[],accounting=owner(events);
+    accounting.recoveryStatus=()=>({state:'blocked',revision:0,knownTokens:0,unknown:1,recoveryAllowed:true,reason:'unresolved_previous_call'});
+    accounting.reconcileRecoveredPending=vi.fn(async()=>{throw Error('RELEASE_RECOVERY_INVALID');});
+    const inspectProof=vi.fn(async()=>({source:'windows-win32-operating-system' as const,bootAt:0,observedAt:20000}));
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>20000,events),dialog:dialogFor(events),openAccounting:async()=>accounting,now:()=>20000,inspectRecoveryBootBoundary:inspectProof});
+    try{
+      await runtime.start(new AbortController().signal);
+      expect(inspectProof).toHaveBeenCalledOnce();
+      expect(accounting.recoveryStatus().reason).toBe('unresolved_previous_call');
+      expect(runtime.workers.every(worker=>!worker.status().disabled)).toBe(true);
+      expect(events.some(event=>event.startsWith('reserve:'))).toBe(false);
+    }finally{await runtime.close();}
+  });
+
+  it('refuses orphan reconciliation after the account binding changes during the boot probe',async()=>{
+    const events:string[]=[],accounting=owner(events);let account='a'.repeat(64);
+    accounting.recoveryStatus=()=>({state:'blocked',revision:0,knownTokens:0,unknown:1,recoveryAllowed:true,reason:'unresolved_previous_call'});
+    accounting.reconcileRecoveredPending=vi.fn(async()=>1);
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>20000,events,{inspect:()=>evidence(20000,account)}),dialog:dialogFor(events),openAccounting:async()=>accounting,now:()=>20000,
+      inspectRecoveryBootBoundary:async()=>{account='d'.repeat(64);return {source:'windows-win32-operating-system',bootAt:10000,observedAt:20000};}});
+    try{
+      await runtime.start(new AbortController().signal);
+      expect(accounting.reconcileRecoveredPending).not.toHaveBeenCalled();
+      expect(runtime.workers.every(worker=>worker.status().disabled)).toBe(true);
+    }finally{await runtime.close();}
   });
 
   it('cancels authorized dispatch before waiting for a consent deletion that fails',async()=>{
