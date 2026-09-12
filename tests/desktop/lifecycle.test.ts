@@ -19,7 +19,7 @@ const cleanups: Array<() => Promise<void>> = [];
 it('keeps runtime ownership until the server has finished its checkpoint flush',async()=>{
   const harness=desktopHarness();await runDesktop(harness.dependencies);
   const closing=deferred<void>();
-  harness.progressServer.close.mockImplementation(async()=>closing.promise);
+  harness.progressServer.close.mockImplementation(async()=>{await closing.promise;return undefined;});
   harness.listeners.get('before-quit')?.({preventDefault:vi.fn()});
   try{
     await vi.waitFor(()=>expect(harness.progressServer.close).toHaveBeenCalledOnce());
