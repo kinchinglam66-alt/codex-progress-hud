@@ -63,7 +63,7 @@ interface Entry {
   timerFailures?:number;
   sourceClockAvailable?:boolean;
   sourceActiveSeconds?:number; predictionExcludedSeconds?:number;
-  contextState?:ObserverContextState;
+  contextState?:ObserverContextState; contextStateTurnKey?:string;
   contentIdentity?:string; consumedContentIdentity?:string;
   bootstrapRecoveryEligible?:boolean; bootstrapRecoveryUsed?:boolean;
   lastResultDiagnostic?:ResultDiagnostic; lastRejectionReason?:ResultRejectionReason;
@@ -73,7 +73,7 @@ interface Entry {
 interface Flight {key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
-  contextState?:ObserverContextState; contextMetrics?:ContextPreparationMetrics; done?: Promise<void>}
+  turnKey:string; contextState?:ObserverContextState; contextMetrics?:ContextPreparationMetrics; done?: Promise<void>}
 
 /** Admission timing is local; durable spend admission belongs to each owned worker.
  * changed never dispatches synchronously on the task Hook/HTTP path.
@@ -158,15 +158,19 @@ export class ObserverScheduler {
   }
   private contextState(flight:Flight,state:ObserverContextState,metrics?:ContextPreparationMetrics):void {
     flight.contextState=state;
-    if(metrics)flight.contextMetrics={originalTextBytes:metrics.originalTextBytes,
+    if(metrics)flight.contextMetrics={sizing:metrics.sizing,originalTextBytes:metrics.originalTextBytes,
       originalTextTokenEstimate:metrics.originalTextTokenEstimate,preparedRequestBytes:metrics.preparedRequestBytes,
       preparedTokenEstimate:metrics.preparedTokenEstimate,compressionCalls:metrics.compressionCalls,
       cachedCompressionCalls:metrics.cachedCompressionCalls};
     const entry=this.entries.get(flight.key);
-    if(entry)entry.contextState=state;
-    this.record('stage',flight.key,entry!,{requestId:flight.requestId,contextState:state,
+    const currentView=this.options.goals.view(flight.key,this.time());
+    const ownsEntry=entry?.flight===flight&&entry.goalIdentity===flight.goalIdentity&&
+      currentView?.generation===flight.generation&&this.options.goals.currentTurnKey(flight.key)===flight.turnKey;
+    if(ownsEntry){entry.contextState=state;entry.contextStateTurnKey=flight.turnKey;}
+    if(!entry)return;
+    this.record('stage',flight.key,entry,{requestId:flight.requestId,contextState:state,
       ...(flight.contextMetrics?{contextMetrics:{...flight.contextMetrics}}:{})},flight);
-    this.notify();
+    if(ownsEntry)this.notify();
   }
   private preparationFailureState(flight:Flight,error:unknown):ObserverContextState {
     const code=error instanceof Error?error.message:'';
@@ -247,7 +251,7 @@ export class ObserverScheduler {
       delete entry.overdueReservedPrediction;entry.lastRequestActiveSeconds=state.view.activeSeconds;
       if(state.contentIdentity===undefined)delete entry.contentIdentity;else entry.contentIdentity=state.contentIdentity;
       delete entry.consumedContentIdentity;
-      delete entry.contextState;
+      delete entry.contextState;delete entry.contextStateTurnKey;
       entry.bootstrapRecoveryEligible=false;entry.bootstrapRecoveryUsed=false;
       delete entry.lastResultDiagnostic;delete entry.lastRejectionReason;delete entry.lastResultStatus;
       if(state.view.prediction)entry.overdueEligibleActiveSeconds=
@@ -439,7 +443,8 @@ export class ObserverScheduler {
         requestId:++this.requestSequence,requestedAt:now,observedActiveSeconds:request.input.activeSeconds,
         generation:view.generation,runtime:view.runtime,version:entry.version,triggerReason:decision.reason!,
         lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,eligibleActiveSeconds:decision.eligibleActiveSeconds,
-        goalIdentity:state.goalIdentity,excludedActiveSeconds:0,schedulerGeneration:this.schedulerGeneration};
+        goalIdentity:state.goalIdentity,excludedActiveSeconds:0,schedulerGeneration:this.schedulerGeneration,
+        turnKey:this.options.goals.currentTurnKey(key)??''};
       entry.flight = flight; entry.lastStart = now; entry.starts.push(now); entry.consumed = entry.version;
       entry.consumedEventSequence=entry.eventSequence;
       entry.lastRequestActiveSeconds=request.input.activeSeconds;
@@ -645,8 +650,10 @@ export class ObserverScheduler {
   }
   diagnostics(key:string):ObserverDiagnostics {
     const entry=this.entries.get(key);
+    const contextState=entry?.contextState&&entry.contextStateTurnKey===this.options.goals.currentTurnKey(key)
+      ?entry.contextState:undefined;
     if(this.stopReason)return {state:'disabled',stopReason:this.stopReason,stoppedAt:this.stoppedAt!,
-      ...(entry?.contextState?{contextState:entry.contextState}:{}),
+      ...(contextState?{contextState}:{}),
       estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
     const at=this.stopReason ? this.lastClock : this.time(),view=this.options.goals.view(key,at);
     const health=this.options.goals.contextHealth(key);
@@ -657,7 +664,7 @@ export class ObserverScheduler {
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
       (entry?.lastResultDiagnostic ?? (view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending'));
-    return {state,...(entry?.contextState?{contextState:entry.contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+    return {state,...(contextState?{contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
       ...(entry?.lastResultDiagnostic?{resultDiagnostic:entry.lastResultDiagnostic}:{}),
       ...(entry?.lastRejectionReason?{rejectionReason:entry.lastRejectionReason}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,

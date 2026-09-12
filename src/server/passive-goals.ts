@@ -414,14 +414,19 @@ export class PassiveGoals {
 
   currentTurnKey(sessionKey:string):string|undefined {return this.goals.get(sessionKey)?.turnKey;}
 
-  private ticketIsCurrent(ticket:object,nowMs:number):Ticket|null {
+  private ticketIdentityIsCurrent(ticket:object):Ticket|null {
     const captured=this.tickets.get(ticket),goal=captured?this.goals.get(captured.sessionKey):undefined;
     if(!captured||!goal||goal!==captured.goal||goal.pending!==ticket||goal.epoch!==captured.epoch||
-      !this.clock(nowMs,goal)||goal.runtime==='paused'||goal.runtime==='interrupted'||goal.runtime==='failed'||
+      goal.runtime==='paused'||goal.runtime==='interrupted'||goal.runtime==='failed'||
       goal.runtime==='stopped'||goal.status==='completed')return null;
     if(captured.sourceEpoch!==undefined){try{if(this.source?.epoch(captured.sessionKey)!==captured.sourceEpoch)return null;}catch{return null;}}
     if(captured.sourceMeasurementEpoch!==undefined){try{if(this.source?.measurementEpoch?.(captured.sessionKey)!==captured.sourceMeasurementEpoch)return null;}catch{return null;}}
     return captured;
+  }
+
+  private ticketIsCurrent(ticket:object,nowMs:number):Ticket|null {
+    const captured=this.ticketIdentityIsCurrent(ticket),goal=captured?this.goals.get(captured.sessionKey):undefined;
+    return captured&&goal&&this.clock(nowMs,goal)?captured:null;
   }
 
   /** Non-consuming fence used by asynchronous preparation before dispatch. */
@@ -429,12 +434,12 @@ export class PassiveGoals {
 
   async openHistory(ticket:object,signal:AbortSignal):Promise<OpenHistoryResult|null> {
     const known=this.tickets.get(ticket);
-    const captured=known&&this.ticketIsCurrent(ticket,known.requestedAt);
+    const captured=known&&this.ticketIdentityIsCurrent(ticket);
     if(!captured)throw Object.assign(new Error('goal ticket is stale'),{code:'GOAL_TICKET_STALE'});
     if(!this.source?.openHistory)return null;
     signal.throwIfAborted();
     const result=await this.source.openHistory(captured.sessionKey,captured.goal.turnKey,signal);
-    if(!this.ticketIsCurrent(ticket,captured.requestedAt)||signal.aborted){
+    if(!this.ticketIdentityIsCurrent(ticket)||signal.aborted){
       if(result!==null){try{await result.snapshot.close();}catch{/* stale history must not leak */}}
       throw Object.assign(new Error('goal ticket is stale'),{code:'GOAL_TICKET_STALE'});
     }

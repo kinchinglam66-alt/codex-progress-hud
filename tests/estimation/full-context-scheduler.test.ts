@@ -58,7 +58,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
   let prepareResult: PreparedContext = {
     input: {goalSummary: null, activeSeconds: 0, runtime: "running", messages: [{kind: "user", text: "prepared", truncated: false}], truncated: false},
     representation: {mode: "full", sourceComplete: true, originalRecords: 1, compressedThroughOrdinal: null, sizing: "conservative"},
-    metrics: {originalTextBytes: 11, originalTextTokenEstimate: 3, preparedRequestBytes: 321,
+    metrics: {sizing: "conservative", originalTextBytes: 11, originalTextTokenEstimate: 3, preparedRequestBytes: 321,
       preparedTokenEstimate: 87, compressionCalls: 0, cachedCompressionCalls: 0}
   };
   const worker: ObserverWorker = {
@@ -129,6 +129,18 @@ it("does not observe until delayed source history preparation finishes", async (
   await f.scheduler.close();
 });
 
+it("accepts delayed history after same-turn activity advances the trusted clock", async () => {
+  const f = fixture({deferHistory: true});
+  await f.start();
+  const activity = normalizeHookInput("PostToolUse", {session_id: "session", turn_id: "first"}, 17_000, token).envelope;
+  f.time(17_000);
+  f.goals.observe(activity, true, 17_000);
+  f.resolveHistory();
+  await f.flush();
+  expect(f.counts()).toMatchObject({prepared: 1, observed: 1});
+  await f.scheduler.close();
+});
+
 it("rejects preparation after a new authenticated turn without observing it", async () => {
   const f = fixture({deferHistory: true});
   await f.start();
@@ -139,6 +151,19 @@ it("rejects preparation after a new authenticated turn without observing it", as
   f.resolveHistory();
   await f.flush();
   expect(f.counts().observed).toBe(0);
+  await f.scheduler.close();
+});
+
+it("does not persist a stale preparation failure onto the next goal", async () => {
+  const f = fixture({deferPreparation: true});
+  await f.start();
+  const next = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "second"}, 16_000, token).envelope;
+  f.goals.observe(next, true, 16_000);
+  f.setSourceTurn(next.turnKey!);
+  f.source.attach(next.sessionKey, "conversation-id", next.turnKey!);
+  f.rejectPreparation(Error("context_too_large"));
+  await f.flush();
+  expect(f.scheduler.diagnostics(next.sessionKey).contextState).toBeUndefined();
   await f.scheduler.close();
 });
 
