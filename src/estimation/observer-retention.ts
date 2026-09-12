@@ -36,12 +36,28 @@ function refresh(packet:ObserverInput):void {
 /** Shared deterministic selection after filtering; metadata participates in byte budget. */
 export function retainObserverInput(packet:ObserverInput):ObserverInput {
   const messages=packet.messages;
-  const firstUser=messages.find(m=>m.kind==='user');
+  // Only local configuration can raise the packet budget, never task text.
+  const configured=process.env.CODEX_PROGRESS_HUD_CONTEXT_KIB;
+  const maxBytes=(configured==='32'?32:configured==='64'?64:16)*1024;
+  const current=messages.filter(m=>m.scope!=='background');
+  const firstUser=current.find(m=>m.kind==='user')??messages.find(m=>m.kind==='user');
   const lastUser=[...messages].reverse().find(m=>m.kind==='user');
   const lastAssistant=[...messages].reverse().find(m=>m.kind==='assistant');
   const protectedMessages=new Set([firstUser,lastUser,lastAssistant]);
+  const latestTool=[...current].reverse().find(m=>m.kind==='tool');
+  const latestResult=[...current].reverse().find(m=>m.kind==='tool'&&m.event?.kind==='tool_result');
+  for(const evidence of [latestTool,latestResult]){
+    if(!evidence)continue;
+    protectedMessages.add(evidence);
+    const pair=evidence.event?.pairOrdinal;
+    if(pair!==undefined){
+      for(const message of current){
+        if(message.kind==='tool'&&message.event?.pairOrdinal===pair)protectedMessages.add(message);
+      }
+    }
+  }
   const encode=()=>{refresh(packet);return JSON.stringify(packet);};
-  while(Buffer.byteLength(encode(),'utf8')>16384||messages.length>128||
+  while(Buffer.byteLength(encode(),'utf8')>maxBytes||messages.length>128||
     messages.reduce((n,m)=>n+m.text.length,0)>65536){
     if(packet.paceMeasurements&&packet.paceMeasurements.length>0){
       const index=packet.paceMeasurements.reduce((selected,current,index,array)=>
@@ -51,9 +67,12 @@ export function retainObserverInput(packet:ObserverInput):ObserverInput {
       continue;
     }
     // Preserve amendments ahead of tool logs and old assistant statements.
-    let index=messages.findIndex(m=>m.kind==='tool');
+    let index=messages.findIndex(m=>m.scope==='background'&&!protectedMessages.has(m));
+    if(index<0)index=messages.findIndex(m=>m.kind==='tool'&&!protectedMessages.has(m));
     if(index<0)index=messages.findIndex(m=>m.kind==='assistant'&&!protectedMessages.has(m));
-    if(index<0)index=messages.findIndex(m=>!protectedMessages.has(m));
+    // Compress verbose retained evidence before sacrificing concise amendments.
+    if(index<0&&(messages.length>128||!messages.some(m=>m.text.length>512)))
+      index=messages.findIndex(m=>!protectedMessages.has(m));
     if(index>=0&&messages.length>1){
       const removed=messages.splice(index,1)[0]!;
       noteObserverDrop(packet,removed);continue;

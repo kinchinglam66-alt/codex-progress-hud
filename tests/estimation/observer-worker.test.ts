@@ -204,7 +204,9 @@ it('reuses workers across keys and preserves usage without a twelve-call cap thr
   expect(id).not.toBeNull();
   await later.settle(id!, {inputTokens: 1, outputTokens: 1, cachedInputTokens: 0});
   await later.close();
-});
+  // Fourteen real child launches plus filesystem accounting can exceed the
+  // framework's 5s default on Windows; this is not a performance assertion.
+}, 15_000);
 
 it('does not reserve for an invalid key or missing authorization', async () => {
   const path = await directory();
