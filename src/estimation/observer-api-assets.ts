@@ -37,3 +37,31 @@ export async function loadObserverApiAssets(resourcesDirectory: string): Promise
     return Object.freeze({instructions, schema: JSON.parse(schemaText) as unknown});
   } catch { throw new Error('OBSERVER_API_ASSETS_UNAVAILABLE'); }
 }
+
+/** Load the separately pinned, read-only compression protocol assets. */
+export async function loadObserverCompressionAssets(resourcesDirectory: string): Promise<Readonly<{instructions: string; schema: unknown}>> {
+  try {
+    if (!isAbsolute(resourcesDirectory) || /[\p{Cc}\p{Cf}]/u.test(resourcesDirectory) ||
+        /(?:^|[\\/])[^\\/]*\.asar(?:[\\/]|$)/i.test(resourcesDirectory)) throw Error();
+    async function readPinned(name: 'context-summary-instructions.md'|'context-summary.schema.json'): Promise<string> {
+      const path = resolve(resourcesDirectory, 'observer-assets', name);
+      const metadata = await lstat(path);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > LIMIT) throw Error();
+      const handle = await open(path, 'r');
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile() || opened.size > LIMIT) throw Error();
+        const buffer = Buffer.alloc(LIMIT + 1); let size = 0;
+        while (size < buffer.length) { const read = await handle.read(buffer, size, buffer.length - size, null); if (read.bytesRead === 0) break; size += read.bytesRead; }
+        if (size > LIMIT) throw Error();
+        const bytes = buffer.subarray(0, size);
+        if (createHash('sha256').update(bytes).digest('hex') !== observerAssetPins[name]) throw Error();
+        return new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+      } finally { await handle.close(); }
+    }
+    const [instructions, schemaText] = await Promise.all([
+      readPinned('context-summary-instructions.md'), readPinned('context-summary.schema.json'),
+    ]);
+    return Object.freeze({instructions, schema: JSON.parse(schemaText) as unknown});
+  } catch { throw new Error('OBSERVER_COMPRESSION_ASSETS_UNAVAILABLE'); }
+}

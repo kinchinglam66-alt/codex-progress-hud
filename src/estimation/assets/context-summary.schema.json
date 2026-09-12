@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "text": {"type": "string", "minLength": 1, "maxLength": 12000},
+    "firstOrdinal": {"type": "integer", "minimum": 0},
+    "lastOrdinal": {"type": "integer", "minimum": 0}
+  },
+  "required": ["text", "firstOrdinal", "lastOrdinal"],
+  "additionalProperties": false
+}

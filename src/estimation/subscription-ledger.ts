@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { open, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import type {AdmissionKind, AccountingPurpose} from './subscription-accounting.js';
 
 const counter = z.number().int().nonnegative().max(1_000_000_000);
 const usageSchema = z.object({ inputTokens: counter, outputTokens: counter,
@@ -10,7 +11,7 @@ const limitsSchema = z.object({ maxStarts: z.number().int().min(1).max(6),
   maxKnownTokens: z.number().int().min(1).max(50_000) }).strict();
 const headerSchema = z.object({ version: z.literal(1), limits: limitsSchema }).strict();
 const rowSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("reserve"), id: z.string().uuid() }).strict(),
+  z.object({ type: z.literal("reserve"), id: z.string().uuid(), purpose: z.enum(['eta', 'context_compression']).optional() }).strict(),
   z.object({ type: z.literal("not_dispatched"), id: z.string().uuid() }).strict(),
   z.object({ type: z.literal("settle"), id: z.string().uuid(), usage: usageSchema.nullable() }).strict()
 ]);
@@ -86,10 +87,10 @@ export async function openSubscriptionLedger(directory: string, inputLimits: Lim
     bytes += size; apply(row);
   }
   return {
-    reserve(): Promise<string | null> {
+    reserve(_admissionKind?: AdmissionKind, purpose: AccountingPurpose = 'eta'): Promise<string | null> {
       return serial(async () => {
         if (closed || poisoned || !allowed()) return null;
-        const id = randomUUID(); await append({ type: "reserve", id });liveReservations.add(id); return id;
+        const id = randomUUID(); await append({ type: "reserve", id, ...(purpose === 'eta' ? {} : {purpose}) });liveReservations.add(id); return id;
       });
     },
     settle(id: string, usage: Usage | null): Promise<void> {

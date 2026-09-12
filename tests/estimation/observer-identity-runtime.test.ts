@@ -1,16 +1,16 @@
 import {expect,it,vi,beforeEach} from 'vitest';
 import {resolve} from 'node:path';
 import {ObserverAccountTimeout,ObserverPreDispatchTransient} from '../../src/estimation/observer-call-failure.js';
-const state=vi.hoisted(()=>({events:[] as string[],accountId:'account-one',failure:'',active:false}));
+const state=vi.hoisted(()=>({events:[] as string[],accountId:'account-one',failure:'',active:false,compressionInputs:[] as string[]}));
 vi.mock('../../src/estimation/observer-home.js',()=>({createObserverHomeManager:()=>({prepare:async()=>{state.events.push('home');return resolve('private/observer-auth');},disable(){},status:()=>({active:false,poisoned:false})})}));
 vi.mock('../../src/estimation/codex-probe.js',()=>({createObserverRuntimeProbe:()=>({probe:async()=>({version:'codex-cli 0.153.4',features:'x stable false'}),disable(){}})}));
 vi.mock('../../src/estimation/codex-preflight.js',()=>({createRuntimePreflightCache:()=>({
   check:async()=>{state.events.push('preflight');return {version:'0.153.4'};},invalidate(){state.events.push('cache-invalidated');}
 })}));
-vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:action==='device-auth'?['login','--device-auth']:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'})}));
+vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:action==='device-auth'?['login','--device-auth']:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'}),buildObserverCompressionInvocation:(_p:unknown,input:string)=>{state.compressionInputs.push(input);return {executable:'unused',args:['exec','--compression-schema','pinned-summary-schema','-c','model_instructions_file="pinned-summary-instructions"'],env:{},cwd:resolve('.'),input};}}));
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:()=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure)throw Error(state.failure);return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:'b'.repeat(64)};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
-beforeEach(()=>{state.events=[];state.accountId='account-one';state.failure='';state.active=false;});
+beforeEach(()=>{state.events=[];state.accountId='account-one';state.failure='';state.active=false;state.compressionInputs=[];});
 const config=()=>({resourcesDirectory:resolve('resources'),parentDirectory:resolve('private'),powershell:resolve('powershell.exe'),executable:resolve('codex.exe'),cwd:resolve('empty'),version:'0.153.4',now:()=>1000});
 it('binds identity to backend account and verified assets rather than email',async()=>{
   const runtime=createObserverIdentityRuntime(config());
@@ -76,7 +76,18 @@ it('reports the failed preparation stage without private error text',async()=>{
  await expect(runtime.inspect(new AbortController().signal)).rejects.toThrow('OBSERVER_IDENTITY_UNAVAILABLE');
  expect(diagnostics).toContainEqual(expect.objectContaining({stage:'account-read',outcome:'failed'}));
  expect(JSON.stringify(diagnostics)).not.toContain('secret');
- await runtime.close();
+  await runtime.close();
+});
+it('prepares compression with the pinned summary invocation through the trusted identity runtime',async()=>{
+  const runtime=createObserverIdentityRuntime(config());
+  const request={text:'older context',firstOrdinal:4,lastOrdinal:8};
+  const prepared=await runtime.prepareCompression(request,new AbortController().signal);
+  expect(prepared.invocation.args).toContain('--compression-schema');
+  expect(prepared.invocation.args).toContain('pinned-summary-schema');
+  expect(prepared.invocation.args).toContain('model_instructions_file="pinned-summary-instructions"');
+  expect(prepared.invocation.input).toBe(JSON.stringify(request));
+  expect(state.compressionInputs).toEqual([JSON.stringify(request)]);
+  await runtime.close();
 });
 it('diagnostic sink failures cannot turn a successful account check into a failure',async()=>{
  const runtime=createObserverIdentityRuntime({...config(),onDiagnostic:()=>{throw Error('sink');}});

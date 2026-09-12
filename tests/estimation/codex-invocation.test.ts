@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
-import { buildCodexInvocation, buildObserverCodexInvocation, buildObserverSetupInvocation } from "../../src/estimation/codex-invocation.js";
+import { buildCodexInvocation, buildObserverCodexInvocation, buildObserverCompressionInvocation, buildObserverSetupInvocation } from "../../src/estimation/codex-invocation.js";
 
 const features = ["plugins", "hooks", "apps", "remote_plugin", "multi_agent", "shell_tool", "unified_exec",
   "shell_snapshot", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
@@ -49,6 +49,20 @@ it('uses the same isolated subscription profile for bounded rich stdin, never CL
   expect(JSON.parse(invocation.input)).toEqual(observer);
   expect(invocation.env).toEqual({HTTPS_PROXY: 'http://proxy.invalid', CODEX_HOME: resolve('observer-home')});
   expect(() => buildObserverCodexInvocation(profile, {...observer, sessionKey: 'PRIVATE'}, {})).toThrow('INVALID_OBSERVER_INPUT');
+});
+
+it('builds compression with separately pinned summary assets and trusted stdin', () => {
+  const request = {text: 'older context', firstOrdinal: 4, lastOrdinal: 8};
+  const compressionProfile = {...profile,
+    compressionSchemaPath: resolve('context-summary.schema.json'),
+    compressionInstructionsPath: resolve('context-summary-instructions.md')};
+  const invocation = buildObserverCompressionInvocation(compressionProfile, JSON.stringify(request),
+    {HTTPS_PROXY: 'http://proxy.invalid', OPENAI_API_KEY: 'secret'}, resolve('observer-home'));
+  expect(invocation.args).toContain(compressionProfile.compressionSchemaPath);
+  expect(invocation.args).toContain(`model_instructions_file=${JSON.stringify(compressionProfile.compressionInstructionsPath)}`);
+  expect(invocation.args.join(' ')).not.toContain(request.text);
+  expect(invocation.input).toBe(JSON.stringify(request));
+  expect(invocation.env).toEqual({HTTPS_PROXY: 'http://proxy.invalid', CODEX_HOME: resolve('observer-home')});
 });
 
 it('refuses observer dispatch without an explicit separate home', () => {

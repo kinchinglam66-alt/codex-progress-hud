@@ -6,8 +6,9 @@ import {createObserverHomeManager} from './observer-home.js';
 import {createOwnedProcessRunner,type Invocation} from './owned-process.js';
 import {createObserverRuntimeProbe} from './codex-probe.js';
 import {createRuntimePreflightCache} from './codex-preflight.js';
-import {buildObserverSetupInvocation,buildObserverCodexInvocation} from './codex-invocation.js';
+import {buildObserverSetupInvocation,buildObserverCodexInvocation,buildObserverCompressionInvocation} from './codex-invocation.js';
 import type {ObserverInput} from './observer-contract.js';
+import {validateCompressionRequest, type CompressionRequest} from './context-compression.js';
 import {createObserverAccountReader,type AccountReadDiagnostic} from './observer-account-reader.js';
 import type {ObserverAttestation} from './observer-consent.js';
 import type {ForecastVersions} from './forecast-record.js';
@@ -35,12 +36,13 @@ export function createObserverIdentityRuntime(options:Options) {
   const files=observerReleaseFiles(config.resourcesDirectory,config.executable,config.cwd,config.version,config.executableSha256);
   const runtimeCache=createRuntimePreflightCache(files);
   const homeConfig=observerHomeProfile(config.resourcesDirectory,config.parentDirectory,config.powershell);
-  const assetsFingerprint=digest(['observer-assets-v1',files.executableSha256,files.schemaSha256,files.instructionsSha256,OBSERVER_HOME_SCRIPT_SHA256]);
+  const assetsFingerprint=digest(['observer-assets-v1',files.executableSha256,files.schemaSha256,files.instructionsSha256,
+    files.compressionSchemaSha256,files.compressionInstructionsSha256,OBSERVER_HOME_SCRIPT_SHA256]);
   let disabled=false,poisoned=false,pending:Promise<Snapshot|Invocation|PreparedEstimate>|undefined,closing:Promise<void>|undefined;
   let cancel:(()=>void)|undefined,owned:(()=>boolean)|undefined;
   const fail=()=>Error('OBSERVER_IDENTITY_UNAVAILABLE');
   const disable=()=>{disabled=true;runtimeCache.invalidate();cancel?.();};
-    function perform(signal:AbortSignal,mode:'inspect'|SetupAction|ObserverInput):Promise<Snapshot|Invocation|PreparedEstimate> {
+    function perform(signal:AbortSignal,mode:'inspect'|SetupAction|ObserverInput|CompressionRequest):Promise<Snapshot|Invocation|PreparedEstimate> {
       const setupMode=mode==='login'||mode==='device-auth'||mode==='logout';
       const loginMode=mode==='login'||mode==='device-auth';
       if(disabled || poisoned || pending || signal.aborted) return Promise.reject(fail());
@@ -89,7 +91,9 @@ export function createObserverIdentityRuntime(options:Options) {
             evidence:{accountFingerprint:digest(['observer-account-v1',account.accountId]),routeFingerprint:account.routeFingerprint,
               assetsFingerprint,observedAt,expiresAt:observedAt+300000}};
           if(typeof mode!=='object')return snapshot;
-          const invocation=buildObserverCodexInvocation(profile,mode,env,authHome);
+          const invocation = typeof mode === 'object' && 'text' in mode
+            ? buildObserverCompressionInvocation(profile, JSON.stringify(validateCompressionRequest(mode)), env, authHome)
+            : buildObserverCodexInvocation(profile,mode,env,authHome);
           const modelIndex=invocation.args.indexOf('--model');
           const model=modelIndex>=0?invocation.args[modelIndex+1]:undefined;
           const effortArg=invocation.args.find(arg=>arg.startsWith('model_reasoning_effort='));
@@ -121,6 +125,7 @@ export function createObserverIdentityRuntime(options:Options) {
       prepareDeviceAuth:(signal:AbortSignal)=>perform(signal,'device-auth') as Promise<Invocation>,
       prepareLogout:(signal:AbortSignal)=>perform(signal,'logout') as Promise<Invocation>,
     prepareEstimate:(input:ObserverInput,signal:AbortSignal)=>perform(signal,input) as Promise<PreparedEstimate>,
+      prepareCompression:(input:CompressionRequest,signal:AbortSignal)=>perform(signal,input) as Promise<PreparedEstimate>,
     disable,
     close():Promise<void> {
       if(closing)return closing;

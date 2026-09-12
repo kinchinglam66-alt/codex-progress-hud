@@ -8,6 +8,8 @@ import {parseCodexVersion} from './codex-runtime-profiles.js';
 export interface CodexFiles {
   executable:string; cwd:string; schemaPath:string; instructionsPath:string;
   executableSha256:string; schemaSha256:string; instructionsSha256:string;
+  compressionSchemaPath?:string; compressionInstructionsPath?:string;
+  compressionSchemaSha256?:string; compressionInstructionsSha256?:string;
 }
 interface Evidence { version:string; features:string; login:string }
 export interface CodexRuntimeEvidence { version:string; features:string }
@@ -51,6 +53,13 @@ async function verify(files:CodexFiles):Promise<void> {
   await regularFile(files.executable,files.executableSha256,512*1024*1024);
   await regularFile(files.schemaPath,files.schemaSha256,16384);
   await regularFile(files.instructionsPath,files.instructionsSha256,16384);
+  const compressionPaths=[files.compressionSchemaPath,files.compressionInstructionsPath,
+    files.compressionSchemaSha256,files.compressionInstructionsSha256];
+  if(compressionPaths.some(value=>value!==undefined)) {
+    if(compressionPaths.some(value=>value===undefined)) throw Error();
+    await regularFile(files.compressionSchemaPath!,files.compressionSchemaSha256!,16384);
+    await regularFile(files.compressionInstructionsPath!,files.compressionInstructionsSha256!,16384);
+  }
 }
 
 function parseFeatures(evidence:string):string[] {
@@ -66,7 +75,9 @@ function parseFeatures(evidence:string):string[] {
 
 function profileFrom(files:CodexFiles,version:string,features:string[]):CodexProfile {
   const profile:CodexProfile={executable:files.executable,cwd:files.cwd,schemaPath:files.schemaPath,
-    instructionsPath:files.instructionsPath,version,features:Object.freeze(features)};
+    instructionsPath:files.instructionsPath,version,features:Object.freeze(features),
+    ...(files.compressionSchemaPath===undefined?{}:{compressionSchemaPath:files.compressionSchemaPath}),
+    ...(files.compressionInstructionsPath===undefined?{}:{compressionInstructionsPath:files.compressionInstructionsPath})};
   // Reuse the invocation's required feature gate without launching or reading
   // any ambient configuration. Numeric dummy data never reaches a model.
   buildCodexInvocation(profile,{activeSeconds:0,progress:null,toolCount:0,validationFailures:0},{});
@@ -75,7 +86,9 @@ function profileFrom(files:CodexFiles,version:string,features:string[]):CodexPro
 
 function normalizedFiles(input:CodexFiles):CodexFiles {
   return {...input,executable:qualifiedPath(input.executable),cwd:qualifiedPath(input.cwd),
-    schemaPath:qualifiedPath(input.schemaPath),instructionsPath:qualifiedPath(input.instructionsPath)};
+    schemaPath:qualifiedPath(input.schemaPath),instructionsPath:qualifiedPath(input.instructionsPath),
+    ...(input.compressionSchemaPath===undefined?{}:{compressionSchemaPath:qualifiedPath(input.compressionSchemaPath)}),
+    ...(input.compressionInstructionsPath===undefined?{}:{compressionInstructionsPath:qualifiedPath(input.compressionInstructionsPath)})};
 }
 
 /** Integrity relative to release-controlled pins, not vendor attestation.
@@ -98,7 +111,9 @@ export async function preflightCodex(input:CodexFiles,probe:Probe):Promise<Codex
       if(match[2]!=="removed") features.push(match[1]!);
     }
     const profile:CodexProfile={executable:files.executable,cwd:files.cwd,schemaPath:files.schemaPath,
-      instructionsPath:files.instructionsPath,version,features:Object.freeze(features)};
+      instructionsPath:files.instructionsPath,version,features:Object.freeze(features),
+      ...(files.compressionSchemaPath===undefined?{}:{compressionSchemaPath:files.compressionSchemaPath}),
+      ...(files.compressionInstructionsPath===undefined?{}:{compressionInstructionsPath:files.compressionInstructionsPath})};
     // Reuse the invocation's required feature gate without launching or reading
     // any ambient configuration. Numeric dummy data never reaches a model.
     buildCodexInvocation(profile,{activeSeconds:0,progress:null,toolCount:0,validationFailures:0},{});

@@ -2,12 +2,13 @@ import type {ApiConfig} from '../desktop/observer-provider-config.js';
 import type {ApiAccounting, ApiLimits, ApiProviderBinding, ApiReservation, ApiUsage} from './observer-api-accounting.js';
 import type {ObserverInput, ObserverResponse} from './observer-contract.js';
 import {observerInputSchema, observerResponseSchema} from './observer-contract.js';
-import {packObserverInput} from './observer-input.js';
 import type {ApiTransport} from '../desktop/observer-api-transport.js';
 import type {ObserverResult} from './observer-provider.js';
 import {reportObserverStage, type ObserverCallStage} from './observer-provider.js';
 import type {ObserverWorker} from './observer-scheduler.js';
 import {randomUUID,createHash} from 'node:crypto';
+import {createCompressionAdapter, CompressionDispatchError, serializeCompressionTransport, serializeObserverTransport, validateCompressionSummary, type CompressionAdapter, type CompressionDispatchIdentity, type CompressionDispatchResult, type CompressionRequest} from './context-compression.js';
+import type {AccountingPurpose} from './subscription-accounting.js';
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -312,15 +313,9 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
     let body: string;
     try {
       if (!observerInputSchema.safeParse(input).success) return result('invalid_input');
-      const packedInput = packObserverInput(input);
-      body = JSON.stringify({
-        model: options.config.model,
-        ...(options.config.reasoningEffort === undefined ? {} : {reasoning: {effort: options.config.reasoningEffort}}),
-        instructions: options.instructions,
-        input: packedInput,
-        store: false,
-        max_output_tokens: options.config.maxOutputTokens,
-        text: {format: {type: 'json_schema', name: 'observer_response', strict: true, schema: options.schema}},
+      body = serializeObserverTransport(input, {
+        model: options.config.model, instructions: options.instructions, schema: options.schema,
+        maxOutputTokens: options.config.maxOutputTokens, reasoningEffort: options.config.reasoningEffort,
       });
     } catch {return result('invalid_input');}
     const key = await options.readKey().catch(() => null);
@@ -357,4 +352,127 @@ export function createObserverApiProvider(options: ObserverApiProviderOptions): 
       return closing;
     },
   };
+}
+
+export interface ObserverApiCompressionAdapterOptions extends Omit<ObserverApiProviderOptions, 'maxAutoRetries'|'maxRetryDelayMs'|'retry'>, CompressionDispatchIdentity {
+  authorize: () => boolean;
+}
+
+interface ParsedCompressionResponse {
+  summary: CompressionRequest|{text: string; firstOrdinal: number; lastOrdinal: number}|null;
+  usage: ApiUsage|null;
+  failureCode?: FailureCode;
+}
+
+function parseCompressionResponse(value: unknown, status: number): ParsedCompressionResponse {
+  if (status < 200 || status >= 300) return {summary: null, usage: null, failureCode: statusFailureCode(status)};
+  if (typeof value !== 'object' || value === null) return {summary: null, usage: null, failureCode: 'invalid_response'};
+  const record = value as Record<string, unknown>;
+  const usage = parseUsage(record.usage);
+  const invalid = (failureCode: FailureCode = usage === null ? 'missing_usage' : 'invalid_output'): ParsedCompressionResponse => ({summary: null, usage, failureCode});
+  if (record.status !== 'completed' || !Array.isArray(record.output)) return invalid();
+  const output = record.output as unknown[];
+  if (output.some(item => typeof item !== 'object' || item === null || !['reasoning', 'message'].includes(String((item as Record<string, unknown>).type)))) return invalid('invalid_output');
+  const messages = output.filter(item => (item as Record<string, unknown>).type === 'message');
+  if (messages.length !== 1) return invalid();
+  const message = messages[0] as Record<string, unknown>;
+  if (message.role !== 'assistant' || !Array.isArray(message.content) || message.content.length !== 1 ||
+      typeof message.content[0] !== 'object' || message.content[0] === null ||
+      (message.content[0] as Record<string, unknown>).type !== 'output_text' ||
+      typeof (message.content[0] as Record<string, unknown>).text !== 'string') return invalid();
+  let decoded: unknown;
+  try { decoded = JSON.parse((message.content[0] as Record<string, unknown>).text as string); }
+  catch { return invalid('invalid_output'); }
+  const parsed = typeof decoded === 'object' && decoded !== null ? decoded as Record<string, unknown> : null;
+  const firstOrdinal = parsed?.firstOrdinal, lastOrdinal = parsed?.lastOrdinal;
+  if (parsed === null || typeof parsed.text !== 'string' || typeof firstOrdinal !== 'number' || !Number.isSafeInteger(firstOrdinal) ||
+      firstOrdinal < 0 || typeof lastOrdinal !== 'number' || !Number.isSafeInteger(lastOrdinal) || lastOrdinal < firstOrdinal) return invalid();
+  return {summary: {text: parsed.text, firstOrdinal, lastOrdinal}, usage,
+    ...(usage === null ? {failureCode: 'missing_usage' as const} : {})};
+}
+
+/** API counterpart to the subscription compression session. The same
+ * Responses transport and accounting owner are used, but the response schema
+ * is summary-only and cannot be selected by task text. */
+export function createObserverApiCompressionAdapter(options: ObserverApiCompressionAdapterOptions): CompressionAdapter {
+  const binding: ApiProviderBinding = {kind: 'api', profileId: options.config.profileId, generation: options.generation};
+  const limits: ApiLimits = options.limits ?? {
+    dailyCallLimit: options.config.dailyCallLimit, maxInputTokens: MAX_TOKEN_COUNT,
+    maxOutputTokens: options.config.maxOutputTokens,
+  };
+  const ownerUuid = randomUUID();
+  const now = options.now ?? Date.now;
+  const dispatch = async (request: CompressionRequest, signal: AbortSignal, identity: CompressionDispatchIdentity): Promise<CompressionDispatchResult> => {
+    if (signal.aborted) throw new CompressionDispatchError('COMPRESSION_ABORTED');
+    try { if (options.authorize() !== true) throw new CompressionDispatchError('COMPRESSION_UNAUTHORIZED'); } catch (error) {
+      if (error instanceof CompressionDispatchError) throw error;
+      throw new CompressionDispatchError('COMPRESSION_UNAUTHORIZED');
+    }
+    const key = await options.readKey().catch(() => null);
+    if (!key) throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED');
+    const body = serializeCompressionTransport(request, {
+      model: options.config.model, instructions: options.instructions, schema: options.schema,
+      maxOutputTokens: options.config.maxOutputTokens, reasoningEffort: options.config.reasoningEffort,
+    });
+    const accountScope = createHash('sha256').update(JSON.stringify([options.config.baseUrl, key])).digest('hex');
+    const ownership = {conversationKey: identity.conversationKey, turnGeneration: identity.turnGeneration, ownerUuid,
+      accountScope, providerKind: 'api' as const, phase: 'prepared' as const, deadline: now() + REQUEST_TIMEOUT_MS,
+      cleanupOutcome: 'pending' as const, purpose: 'context_compression' as const};
+    let reservation: ApiReservation|null;
+    try { reservation = await options.accounting.reserve(binding, limits, ownership, 'context_compression' satisfies AccountingPurpose); }
+    catch { throw new CompressionDispatchError('COMPRESSION_ACCOUNTING_FAILED'); }
+    if (reservation === null) throw new CompressionDispatchError('COMPRESSION_ADMISSION_DENIED');
+    let dispatched = false, settled = false, bound = reservation.ownershipBound === true;
+    let usage: ApiUsage|null = null;
+    const closeLocal = async () => {
+      if (bound && options.accounting.updateInvocation) {
+        await options.accounting.updateInvocation(reservation.id, {phase: 'closed', cleanupOutcome: 'confirmed'});
+        bound = false;
+      }
+    };
+    try {
+      if (!bound && options.accounting.bindInvocation && options.accounting.updateInvocation) {
+        await options.accounting.bindInvocation(reservation.id, {admissionId: reservation.id, ...ownership});
+        bound = true;
+      }
+      if (signal.aborted) {
+        await closeLocal(); await options.accounting.cancelBeforeDispatch(reservation.id);
+        throw new CompressionDispatchError('COMPRESSION_ABORTED');
+      }
+      await options.accounting.markDispatch(reservation.id); dispatched = true;
+      const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      const requestSignal = AbortSignal.any([signal, timeout]);
+      let response: Response;
+      try { response = await options.transport(responsesUrl(options.config.baseUrl), {
+        method: 'POST', redirect: 'error', signal: requestSignal,
+        headers: {'content-type': 'application/json', authorization: `Bearer ${key}`}, body,
+      }); } catch { throw new CompressionDispatchError(signal.aborted ? 'COMPRESSION_ABORTED' : 'COMPRESSION_PROVIDER_FAILED'); }
+      let raw: Uint8Array;
+      try { raw = await readBounded(response); } catch { throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED'); }
+      let decoded: unknown;
+      try { decoded = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(raw)); }
+      catch { throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED'); }
+      const parsed = parseCompressionResponse(decoded, response.status); usage = parsed.usage;
+      await closeLocal();
+      await options.accounting.settle(reservation.id, usage); settled = true;
+      if (parsed.summary === null) throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED', usage);
+      const summary = validateCompressionSummary(parsed.summary, request);
+      return {summary, usage};
+    } catch (error) {
+      if (!dispatched) {
+        await closeLocal().catch(() => undefined);
+        await options.accounting.cancelBeforeDispatch(reservation.id).catch(() => undefined);
+        if (error instanceof CompressionDispatchError) throw error;
+        throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED');
+      }
+      if (!settled) { await closeLocal().catch(() => undefined); await options.accounting.settle(reservation.id, usage).catch(() => undefined); settled = true; }
+      if (error instanceof CompressionDispatchError) throw new CompressionDispatchError(error.message, usage);
+      throw new CompressionDispatchError('COMPRESSION_PROVIDER_FAILED', usage);
+    }
+  };
+  return createCompressionAdapter({
+    conversationKey: options.conversationKey, turnGeneration: options.turnGeneration,
+    ...(options.sourceEpoch === undefined ? {} : {sourceEpoch: options.sourceEpoch}),
+    authorize: options.authorize, dispatch,
+  });
 }

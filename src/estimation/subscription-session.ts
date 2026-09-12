@@ -1,9 +1,10 @@
 import { metricsSchema, type Metrics, type Prediction } from "./contracts.js";
-import { createCodexOutputParser, createObserverOutputParser, type CodexOutput, type SubscriptionUsage, type ObserverOutput } from "./codex-output.js";
+import { createCodexOutputParser, createObserverOutputParser, createCompressionOutputParser, type CodexOutput, type SubscriptionUsage, type ObserverOutput } from "./codex-output.js";
+import {validateCompressionRequest, validateCompressionSummary, type CompressionDispatchResult, type CompressionRequest, type CompressionSummary} from './context-compression.js';
 import type {ObserverInput, ObserverResponse} from './observer-contract.js';
 import {packObserverInput} from './observer-input.js';
 import type { createOwnedProcessRunner, Invocation, OwnedProcessResult } from "./owned-process.js";
-import type {AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
+import type {AccountingPurpose, AdmissionKind, SettlementClassification, SubscriptionAccounting} from './subscription-accounting.js';
 import type {InvocationRecord} from './invocation-ownership.js';
 import {ObserverPreDispatchTransient} from './observer-call-failure.js';
 import {reportObserverStage, type ObserverCallStage} from './observer-provider.js';
@@ -23,6 +24,7 @@ interface SharedDependencies<I, P> extends Dependencies<I> {
   onStage?: (stage:ObserverCallStage)=>void;
   observerMode?:boolean;
   admissionKind?: AdmissionKind;
+  purpose?: AccountingPurpose;
   authorize: () => boolean;
   parseInput: (input: unknown) => {success: true; data: I} | {success: false};
   createParser: () => {push(chunk: Uint8Array): boolean; end(): CodexOutput<P>&Partial<Pick<ObserverOutput,'framingValid'|'predictionStatus'|'usageStatus'>>};
@@ -33,7 +35,7 @@ interface SharedDependencies<I, P> extends Dependencies<I> {
  * trusted, not task/model supplied. No default executable or live activation.
  * close drains this session; it does not implement a companion shutdown budget.
  */
-function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind,invocationRecord,onStage}:SharedDependencies<I, P>) {
+function createSession<I extends object, P>({ledger,runner,prepare,authorize,parseInput,createParser,observerMode=false,admissionKind,purpose='eta',invocationRecord,onStage}:SharedDependencies<I, P>) {
   let disabled=false, externallyDisabled=false, active=false;
   let pending:Promise<SessionResult<P>>|undefined, closing:Promise<void>|undefined;
   let preparation:AbortController|undefined;
@@ -49,10 +51,13 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
     const outcomes=observerMode?emptyOutcomes('process_error',null):undefined;
     let id:string|null;
     reportObserverStage(onStage,'reservation');
-    try { id=await ledger.reserve(admissionKind); }
+    try { id=await ledger.reserve(admissionKind, purpose); }
     catch { disable(); return result("accounting_error"); }
     if(id===null) return result("admission_denied");
-    const ownedInvocation = invocationRecord?.(id);
+    const ownedInvocation = invocationRecord === undefined ? undefined : {
+      ...invocationRecord(id),
+      ...(purpose === 'context_compression' ? {purpose} : {}),
+    };
     try { if (ownedInvocation) await ledger.bindInvocation?.(id, ownedInvocation); }
     catch { disable(); return result('accounting_error'); }
     let usage:SubscriptionUsage|null=null, prediction:P|null=null;
@@ -97,7 +102,7 @@ function createSession<I extends object, P>({ledger,runner,prepare,authorize,par
         }
         // Only confirmed exit makes the reported stream final. Cancellation can
         // suppress a prediction while an already-complete usage frame settles.
-        if(process.closed && (output.ok || (observerMode&&output.framingValid===true))) usage=output.usage;
+        if(process.closed && (output.ok || output.usage !== null || (observerMode&&output.framingValid===true))) usage=output.usage;
         const safeUnknown = observerMode && process.closed && output.framingValid === true &&
           output.predictionStatus !== 'invalid' && outcomes?.dispatch === 'started' &&
           outcomes.call === 'success' && !signal.aborted && !disabled && authorized();
@@ -209,5 +214,55 @@ export function createObserverSubscriptionSession(dependencies: Dependencies<Obs
         ...(admissionKind?{admissionKind}:{}),
         ...(outcomes?{outcomes}:{}),...(timings?{timings}:{})};
     }
+  };
+}
+
+export interface CompressionSubscriptionSessionDependencies extends Dependencies<CompressionRequest> {
+  authorize: () => boolean;
+  onStage?: (stage: ObserverCallStage) => void;
+  admissionKind?: AdmissionKind;
+  purpose?: 'context_compression';
+}
+
+/** Accounted subscription dispatch seam for context compression. It shares
+ * createSession's reservation, owned-process, cancellation, settlement and
+ * cleanup state machine; it never invokes the ETA scheduler. */
+export function createSubscriptionCompressionSession(dependencies: CompressionSubscriptionSessionDependencies) {
+  const session = createSession<CompressionRequest, CompressionSummary>({
+    ...dependencies,
+    purpose: 'context_compression',
+    parseInput(input) {
+      try { return {success: true, data: validateCompressionRequest(input)}; }
+      catch { return {success: false}; }
+    },
+    createParser() {
+      const parser = createCompressionOutputParser();
+      return {push: parser.push, end() {
+        const output = parser.end();
+        return {
+          ok: output.framingValid && output.summary !== null,
+          prediction: output.summary,
+          usage: output.usage,
+          error: output.error,
+          framingValid: output.framingValid,
+          predictionStatus: output.summaryStatus === 'valid' ? 'numeric' as const : 'invalid' as const,
+          usageStatus: output.usage === null ? 'unknown' as const : 'known' as const,
+        };
+      }};
+    },
+  });
+  return {
+    disable: session.disable,
+    close: session.close,
+    status: dependencies.runner.status,
+    async summarize(request: CompressionRequest, signal: AbortSignal): Promise<CompressionDispatchResult> {
+      const result = await session.estimate(request, signal);
+      if (result.status === 'estimated' && result.prediction !== null) {
+        return {summary: validateCompressionSummary(result.prediction, request), usage: result.usage};
+      }
+      if (result.status === 'aborted') throw new Error('COMPRESSION_ABORTED');
+      if (result.status === 'invalid_input') throw new Error('COMPRESSION_REQUEST_INVALID');
+      throw new Error('COMPRESSION_PROVIDER_FAILED');
+    },
   };
 }

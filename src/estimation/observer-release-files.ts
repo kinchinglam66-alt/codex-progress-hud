@@ -16,6 +16,10 @@ export function observerReleaseFiles(resourcesDirectory:string,executable:string
   return Object.freeze({executable:resolve(executable),cwd:resolve(cwd),
     schemaPath:resolve(resourcesDirectory,'observer-assets','observer.schema.json'),
     instructionsPath:resolve(resourcesDirectory,'observer-assets','observer-instructions.md'),
+    compressionSchemaPath:resolve(resourcesDirectory,'observer-assets','context-summary.schema.json'),
+    compressionInstructionsPath:resolve(resourcesDirectory,'observer-assets','context-summary-instructions.md'),
     executableSha256:runtime.sha256,schemaSha256:observerAssetPins['observer.schema.json'],
-    instructionsSha256:observerAssetPins['observer-instructions.md']});
+    instructionsSha256:observerAssetPins['observer-instructions.md'],
+    compressionSchemaSha256:observerAssetPins['context-summary.schema.json'],
+    compressionInstructionsSha256:observerAssetPins['context-summary-instructions.md']});
 }

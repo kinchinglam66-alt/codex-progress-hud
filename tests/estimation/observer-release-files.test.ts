@@ -25,8 +25,12 @@ it('returns fixed release pins and external paths without reading or trusting fi
   expect(files).toEqual({executable:resolve('codex.exe'),cwd:resolve('empty'),
     schemaPath:resolve('resources/observer-assets/observer.schema.json'),
     instructionsPath:resolve('resources/observer-assets/observer-instructions.md'),
+    compressionSchemaPath:resolve('resources/observer-assets/context-summary.schema.json'),
+    compressionInstructionsPath:resolve('resources/observer-assets/context-summary-instructions.md'),
     executableSha256:runtime.sha256,schemaSha256:observerAssetPins['observer.schema.json'],
-    instructionsSha256:observerAssetPins['observer-instructions.md']});
+    instructionsSha256:observerAssetPins['observer-instructions.md'],
+    compressionSchemaSha256:observerAssetPins['context-summary.schema.json'],
+    compressionInstructionsSha256:observerAssetPins['context-summary-instructions.md']});
   expect(Object.isFrozen(files)).toBe(true);
 });
 it('rejects unsupported runtime versions instead of trusting discovered hashes',()=>{

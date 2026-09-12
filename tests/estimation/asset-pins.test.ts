@@ -14,7 +14,7 @@ it("the real build copy preserves numeric and observer pinned asset byte sequenc
     }
     await cp(resolve("src/estimation/assets"),join(root,"src/estimation/assets"),{recursive:true});
     await promisify(execFile)(process.execPath,[resolve("scripts/copy-assets.mjs")],{cwd:root,windowsHide:true});
-    expect((await readdir(join(root,"dist/estimation/assets"))).sort()).toEqual(["estimate.schema.json","instructions.md","observer-instructions.md","observer.schema.json"]);
+    expect((await readdir(join(root,"dist/estimation/assets"))).sort()).toEqual(["context-summary-instructions.md","context-summary.schema.json","estimate.schema.json","instructions.md","observer-instructions.md","observer.schema.json"]);
     for(const [file,pin] of Object.entries({...estimatorAssetPins,...observerAssetPins})) {
       const source=await readFile(resolve("src/estimation/assets",file));
       const built=await readFile(join(root,"dist/estimation/assets",file));

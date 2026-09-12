@@ -20,6 +20,8 @@ export interface CodexProfile {
   cwd: string;
   schemaPath: string;
   instructionsPath: string;
+  compressionSchemaPath?: string;
+  compressionInstructionsPath?: string;
   version: string;
   features: readonly string[];
 }
@@ -35,9 +37,11 @@ export function subscriptionEnvironment(env:NodeJS.ProcessEnv):NodeJS.ProcessEnv
  */
 type ObserverSetupAction = 'login' | 'status' | 'metadata' | 'logout' | 'device-auth';
 
-function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.ProcessEnv, mode: 'exec' | ObserverSetupAction = 'exec'): Invocation {
+function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.ProcessEnv, mode: 'exec' | ObserverSetupAction = 'exec', assets?: {schemaPath: string; instructionsPath: string}): Invocation {
+  const schemaPath = assets?.schemaPath ?? profile.schemaPath;
+  const instructionsPath = assets?.instructionsPath ?? profile.instructionsPath;
   if (!supportedCodexVersion(profile.version) ||
-    [profile.executable, profile.cwd, profile.schemaPath, profile.instructionsPath].some(
+    [profile.executable, profile.cwd, schemaPath, instructionsPath].some(
       path => typeof path !== "string" || !isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) ||
     !Array.isArray(profile.features) ||
     [...disabled, "skip_host_skill_discovery", "respect_system_proxy"].some(feature => !profile.features.includes(feature))) {
@@ -45,7 +49,7 @@ function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.Proce
   }
   const args = mode === 'exec' ? ["exec", "--ignore-user-config", "--strict-config", "--ephemeral", "--skip-git-repo-check",
     "--sandbox", "read-only", "--model", "gpt-5.6-luna", "--color", "never", "--json",
-    "--output-schema", profile.schemaPath, "--cd", profile.cwd] : mode === 'login' ? ['login'] :
+    "--output-schema", schemaPath, "--cd", profile.cwd] : mode === 'login' ? ['login'] :
     mode === 'device-auth' ? ['login', '--device-auth'] : mode === 'logout' ? ['logout'] :
     mode === 'status' ? ['login', 'status'] : ['app-server', '--stdio', '--strict-config'];
   for (const feature of disabled) args.push("--disable", feature);
@@ -54,7 +58,7 @@ function buildInvocation(profile: CodexProfile, input: string, env: NodeJS.Proce
     approval_policy:"never", web_search:"disabled", project_doc_max_bytes:0,
     "history.persistence":"none", hide_agent_reasoning:true, "analytics.enabled":false,
     "features.skip_host_skill_discovery":true, suppress_unstable_features_warning:true,
-    model_instructions_file:profile.instructionsPath, "features.respect_system_proxy":true
+    model_instructions_file:instructionsPath, "features.respect_system_proxy":true
   };
   for (const [key, value] of Object.entries(config)) args.push("-c", `${key}=${JSON.stringify(value)}`);
   if (mode === 'exec') args.push("-");
@@ -75,6 +79,18 @@ export function buildCodexInvocation(profile: CodexProfile, metrics: unknown, en
 export function buildObserverCodexInvocation(profile: CodexProfile, input: unknown, env: NodeJS.ProcessEnv, observerHome?: string): Invocation {
   const packed = packObserverInput(input);
   const invocation = buildInvocation(profile, packed, observerEnvironment(env, observerHome));
+  return {...invocation, args: [...invocation.args.slice(0, -1), '-c', 'cli_auth_credentials_store="file"', '-']};
+}
+
+/** Uses only compression asset paths carried through trusted preflight. The
+ * request text is data supplied on stdin; it cannot select files or tools. */
+export function buildObserverCompressionInvocation(profile: CodexProfile, input: string, env: NodeJS.ProcessEnv, observerHome?: string): Invocation {
+  if (typeof profile.compressionSchemaPath !== 'string' || typeof profile.compressionInstructionsPath !== 'string') {
+    throw new Error('OBSERVER_COMPRESSION_ASSETS_REQUIRED');
+  }
+  const invocation = buildInvocation(profile, input, observerEnvironment(env, observerHome), 'exec', {
+    schemaPath: profile.compressionSchemaPath, instructionsPath: profile.compressionInstructionsPath,
+  });
   return {...invocation, args: [...invocation.args.slice(0, -1), '-c', 'cli_auth_credentials_store="file"', '-']};
 }
 

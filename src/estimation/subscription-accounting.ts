@@ -9,10 +9,11 @@ export interface AccountedUsage {
 import type {InvocationRecord, InvocationRecordPatch} from './invocation-ownership.js';
 
 export type AdmissionKind = 'ordinary' | 'retry' | 'half_open';
+export type AccountingPurpose = 'eta' | 'context_compression';
 export type SettlementClassification = 'known_success' | 'known_non_success' | 'safe_unknown' | 'unsafe_unknown' | 'abandoned_unconfirmed';
 
 export interface SubscriptionAccounting {
-  reserve(admissionKind?: AdmissionKind): Promise<string | null>;
+  reserve(admissionKind?: AdmissionKind, purpose?: AccountingPurpose): Promise<string | null>;
   settle(id: string, usage: AccountedUsage | null, classification?: SettlementClassification): Promise<void>;
   bindInvocation?(id: string, record: InvocationRecord): Promise<void>;
   updateInvocation?(id: string, patch: InvocationRecordPatch): Promise<void>;

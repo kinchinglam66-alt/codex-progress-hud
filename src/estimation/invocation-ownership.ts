@@ -19,6 +19,7 @@ export const invocationRecordSchema = z.object({
   retryAttempt: z.boolean().optional(),
   accountScope: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   recoveredAt: z.number().int().nonnegative().safe().optional(),
+  purpose: z.enum(['eta', 'context_compression']).optional(),
 }).strict();
 
 export type InvocationRecord = z.infer<typeof invocationRecordSchema>;

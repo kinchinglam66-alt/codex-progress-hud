@@ -13,6 +13,10 @@ extraResources:
     to: observer-assets/observer-instructions.md
   - from: src/estimation/assets/observer.schema.json
     to: observer-assets/observer.schema.json
+  - from: src/estimation/assets/context-summary-instructions.md
+    to: observer-assets/context-summary-instructions.md
+  - from: src/estimation/assets/context-summary.schema.json
+    to: observer-assets/context-summary.schema.json
   - from: scripts/windows/observer-home.ps1
     to: observer-home.ps1
   - from: build/stop-companion.ps1

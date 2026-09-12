@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {copyInvocationRecord, copyInvocationPatch, type InvocationRecord, type InvocationRecordPatch} from './invocation-ownership.js';
+import type {AccountingPurpose} from './subscription-accounting.js';
 
 const SCHEMA_VERSION = 3;
 const MILLION = 1_000_000;
@@ -19,6 +20,7 @@ export interface ApiReservation {
   profileId: string;
   generation: number;
   ownershipBound?: boolean;
+  purpose?: AccountingPurpose;
 }
 
 export interface ApiPrices {
@@ -83,7 +85,7 @@ export interface ApiAccountingSnapshot {
 }
 
 export interface ApiAccounting {
-  reserve(binding: ApiProviderBinding, limits: ApiLimits, ownership?: Omit<InvocationRecord,'admissionId'>): Promise<ApiReservation | null>;
+  reserve(binding: ApiProviderBinding, limits: ApiLimits, ownership?: Omit<InvocationRecord,'admissionId'>, purpose?: AccountingPurpose): Promise<ApiReservation | null>;
   markDispatch(id: string): Promise<void>;
   settle(id: string, usage: ApiUsage | null): Promise<void>;
   cancelBeforeDispatch(id: string): Promise<void>;
@@ -493,7 +495,7 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock, mon
   }
 
   const accounting: ApiAccounting = {
-    reserve(binding, limits, ownership) {
+    reserve(binding, limits, ownership, purpose: AccountingPurpose = 'eta') {
       return enqueue(() => {
         if(recoveryFailed)fail('API_ACCOUNTING_RECOVERY_FAILED');
         reconcileRecovered();
@@ -555,7 +557,7 @@ export function createApiAccounting(path: string, clock: ApiAccountingClock, mon
           `).run(id, binding.profileId, binding.generation, day, checkedLimits.maxInputTokens, checkedLimits.maxOutputTokens,
             reservedMicrousd, costState, prices ? JSON.stringify(prices) : null, createdAt);
           if(invocation)database.prepare('UPDATE api_reservations SET invocation_json=? WHERE id=?').run(JSON.stringify(invocation),id);
-          return {id, profileId: binding.profileId, generation: binding.generation,...(invocation?{ownershipBound:true}:{})};
+          return {id, profileId: binding.profileId, generation: binding.generation, purpose, ...(invocation?{ownershipBound:true}:{})};
         });
       });
     },
