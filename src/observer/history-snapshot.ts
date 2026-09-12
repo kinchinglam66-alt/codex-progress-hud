@@ -4,6 +4,7 @@ export type HistoryGap =
   | "upstream_truncated"
   | "unsupported_payload"
   | "unattributed_record"
+  | "deduplication_window"
   | "unreadable_record";
 
 export interface HistoryCoverage {

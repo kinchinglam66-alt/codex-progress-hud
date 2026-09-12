@@ -74,6 +74,11 @@ it("accepts a full prepared input above the legacy bound only with an attested b
   const result = await runner.run({...spec('process.stdin.resume(); process.stdin.on("end",()=>process.stdout.write("ok"))'), input}, new AbortController().signal);
   expect(result).toMatchObject({reason:"exited",exitCode:0,closed:true,stdout:"ok"});
 });
+it("does not reject an attested capacity above 16 MiB before dispatch", async () => {
+  const runner=createOwnedProcessRunner({inputBudgetBytes:32*1024*1024});
+  const result=await runner.run(spec('process.stdout.write("ok")'),new AbortController().signal);
+  expect(result).toMatchObject({reason:'exited',exitCode:0,stdout:'ok'});
+});
 it("cancels a real child and rejects a concurrent start", async () => {
   const r=createOwnedProcessRunner(); const c=new AbortController();
   const pending=r.run(spec('setInterval(()=>{},1000)'),c.signal);

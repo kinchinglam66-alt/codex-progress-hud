@@ -92,7 +92,7 @@ const LEGACY_PARSE_OPTIONS: ParseOptions = {
 const SNAPSHOT_PARSE_OPTIONS: ParseOptions = {
   preserveText: true,
   inferTurnId: false,
-  dedupeLimit: null
+  dedupeLimit: MAX_DEDUPE_KEYS
 };
 
 interface PassResult {
@@ -315,6 +315,9 @@ function addRecord(context: ParseContext, record: ConversationRecord, dedupeKey:
     const oldest = context.seenOrder.shift();
     if (oldest !== undefined) context.seen.delete(oldest);
     context.historyTruncated = true;
+    // Keep reading all later text, but do not claim global deduplication once
+    // the bounded metadata window evicts an identity. No raw transcript cache.
+    if (context.options.preserveText) context.gaps.add("deduplication_window");
   }
   context.seen.add(hash);
   context.seenOrder.push(hash);

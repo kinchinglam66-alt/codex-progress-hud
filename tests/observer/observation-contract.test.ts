@@ -21,7 +21,7 @@ it('rejects impossible metadata and undeclared fields',()=>{
     expect(observerInputSchema.safeParse({...value,observation}).success).toBe(false);
   }
 });
-it('filters credentials in action metadata as well as messages',()=>{
+it('preserves synthetic credential-like task text in action metadata',()=>{
   const value=input();value.observation.currentAction!.text='Authorization: Bearer abcdefghijklmnopqrstuvwxyz';
-  expect(packObserverInput(value)).not.toContain('abcdefghijklmnopqrstuvwxyz');
+  expect(JSON.parse(packObserverInput(value)).observation.currentAction.text).toBe(value.observation.currentAction!.text);
 });

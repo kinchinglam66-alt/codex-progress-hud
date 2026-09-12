@@ -37,6 +37,12 @@ internal context. Missing source, upstream truncation and inaccessible attachmen
 are visible gaps. The plugin does not open arbitrary referenced files to fill them.
 Task text is not privacy-filtered. Review the selected recipient before enabling it.
 
+Source deduplication retains a rolling window of 4,096 hashed identities rather
+than an index growing with the conversation. Once that window evicts an identity,
+later readable records are still included, but `deduplication_window` marks the
+representation incomplete: far-apart mirrored records may repeat. This is a
+metadata-memory bound, not a 4,096-record transcript cutoff.
+
 Overflow compression uses the same selected model/account/provider and consumes
 additional allowance. Per-conversation compression is sequential; conversations
 remain independent. Exact prefix summaries can be reused within a bounded in-memory

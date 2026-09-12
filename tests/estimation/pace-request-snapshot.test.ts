@@ -107,7 +107,7 @@ it('invalidates measurement state across pause, recovery, and end',()=>{
   expect(f.goals.paceIntervals(request.ticket,work)).toEqual([]);
 });
 
-it('removes dropped summaries from the frozen lookup after final packing',()=>{
+it('preserves task text and matching frozen measurement refs without the old packet cap',()=>{
   const intervals=[0,2,4].map(start=>({workClass:'file_processing' as const,unit:'file' as const,
     startActiveSeconds:start,endActiveSeconds:start+1,completedUnits:1,complete:true,serial:true}));
   const groups:PaceGroup[]=Array.from({length:8},(_,index)=>({signature:`sig-${index}`,project:'project',
@@ -116,7 +116,8 @@ it('removes dropped summaries from the frozen lookup after final packing',()=>{
     messages:[{kind:'user',text:'u'.repeat(4096),truncated:false},{kind:'assistant',text:'a'.repeat(4096),truncated:false},
       {kind:'tool',text:'t'.repeat(4096),truncated:false},{kind:'tool',text:'v'.repeat(4096),truncated:false}]};
   const frozen=freezePaceRequest(input,groups);
-  expect(Buffer.byteLength(JSON.stringify(frozen.input),'utf8')).toBeLessThanOrEqual(16_384);
+  expect(frozen.input.messages.map(message=>message.text)).toEqual(input.messages.map(message=>message.text));
+  expect(frozen.input.paceMeasurements).toHaveLength(8);
   expect(frozen.intervals.size).toBe(frozen.input.paceMeasurements?.length??0);
   expect(JSON.stringify(frozen.input.paceMeasurements)).not.toMatch(/project|command|cwd|tests/u);
 });

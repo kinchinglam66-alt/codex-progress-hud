@@ -54,6 +54,19 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it("bounds dedupe metadata while retaining text beyond the window and flags uncertainty", async () => {
+    const f=await fixture(meta()+Array.from({length:4200},(_,i)=>message('assistant',`text-${i}`,`id-${i}`)).join('')+
+      message('assistant','text-0','id-0'));
+    const reader=createLocalSessionReader({root:f.root});
+    const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      let count=0,last='';
+      for await(const entry of snapshot.records(signal())){count++;last=entry.record.text??'';}
+      expect(count).toBe(4201);
+      expect(last).toBe('text-0');
+      expect(snapshot.coverage).toEqual({complete:false,gaps:['deduplication_window']});
+    } finally {await snapshot.close();await reader.close();}
+  });
   it("keeps an earlier incomplete page authoritative after a complete terminal page", async () => {
     let page = 0;
     const snapshot = createHistorySnapshot({

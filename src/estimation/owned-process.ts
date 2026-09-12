@@ -25,7 +25,7 @@ function createRunner(options: OwnedProcessOptions, maximumTimeoutMs:number) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maximumTimeoutMs ||
     !Number.isInteger(cleanupMs) || cleanupMs < 1 || cleanupMs > 5_000) throw new Error("INVALID_PROCESS_DEADLINE");
   const inputBudgetBytes = options.inputBudgetBytes ?? 16_384;
-  if (!Number.isSafeInteger(inputBudgetBytes) || inputBudgetBytes < 1 || inputBudgetBytes > 16 * 1024 * 1024)
+  if (!Number.isSafeInteger(inputBudgetBytes) || inputBudgetBytes < 1)
     throw new Error("INVALID_PROCESS_INPUT_BUDGET");
   const launch = options.spawn ?? spawn;
   let active = false, disabled = false, poisoned = false;
