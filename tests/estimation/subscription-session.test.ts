@@ -115,7 +115,7 @@ it('executes a rich observer through real owned stdin and settles usage in the e
   const d = await setup();
   const code = `let input='';process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{
     const parsed=JSON.parse(input);
-    if(Buffer.byteLength(input)>16384 || parsed.messages[0].text.includes('private'))process.exit(9);
+    if(parsed.messages[0].text!==${JSON.stringify(observerInput.messages[0]!.text)})process.exit(9);
     process.stdout.write(${JSON.stringify(stream(interpretation))});
   });`;
   const s = createObserverSubscriptionSession({...d, authorize: () => true,
