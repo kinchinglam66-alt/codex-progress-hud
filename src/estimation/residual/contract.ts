@@ -28,6 +28,8 @@ export const shadowSchema=z.object({seconds:seconds.nullable(),reason:z.enum(sha
     {message:'shadow result does not match its reason'});
 export type Shadow=z.infer<typeof shadowSchema>;
 export const researchRecordSchema=z.discriminatedUnion('kind',[
+  z.object({schemaVersion:z.literal(1),kind:z.literal('unavailable_forecast'),sequence:ordinal,identity:identitySchema,
+    predictionId:ordinal,rawSeconds:seconds,deliveredActiveSeconds:seconds,versions:versionsSchema,reason:z.literal('prefix_unavailable')}).strict(),
   z.object({schemaVersion:z.literal(1),kind:z.literal('forecast'),sequence:ordinal,prefix:prefixSchema,
     rawSeconds:seconds,deliveredActiveSeconds:seconds,versions:versionsSchema,shadow:shadowSchema}).strict(),
   z.object({schemaVersion:z.literal(1),kind:z.literal('terminal'),sequence:ordinal,identity:identitySchema,

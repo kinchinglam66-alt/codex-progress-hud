@@ -10,6 +10,8 @@ import {normalizeAdmissionReason, type AdmissionReason, type ObserverContextStat
 export type {ObserverContextState} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
+import type {ResidualRuntime} from './residual/runtime.js';
+import {captureHistoryFeatures} from './residual/capture.js';
 export interface ObserverWorker {
   /** Authenticated local key is accounting metadata, never observer prompt data. */
   observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number,
@@ -47,7 +49,7 @@ export interface ObserverObservation {
   contextState?:ObserverContextState;
   contextMetrics?:ContextPreparationMetrics;
 }
-interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
+interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void;research?:ResidualRuntime}
 interface Entry {
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
   eventSequence: number; consumedEventSequence: number;
@@ -70,7 +72,7 @@ interface Entry {
   expiredTimerResults:number;
   ended:boolean;
 }
-interface Flight {key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
+interface Flight {researchGeneration?:number;researchTicket?:object;key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
   turnKey:string; contextState?:ObserverContextState; contextMetrics?:ContextPreparationMetrics; done?: Promise<void>}
@@ -196,15 +198,24 @@ export class ObserverScheduler {
       try {
         const opened=await this.options.goals.openHistory?.(flight.ticket,flight.controller.signal);
         if(!opened)throw Error('history_unavailable');
+        const researchCapture=this.options.research?captureHistoryFeatures(opened.snapshot,opened.currentTurnId):undefined;
         this.contextState(flight,'context_preparing');
         let handedToPlanner=false;
         let promise:Promise<PreparedContext>;
         try {
-          promise=flight.worker.prepareContext(input,opened,flight.controller.signal,flight.key,flight.generation,flight.requestedAt);
+          promise=flight.worker.prepareContext(input,researchCapture?{...opened,snapshot:researchCapture.snapshot}:opened,flight.controller.signal,flight.key,flight.generation,flight.requestedAt);
           handedToPlanner=true;
           const value=await promise;
           if(!value){await opened.snapshot.close();throw Error('preparation_empty');}
           prepared=value.input;
+          try{
+            const actions=researchCapture?.result(),owner=this.options.goals.researchOwner(flight.ticket);
+            if(actions&&owner&&owner.fingerprint!==undefined&&owner.fingerprint===researchCapture?.fingerprint()&&this.options.research){
+              flight.researchTicket=this.options.research.capture(owner,flight.requestId,
+                JSON.stringify([opened.snapshot.identity,opened.snapshot.sourceEpoch,opened.snapshot.revision]),flight.observedActiveSeconds,actions);
+              flight.researchGeneration=owner.generation;
+            }
+          }catch{/* Research capture cannot fail context preparation. */}
           this.contextState(flight,value.representation.mode==='compressed'?'context_compressed':
             value.representation.mode==='incomplete'||!value.representation.sourceComplete?'history_incomplete':'context_full',value.metrics);
         }catch(error){
@@ -601,6 +612,15 @@ export class ObserverScheduler {
               remainingUnitsProvenance:'model_hypothesis' as const,sampleCount:Math.min(intervals.length,5)}}:{}),versions});
         } catch {forecastDiagnostic='invalid_provenance';}
       }
+    }
+    if(accepted&&live&&forecast?.rawSeconds!==null&&forecast?.rawSeconds!==undefined&&this.options.research){
+      let recorded=false;
+      try{if(flight.researchTicket&&snapshotAnchor===flight.observedActiveSeconds&&flight.researchGeneration===live.view.generation)
+        recorded=this.options.research.accept(flight.researchTicket,forecast.rawSeconds,live.view.activeSeconds,forecast.versions);}
+      catch{/* Still retain a coverage-only record below. */}
+      if(!recorded)try{const owner=this.options.goals.currentResearchOwner(flight.key);if(owner)
+        this.options.research.unavailable(owner,flight.requestId,forecast.rawSeconds,live.view.activeSeconds,forecast.versions);
+      }catch{/* Research failure cannot reject a production estimate. */}
     }
     this.record('result',flight.key,entry,{requestId:flight.requestId,requestedAt:flight.requestedAt,
       ...(!accepted?{generation:flight.generation}:{}),

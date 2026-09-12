@@ -107,6 +107,7 @@ export interface DesktopDependencies {
   observerWorkerSource?: ProgressServerOptions['observerWorkerSource'];
   observerSchedulerRecovery?: ProgressServerOptions['observerSchedulerRecovery'];
   onObserverObservation?: ProgressServerOptions['onObserverObservation'];
+  residualResearch?:ProgressServerOptions['residualResearch'];
   observerSetup?: {
     start(signal: AbortSignal): Promise<unknown>;
     disable(): void;
@@ -221,7 +222,8 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     ...(observer?.providerSettings === undefined ? {} : {provider: observer.providerSettings}),
   });
   return {
-    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,observerWorkerSource:observer.workerSource,observerSchedulerRecovery:observer.schedulerRecovery,onObserverObservation:observer.onObservation}:{}),
+    ...(observer?{observerSetup:observer,observerWorkers:observer.workers,observerWorkerSource:observer.workerSource,observerSchedulerRecovery:observer.schedulerRecovery,onObserverObservation:observer.onObservation,
+      ...(observer.residualResearch?{residualResearch:observer.residualResearch}:{})}:{}),
     ...(settingsController ? {settingsController} : {}),
     app: electron.app,
       createWindowController: ({ quitting, onHideSelectedTask }) => new WindowController({
@@ -566,6 +568,7 @@ export async function runDesktop(
           ...(resolved.observerWorkerSource?{observerWorkerSource:resolved.observerWorkerSource}:{}),
           ...(resolved.observerSchedulerRecovery?{observerSchedulerRecovery:resolved.observerSchedulerRecovery}:{}),
           ...(resolved.onObserverObservation?{onObserverObservation:resolved.onObserverObservation}:{}),
+          ...(resolved.residualResearch?{residualResearch:resolved.residualResearch}:{}),
           port: resolved.port,
           awaitInitialLease: launchReason.kind === "manager",
           tokenPath: resolved.tokenPath,

@@ -107,6 +107,7 @@ export interface ProgressServerOptions extends Partial<ProgressServerControls> {
   /** Explicit selected local source; omission preserves the legacy test adapter. */
   observerSessionsRoot?:string;
   onObserverObservation?: (record:ObserverObservation)=>void;
+  residualResearch?:import('../estimation/residual/runtime.js').ResidualRuntime;
   runIfGeneration?(
     generation: number,
     desiredState: DesiredHudState,
@@ -361,9 +362,12 @@ export function createProgressServer(options: ProgressServerOptions) {
         }
         passiveObserver?.changed(key,takeover===null?'activity':'prompt');store.refreshPresentation();
       }}});
-  const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals);
+  const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals,
+    options.residualResearch?event=>options.residualResearch!.boundary(event):undefined);
   const pruneSources=()=>{
-    const at=passiveObserver?.presentationTime() ?? goalNow();selectedSource?.prune(key=>passiveGoals.retainSource(key,at));
+    const at=passiveObserver?.presentationTime() ?? goalNow();selectedSource?.prune(key=>{
+      const retain=passiveGoals.retainSource(key,at);if(!retain)try{options.residualResearch?.forget(key);}catch{}return retain;
+    });
   };
   const store = new TaskStore({ now, nameForConversation: key => names.get(key),
     goalForConversation: key => passiveGoals.view(key, passiveObserver?.presentationTime() ?? goalNow()),
@@ -372,6 +376,7 @@ export function createProgressServer(options: ProgressServerOptions) {
   const passiveObserver = options.observerWorkers === undefined && workerSource === undefined ? undefined : new ObserverScheduler({
     contexts: passiveContexts, goals: passiveGoals, ...(workerSource ? {workerSource} : {workers: options.observerWorkers!}), now: goalNow,
     ...(options.onObserverObservation?{onObservation:options.onObserverObservation}:{}),
+    ...(options.residualResearch?{research:options.residualResearch}:{}),
     onChange: () => {if (!shuttingDown) {pruneSources();store.refreshPresentation();}}
   });
   if (passiveObserver !== undefined) options.observerSchedulerRecovery?.attachScheduler(passiveObserver);
@@ -902,6 +907,7 @@ export function createProgressServer(options: ProgressServerOptions) {
             // Lifecycle deletion is unconditional, even if the event fence is full.
             passiveContexts.remove(route.sessionKey);
             selectedSource?.remove(route.sessionKey);
+            try{options.residualResearch?.forget(route.sessionKey);}catch{/* research-only cleanup */}
             passiveGoals.end(route.sessionKey);
             passiveObserver?.end(route.sessionKey);
             store.refreshPresentation();
@@ -1066,7 +1072,8 @@ export function createProgressServer(options: ProgressServerOptions) {
                 : type === 'tracking_resumed' || type === 'tracking_started' ? 'running' : undefined;
               if (runtime) {
                 passiveGoals.runtime(currentTask.conversationKey, currentTask.turnKey, runtime, goalNow());
-                if(runtime==='stopped')selectedSource?.stop(currentTask.conversationKey);
+                if(runtime==='stopped'){selectedSource?.stop(currentTask.conversationKey);
+                  try{options.residualResearch?.forget(currentTask.conversationKey);}catch{/* research-only cleanup */}}
                 else selectedSource?.setActive(currentTask.conversationKey,runtime==='running');
                 passiveObserver?.changed(currentTask.conversationKey, 'runtime');
                 store.refreshPresentation();

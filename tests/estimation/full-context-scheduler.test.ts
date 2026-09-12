@@ -8,6 +8,13 @@ import type {ReadBatch} from "../../src/observer/conversation-record.js";
 import {ObserverScheduler, type ObserverObservation, type ObserverWorker} from "../../src/estimation/observer-scheduler.js";
 import type {ObserverInput} from "../../src/estimation/observer-contract.js";
 import type {PreparedContext} from "../../src/estimation/prepared-context.js";
+import type {ResidualRuntime} from '../../src/estimation/residual/runtime.js';
+import {createResidualRuntime} from '../../src/estimation/residual/runtime.js';
+import {readResidualSegments} from '../../src/estimation/residual/recorder.js';
+import {buildDataset} from '../../src/evaluation/residual/dataset.js';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
 
 const token = "protected-full-context-scheduler-test-token-123456789";
 const answer = {relation: "replace" as const, status: "running" as const, summary: "task", estimate: {remainingSeconds: 100, errorPercent: 20}};
@@ -25,7 +32,7 @@ function history(records: ReadBatch["records"], closed: {value: number}): Histor
   };
 }
 
-function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} = {}) {
+function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime} = {}) {
   let now = 0;
   let resolveHistory!: (value: HistorySnapshot) => void;
   let resolvePreparation!: (value: PreparedContext) => void;
@@ -54,7 +61,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
     turnKeyFor: () => sourceTurnKey
   });
   const contexts = new PassiveContextStore();
-  const goals = new PassiveGoals(contexts, source.goals);
+  const goals = new PassiveGoals(contexts, source.goals,options.research?event=>options.research!.boundary(event):undefined);
   let prepareResult: PreparedContext = {
     input: {goalSummary: null, activeSeconds: 0, runtime: "running", messages: [{kind: "user", text: "prepared", truncated: false}], truncated: false},
     representation: {mode: "full", sourceComplete: true, originalRecords: 1, compressedThroughOrdinal: null, sizing: "conservative"},
@@ -64,6 +71,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
   const worker: ObserverWorker = {
     prepareContext: async (input, _snapshot, _signal, _key, _generation, timestamp) => {
       prepared++;
+      if(options.research)for await(const record of _snapshot.snapshot.records(_signal))void record;
       observedAt = timestamp;
       if (options.deferPreparation) return new Promise<PreparedContext>((resolve, reject) => {
         resolvePreparation = resolve;
@@ -80,7 +88,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
     close: async () => { disabled = true; }
   };
   const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => now,
-    onObservation: record => observations.push(record)});
+    onObservation: record => observations.push(record),...(options.research?{research:options.research}:{})});
   const envelope = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "first"}, now, token).envelope;
   goals.observe(envelope, true, now);
   sourceTurnKey = envelope.turnKey!;
@@ -112,6 +120,48 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean} =
     start, flush, counts: () => ({prepared, observed, observedAt, disabled})
   };
 }
+
+it('captures the full-context prefix without changing production ETA when research fails',async()=>{
+  let captures=0;
+  const research:ResidualRuntime={capture(){captures++;throw Error('recording failure');},accept(){throw Error('recording failure');},unavailable(){},boundary(){},forget(){},async close(){}};
+  const ordinary=fixture(),withResearch=fixture({research});
+  await ordinary.start();await withResearch.start();
+  expect(captures).toBe(1);
+  expect(withResearch.counts()).toEqual(ordinary.counts());
+  expect(withResearch.goals.view(withResearch.envelope.sessionKey,16000)).toEqual(ordinary.goals.view(ordinary.envelope.sessionKey,16000));
+  await ordinary.scheduler.close();await withResearch.scheduler.close();
+});
+
+it('joins a real scheduler forecast with independent same-turn source completion',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'residual-scheduler-'));
+  const research=await createResidualRuntime(directory),f=fixture({research});
+  f.worker.provenance=()=>({input:'i1',prompt:'p1',model:'m1',algorithm:'a1'});
+  try{
+    await f.flush();
+    const bootstrap=f.goals.request(f.envelope.sessionKey,500)!;
+    f.goals.settle(bootstrap.ticket,answer,500);
+    f.worker.observe=async()=>({status:'interpreted',interpretation:{...answer,relation:'continue'},usage:null});
+    await f.start();
+    expect(f.counts().prepared).toBe(1);
+    f.time(20000);f.setRecords([{id:'end',turnId:'first',atMs:20000,kind:'runtime',runtime:'waiting',outcome:'completed'}]);
+    f.source.tick();await f.flush();f.goals.reconcileSource(f.envelope.sessionKey,20000);
+    await f.scheduler.close();await research.close();
+    const result=buildDataset((await readResidualSegments(directory)).records);
+    expect(result.samples,JSON.stringify(result)).toHaveLength(1);
+    expect(result.samples[0]).toMatchObject({actualSeconds:4,features:{rawSeconds:100}});
+  }finally{await f.scheduler.close();await research.close();await rm(directory,{recursive:true,force:true});}
+});
+it('keeps accepted forecasts with a later history watermark in the coverage denominator',async()=>{
+  let captured=0,unavailable=0;
+  const research:ResidualRuntime={capture(){captured++;return {};},accept(){return true;},unavailable(){unavailable++;},boundary(){},forget(){},async close(){}};
+  const f=fixture({research,deferHistory:true});f.worker.provenance=()=>({input:'i',prompt:'p',model:'m',algorithm:'a'});
+  await f.start();
+  f.resolveHistory(history([{id:'user',turnId:'first',atMs:1,kind:'user',text:'work'},
+    {id:'late',turnId:'first',atMs:17000,kind:'tool_result',actionId:'late',exitCode:0}],{value:0}));
+  await f.flush();
+  expect(f.counts().observed).toBe(1);expect(captured).toBe(0);expect(unavailable).toBe(1);
+  await f.scheduler.close();
+});
 
 it("does not observe until delayed source history preparation finishes", async () => {
   const f = fixture({deferHistory: true});

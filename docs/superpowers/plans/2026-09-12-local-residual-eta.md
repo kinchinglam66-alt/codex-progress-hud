@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-12-local-residual-eta-design.md` (approved 2026-09-12).
 
+## Execution checkpoint (2026-09-12)
+
+Inline implementation selected by the user. Tasks 1–7 have their core implementation in `feat/local-residual-eta`; one architectural review and one fix review completed. Tasks 2 and 7 were integrated together after building the independent recorder/evaluator to avoid repeated scheduler changes. Task 1 is committed as `06fa4a6`; the remaining implementation is delivered as one integration commit rather than the per-task commit sketch below. Final full regression: 2,208 tests in 190 files passed with four workers, plus a prior serial run of 2,206 tests before the last two tests were added. Typecheck/build passed. See `../reports/2026-09-12-local-residual-eta.md` for evidence and limitations. The original detailed checklists below remain a design/validation inventory, not a claim that every proposed stress variant was exercised; exact executed evidence is in the report. Installation, held-out accuracy measurement and promotion to displayed ETA remain outside this turn.
+
+Concrete adapter refinements: `capture.ts` piggybacks on the existing planner iterator, and `telemetry.ts` separates local source keys from persisted anonymous identities. Runtime capture returns an opaque ticket and consumes it once on acceptance. Research uses the actual goal generation as well as source epoch and turn ownership. Changed generation/anchor or a history fingerprint mismatch becomes an explicit unavailable-prefix attempt, not a silently omitted forecast. Whole-turn elapsed and outstanding active action age are conservatively missing until trustworthy measurements are available. These limitations are documented rather than populated with wall-clock guesses.
+
 ## Global Constraints
 
 - Shadow-only: do not replace raw ETA, modify UI/countdown, change completion authority, or reuse pace `ForecastRecord.shadowSeconds`.

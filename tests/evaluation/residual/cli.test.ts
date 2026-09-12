@@ -1,0 +1,36 @@
+import {mkdtemp,mkdir,readFile,rm,writeFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve,join} from 'node:path';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {afterEach,expect,it} from 'vitest';
+import {samples} from './fixtures.js';
+const execute=promisify(execFile),roots:string[]=[];
+afterEach(async()=>{for(const p of roots.splice(0))await rm(p,{recursive:true,force:true});});
+it('builds an empty local dataset without overwriting an existing export',async()=>{
+  const p=await mkdtemp(join(tmpdir(),'residual-cli-'));roots.push(p);
+  const input=join(p,'input'),output=join(p,'output');await mkdir(input);
+  const args=[resolve('scripts/evaluation/residual.mjs'),'dataset','--input',input,'--output',output];
+  await execute(process.execPath,args,{windowsHide:true});
+  const text=await readFile(join(output,'dataset.json'),'utf8');
+  expect(JSON.parse(text).samples).toEqual([]);
+  await expect(execute(process.execPath,args,{windowsHide:true})).rejects.toThrow();
+  expect(await readFile(join(output,'dataset.json'),'utf8')).toBe(text);
+});
+it('trains and scores a synthetic disjoint dataset entirely through the command',async()=>{
+  const p=await mkdtemp(join(tmpdir(),'residual-cli-'));roots.push(p);
+  const train=samples(),validation=samples(100,10),test=samples(200,10);
+  const dataset=join(p,'dataset.json'),manifest=join(p,'manifest.json'),artifact=join(p,'artifact.json'),report=join(p,'report.json');
+  await writeFile(dataset,JSON.stringify({schemaVersion:1,grouping:'opaque_conversation',samples:[...train,...validation,...test],excluded:{}}));
+  await writeFile(manifest,JSON.stringify({train:train.map(s=>s.identity.groupId),validation:validation.map(s=>s.identity.groupId),test:test.map(s=>s.identity.groupId)}));
+  const script=resolve('scripts/evaluation/residual.mjs');
+  await execute(process.execPath,[script,'train','--dataset',dataset,'--manifest',manifest,'--output',artifact],{windowsHide:true});
+  await execute(process.execPath,[script,'score','--dataset',dataset,'--manifest',manifest,'--artifact',artifact,'--output',report],{windowsHide:true});
+  const value=JSON.parse(await readFile(report,'utf8'));
+  expect(value.counts.groups).toBe(10);expect(value.metrics.request.raw.maeSeconds).toBe(61);
+  expect(value.metrics.request.residual.maeSeconds).toBeCloseTo(0,8);
+  const all=[...train,...validation,...test],attempts=all.map(s=>({identity:s.identity,predictionId:s.predictionId,reason:'eligible'}));
+  attempts.push({identity:samples(300,1)[0]!.identity,predictionId:1,reason:'prefix_unavailable'});
+  await writeFile(dataset,JSON.stringify({schemaVersion:1,grouping:'opaque_conversation',samples:all,attempts,excluded:{}}));
+  await expect(execute(process.execPath,[script,'score','--dataset',dataset,'--manifest',manifest,'--artifact',artifact,'--output',join(p,'unassigned.json')],{windowsHide:true})).rejects.toThrow('RESIDUAL_SPLIT_UNASSIGNED');
+});

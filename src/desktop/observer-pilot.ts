@@ -7,6 +7,8 @@ import {createObserverIdentityRuntime} from '../estimation/observer-identity-run
 import {openThreadedReleaseAccounting} from '../estimation/accounting-worker-owner.js';
 import {createDesktopObserverRuntime, type ObserverInlineConsent} from './observer-runtime.js';
 import {createPilotJournal} from '../evaluation/pilot-journal.js';
+import {createResidualRuntime} from '../estimation/residual/runtime.js';
+import {openResearchBounded,closeResearchBounded} from '../estimation/residual/availability.js';
 import type {ObserverConsentDialog} from './observer-consent-dialog.js';
 import {createObserverConsentStore,type ConsentProtection} from '../estimation/observer-consent-store.js';
 import {createObserverAccountSettings} from './observer-account-settings.js';
@@ -209,10 +211,12 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
   const host=await createObserverProviderHost({dataDirectory:options.dataDirectory,consentProtection:options.consentProtection,
     openSubscription,openApi,autoStartSubscription:config!==null, ...(config?.proxyUrl===undefined?{}:{proxyUrl:config.proxyUrl}),
     ...(accountSettings===undefined?{}:{subscriptionAccount:accountSettings,readSubscriptionAccount:async signal=>{const snapshot=await accountSettings.inspect(signal);return {label:snapshot.accountLabel,observedAt:snapshot.evidence.observedAt,expiresAt:snapshot.evidence.expiresAt};}})});
+  const residualResearch=await openResearchBounded(()=>createResidualRuntime(resolve(options.dataDirectory,'residual-research')));
   return {workers:host.workers,workerSource:host.workerSource,onObservation:journal.record,
+    ...(residualResearch?{residualResearch}:{}),
     schedulerRecovery:{attachScheduler(scheduler:Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>){attachedScheduler=scheduler;currentRuntime?.schedulerRecovery.attachScheduler(scheduler);}},
     recovery:{status:()=>currentRuntime?.recovery.status()??{state:'unauthorized' as const,revision:0,knownTokens:0,unknown:0,recoveryAllowed:false},preflight:()=>currentRuntime?.recovery.preflight()??Promise.resolve({state:'unauthorized' as const,revision:0,knownTokens:0,unknown:0,recoveryAllowed:false,allowed:false}),confirm:(revision:number)=>currentRuntime?.recovery.confirm(revision)??Promise.reject(new Error('OBSERVER_RECOVERY_UNAVAILABLE')),binding:()=>currentRuntime?.recovery.binding()},
     start:host.start,disable:()=>{host.disable();currentRuntime?.disable();},revokeConsent:async()=>{await currentRuntime?.revokeConsent();},
     providerSettings:host,accountSettings,
-    async close(){try{await host.close();await Promise.all([...runtimes].map(runtime=>runtime.close().catch(()=>undefined)));await accountSettings?.close();await apiAccounting?.close();}finally{await journal.close();}}};
+    async close(){try{await host.close();await Promise.all([...runtimes].map(runtime=>runtime.close().catch(()=>undefined)));await accountSettings?.close();await apiAccounting?.close();}finally{try{await journal.close();}finally{await closeResearchBounded(residualResearch);}}}};
 }

@@ -9,6 +9,7 @@ import {createHash} from 'node:crypto';
 import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
 import type {GoalCheckpointRecord} from './goal-checkpoint.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
+import type {ResearchBoundary,ResearchOwner} from '../estimation/residual/telemetry.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
@@ -71,7 +72,7 @@ export interface GoalContextSource {
   openHistory?(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>;
   health?(key:string):'loading'|'ready'|'error'|'missing';
   execution?(key:string,turnKey:string):{
-    state:'running'|'waiting'|'interrupted'|'failed'|'unknown';outcome?:'completed'|'interrupted'|'failed';boundaryMs?:number;identity:string
+    state:'running'|'waiting'|'interrupted'|'failed'|'unknown';outcome?:'completed'|'interrupted'|'failed';boundaryMs?:number;identity:string;researchReliable?:boolean
   }|null;
   takeover?(key:string,turnKey:string):SourceTurnTakeover|null;
   epoch(key:string):number|null;
@@ -79,13 +80,14 @@ export interface GoalContextSource {
     ready:boolean;revision:number;userFingerprint?:string;contentFingerprint?:string;currentActionId:string|null;finalAvailable:boolean
   }|null;
   read(key:string,turnKey:string,query:GoalContextQuery):{
+    researchFingerprint?:string;
     epoch:number;revision:number;userFingerprint?:string;contentFingerprint?:string;currentActionId:string|null;finalAvailable:boolean;input:ObserverInput
     paceEvidence?:PaceEvidence|readonly PaceEvidence[];paceContinuity?:PaceContinuity;
     paceBatches?:readonly {evidence:PaceEvidence;continuity:PaceContinuity}[];measurementEpoch?:number;
   }|null;
   measurementEpoch?(key:string):number|null;
 }
-interface Ticket {sessionKey: string; goal: Goal; goalIdentity: object; measurementScope:object; epoch: number; activeSeconds: number; requestedAt: number;sourceEpoch?:number;sourceRevision?:number;sourceMeasurementEpoch?:number;userFingerprint?:string;paceLookup:ReadonlyMap<string,readonly PaceInterval[]>}
+interface Ticket {researchFingerprint?:string;sessionKey: string; goal: Goal; goalIdentity: object; measurementScope:object; epoch: number; activeSeconds: number; requestedAt: number;sourceEpoch?:number;sourceRevision?:number;sourceMeasurementEpoch?:number;userFingerprint?:string;paceLookup:ReadonlyMap<string,readonly PaceInterval[]>}
 interface SettledPace {sessionKey:string;goal:Goal;goalIdentity:object;measurementScope:object;epoch:number;sourceEpoch?:number;sourceMeasurementEpoch?:number;intervals:ReadonlyMap<string,readonly PaceInterval[]>}
 export interface OpenHistoryResult {snapshot:HistorySnapshot;currentTurnId:string}
 
@@ -115,7 +117,35 @@ export class PassiveGoals {
   private settledAnchors = new WeakMap<object, number>();
   private settledPace = new WeakMap<object, SettledPace>();
   private readonly paceMeasurements = new PaceMeasurements();
-  constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource) {}
+  constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource,
+    private readonly onResearchBoundary?:(event:ResearchBoundary)=>void) {}
+
+  private researchBoundary(sessionKey:string,goal:Goal,nowMs:number):void {
+    if(!this.onResearchBoundary||!this.source?.execution)return;
+    try{
+      const evidence=this.source.execution(sessionKey,goal.turnKey),sourceEpoch=this.source.epoch(sessionKey);
+      if(!evidence||sourceEpoch===null)return;
+      const boundary=evidence.boundaryMs;
+      const bounded=Number.isSafeInteger(boundary)&&boundary!>=goal.since&&boundary!<=nowMs;
+      const activeSeconds=this.active(goal,bounded?boundary!:nowMs);
+      const trusted=evidence.researchReliable===true&&!goal.timingUncertain&&!goal.runtimeUncertain&&
+        !goal.recovered&&!goal.recoveryPending&&bounded;
+      this.onResearchBoundary({sessionKey,turnKey:goal.turnKey,sourceEpoch,generation:goal.generation,activeSeconds,trusted,
+        state:evidence.state==='running'?'running':evidence.state==='unknown'?'unknown':'waiting',evidenceId:evidence.identity,
+        ...(evidence.outcome===undefined?{}:{outcome:evidence.outcome==='completed'?'normal_end':evidence.outcome})});
+    }catch{/* Research never mutates or blocks lifecycle authority. */}
+  }
+
+  researchOwner(ticket:object):(ResearchOwner&{fingerprint?:string})|null {
+    const captured=this.ticketIdentityIsCurrent(ticket);
+    if(!captured||captured.sourceEpoch===undefined)return null;
+    return {sessionKey:captured.sessionKey,turnKey:captured.goal.turnKey,sourceEpoch:captured.sourceEpoch,generation:captured.goal.generation,
+      ...(captured.researchFingerprint===undefined?{}:{fingerprint:captured.researchFingerprint})};
+  }
+  currentResearchOwner(sessionKey:string):ResearchOwner|null {
+    const goal=this.goals.get(sessionKey);if(!goal||goal.sourceEpoch===undefined)return null;
+    return {sessionKey,turnKey:goal.turnKey,sourceEpoch:goal.sourceEpoch,generation:goal.generation};
+  }
 
   /** Validated value records only; no restored object can authorize inference. */
   restoreCheckpoint(records:readonly GoalCheckpointRecord[],wallNowMs?:number):void {
@@ -358,6 +388,7 @@ export class PassiveGoals {
   reconcileSource(sessionKey:string,nowMs:number):SourceTurnTakeover|null {
     const goal=this.goals.get(sessionKey);
     if(!goal||!this.clock(nowMs,goal)||!this.source?.execution)return null;
+    this.researchBoundary(sessionKey,goal,nowMs);
     // A read already in flight may finish after manual pause/stop. Never let
     // its takeover mutate source ownership or restart the active clock.
     if(goal.runtime==='stopped')return null;
@@ -466,7 +497,7 @@ export class PassiveGoals {
       paceLookup:frozen.intervals,
       ...(selected?{sourceEpoch:selected.epoch,sourceRevision:selected.revision,
         ...(goal.measurementEpoch===undefined?{}:{sourceMeasurementEpoch:goal.measurementEpoch}),
-        userFingerprint:selected.userFingerprint}: {})});
+        userFingerprint:selected.userFingerprint,...(selected.researchFingerprint===undefined?{}:{researchFingerprint:selected.researchFingerprint})}: {})});
     return {ticket, input:frozen.input};
   }
 

@@ -22,4 +22,5 @@ __pycache__/
 *.py[cod]
 observer-auth/
 pilot-observations/
+residual-research/
 observer-pilot.json

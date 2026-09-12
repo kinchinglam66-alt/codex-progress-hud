@@ -3,6 +3,17 @@ import {createConversationSource} from '../../src/observer/conversation-source.j
 import type {ReadBatch} from '../../src/observer/conversation-record.js';
 
 const query={goalSummary:null,activeSeconds:15,runtime:'running' as const,previousEstimate:null};
+it('does not trust research terminal time after a wall-clock jump',async()=>{
+  let now=0,wall=10000;
+  let batch:ReadBatch={records:[{id:'start',turnId:'current',atMs:10000,kind:'runtime',runtime:'running'}],caughtUp:true,partialLine:false,reset:false};
+  const source=createConversationSource({source:{read:async()=>batch,remove(){},async close(){}},now:()=>now,wallNow:()=>wall,turnKeyFor:()=> 'turn'});
+  source.attach('key','host','turn');now=500;wall=10500;source.tick();await new Promise(r=>setImmediate(r));
+  expect(source.goals.execution?.('key','turn')?.researchReliable).toBe(true);
+  batch={records:[{id:'end',turnId:'current',atMs:20000,kind:'runtime',runtime:'waiting',outcome:'completed'}],caughtUp:true,partialLine:false,reset:false};
+  now=6000;wall=30000;source.tick();await new Promise(r=>setImmediate(r));
+  expect(source.goals.execution?.('key','turn')?.researchReliable).toBe(false);
+  await source.close();
+});
 it('tracks current-turn assistant and tool text but excludes lifecycle-only content from recovery identity',async()=>{
   const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
   const identity=()=>f.source.goals.inspect?.('key','opaque-current',query)?.contentFingerprint;

@@ -4,6 +4,7 @@ import {assembleContext} from './context-assembler.js';
 import type {GoalContextSource,GoalContextQuery} from '../server/passive-goals.js';
 import {parsePaceEvidence, type PaceContinuity, type PaceWindow} from '../estimation/pace-measurements.js';
 import type {HistorySnapshot} from './history-snapshot.js';
+import {createPrefixFingerprint} from '../estimation/residual/fingerprint.js';
 
 type OwnerOptions=Parameters<typeof createContextOwner>[0];
 interface Binding {hostId:string;turnKey:string;epoch:number;sourceEpoch:number}
@@ -115,6 +116,7 @@ export function createConversationSource(options:OwnerOptions & {
   };
   const measurementEpoch=(key:string):number|null=>bindings.has(key)?observeHealth(key):null;
   const executionCache=new Map<string,{identity:string;boundaryMs:number;trustedAt:number}>();
+  const researchBridges=new Map<string,{epoch:number;offset:number;reliable:boolean}>();
   const takeover=(key:string,turnKey:string)=>{
     const binding=bindings.get(key),snapshot=owner.snapshot(key);
     if(!binding||binding.turnKey!==turnKey||!snapshot||snapshot.health!=='ready'||
@@ -171,10 +173,17 @@ export function createConversationSource(options:OwnerOptions & {
       state='unknown';record=next;
     }
     const identity=`${selected.currentEpoch}:${turnKey}:${record.id}:${state}`;
+    const wall=options.wallNow(),offset=wall-now,bridge=researchBridges.get(key);
+    const reliable=Number.isFinite(offset)&&(bridge?.epoch!==selected.currentEpoch||
+      (bridge.reliable&&Math.abs(offset-bridge.offset)<=1000));
+    researchBridges.set(key,{epoch:selected.currentEpoch,offset:bridge?.epoch===selected.currentEpoch?bridge.offset:offset,reliable});
     const boundaryMs=previous?.identity===identity?previous.boundaryMs:
       Math.max(0,Math.floor(now-Math.max(0,options.wallNow()-record.atMs)));
     executionCache.set(key,{identity,boundaryMs,trustedAt:now});
-    return {state,identity,boundaryMs,...(outcome===undefined?{}:{outcome})};
+    return {state,identity,boundaryMs,
+      researchReliable:reliable&&snapshot.historyComplete&&record.kind==='runtime'&&snapshot.health==='ready'&&!snapshot.partialLine&&
+        Number.isSafeInteger(record.atMs)&&record.atMs>=0&&record.atMs<=options.wallNow(),
+      ...(outcome===undefined?{}:{outcome})};
   },takeover,openHistory,inspect(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
      return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,contentFingerprint:selected.contentFingerprint,
@@ -186,12 +195,13 @@ export function createConversationSource(options:OwnerOptions & {
     const selected=select(key,turnKey,query);if(!selected)return null;
     const {snapshot,currentEpoch,floor,records,actions,finalAvailable}=selected;
     try{
+      const researchHash=createPrefixFingerprint();for(const record of selected.current)researchHash.add(record);
       const input=assembleContext(records,{summary:query.goalSummary,
         summaryThroughSequence:Math.min(query.summaryThroughSequence??0,snapshot.revision),
         sequence:snapshot.revision,activeSeconds:query.activeSeconds,activeTimeKnown:false,
         historyComplete:snapshot.historyComplete&&floor>=0,nowMs:options.wallNow(),previousEstimate:query.previousEstimate,
         runtime:query.runtime,currentTurnId:selected.currentTurnId});
-      return {epoch:currentEpoch,revision:snapshot.revision,userFingerprint:selected.userFingerprint,input,
+      return {epoch:currentEpoch,revision:snapshot.revision,userFingerprint:selected.userFingerprint,input,researchFingerprint:researchHash.finish(),
          currentActionId:[...actions.keys()].at(-1)??null,contentFingerprint:selected.contentFingerprint,
         finalAvailable,...paceFor(key,selected,query)};
     }catch{return null;}
@@ -209,15 +219,15 @@ export function createConversationSource(options:OwnerOptions & {
     turnKey(key:string):string|null {return bindings.get(key)?.turnKey??null;},
     stop(key:string):void {
       const binding=bindings.get(key);if(!binding)return;
-      executionCache.delete(key);
+      executionCache.delete(key);researchBridges.delete(key);
       owner.remove(key);invalidateScopes(key);owner.attach(key,binding.hostId,binding.turnKey);owner.setActive(key,false);
       binding.epoch=allocate();binding.sourceEpoch=0;
     },
-    remove(key:string):void {owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);},
+    remove(key:string):void {owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);researchBridges.delete(key);},
     prune(retain:(key:string)=>boolean):void {
-      for(const key of bindings.keys())if(!retain(key)){owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);}
+      for(const key of bindings.keys())if(!retain(key)){owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);researchBridges.delete(key);}
     },
     measurementEpoch,
-    async close():Promise<void>{bindings.clear();scopesByKey.clear();measurementEpochs.clear();executionCache.clear();await owner.close();}
+    async close():Promise<void>{bindings.clear();scopesByKey.clear();measurementEpochs.clear();executionCache.clear();researchBridges.clear();await owner.close();}
   };
 }
