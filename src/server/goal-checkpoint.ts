@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { LifecycleStateTimeoutError, withLifecycleStateLock } from "../lifecycle/state-lock.js";
 import type { CountdownPrediction } from "../ui/countdown.js";
 
 const SCHEMA_VERSION = 1 as const;
@@ -11,6 +12,8 @@ const MAX_RECORDS = 256;
 const MAX_SECONDS = 31_536_000;
 const MAX_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_OPAQUE_STRING_LENGTH = 256;
+const CHECKPOINT_LOCK_FILE = ".goal-checkpoint.lock";
+const CHECKPOINT_LOCK_TIMEOUT_MS = 500;
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 const RECORD_KEYS = [
@@ -373,6 +376,24 @@ async function writeAtomically(
   }
 }
 
+async function withCheckpointLock<T>(
+  directory: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  await trustedDirectory(directory);
+  try {
+    return await withLifecycleStateLock(
+      join(directory, CHECKPOINT_LOCK_FILE),
+      operation,
+      CHECKPOINT_LOCK_TIMEOUT_MS
+    );
+  } catch (error) {
+    if (error instanceof GoalCheckpointError) throw error;
+    if (error instanceof LifecycleStateTimeoutError) throw checkpointError("storage lock timed out");
+    throw checkpointError("storage lock is unavailable");
+  }
+}
+
 export function createGoalCheckpointRepository(options: {
   directory: string;
   sourceIdentity: string;
@@ -385,15 +406,18 @@ export function createGoalCheckpointRepository(options: {
   const sourceIdentity = opaqueString(options.sourceIdentity, "source identity");
   const now = options.now ?? Date.now;
   if (typeof options.isOwner !== "function") throw checkpointError("ownership callback is invalid");
-  const path = join(options.directory, FILE_NAME);
+  const directory = resolve(options.directory);
+  const path = join(directory, FILE_NAME);
   let pending: Promise<void> = Promise.resolve();
 
   const load = async (): Promise<GoalCheckpointRecord[]> => {
-    await trustedDirectory(options.directory);
-    const target = await regularTarget(path);
-    if (target === null) return [];
-    const serialized = await readBounded(path, target);
-    return parseDocument(serialized, sourceIdentity, safeNow(now));
+    return withCheckpointLock(directory, async () => {
+      await trustedDirectory(directory);
+      const target = await regularTarget(path);
+      if (target === null) return [];
+      const serialized = await readBounded(path, target);
+      return parseDocument(serialized, sourceIdentity, safeNow(now));
+    });
   };
 
   const save = (records: readonly GoalCheckpointRecord[]): Promise<void> => {
@@ -408,7 +432,9 @@ export function createGoalCheckpointRepository(options: {
     }
 
     const operation = pending.then(async () => {
-      await writeAtomically(options.directory, path, serialized, options.isOwner);
+      await withCheckpointLock(directory, async () => {
+        await writeAtomically(directory, path, serialized, options.isOwner);
+      });
     });
     pending = operation.catch(() => undefined);
     return operation;

@@ -264,4 +264,47 @@ describe("goal checkpoint repository", () => {
     await Promise.all([firstSave, secondSave]);
     await expect(source.load()).resolves.toEqual([record(2)]);
   });
+
+  it("fences separate repository instances while ownership is delayed and lost", async () => {
+    const directory = await makeDirectory();
+    let releaseFirstOwner: (() => void) | undefined;
+    let firstOwnerEntered: (() => void) | undefined;
+    let secondOwnerEntered: (() => void) | undefined;
+    const firstOwnerGate = new Promise<void>(resolve => { releaseFirstOwner = resolve; });
+    const firstOwnerStarted = new Promise<void>(resolve => { firstOwnerEntered = resolve; });
+    const secondOwnerStarted = new Promise<void>(resolve => { secondOwnerEntered = resolve; });
+    const first = createGoalCheckpointRepository({
+      directory,
+      sourceIdentity: "source-a",
+      isOwner: async () => {
+        firstOwnerEntered!();
+        await firstOwnerGate;
+        return false;
+      },
+      now: () => 1_700_000_000_000
+    });
+    const second = createGoalCheckpointRepository({
+      directory,
+      sourceIdentity: "source-a",
+      isOwner: async () => {
+        secondOwnerEntered!();
+        return true;
+      },
+      now: () => 1_700_000_000_000
+    });
+
+    const firstSave = first.save([record(1)]);
+    await firstOwnerStarted;
+    const secondSave = second.save([record(2)]);
+    const raceResult = await Promise.race([
+      secondOwnerStarted.then(() => "entered"),
+      new Promise(resolve => setTimeout(() => resolve("blocked"), 50))
+    ]);
+    expect(raceResult).toBe("blocked");
+
+    releaseFirstOwner!();
+    await expect(firstSave).rejects.toThrow(/owner|ownership/i);
+    await expect(secondSave).resolves.toBeUndefined();
+    await expect(second.load()).resolves.toEqual([record(2)]);
+  });
 });

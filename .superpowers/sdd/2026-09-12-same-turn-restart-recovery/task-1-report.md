@@ -105,3 +105,32 @@ Process exited successfully after generate:capabilities and tsc --noEmit
 
 No full suite was run. The controller reported its main HTTP/core 43-test
 baseline as passing.
+
+## Cross-owner fencing follow-up
+
+Red test before the lock change:
+
+```text
+npm test -- --run tests/server/goal-checkpoint.test.ts --maxWorkers=1
+Test Files  1 failed (15 tests | 1 failed)
+Failure: a second repository instance entered its owner callback while the
+first instance was delayed before losing ownership.
+```
+
+The repository now uses `withLifecycleStateLock` on the separate
+`.goal-checkpoint.lock` path with a 500 ms bounded timeout. Both load and the
+entire write operation are fenced; the existing ownership check remains inside
+the write lock, after the lock holder revalidates directory and target identity.
+This path is separate from settings/state locking to avoid lock inversion.
+
+Green verification:
+
+```text
+npm test -- --run tests/server/goal-checkpoint.test.ts --maxWorkers=1
+Test Files  1 passed (15 tests)
+
+npm run typecheck
+Process exited successfully after generate:capabilities and tsc --noEmit
+```
+
+No full suite was run.
