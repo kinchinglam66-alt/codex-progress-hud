@@ -70,3 +70,38 @@ target.
 
 Commit: final Task 1 commit containing this report; the exact hash is reported
 with the handoff.
+
+## Controller review follow-up
+
+Review red run after adding four targeted real-filesystem tests:
+
+```text
+npm test -- --run tests/server/goal-checkpoint.test.ts --maxWorkers=1
+Test Files  1 failed (14 tests | 4 failed)
+Failures: linked ancestor accepted, hard-linked target accepted, duplicate
+session with different turns accepted, and temporary hard-link race accepted.
+```
+
+The follow-up uses the existing safe-files security pattern equivalently: the
+directory is resolved and realpath-verified so linked ancestors are rejected;
+regular targets and opened handles require `nlink === 1`; the temporary file
+identity is captured from the still-open handle before close and later matched
+to the pathname; and any session appearing with more than one turn is rejected
+before persistence or restore.
+
+Focused green run:
+
+```text
+npm test -- --run tests/server/goal-checkpoint.test.ts --maxWorkers=1
+Test Files  1 passed (14 tests)
+```
+
+Follow-up typecheck:
+
+```text
+npm run typecheck
+Process exited successfully after generate:capabilities and tsc --noEmit
+```
+
+No full suite was run. The controller reported its main HTTP/core 43-test
+baseline as passing.

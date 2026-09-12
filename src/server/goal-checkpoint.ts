@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, rename, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { CountdownPrediction } from "../ui/countdown.js";
 
 const SCHEMA_VERSION = 1 as const;
@@ -57,6 +57,7 @@ interface FileIdentity {
   dev: number;
   ino: number;
   birthtimeMs: number;
+  nlink: number;
 }
 
 class GoalCheckpointError extends Error {
@@ -174,11 +175,17 @@ function validateRecord(value: unknown): GoalCheckpointRecord {
 }
 
 function uniqueRecords(records: readonly GoalCheckpointRecord[]): GoalCheckpointRecord[] {
-  const seen = new Set<string>();
+  const seenTurns = new Set<string>();
+  const seenSessions = new Map<string, string>();
   for (const record of records) {
-    const key = `${record.sessionKey}\u0000${record.turnKey}`;
-    if (seen.has(key)) throw checkpointError("contains duplicate session-turn records");
-    seen.add(key);
+    const previousTurn = seenSessions.get(record.sessionKey);
+    if (previousTurn !== undefined && previousTurn !== record.turnKey) {
+      throw checkpointError("contains multiple turns for one session");
+    }
+    seenSessions.set(record.sessionKey, record.turnKey);
+    const sessionTurn = `${record.sessionKey}\u0000${record.turnKey}`;
+    if (seenTurns.has(sessionTurn)) throw checkpointError("contains duplicate session-turn records");
+    seenTurns.add(sessionTurn);
   }
   return records.map(record => ({
     ...record,
@@ -199,11 +206,12 @@ function newestRecords(records: readonly GoalCheckpointRecord[]): GoalCheckpoint
   return [...records].sort(compareNewest).slice(0, MAX_RECORDS);
 }
 
-function identity(stats: { dev: number; ino: number; birthtimeMs: number }): FileIdentity {
+function identity(stats: { dev: number; ino: number; birthtimeMs: number; nlink: number }): FileIdentity {
   return {
     dev: stats.dev,
     ino: stats.ino,
-    birthtimeMs: stats.birthtimeMs
+    birthtimeMs: stats.birthtimeMs,
+    nlink: stats.nlink
   };
 }
 
@@ -216,8 +224,13 @@ function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
 
 async function trustedDirectory(directory: string): Promise<FileIdentity> {
   try {
-    const stats = await lstat(directory);
+    const absolute = resolve(directory);
+    const stats = await lstat(absolute);
     if (!stats.isDirectory() || stats.isSymbolicLink()) throw checkpointError("directory is not trusted");
+    const canonical = await realpath(absolute);
+    const comparableCanonical = process.platform === "win32" ? canonical.toLowerCase() : canonical;
+    const comparableAbsolute = process.platform === "win32" ? absolute.toLowerCase() : absolute;
+    if (comparableCanonical !== comparableAbsolute) throw checkpointError("directory is not trusted");
     return identity(stats);
   } catch (error) {
     if (error instanceof GoalCheckpointError) throw error;
@@ -228,7 +241,9 @@ async function trustedDirectory(directory: string): Promise<FileIdentity> {
 async function regularTarget(path: string): Promise<FileIdentity | null> {
   try {
     const stats = await lstat(path);
-    if (!stats.isFile() || stats.isSymbolicLink()) throw checkpointError("target is not a regular file");
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+      throw checkpointError("target is not a single-link regular file");
+    }
     return identity(stats);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -252,7 +267,7 @@ async function readBounded(path: string, expectedIdentity: FileIdentity): Promis
   try {
     handle = await open(path, constants.O_RDONLY | O_NOFOLLOW);
     const stats = await handle.stat();
-    if (!stats.isFile()) throw checkpointError("target is not a regular file");
+    if (!stats.isFile() || stats.nlink !== 1) throw checkpointError("target is not a single-link regular file");
     if (!sameIdentity(expectedIdentity, identity(stats))) throw checkpointError("target changed");
     if (stats.size > MAX_BYTES) throw checkpointError("file is too large");
     const buffer = Buffer.allocUnsafe(MAX_BYTES + 1);
@@ -324,15 +339,19 @@ async function writeAtomically(
   try {
     const handle = await open(temporaryPath, "wx", 0o600);
     ownsTemporary = true;
+    let temporaryIdentity: FileIdentity | undefined;
     try {
       await handle.writeFile(serialized, "utf8");
       await handle.sync();
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.nlink !== 1) {
+        throw checkpointError("temporary file is not a single-link regular file");
+      }
+      temporaryIdentity = identity(opened);
     } finally {
       await handle.close();
     }
-
-    const temporaryIdentity = await regularTarget(temporaryPath);
-    if (temporaryIdentity === null) throw checkpointError("temporary file disappeared");
+    if (temporaryIdentity === undefined) throw checkpointError("temporary file identity is unavailable");
     await requireOwner(isOwner);
     const afterFlushDirectory = await trustedDirectory(directory);
     const afterFlushTarget = await regularTarget(path);

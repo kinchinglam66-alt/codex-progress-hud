@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, readdir, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -155,6 +155,70 @@ describe("goal checkpoint repository", () => {
 
     await expect(repository(directory).load()).rejects.toThrow(/regular|link|trusted|checkpoint/i);
     await expect(repository(directory).save([record()])).rejects.toThrow(/regular|link|trusted|checkpoint/i);
+  });
+
+  it("refuses a checkpoint directory reached through a linked ancestor", async () => {
+    const root = await makeDirectory();
+    const outside = await makeDirectory();
+    const linkedAncestor = join(root, "linked-ancestor");
+    await mkdir(join(outside, "leaf"));
+    try {
+      await symlink(outside, linkedAncestor, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM" || (error as NodeJS.ErrnoException).code === "EACCES") return;
+      throw error;
+    }
+
+    await expect(repository(join(linkedAncestor, "leaf")).load()).rejects.toThrow(/link|trusted|directory/i);
+  });
+
+  it("refuses checkpoint targets with more than one hard link", async () => {
+    const directory = await makeDirectory();
+    const path = await checkpointPath(directory);
+    await repository(directory).save([record()]);
+    try {
+      await link(path, join(directory, "checkpoint-alias.json"));
+    } catch (error) {
+      if (["EACCES", "EPERM", "ENOSYS"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
+      throw error;
+    }
+
+    await expect(repository(directory).load()).rejects.toThrow(/link|regular|checkpoint/i);
+    await expect(repository(directory).save([record(2)])).rejects.toThrow(/link|regular|checkpoint/i);
+  });
+
+  it("rejects two turns for the same session instead of restoring ambiguously", async () => {
+    const directory = await makeDirectory();
+    const first = record(1);
+    const secondTurn = { ...record(2), sessionKey: first.sessionKey, turnKey: "turn-different" };
+
+    await expect(repository(directory).save([first, secondTurn])).rejects.toThrow(/duplicate|session|turn/i);
+  });
+
+  it("rejects a temporary file that becomes hard-linked before replacement", async () => {
+    const directory = await makeDirectory();
+    let ownerChecks = 0;
+    const source = createGoalCheckpointRepository({
+      directory,
+      sourceIdentity: "source-a",
+      isOwner: async () => {
+        ownerChecks += 1;
+        if (ownerChecks === 2) {
+          const temporaryName = (await readdir(directory)).find(name => name.startsWith(".goal-checkpoint.json.") && name.endsWith(".tmp"));
+          expect(temporaryName).toBeDefined();
+          try {
+            await link(join(directory, temporaryName!), join(directory, "temporary-alias.tmp"));
+          } catch (error) {
+            if (["EACCES", "EPERM", "ENOSYS"].includes((error as NodeJS.ErrnoException).code ?? "")) return true;
+            throw error;
+          }
+        }
+        return true;
+      },
+      now: () => 1_700_000_000_000
+    });
+
+    await expect(source.save([record()])).rejects.toThrow(/link|regular|temporary|changed/i);
   });
 
   it("refuses a save after ownership is lost and preserves the prior file", async () => {
