@@ -3,6 +3,7 @@ import {createHash} from 'node:crypto';
 import {assembleContext} from './context-assembler.js';
 import type {GoalContextSource,GoalContextQuery} from '../server/passive-goals.js';
 import {parsePaceEvidence, type PaceContinuity, type PaceWindow} from '../estimation/pace-measurements.js';
+import type {HistorySnapshot} from './history-snapshot.js';
 
 type OwnerOptions=Parameters<typeof createContextOwner>[0];
 interface Binding {hostId:string;turnKey:string;epoch:number;sourceEpoch:number}
@@ -131,6 +132,17 @@ export function createConversationSource(options:OwnerOptions & {
     return {turnKey:nextTurnKey,startedAtMs:selected.nextTurn.atMs,identity,
       ...(options.taskHandleFor===undefined?{}:{taskHandle:options.taskHandleFor(binding.hostId,nextTurnId)})};
   };
+  const openHistory=async(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>=>{
+    const binding=bindings.get(key);
+    if(!binding||binding.turnKey!==turnKey)return null;
+    const result=await owner.openHistory(key,turnKey,signal);
+    const current=bindings.get(key);
+    if(result!==null&&(!current||current!==binding||current.turnKey!==turnKey)){
+      await result.snapshot.close();
+      throw Object.assign(new Error('source history binding changed'),{code:'SOURCE_HISTORY_BINDING_CHANGED'});
+    }
+    return result;
+  };
   const goals:GoalContextSource={epoch,measurementEpoch,health:owner.health,execution(key,turnKey){
     const snapshot=owner.snapshot(key),binding=bindings.get(key);
     if(!binding||binding.turnKey!==turnKey||!snapshot)return null;
@@ -163,7 +175,7 @@ export function createConversationSource(options:OwnerOptions & {
       Math.max(0,Math.floor(now-Math.max(0,options.wallNow()-record.atMs)));
     executionCache.set(key,{identity,boundaryMs,trustedAt:now});
     return {state,identity,boundaryMs,...(outcome===undefined?{}:{outcome})};
-  },takeover,inspect(key,turnKey,query){
+  },takeover,openHistory,inspect(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
      return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,contentFingerprint:selected.contentFingerprint,
        currentActionId:[...selected.actions.keys()].at(-1)??null,
@@ -193,7 +205,7 @@ export function createConversationSource(options:OwnerOptions & {
       if(!existing||existing.hostId!==hostId)bindings.set(key,{hostId,turnKey,epoch:allocate(),sourceEpoch:0});
       else existing.turnKey=turnKey;
     },
-    changed:owner.changed,setActive:owner.setActive,tick:owner.tick,snapshot:owner.snapshot,
+    changed:owner.changed,setActive:owner.setActive,tick:owner.tick,snapshot:owner.snapshot,openHistory,
     turnKey(key:string):string|null {return bindings.get(key)?.turnKey??null;},
     stop(key:string):void {
       const binding=bindings.get(key);if(!binding)return;

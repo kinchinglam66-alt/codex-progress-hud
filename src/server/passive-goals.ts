@@ -8,6 +8,7 @@ import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
 import {createHash} from 'node:crypto';
 import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
 import type {GoalCheckpointRecord} from './goal-checkpoint.js';
+import type {HistorySnapshot} from '../observer/history-snapshot.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
@@ -67,6 +68,7 @@ export interface GoalContextQuery {
   paceScope?:object;
 }
 export interface GoalContextSource {
+  openHistory?(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>;
   health?(key:string):'loading'|'ready'|'error'|'missing';
   execution?(key:string,turnKey:string):{
     state:'running'|'waiting'|'interrupted'|'failed'|'unknown';outcome?:'completed'|'interrupted'|'failed';boundaryMs?:number;identity:string

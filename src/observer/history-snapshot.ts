@@ -22,6 +22,9 @@ export interface HistorySnapshot {
   sourceEpoch: number;
   revision: number;
   coverage: HistoryCoverage;
+  // Each call opens a fresh reader over this snapshot's fixed watermark. The
+  // iterator closes its page reader automatically; callers may replay the
+  // snapshot for another planner pass until close() is called.
   records(signal: AbortSignal): AsyncIterable<HistoryRecord>;
   close(): Promise<void>;
 }
@@ -66,6 +69,7 @@ function snapshotError(code: string, message: string): Error & {code: string} {
 
 export function createHistorySnapshot(source: HistorySnapshotSource): HistorySnapshot {
   let closed = false;
+  let encounteredIncompletePage = false;
   const coverage: HistoryCoverage = {
     // A snapshot is only authoritative after the iterator reaches its fixed watermark.
     complete: false,
@@ -86,6 +90,7 @@ export function createHistorySnapshot(source: HistorySnapshotSource): HistorySna
     try {
       while (!closed) {
         const page = await reader.readPage(offset, signal);
+        if (!page.coverage.complete) encounteredIncompletePage = true;
         mergeCoverage(coverage, page.coverage);
         for (const record of page.records) {
           checkCancelled(signal);
@@ -93,7 +98,7 @@ export function createHistorySnapshot(source: HistorySnapshotSource): HistorySna
           ordinal += 1;
         }
         if (page.done) {
-          coverage.complete = coverage.gaps.length === 0 && page.coverage.complete;
+          coverage.complete = !encounteredIncompletePage && coverage.gaps.length === 0 && page.coverage.complete;
           return;
         }
         if (page.nextOffset <= offset) {

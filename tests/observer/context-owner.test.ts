@@ -66,12 +66,13 @@ it('retains first objective and latest user amendment across large current-turn 
   expect(Buffer.byteLength(JSON.stringify(value.records))).toBeLessThanOrEqual(256*1024);
   expect(value.historyComplete).toBe(false);
 });
-it('stays unavailable when protected goals exceed the budget rather than reviving old context',async()=>{
+it('bounds a huge protected goal projection rather than blocking independent history reads',async()=>{
   const f=setup();f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();
   f.calls[0]!.finish({...batch,records:[{...batch.records[0],text:'x'.repeat(300000)}]});await f.flush();
-  expect(f.owner.snapshot('one')?.health).toBe('error');
-  f.time(1500);f.owner.tick();f.calls[1]!.finish({...batch,records:[]});await f.flush();
-  expect(f.owner.snapshot('one')?.health).toBe('error');
+  expect(f.owner.snapshot('one')).toMatchObject({health:'ready',projectionOnly:true,historyComplete:false});
+  expect(f.owner.snapshot('one')!.records[0]!.text!.length).toBeLessThan(300000);
+  f.time(5500);f.owner.tick();f.calls[1]!.finish({...batch,records:[]});await f.flush();
+  expect(f.owner.snapshot('one')?.health).toBe('ready');
 });
 
 it('debounces source reads then publishes persisted user content without a tool result',async()=>{

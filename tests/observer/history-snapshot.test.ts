@@ -3,6 +3,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {afterEach, describe, expect, it} from "vitest";
 import type {HistoryRecord, HistorySnapshot} from "../../src/observer/history-snapshot.js";
+import {createHistorySnapshot} from "../../src/observer/history-snapshot.js";
 import {createLocalSessionReader} from "../../src/observer/local-session-reader.js";
 
 const THREAD = "11111111-1111-4111-8111-111111111111";
@@ -53,6 +54,38 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it("keeps an earlier incomplete page authoritative after a complete terminal page", async () => {
+    let page = 0;
+    const snapshot = createHistorySnapshot({
+      identity: "verified-source",
+      sourceEpoch: 1,
+      revision: 2,
+      open: () => {
+        page = 0;
+        return {
+        readPage: async () => page++ === 0 ? {
+          records: [{id: "early", turnId: "turn-1", atMs: 1, kind: "user", text: "early"}],
+          nextOffset: 1,
+          done: false,
+          coverage: {complete: false, gaps: []}
+        } : {
+          records: [{id: "late", turnId: "turn-1", atMs: 2, kind: "assistant", text: "late"}],
+          nextOffset: 2,
+          done: true,
+          coverage: {complete: true, gaps: []}
+        },
+        close: async () => {}
+        };
+      },
+      close: async () => {}
+    });
+    const records: HistoryRecord[] = [];
+    for await (const entry of snapshot.records(signal())) records.push(entry);
+    expect(records.map(entry => entry.record.id)).toEqual(["early", "late"]);
+    expect(snapshot.coverage).toEqual({complete: false, gaps: []});
+    await snapshot.close();
+  });
+
   it("captures a fixed watermark and preserves readable history bodies", async () => {
     const largeToolOutput = "tool-result-marker:" + "x".repeat(300 * 1024);
     const initial = meta() + Array.from({length: 200}, (_, index) =>

@@ -1,19 +1,36 @@
 import type {ConversationRecord,ReadBatch} from './conversation-record.js';
+import type {HistorySnapshot} from './history-snapshot.js';
 
 interface Source {
   read(id:string,signal:AbortSignal):Promise<ReadBatch>;
+  snapshot?(id:string,signal:AbortSignal):Promise<HistorySnapshot>;
   remove(id:string):void;close():Promise<void>;
 }
 export interface ContextSnapshot {
   lastSuccessfulReadAt?:number;
   records:ConversationRecord[];revision:number;sourceEpoch:number;
   health:'loading'|'ready'|'error';historyComplete:boolean;partialLine:boolean;
-  reason:string|null;
+  reason:string|null;projectionOnly:true;
 }
 interface Entry extends ContextSnapshot {
   hostId:string;turnKey:string;due:number;active:boolean;failures:number;
   bytes:number;historyTrimmed:boolean;flight?:AbortController;operation?:Promise<void>;
-  goalRetentionFailed?:boolean;
+  goalRetentionFailed?:boolean;historyFlights:Set<AbortController>;
+}
+
+const PROJECTION_TEXT_BYTES=16*1024;
+function boundProjectionText(text:string):string {
+  if(Buffer.byteLength(text)<=PROJECTION_TEXT_BYTES)return text;
+  return Buffer.from(text).subarray(0,PROJECTION_TEXT_BYTES).toString('utf8');
+}
+function projectRecord(record:ConversationRecord):{record:ConversationRecord;trimmed:boolean} {
+  let trimmed=false;const projected={...record};
+  if(projected.text!==undefined){const text=boundProjectionText(projected.text);if(text!==projected.text){projected.text=text;trimmed=true;}}
+  if(projected.output!==undefined){const output=boundProjectionText(projected.output);if(output!==projected.output){projected.output=output;projected.outputComplete=false;trimmed=true;}}
+  return {record:projected,trimmed};
+}
+function historyBindingError():Error&{code:string} {
+  const error=new Error('source history binding changed') as Error&{code:string};error.code='SOURCE_HISTORY_BINDING_CHANGED';return error;
 }
 
 /** Owns source reads only. No inference, authorization or model quota mutations. */
@@ -25,13 +42,14 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
   const notify=(key:string)=>{try{options.onChange?.(key);}catch{/* display callback owns no source */}};
   const remove=(key:string)=>{
     const e=entries.get(key);if(!e)return;
-    e.flight?.abort();entries.delete(key);totalBytes-=e.bytes;options.source.remove(e.hostId);
+    e.flight?.abort();for(const flight of e.historyFlights)flight.abort();e.historyFlights.clear();
+    entries.delete(key);totalBytes-=e.bytes;options.source.remove(e.hostId);
   };
   const snapshot=(key:string):ContextSnapshot|null=>{
     const e=entries.get(key);if(!e)return null;
     return {records:e.records.map(r=>({...r})),revision:e.revision,sourceEpoch:e.sourceEpoch,
       ...(e.lastSuccessfulReadAt===undefined?{}:{lastSuccessfulReadAt:e.lastSuccessfulReadAt}),
-      health:e.health,historyComplete:e.historyComplete,partialLine:e.partialLine,reason:e.reason};
+      health:e.health,historyComplete:e.historyComplete,partialLine:e.partialLine,reason:e.reason,projectionOnly:true};
   };
   const start=(key:string,e:Entry)=>{
     const controller=new AbortController();e.flight=controller;inFlight++;
@@ -63,11 +81,12 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       const known=new Set(records.map(r=>r.id));
       let changed=batch.reset;
       for(const record of batch.records){if(!known.has(record.id)){known.add(record.id);records.push({...record});changed=true;}}
+      let trimmed=false;
+      records=records.map(record=>{const projected=projectRecord(record);trimmed ||= projected.trimmed;return projected.record;});
       // Exact JSON array size, without repeatedly serializing the entire
       // history for every discarded record during catch-up.
       const sizes=records.map(record=>Buffer.byteLength(JSON.stringify(record)));
       let bytes=2+sizes.reduce((sum,size)=>sum+size,0)+Math.max(0,records.length-1);
-      let trimmed=false;
       const firstUser=records.find(r=>r.kind==='user');
       let latestUser:ConversationRecord|undefined,currentUser:ConversationRecord|undefined;
       for(const record of records){
@@ -144,11 +163,37 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       else if(existing){existing.turnKey=turnKey;existing.active=true;existing.due=Math.min(existing.due,clock()+500);return;}
       if(entries.size>=32)throw Error('SOURCE_CAPACITY');
       entries.set(key,{hostId,turnKey,records:[],revision:0,sourceEpoch:0,health:'loading',
-        historyComplete:true,partialLine:false,reason:null,due:clock()+500,active:true,failures:0,bytes:0,historyTrimmed:false});
+        historyComplete:true,partialLine:false,reason:null,projectionOnly:true,due:clock()+500,active:true,failures:0,bytes:0,
+        historyTrimmed:false,historyFlights:new Set()});
     },
     changed(key:string):void {const e=entries.get(key);if(e&&!closed)e.due=Math.min(e.due,clock()+500);},
     setActive(key:string,active:boolean):void {const e=entries.get(key);if(!e||closed)return;e.active=active;if(active)e.due=clock()+500;},
     snapshot,remove,
+    async openHistory(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null> {
+      const e=entries.get(key),snapshotReader=options.source.snapshot;
+      if(!e||e.turnKey!==turnKey||snapshotReader===undefined)return null;
+      const currentRecord=[...e.records].reverse().find(record=>record.turnId!==null&&
+        (options.turnKeyFor?options.turnKeyFor(e.hostId,record.turnId):record.turnId)===turnKey);
+      if(!currentRecord?.turnId)return null;
+      const boundHostId=e.hostId,boundSourceEpoch=e.sourceEpoch,boundCurrentTurnId=currentRecord.turnId;
+      const controller=new AbortController();
+      const relay=()=>controller.abort();
+      signal.addEventListener('abort',relay,{once:true});e.historyFlights.add(controller);
+      let history:HistorySnapshot|undefined;
+      try{
+        history=await snapshotReader(boundHostId,controller.signal);
+        const current=entries.get(key),stillCurrent=current?.records.some(record=>record.turnId===boundCurrentTurnId&&
+          (options.turnKeyFor?options.turnKeyFor(boundHostId,record.turnId):record.turnId)===turnKey);
+        if(closed||controller.signal.aborted||current!==e||current.hostId!==boundHostId||current.turnKey!==turnKey||
+          current.sourceEpoch!==boundSourceEpoch||!stillCurrent)throw historyBindingError();
+        return {snapshot:history,currentTurnId:boundCurrentTurnId};
+      }catch(error){
+        if(history!==undefined){try{await history.close();}catch{/* stale history must not leak */}}
+        throw error;
+      }finally{
+        signal.removeEventListener('abort',relay);e.historyFlights.delete(controller);
+      }
+    },
     health(key:string):ContextSnapshot['health']|'missing' {return entries.get(key)?.health??'missing';},
     sourceEpoch(key:string):number|null {return entries.get(key)?.sourceEpoch??null;},
     tick():void {
@@ -170,7 +215,9 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
     },
     close():Promise<void> {
       if(closing)return closing;
-      closed=true;for(const e of entries.values())e.flight?.abort();
+      closed=true;for(const e of entries.values()){
+        e.flight?.abort();for(const flight of e.historyFlights)flight.abort();e.historyFlights.clear();
+      }
       const drain=(async()=>{
         await options.source.close();await Promise.allSettled([...operations]);
         entries.clear();totalBytes=0;

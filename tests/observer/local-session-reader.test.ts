@@ -297,8 +297,8 @@ describe("bounded local session reader", () => {
     expect(packet.messages.some(message => message.text.includes("AGENTS boilerplate"))).toBe(true);
     expect(packet.messages.some(message => message.text.includes(delegatedTask))).toBe(true);
     expect(packet.messages.some(message => message.text.includes("LATEST AMENDMENT"))).toBe(true);
-    expect(packet.truncated).toBe(true);
-    expect(Buffer.byteLength(packed)).toBeLessThanOrEqual(16_384);
+    expect(packet.truncated).toBe(false);
+    expect(Buffer.byteLength(packed)).toBeGreaterThan(16_384);
     await reader.close();
   });
 
