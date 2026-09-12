@@ -3,6 +3,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process"
 export interface SpawnedHud {
   pid: number;
   terminate(): Promise<void>;
+  exited?:Promise<'exited'|'terminated'>;
   outcome?(): "running" | "termination_requested" | "exited" | "terminated" | "unknown";
 }
 
@@ -42,14 +43,18 @@ export function createProcessLauncher(
       child.unref();
       let childOutcome: "running" | "termination_requested" | "exited" | "terminated" | "unknown" = "running";
       let terminationRequested = false;
+      let confirmExit!:(outcome:'exited'|'terminated')=>void;
+      const exited=new Promise<'exited'|'terminated'>(resolve=>{confirmExit=resolve;});
       child.once?.("error", () => {
         if (childOutcome === "running" || childOutcome === "termination_requested") childOutcome = "unknown";
       });
       child.once?.("exit", () => {
         childOutcome = terminationRequested ? "terminated" : "exited";
+        confirmExit(childOutcome);
       });
       return {
         pid: child.pid,
+        exited,
         outcome: () => childOutcome,
         async terminate(): Promise<void> {
           let killed: boolean;

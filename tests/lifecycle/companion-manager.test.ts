@@ -3,8 +3,9 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createCompanionManager } from "../../src/lifecycle/companion-manager.js";
-import { createProcessLauncher } from "../../src/lifecycle/process-launcher.js";
+import { createCompanionManager,type CompanionManagerDependencies } from "../../src/lifecycle/companion-manager.js";
+import { createProcessLauncher,type ProcessLauncher } from "../../src/lifecycle/process-launcher.js";
+import {createStartupClaimStore} from '../../src/lifecycle/startup-claim.js';
 import { createLifecycleStateStore } from "../../src/lifecycle/state-store.js";
 import { LifecycleStateTimeoutError } from "../../src/lifecycle/state-lock.js";
 import type { HudHealth, LifecycleStateStore } from "../../src/lifecycle/types.js";
@@ -43,6 +44,8 @@ async function harness(options: {
   online?: boolean;
   spawnMakesOnline?: boolean;
   shutdownStops?: boolean;
+  exitOnTerminate?:boolean;
+  managerOverrides?:Partial<CompanionManagerDependencies>;
   logger?: { write(entry: OperationalLogEntry): Promise<void> };
   reportWriter?: (input: any) => Promise<{ path: string }>;
 } = {}) {
@@ -66,13 +69,17 @@ async function harness(options: {
   let online = options.online ?? false;
   let visibility: HudHealth["visibility"] = "visible";
   let elapsed = 0;
+  let resolveExit:((outcome:'exited'|'terminated')=>void)|undefined;
+  const finishChild=(outcome:'exited'|'terminated'='exited')=>{online=false;resolveExit?.(outcome);};
   const terminate = vi.fn(async () => {
     online = false;
+    if(options.exitOnTerminate!==false)finishChild('terminated');
   });
   const launcher = {
-    spawnHud: vi.fn(async () => {
+    spawnHud: vi.fn<ProcessLauncher['spawnHud']>(async () => {
       if (options.spawnMakesOnline ?? true) online = true;
-      return { pid: compatibleHealth.pid, terminate };
+      const exited=new Promise<'exited'|'terminated'>(resolve=>{resolveExit=resolve;});
+      return { pid: compatibleHealth.pid, terminate,exited };
     })
   };
   const offline = () => new HudClientError("OFFLINE", "not reachable");
@@ -92,7 +99,7 @@ async function harness(options: {
       visibility = "hidden";
     }),
     shutdown: vi.fn(async () => {
-      if (options.shutdownStops ?? true) online = false;
+      if (options.shutdownStops ?? true) finishChild();
     }),
     currentLease: vi.fn<() => { id: string; ownerNonce: string; expiresAt: number } | undefined>(() => undefined),
     status: vi.fn(async () => ({
@@ -145,6 +152,7 @@ async function harness(options: {
       elapsed += milliseconds;
     },
     now: () => elapsed,
+    startupClaims:createStartupClaimStore(directory,{now:()=>elapsed,processAlive:()=>true}),
     recoveryCooldownMs: 60_000,
     logger,
     diagnostics: {
@@ -156,7 +164,8 @@ async function harness(options: {
       installManifestPath: paths.installManifestPath,
       dataDirectoryPath: directory
     },
-    ...(options.reportWriter === undefined ? {} : { reportWriter: options.reportWriter })
+    ...(options.reportWriter === undefined ? {} : { reportWriter: options.reportWriter }),
+    ...options.managerOverrides
   });
   return {
     directory,
@@ -169,6 +178,7 @@ async function harness(options: {
     manager,
     logger,
     delays,
+    finishChild,
     setOnline(value: boolean) {
       online = value;
     }
@@ -460,6 +470,47 @@ describe("companion lifecycle manager", () => {
     expect(first.kind).toBe("ready");
     expect(second.kind).toBe("ready");
     expect(launcher.spawnHud).toHaveBeenCalledOnce();
+  });
+
+  it('rechecks disable after claim acquisition and manifest work before spawning',async()=>{
+    let fixture:Awaited<ReturnType<typeof harness>>;
+    fixture=await harness({managerOverrides:{pathExists:async()=>{await fixture.store.setDesiredState('off');return true;}}});
+    expect(await fixture.manager.open()).toMatchObject({code:'MANUALLY_DISABLED'});
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+  });
+
+  it('keeps a timed-out initializing child fenced when termination is unconfirmed',async()=>{
+    const fixture=await harness({spawnMakesOnline:false,exitOnTerminate:false,managerOverrides:{startupTimeoutMs:20,shutdownTimeoutMs:20}});
+    expect(await fixture.manager.open()).toMatchObject({code:'START_TIMEOUT'});
+    expect(await fixture.manager.open()).toMatchObject({code:'START_TIMEOUT'});
+    expect(fixture.launcher.spawnHud).toHaveBeenCalledOnce();
+    fixture.setOnline(true);
+    expect(await fixture.manager.open()).toMatchObject({observedState:'running'});
+    expect(fixture.launcher.spawnHud).toHaveBeenCalledOnce();fixture.finishChild();
+  });
+
+  it('attaches when an incumbent becomes ready during prelaunch work',async()=>{
+    let fixture:Awaited<ReturnType<typeof harness>>;
+    fixture=await harness({managerOverrides:{pathExists:async()=>{fixture.setOnline(true);return true;}}});
+    expect(await fixture.manager.open()).toMatchObject({observedState:'running'});
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+  });
+
+  it('persists a correlated natural child exit after readiness',async()=>{
+    const fixture=await harness();await fixture.manager.open();fixture.finishChild();
+    await vi.waitFor(()=>expect(vi.mocked(fixture.logger.write).mock.calls.map(([entry])=>entry)).toEqual(expect.arrayContaining([
+      expect.objectContaining({event:'child_exit',role:'manager',childPid:compatibleHealth.pid,generation:1,childOutcome:'exited',attemptId:expect.any(String)})
+    ])));
+  });
+
+  it('does not clear runtime or claim shutdown completion on a termination request alone',async()=>{
+    const fixture=await harness({shutdownStops:false,exitOnTerminate:false});
+    await fixture.manager.open();const closing=fixture.manager.close();
+    await vi.waitFor(()=>expect(fixture.terminate).toHaveBeenCalledOnce());
+    expect(await closing).toMatchObject({code:'SHUTDOWN_TIMEOUT'});
+    expect(await fixture.store.readRuntime()).not.toBeNull();
+    expect(vi.mocked(fixture.logger.write).mock.calls.some(([entry])=>entry.event==='shutdown_complete')).toBe(false);
+    fixture.finishChild('terminated');
   });
 
   it("coalesces startup across independent managers sharing one data directory", async () => {
@@ -2038,6 +2089,7 @@ describe("process launcher", () => {
     expect(naturallyExited.outcome?.()).toBe("running");
     naturalChild.emitExit();
     expect(naturallyExited.outcome?.()).toBe("exited");
+    await expect(naturallyExited.exited).resolves.toBe('exited');
 
     const terminated = await launcher.spawnHud("C:\\Program Files\\HUD\\hud.exe", { generation: 7 });
     await terminated.terminate();
@@ -2045,6 +2097,7 @@ describe("process launcher", () => {
     expect(terminated.outcome?.()).toBe("termination_requested");
     terminatedChild.emitExit();
     expect(terminated.outcome?.()).toBe("terminated");
+    await expect(terminated.exited).resolves.toBe('terminated');
 
     const killFailure = new Error("kill failed");
     const failingChild = {

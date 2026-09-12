@@ -58,7 +58,7 @@ const TASK_STATUSES = new Set<TaskStatus>([
 ]);
 const OPERATIONAL_CODES = new Set<OperationalEventCode>([
   "startup_requested", "startup_ready", "startup_failed", "shutdown_requested",
-  "shutdown_complete", "shutdown_timeout", "port_conflict", "protocol_mismatch",
+  "shutdown_complete", "shutdown_timeout", "port_conflict", "protocol_mismatch", "child_exit",
   "crash_recovery", "hook_received", "hook_failed", "lease_acquired", "lease_expired",
   "late_attach", "stale_revision"
 ]);

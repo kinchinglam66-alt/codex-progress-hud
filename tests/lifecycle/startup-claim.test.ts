@@ -41,8 +41,8 @@ describe("startup claim", () => {
   it("takes over an expired claim and does not let the old owner release it", async () => {
     const directory = await claimDirectory();
     let clock = 100;
-    const first = createStartupClaimStore(directory, { now: () => clock });
-    const second = createStartupClaimStore(directory, { now: () => clock });
+    const first = createStartupClaimStore(directory, { now: () => clock, processAlive:()=>false });
+    const second = createStartupClaimStore(directory, { now: () => clock, processAlive:()=>false });
     const original = await first.tryAcquire(3, 200);
     expect(original.kind).toBe("acquired");
     if (original.kind !== "acquired") throw new Error("expected original claim");
@@ -61,6 +61,20 @@ describe("startup claim", () => {
       expiresAt: 1_000
     });
     await replacement.lease.release();
+  });
+
+  it('keeps expired ownership while its launcher or bound child may still be alive',async()=>{
+    const directory=await claimDirectory();let clock=100,ownerAlive=true,childAlive=true;
+    const make=()=>createStartupClaimStore(directory,{now:()=>clock,processAlive:(pid:number)=>pid===1234?childAlive:ownerAlive});
+    const first=await make().tryAcquire(1,200);if(first.kind!=='acquired')throw Error('claim missing');
+    clock=300;expect((await make().tryAcquire(1,400)).kind).toBe('held');
+    await first.lease.bindChild(1234);ownerAlive=false;
+    expect((await make().tryAcquire(2,500)).kind).toBe('held');
+    childAlive=false;
+    const replacement=await make().tryAcquire(2,600);expect(replacement.kind).toBe('acquired');
+    await first.lease.release();
+    expect((await make().tryAcquire(2,600)).kind).toBe('held');
+    if(replacement.kind==='acquired')await replacement.lease.release();
   });
 
   it("attaches to a claim during the transient hard-link publication window", async () => {

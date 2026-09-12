@@ -15,6 +15,7 @@ import type { FileSystemOperations, TrustedDirectory } from "./safe-files.js";
 
 export type OperationalEventCode =
   | "startup_requested"
+  | "child_exit"
   | "startup_ready"
   | "startup_failed"
   | "shutdown_requested"
@@ -52,6 +53,7 @@ export interface OperationalLoggerOptions {
 }
 
 const EVENT_CODES = new Set<OperationalEventCode>([
+  "child_exit",
   "startup_requested",
   "startup_ready",
   "startup_failed",

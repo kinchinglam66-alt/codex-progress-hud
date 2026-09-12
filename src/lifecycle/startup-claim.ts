@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   link,
+  rename,
   unlink,
   type FileHandle
 } from "node:fs/promises";
@@ -18,9 +19,12 @@ export interface StartupClaim {
   generation: number;
   ownerNonce: string;
   expiresAt: number;
+  ownerPid?: number;
+  childPid?: number;
 }
 
 export interface StartupClaimLease extends StartupClaim {
+  bindChild(pid:number):Promise<void>;
   release(): Promise<void>;
 }
 
@@ -67,7 +71,8 @@ function assertClaim(claim: unknown): asserts claim is StartupClaim {
     candidate.ownerNonce.length > 64 ||
     !Number.isSafeInteger(candidate.expiresAt) ||
     (candidate.expiresAt as number) < 0 ||
-    Object.keys(candidate).some((key) => !["generation", "ownerNonce", "expiresAt"].includes(key))
+    [candidate.ownerPid,candidate.childPid].some(pid=>pid!==undefined&&(!Number.isSafeInteger(pid)||(pid as number)<=0)) ||
+    Object.keys(candidate).some((key) => !["generation", "ownerNonce", "expiresAt", "ownerPid", "childPid"].includes(key))
   ) throw new Error("startup claim is invalid");
 }
 
@@ -153,8 +158,15 @@ async function createClaimFile(
   }
 }
 
-export function createStartupClaimStore(dataDirectory: string, options: { now?: () => number } = {}): StartupClaimStore {
+export function createStartupClaimStore(dataDirectory: string, options: { now?: () => number;processAlive?:(pid:number)=>boolean } = {}): StartupClaimStore {
   const now = options.now ?? Date.now;
+  const processAlive=options.processAlive??((pid:number)=>{
+    try{process.kill(pid,0);return true;}catch(error){return (error as NodeJS.ErrnoException).code!=='ESRCH';}
+  });
+  const mayBeAlive=(pid:number|undefined)=>{
+    if(pid===undefined)return false;
+    try{return processAlive(pid);}catch{return true;}
+  };
   const claimPath = join(dataDirectory, CLAIM_FILENAME);
   let trustedDirectoryPromise: Promise<TrustedDirectory> | undefined;
   const trustedDirectory = () => trustedDirectoryPromise ??= ensureTrustedDirectory(dataDirectory);
@@ -166,26 +178,51 @@ export function createStartupClaimStore(dataDirectory: string, options: { now?: 
       const directory = await trustedDirectory();
       for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
         await assertTrustedDirectory(directory, nodeFileSystemOperations);
-        const candidate: StartupClaim = { generation, ownerNonce: randomUUID(), expiresAt };
+        const candidate: StartupClaim = { generation, ownerNonce: randomUUID(), expiresAt,ownerPid:process.pid };
         const created = await createClaimFile(directory, claimPath, candidate);
         if (created !== undefined) {
           let released = false;
+          let currentIdentity=created;
+          let mutations:Promise<void>=Promise.resolve();
+          const serialize=(operation:()=>Promise<void>)=>{
+            const result=mutations.then(operation);mutations=result.catch(()=>undefined);return result;
+          };
           return {
             kind: "acquired",
             lease: {
               ...candidate,
-              async release(): Promise<void> {
+              bindChild(pid:number):Promise<void> {return serialize(async()=>{
+                if(released||!Number.isSafeInteger(pid)||pid<=0)throw Error('startup child binding invalid');
+                await assertTrustedDirectory(directory,nodeFileSystemOperations);
+                const existing=await readClaim(directory,claimPath);
+                if(!existing||existing.identity.dev!==currentIdentity.dev||existing.identity.ino!==currentIdentity.ino)throw Error('startup ownership changed');
+                if(candidate.childPid!==undefined&&candidate.childPid!==pid)throw Error('startup child already bound');
+                const temporaryName=`${CLAIM_FILENAME}.${randomUUID()}.bind.tmp`,temporaryPath=join(directory.path,temporaryName);
+                let handle:FileHandle|undefined;
+                try{
+                  handle=await openVerifiedCreate(directory,temporaryName,nodeFileSystemOperations);
+                  await handle.writeFile(JSON.stringify({...candidate,childPid:pid})+'\n');await handle.sync();
+                  const identity=await handle.stat({bigint:true});await handle.close();handle=undefined;
+                  await assertTrustedDirectory(directory,nodeFileSystemOperations);
+                  const current=await claimFileInformation(claimPath),temporary=await claimFileInformation(temporaryPath);
+                  if(!current||current.dev!==currentIdentity.dev||current.ino!==currentIdentity.ino||!temporary||temporary.dev!==identity.dev||temporary.ino!==identity.ino)throw Error('startup ownership changed');
+                  await rename(temporaryPath,claimPath);
+                  currentIdentity={dev:identity.dev,ino:identity.ino};candidate.childPid=pid;
+                }finally{await handle?.close().catch(()=>undefined);await unlink(temporaryPath).catch(()=>undefined);}
+              });},
+              release(): Promise<void> {return serialize(async()=>{
                 if (released) return;
                 released = true;
                 await assertTrustedDirectory(directory, nodeFileSystemOperations);
-                await unlinkIfIdentical(claimPath, created, undefined, nodeLifecycleStateLockFileSystem).catch(() => false);
-              }
+                await unlinkIfIdentical(claimPath, currentIdentity, undefined, nodeLifecycleStateLockFileSystem).catch(() => false);
+              });}
             }
           };
         }
         const existing = await readClaim(directory, claimPath);
         if (existing === null) continue;
-        if (existing.claim.expiresAt <= now()) {
+        // PID liveness is only a conservative fence, never authority to kill a process.
+        if (existing.claim.expiresAt <= now()&&!mayBeAlive(existing.claim.childPid??existing.claim.ownerPid)) {
           await unlinkIfIdentical(claimPath, existing.identity, undefined, nodeLifecycleStateLockFileSystem).catch(() => false);
           continue;
         }

@@ -339,6 +339,22 @@ export function createCompanionManager(
     return await resultBeforeDeadline(operation, deadline) !== OPERATION_DEADLINE;
   }
 
+  async function exitConfirmed(child:SpawnedHud,deadline:number):Promise<boolean>{
+    if(child.outcome?.()==='exited'||child.outcome?.()==='terminated')return true;
+    if(!child.exited)return false;
+    return await resultBeforeDeadline(child.exited,deadline)!==OPERATION_DEADLINE;
+  }
+
+  async function terminateConfirmed(child:SpawnedHud,deadline:number,context?:StartupLogContext):Promise<boolean>{
+    if(child.outcome?.()==='exited'||child.outcome?.()==='terminated')return true;
+    record({level:'info',event:'shutdown_requested',protocolVersion:PROTOCOL_VERSION},
+      context?{...context,childPid:child.pid,childOutcome:'termination_requested'}:undefined);
+    try{
+      if(!await settlesBeforeDeadline(child.terminate(),deadline))return false;
+      return await exitConfirmed(child,deadline);
+    }catch{return false;}
+  }
+
   async function clearRuntimeBefore(
     deadline: number,
     generation: number,
@@ -472,7 +488,7 @@ export function createCompanionManager(
       confirmed !== undefined &&
       confirmed.pid === spawned.pid
     ) {
-      return settlesBeforeDeadline(spawned.terminate().catch(() => undefined), deadline);
+      return terminateConfirmed(spawned, deadline);
     }
     return true;
   }
@@ -496,9 +512,26 @@ export function createCompanionManager(
   async function spawnBeforeDeadline(
     executablePath: string,
     generation: number,
-    deadline: number
+    deadline: number,
+    lease:StartupClaimLease,
+    custody:{dispatched:boolean},
+    context:StartupLogContext
   ): Promise<SpawnedHud | typeof SPAWN_DEADLINE> {
-    const spawnPromise = dependencies.launcher.spawnHud(executablePath, { generation });
+    custody.dispatched=true;
+    let launch:Promise<SpawnedHud>;
+    try{launch=dependencies.launcher.spawnHud(executablePath,{generation});}
+    catch(error){custody.dispatched=false;throw error;}
+    const spawnPromise=launch.catch(error=>{custody.dispatched=false;throw error;}).then(async child=>{
+      const binding=lease.bindChild(child.pid);
+      void child.exited?.then(async outcome=>{
+        await binding.catch(()=>undefined);
+        record({level:'info',event:'child_exit',lifecycleState:'stopped',protocolVersion:PROTOCOL_VERSION},
+          {...context,childPid:child.pid,childOutcome:outcome});
+        await lease.release();
+      }).catch(()=>undefined);
+      try{await binding;}catch(error){await terminateConfirmed(child,now()+shutdownTimeoutMs,context);throw error;}
+      return child;
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadlinePromise = new Promise<typeof SPAWN_DEADLINE>((resolve_) => {
       timer = setTimeout(() => resolve_(SPAWN_DEADLINE), Math.max(1, deadline - now()));
@@ -509,9 +542,7 @@ export function createCompanionManager(
 
     void spawnPromise.then(async (lateSpawn) => {
       const cleanupDeadline = now() + shutdownTimeoutMs;
-      if (!(await currentOnGeneration(generation, cleanupDeadline))) {
-        await retireStaleSpawn(lateSpawn, undefined, cleanupDeadline);
-      }
+      await terminateConfirmed(lateSpawn,cleanupDeadline,context);
     }).catch(() => undefined);
     return SPAWN_DEADLINE;
   }
@@ -564,6 +595,7 @@ export function createCompanionManager(
         const replacement = await startupClaims.tryAcquire(generation, deadline);
         if (replacement.kind === "acquired") return replacement.lease;
         claim = replacement.claim;
+        if(claim.expiresAt<=now())await sleep(Math.min(100,Math.max(0,deadline-now())));
         continue;
       }
       const remaining = Math.min(deadline - now(), claim.expiresAt - now());
@@ -609,26 +641,27 @@ export function createCompanionManager(
         snapshot: { observedState: "stopped", code: "INTERNAL_ERROR" }
       };
     }
+    let lease:StartupClaimLease;
     if (claim.kind === "held") {
       const coordinated = await waitForStartupClaim(generation, deadline, context, claim);
       if (!("release" in coordinated)) return coordinated;
-      try {
-        return await startOwned(generation, deadline, context);
-      } finally {
-        await coordinated.release().catch(() => undefined);
-      }
-    }
+      lease=coordinated;
+    }else lease=claim.lease;
+    const custody={dispatched:false};
     try {
-      return await startOwned(generation, deadline, context);
+      return await startOwned(generation, deadline, context,lease,custody);
     } finally {
-      await claim.lease.release().catch(() => undefined);
+      // A dispatched child keeps its durable fence until exit/absence is proven.
+      if(!custody.dispatched)await lease.release().catch(() => undefined);
     }
   }
 
   async function startOwned(
     generation: number,
     deadline: number,
-    context: StartupLogContext
+    context: StartupLogContext,
+    lease:StartupClaimLease,
+    custody:{dispatched:boolean}
   ): Promise<RunningResult> {
     const settings = await dependencies.store.readSettings(stateOptions(deadline));
     const manifest = await dependencies.store.readInstallManifest(stateOptions(deadline));
@@ -674,15 +707,33 @@ export function createCompanionManager(
 
     let spawned: SpawnedHud | typeof SPAWN_DEADLINE;
     try {
-      spawned = await spawnBeforeDeadline(executablePath, generation, deadline);
-    } catch {
-      remember("INTERNAL_ERROR");
-      recordStartupFailure("INTERNAL_ERROR", "stopped", context);
+      if(now()>=deadline)throw new LifecycleStateTimeoutError();
+      const incumbent=await readinessProbe(deadline);
+      if(!(await currentOnGeneration(generation,deadline)))return staleStartupResult(generation,deadline);
+      if(incumbent.kind==='ready'){
+        if(!await dependencies.store.writeRuntime(incumbent.health,generation,stateOptions(deadline)))return staleStartupResult(generation,deadline);
+        record({level:'info',event:'startup_ready',lifecycleState:incumbent.health.visibility==='visible'?'running':'hidden',protocolVersion:PROTOCOL_VERSION},
+          {...context,childPid:incumbent.health.pid,childOutcome:'attached'});
+        return {kind:'ready',generation,snapshot:withDesiredState('on',{observedState:incumbent.health.visibility==='visible'?'running':'hidden',health:incumbent.health})};
+      }
+      if(incumbent.kind==='terminal')return {kind:'error',code:incumbent.code,snapshot:withDesiredState('on',{observedState:'stopped',code:incumbent.code})};
+      // Synchronous launch admission only: never hold the settings lock through readiness.
+      const admission=await dependencies.store.runIfGeneration(generation,'on',()=>{
+        const pending=now()>=deadline?Promise.resolve(SPAWN_DEADLINE):spawnBeforeDeadline(executablePath,generation,deadline,lease,custody,context);
+        void pending.catch(()=>undefined); // Lock-release failure must not leave an unhandled launch rejection.
+        return {pending};
+      },stateOptions(deadline));
+      if(!admission.accepted)return staleStartupResult(generation,deadline);
+      spawned=await admission.value.pending;
+    } catch (error) {
+      const code=error instanceof LifecycleStateTimeoutError||now()>=deadline?'START_TIMEOUT':'INTERNAL_ERROR';
+      remember(code);
+      recordStartupFailure(code, "stopped", context);
       const snapshot = withDesiredState(settings.desiredState, {
         observedState: "stopped",
-        code: "INTERNAL_ERROR"
+        code
       });
-      return { kind: "error", code: "INTERNAL_ERROR", snapshot };
+      return { kind: "error", code, snapshot };
     }
     if (spawned === SPAWN_DEADLINE) {
       remember("START_TIMEOUT");
@@ -722,6 +773,7 @@ export function createCompanionManager(
       readiness = await readinessProbe(deadline);
     }
     if (readiness.kind === "terminal") {
+      await terminateConfirmed(spawned,now()+shutdownTimeoutMs,context);
       remember(readiness.code);
       const observedState =
         readiness.code === "PORT_CONFLICT"
@@ -737,6 +789,7 @@ export function createCompanionManager(
       return { kind: "error", code: readiness.code, snapshot };
     }
     if (readiness.kind === "offline") {
+      await terminateConfirmed(spawned,now()+shutdownTimeoutMs,context);
       remember("START_TIMEOUT");
       const snapshot = withDesiredState(settings.desiredState, {
         observedState: "stopped",
@@ -1034,6 +1087,7 @@ export function createCompanionManager(
       } catch (error) {
         const code = errorCode(error);
         if (code === "OFFLINE") {
+          if(ownedHud&&!await exitConfirmed(ownedHud.process,shutdownDeadline))return shutdownTimedOut(shutdownStartedAt);
           const cleared = await clearRuntimeBefore(
             shutdownDeadline,
             offSettings.generation,
@@ -1106,6 +1160,7 @@ export function createCompanionManager(
         } catch (error) {
           const code = errorCode(error);
           if (code === "OFFLINE") {
+            if(ownedHud&&!await exitConfirmed(ownedHud.process,shutdownDeadline))return shutdownTimedOut(shutdownStartedAt);
             const cleared = await clearRuntimeBefore(
               shutdownDeadline,
               offSettings.generation,
@@ -1132,7 +1187,11 @@ export function createCompanionManager(
         latestHealth !== undefined &&
         identityMatches(latestHealth, ownedHud)
       ) {
-        if (!(await settlesBeforeDeadline(ownedHud.process.terminate(), shutdownDeadline))) {
+        if (!(await terminateConfirmed(ownedHud.process, shutdownDeadline))) {
+          try{
+            const current=await dependencies.store.readSettings(stateOptions(shutdownDeadline));
+            if(current.generation!==offSettings.generation)return observe(shutdownDeadline);
+          }catch{/* An expired close budget cannot claim either exit or successful reopen. */}
           return shutdownTimedOut(shutdownStartedAt);
         }
         const cleared = await clearRuntimeBefore(
