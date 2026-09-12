@@ -1,6 +1,6 @@
 # Direction 03: local residual ETA correction
 
-Status: proposed design; product intent and automatic-label policy confirmed; written-spec review required before implementation.
+Status: design approved by the user on 2026-09-12; implementation tracked in `../plans/2026-09-12-local-residual-eta.md`.
 
 ## Goal and boundaries
 
