@@ -118,6 +118,7 @@ it("does not observe until delayed source history preparation finishes", async (
   await f.flush();
   expect(f.counts()).toMatchObject({prepared: 1, observed: 1, observedAt: 16_000});
   expect(f.observations.map(row => row.contextState)).toEqual(expect.arrayContaining(["history_loading", "context_preparing", "context_full"]));
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe("context_full");
   await f.scheduler.close();
 });
 
@@ -169,6 +170,23 @@ it("releases a ticket after preparation failure without exposing the raw error",
   expect(f.counts().observed).toBe(0);
   expect(f.observations.at(-1)).toMatchObject({kind: "result", contextState: "context_too_large"});
   expect(f.observations.at(-1)).not.toHaveProperty("error");
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe("context_too_large");
+  await f.scheduler.close();
+});
+
+it("clears the persisted context state when a new goal begins", async () => {
+  const f = fixture({deferPreparation: true});
+  await f.start();
+  f.rejectPreparation(Error("context_too_large"));
+  await f.flush();
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe("context_too_large");
+
+  const next = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "second"}, 16_000, token).envelope;
+  f.goals.observe(next, true, 16_000);
+  f.setSourceTurn(next.turnKey!);
+  f.source.attach(next.sessionKey, "conversation-id", next.turnKey!);
+  f.scheduler.changed(next.sessionKey, "prompt");
+  expect(f.scheduler.diagnostics(next.sessionKey).contextState).toBeUndefined();
   await f.scheduler.close();
 });
 

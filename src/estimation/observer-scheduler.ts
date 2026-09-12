@@ -6,7 +6,8 @@ import type {PassiveGoals} from '../server/passive-goals.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import type {PreparedContext} from './prepared-context.js';
 import {decideTrigger, type TriggerReason} from './long-task-policy.js';
-import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
+import {normalizeAdmissionReason, type AdmissionReason, type ObserverContextState, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
+export type {ObserverContextState} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 export interface ObserverWorker {
@@ -45,8 +46,6 @@ export interface ObserverObservation {
   stage?:ObserverCallStage;
   contextState?:ObserverContextState;
 }
-export type ObserverContextState='history_loading'|'context_preparing'|'context_full'|'context_compressed'|
-  'history_incomplete'|'capacity_unknown'|'context_too_large'|'compression_failed';
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void}
 interface Entry {
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
@@ -63,6 +62,7 @@ interface Entry {
   timerFailures?:number;
   sourceClockAvailable?:boolean;
   sourceActiveSeconds?:number; predictionExcludedSeconds?:number;
+  contextState?:ObserverContextState;
   contentIdentity?:string; consumedContentIdentity?:string;
   bootstrapRecoveryEligible?:boolean; bootstrapRecoveryUsed?:boolean;
   lastResultDiagnostic?:ResultDiagnostic; lastRejectionReason?:ResultRejectionReason;
@@ -157,7 +157,9 @@ export class ObserverScheduler {
   }
   private contextState(flight:Flight,state:ObserverContextState):void {
     flight.contextState=state;
-    this.record('stage',flight.key,this.entries.get(flight.key)!,{requestId:flight.requestId,contextState:state},flight);
+    const entry=this.entries.get(flight.key);
+    if(entry)entry.contextState=state;
+    this.record('stage',flight.key,entry!,{requestId:flight.requestId,contextState:state},flight);
     this.notify();
   }
   private preparationFailureState(flight:Flight,error:unknown):ObserverContextState {
@@ -239,6 +241,7 @@ export class ObserverScheduler {
       delete entry.overdueReservedPrediction;entry.lastRequestActiveSeconds=state.view.activeSeconds;
       if(state.contentIdentity===undefined)delete entry.contentIdentity;else entry.contentIdentity=state.contentIdentity;
       delete entry.consumedContentIdentity;
+      delete entry.contextState;
       entry.bootstrapRecoveryEligible=false;entry.bootstrapRecoveryUsed=false;
       delete entry.lastResultDiagnostic;delete entry.lastRejectionReason;delete entry.lastResultStatus;
       if(state.view.prediction)entry.overdueEligibleActiveSeconds=
@@ -634,9 +637,11 @@ export class ObserverScheduler {
     this.notify();
   }
   diagnostics(key:string):ObserverDiagnostics {
+    const entry=this.entries.get(key);
     if(this.stopReason)return {state:'disabled',stopReason:this.stopReason,stoppedAt:this.stoppedAt!,
+      ...(entry?.contextState?{contextState:entry.contextState}:{}),
       estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
-    const at=this.stopReason ? this.lastClock : this.time(),entry=this.entries.get(key),view=this.options.goals.view(key,at);
+    const at=this.stopReason ? this.lastClock : this.time(),view=this.options.goals.view(key,at);
     const health=this.options.goals.contextHealth(key);
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':entry?.flight?'estimating':
       this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
@@ -645,7 +650,7 @@ export class ObserverScheduler {
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
       (entry?.lastResultDiagnostic ?? (view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending'));
-    return {state,...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+    return {state,...(entry?.contextState?{contextState:entry.contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
       ...(entry?.lastResultDiagnostic?{resultDiagnostic:entry.lastResultDiagnostic}:{}),
       ...(entry?.lastRejectionReason?{rejectionReason:entry.lastRejectionReason}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,
