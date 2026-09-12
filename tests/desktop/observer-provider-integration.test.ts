@@ -2,7 +2,7 @@ import {mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {describe, expect, it, vi} from 'vitest';
-import {createObserverProviderHost, type ProviderWorkerOwner} from '../../src/desktop/observer-provider-host.js';
+import {createObserverProviderHost, type ProviderWorkerOwner, type ObserverProviderHostOptions} from '../../src/desktop/observer-provider-host.js';
 import type {ObserverWorker} from '../../src/estimation/observer-scheduler.js';
 
 const apiDraft = {
@@ -29,6 +29,33 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it('saves and activates model capacity without re-entering subscription credentials',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-context-capacity-'));
+    const openSubscription=vi.fn<ObserverProviderHostOptions['openSubscription']>(async()=>owner('subscription'));
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription});
+    const contextCapacity={model:'fixture-model',contextTokens:100000,outputReserveTokens:4096,requestBytes:null};
+    try{
+      const initial=host.status();
+      const saved=await host.saveProviderSettings({generation:initial.generation,revision:initial.revision,
+        draft:{selected:'subscription',api:null,contextCapacity}});
+      expect(saved.draft.contextCapacity).toEqual(contextCapacity);
+      const activated=await host.activateProvider({generation:saved.generation,revision:saved.revision,selected:'subscription'});
+      expect(activated.active.contextCapacity).toEqual(contextCapacity);
+      expect(openSubscription.mock.calls[0]?.[2]).toEqual(contextCapacity);
+    }finally{await host.close();}
+  });
+  it('retains API capacity and key while saving a capacity-only change',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-api-capacity-'));
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owner('subscription')});
+    const contextCapacity={model:'fixture-model',contextTokens:100000,outputReserveTokens:4096,requestBytes:null};
+    try{
+      const initial=host.status();
+      const first=await host.saveProviderSettings({generation:initial.generation,revision:initial.revision,draft:apiDraft,secret:'synthetic-key'});
+      const saved=await host.saveProviderSettings({generation:first.generation,revision:first.revision,draft:{...apiDraft,contextCapacity}});
+      expect(saved.draft.contextCapacity).toEqual(contextCapacity);
+      expect(saved.draft.api?.keyConfigured).toBe(true);
+    }finally{await host.close();}
+  });
   it.each(['dynamic','compatibility'])('forwards stages through the %s provider host',async mode=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-stage-forwarding-'));
     const delegate=worker('stages');

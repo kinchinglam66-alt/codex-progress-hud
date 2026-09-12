@@ -9,6 +9,7 @@ import {
   readProviderConfig,
   saveProviderConfig,
   toPublicProviderConfig,
+  resolveConfiguredCapacity,
   type ProviderConfig,
 } from "../../src/desktop/observer-provider-config.js";
 
@@ -26,6 +27,18 @@ const api = {
 const config: ProviderConfig = { version: 1, selected: "api", api };
 
 describe("observer provider configuration", () => {
+  it('preserves optional model-scoped capacity without changing credentials',()=>{
+    const contextCapacity={model:api.model,contextTokens:100000,outputReserveTokens:4096,requestBytes:500000};
+    const value={...config,contextCapacity};
+    expect(parseProviderConfig(value)).toEqual(value);
+    expect(toPublicProviderConfig(parseProviderConfig(value)).contextCapacity).toEqual(contextCapacity);
+    expect(resolveConfiguredCapacity(parseProviderConfig(value),api.model,2048)).toEqual({
+      contextTokens:100000,outputReserveTokens:4096,requestBytes:500000,source:'configured'});
+    expect(resolveConfiguredCapacity(parseProviderConfig(value),'another-model',2048)).toBeNull();
+    expect(resolveConfiguredCapacity(config,api.model,2048)).toBeNull();
+    expect(resolveConfiguredCapacity(parseProviderConfig(value),api.model,100001)).toBeNull();
+    expect(()=>parseProviderConfig({...value,contextCapacity:{...contextCapacity,outputReserveTokens:100000}})).toThrow();
+  });
   it("accepts a complete API configuration and exposes editable starting defaults", () => {
     expect(parseProviderConfig(config)).toEqual(config);
     expect(DEFAULT_DAILY_CALL_LIMIT).toBe(24);

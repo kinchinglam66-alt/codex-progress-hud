@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {mkdir, lstat, open} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
-import {parseProviderConfig, readProviderConfig, saveProviderConfig, toPublicProviderConfig, type ApiConfig, type ProviderConfig} from './observer-provider-config.js';
+import {configuredContextCapacitySchema, parseProviderConfig, readProviderConfig, saveProviderConfig, toPublicProviderConfig, type ApiConfig, type ProviderConfig} from './observer-provider-config.js';
 import {createObserverSecretStore} from './observer-secret-store.js';
 import type {ConsentProtection} from '../estimation/observer-consent-store.js';
 import {createObserverConsentStore, type ObserverConsentStore} from '../estimation/observer-consent-store.js';
@@ -18,12 +18,12 @@ const statePath = (root: string): string => join(root, 'observer-provider-state.
 const secretPath = (root: string): string => join(root, 'observer-provider-secrets.json');
 
 const mutation = z.object({generation: z.number().int().nonnegative().safe(), revision: z.number().int().nonnegative().safe()}).passthrough();
-const apiDraft = z.object({selected: z.literal('api'), api: z.object({
+const apiDraft = z.object({selected: z.literal('api'), contextCapacity:configuredContextCapacitySchema.optional(), api: z.object({
   profileId: z.string().min(1).max(128), name: z.string().min(1).max(256), baseUrl: z.string().min(1).max(2048),
   protocol: z.literal('responses'), model: z.string().min(1).max(256), reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
   maxOutputTokens: z.number().int().positive().max(100_000), dailyCallLimit: z.number().int().positive().max(10_000),
 }).strict()}).strict();
-const providerDraft = z.union([z.object({selected: z.literal('subscription'), api: z.null()}).strict(), apiDraft]);
+const providerDraft = z.union([z.object({selected: z.literal('subscription'), api: z.null(),contextCapacity:configuredContextCapacitySchema.optional()}).strict(), apiDraft]);
 
 export interface ProviderWorkerOwner extends ProviderOwner {
   workers: readonly ObserverWorker[];
@@ -69,8 +69,8 @@ export interface ProviderSettingsHost {
 export interface ObserverProviderHostOptions {
   dataDirectory: string;
   consentProtection: ConsentProtection;
-  openSubscription(signal: AbortSignal, consent?: ProviderInlineConsent): Promise<ProviderWorkerOwner>;
-  openApi?: (config: ApiConfig, readKey: () => Promise<string | null>, signal: AbortSignal, generation: number) => Promise<ProviderWorkerOwner>;
+  openSubscription(signal: AbortSignal, consent?: ProviderInlineConsent, contextCapacity?:ProviderConfig['contextCapacity']): Promise<ProviderWorkerOwner>;
+  openApi?: (config: ApiConfig, readKey: () => Promise<string | null>, signal: AbortSignal, generation: number, contextCapacity?:ProviderConfig['contextCapacity']) => Promise<ProviderWorkerOwner>;
   readSubscriptionAccount?: (signal: AbortSignal) => Promise<ProviderAccountMetadata>;
   subscriptionAccount?: ObserverAccountSettings;
   autoStartSubscription?: boolean;
@@ -151,11 +151,11 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
 
   const makeSelection = () => createProviderSelection({
     open: async (config, signal) => config.selected === 'subscription'
-      ? options.openSubscription(signal, inlineSubscriptionConsent)
+      ? options.openSubscription(signal, inlineSubscriptionConsent, config.contextCapacity)
       : options.openApi === undefined ? Promise.reject(fixedFailure('PROVIDER_API_UNAVAILABLE')) : options.openApi(config.api!, async () => {
         const value = await secretStore.read(config.api!.keyRef);
         return value;
-      }, signal, generation),
+      }, signal, generation,config.contextCapacity),
     persist: async () => undefined,
   });
   let selection = makeSelection();
@@ -333,7 +333,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     if (!parsed.success) throw fixedFailure('PROVIDER_CONFIG_INVALID');
     const value = parsed.data;
     let next: ProviderConfig;
-    if (value.selected === 'subscription') next = {version: 1, selected: 'subscription', api: null};
+    if (value.selected === 'subscription') next = parseProviderConfig({version: 1, ...value});
     else {
       const previous = draft.api;
       const validated = parseProviderConfig({version:1, selected:'api', api:{...value.api,keyRef:`pending-${randomUUID()}`}}).api!;
@@ -343,7 +343,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       const sameScope = previous?.profileId === validated.profileId && credentialEndpoint(previous.baseUrl) === credentialEndpoint(validated.baseUrl);
       let keyRef = sameScope ? previous!.keyRef : validated.keyRef;
       if (input.secret !== undefined && input.secret.length > 0) keyRef = await secretStore.put(input.secret);
-      next = parseProviderConfig({version: 1, selected: 'api', api: {...value.api, keyRef}});
+      next = parseProviderConfig({version: 1, ...value, api: {...value.api, keyRef}});
     }
     await saveProviderConfig(draftPath(options.dataDirectory), next);
     draft = next; revision++;
@@ -354,7 +354,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
 
   async function activateProvider(input: ProviderMutation & {selected?: ProviderConfig['selected']}, internalComposedStart = false): Promise<ProviderSettingsPublic> {
     checkMutation(input, internalComposedStart);
-    const next = input.selected === 'subscription' ? initialConfig : draft;
+    const next = input.selected === 'subscription' && draft.selected !== 'subscription' ? initialConfig : draft;
     const {controller,token}=acquireAction();
     const nextGeneration = ++generation;
     dispatchGeneration = nextGeneration;
@@ -459,7 +459,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     try {
       if (draft.selected !== 'api' || !(await keyConfigured(draft))) return {ok: false, stage: 'local', message: '本地配置或密钥不可用'};
       if (options.openApi === undefined) return {ok: false, stage: 'local', message: 'API 提供方尚未就绪'};
-      owner = await options.openApi(draft.api!, () => secretStore.read(draft.api!.keyRef), controller.signal, generation);
+      owner = await options.openApi(draft.api!, () => secretStore.read(draft.api!.keyRef), controller.signal, generation,draft.contextCapacity);
       controller.signal.throwIfAborted();
       const result=owner.check?await owner.check(controller.signal):await owner.inspect(controller.signal).then(()=>({ok:true,message:'本地配置有效，尚未运行推理'})); return {ok: result.ok, stage: owner.check ? 'network' : 'local', message: result.message}; }
     catch { return {ok: false, stage: 'network', message: '连接检查失败，估时保持停用'}; }
@@ -477,7 +477,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       await drainSelection(); controller.signal.throwIfAborted();
       if (draft.selected !== 'api' || !(await keyConfigured(draft))) throw fixedFailure('PROVIDER_KEY_UNAVAILABLE');
       if (options.openApi === undefined) throw fixedFailure('PROVIDER_API_UNAVAILABLE');
-      await grantApiConsent(draft.api!); controller.signal.throwIfAborted(); owner = await options.openApi(draft.api!, () => secretStore.read(draft.api!.keyRef), controller.signal, generation); controller.signal.throwIfAborted(); if (!owner.trial) throw fixedFailure('PROVIDER_TRIAL_UNAVAILABLE'); await owner.trial(controller.signal); return publicStatus(); }
+      await grantApiConsent(draft.api!); controller.signal.throwIfAborted(); owner = await options.openApi(draft.api!, () => secretStore.read(draft.api!.keyRef), controller.signal, generation,draft.contextCapacity); controller.signal.throwIfAborted(); if (!owner.trial) throw fixedFailure('PROVIDER_TRIAL_UNAVAILABLE'); await owner.trial(controller.signal); return publicStatus(); }
     finally { try { await closeAuxiliary(owner); } finally { releaseAction(token); } }
   }
 

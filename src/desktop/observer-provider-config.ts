@@ -2,6 +2,7 @@ import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import { z } from "zod";
+import type {ContextCapacity} from '../estimation/context-capacity.js';
 
 export const DEFAULT_DAILY_CALL_LIMIT = 24;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 2048;
@@ -10,6 +11,13 @@ const MAX_CONFIG_BYTES = 16 * 1024;
 const controlFreeText = (max: number) => z.string().min(1).max(max).refine(
   (value) => !/[\p{Cc}\p{Cf}]/u.test(value),
 ).refine((value) => value.trim().length > 0);
+
+export const configuredContextCapacitySchema=z.object({
+  model:controlFreeText(256),
+  contextTokens:z.number().int().positive().safe(),
+  outputReserveTokens:z.number().int().nonnegative().safe(),
+  requestBytes:z.number().int().positive().safe().nullable(),
+}).strict().refine(value=>value.outputReserveTokens<value.contextTokens);
 
 const apiSchema = z.object({
   profileId: controlFreeText(128),
@@ -34,6 +42,7 @@ const providerConfigSchema = z.object({
   version: z.literal(1),
   selected: z.enum(["subscription", "api"]),
   api: apiSchema.nullable(),
+  contextCapacity:configuredContextCapacitySchema.optional(),
 }).strict();
 
 export type ApiConfig = z.infer<typeof apiSchema>;
@@ -43,6 +52,7 @@ export type PublicProviderConfig = {
   version: 1;
   selected: ProviderConfig["selected"];
   api: PublicApiConfig | null;
+  contextCapacity?:ProviderConfig['contextCapacity'];
 };
 
 export function parseProviderConfig(value: unknown): ProviderConfig {
@@ -50,6 +60,7 @@ export function parseProviderConfig(value: unknown): ProviderConfig {
   if (!parsed.success) throw new Error("OBSERVER_PROVIDER_CONFIG_INVALID");
   return Object.freeze({
     ...parsed.data,
+    ...(parsed.data.contextCapacity?{contextCapacity:Object.freeze({...parsed.data.contextCapacity})}:{}),
     api: parsed.data.api === null ? null : Object.freeze({ ...parsed.data.api }),
   });
 }
@@ -59,6 +70,7 @@ export function toPublicProviderConfig(value: ProviderConfig, keyConfigured = fa
   return Object.freeze({
     version: 1,
     selected: config.selected,
+    ...(config.contextCapacity?{contextCapacity:{...config.contextCapacity}}:{}),
     api: config.api === null ? null : Object.freeze({
       profileId: config.api.profileId,
       name: config.api.name,
@@ -71,6 +83,16 @@ export function toPublicProviderConfig(value: ProviderConfig, keyConfigured = fa
       keyConfigured,
     }),
   });
+}
+
+/** No guessed model limits. A saved value is usable only for its exact model. */
+export function resolveConfiguredCapacity(config:ProviderConfig,model:string,requiredOutputReserve:number):ContextCapacity|null {
+  if(!Number.isSafeInteger(requiredOutputReserve)||requiredOutputReserve<0)return null;
+  const value=config.contextCapacity;
+  if(!value||value.model!==model)return null;
+  const outputReserveTokens=Math.max(value.outputReserveTokens,requiredOutputReserve);
+  if(outputReserveTokens>=value.contextTokens)return null;
+  return {contextTokens:value.contextTokens,outputReserveTokens,requestBytes:value.requestBytes,source:'configured'};
 }
 
 export async function readProviderConfig(path: string): Promise<ProviderConfig | null> {
