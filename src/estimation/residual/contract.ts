@@ -27,9 +27,13 @@ export const shadowSchema=z.object({seconds:seconds.nullable(),reason:z.enum(sha
   .refine(x=>x.reason==='predicted'?(x.seconds!==null&&x.artifactId!==null):x.seconds===null,
     {message:'shadow result does not match its reason'});
 export type Shadow=z.infer<typeof shadowSchema>;
+export const prefixFailureSchema=z.enum(['incomplete_scan','unknown_attribution','action_overflow','snapshot_changed',
+  'owner_changed','fingerprint_missing','fingerprint_changed','capture_error','anchor_changed','generation_changed','accept_rejected']);
+export type PrefixFailure=z.infer<typeof prefixFailureSchema>;
 export const researchRecordSchema=z.discriminatedUnion('kind',[
   z.object({schemaVersion:z.literal(1),kind:z.literal('unavailable_forecast'),sequence:ordinal,identity:identitySchema,
-    predictionId:ordinal,rawSeconds:seconds,deliveredActiveSeconds:seconds,versions:versionsSchema,reason:z.literal('prefix_unavailable')}).strict(),
+    predictionId:ordinal,rawSeconds:seconds,deliveredActiveSeconds:seconds,versions:versionsSchema,reason:z.literal('prefix_unavailable'),
+    detail:prefixFailureSchema.optional()}).strict(),
   z.object({schemaVersion:z.literal(1),kind:z.literal('forecast'),sequence:ordinal,prefix:prefixSchema,
     rawSeconds:seconds,deliveredActiveSeconds:seconds,versions:versionsSchema,shadow:shadowSchema}).strict(),
   z.object({schemaVersion:z.literal(1),kind:z.literal('terminal'),sequence:ordinal,identity:identitySchema,

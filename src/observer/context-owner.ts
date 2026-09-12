@@ -19,6 +19,11 @@ interface Entry extends ContextSnapshot {
 }
 
 const PROJECTION_TEXT_BYTES=16*1024;
+function productionRecordBytes(record:ConversationRecord):number {
+  // Research-only attribution must not evict estimator context sooner.
+  const {sourceTurnId:_research,...production}=record;
+  return Buffer.byteLength(JSON.stringify(production));
+}
 function boundProjectionText(text:string):string {
   if(Buffer.byteLength(text)<=PROJECTION_TEXT_BYTES)return text;
   return Buffer.from(text).subarray(0,PROJECTION_TEXT_BYTES).toString('utf8');
@@ -83,9 +88,9 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       for(const record of batch.records){if(!known.has(record.id)){known.add(record.id);records.push({...record});changed=true;}}
       let trimmed=false;
       records=records.map(record=>{const projected=projectRecord(record);trimmed ||= projected.trimmed;return projected.record;});
-      // Exact JSON array size, without repeatedly serializing the entire
+      // Exact production JSON array size, without repeatedly serializing the entire
       // history for every discarded record during catch-up.
-      const sizes=records.map(record=>Buffer.byteLength(JSON.stringify(record)));
+      const sizes=records.map(productionRecordBytes);
       let bytes=2+sizes.reduce((sum,size)=>sum+size,0)+Math.max(0,records.length-1);
       const firstUser=records.find(r=>r.kind==='user');
       let latestUser:ConversationRecord|undefined,currentUser:ConversationRecord|undefined;
@@ -117,11 +122,12 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       if(bytes>256*1024)records=records.map((record,index)=>{
         if(!protectedRecords.has(record)||protectedUsers.has(record))return record;
         const compact:ConversationRecord={id:record.id,turnId:record.turnId,atMs:record.atMs,kind:record.kind,
+          ...(record.sourceTurnId===undefined?{}:{sourceTurnId:record.sourceTurnId}),
           ...(record.runtime===undefined?{}:{runtime:record.runtime}),
           ...(record.outcome===undefined?{}:{outcome:record.outcome}),
           ...(record.assistantPhase===undefined?{}:{assistantPhase:record.assistantPhase}),
           ...(record.actionId===undefined?{}:{actionId:record.actionId})};
-        const size=Buffer.byteLength(JSON.stringify(compact));
+        const size=productionRecordBytes(compact);
         if(size>=sizes[index]!)return record;
         bytes-=sizes[index]!-size;sizes[index]=size;trimmed=true;
         protectedRecords.delete(record);protectedRecords.add(compact);return compact;

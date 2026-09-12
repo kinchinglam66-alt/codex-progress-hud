@@ -1,8 +1,9 @@
-import {identityKey,identitySchema,parseResearchRecord,sampleSchema,freezeData,type ResearchRecord,type Sample,type Identity} from '../../estimation/residual/contract.js';
+import {identityKey,identitySchema,parseResearchRecord,sampleSchema,freezeData,prefixFailureSchema,type ResearchRecord,type Sample,type Identity} from '../../estimation/residual/contract.js';
 import {z} from 'zod';
 
 export const attemptSchema=z.object({identity:identitySchema,predictionId:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  reason:z.enum(['eligible','prefix_unavailable','invalidated','missing_terminal','invalid_clock','normal_end','interrupted','failed','superseded','clock_unknown','recording_gap'])}).strict();
+  reason:z.enum(['eligible','prefix_unavailable','invalidated','missing_terminal','invalid_clock','normal_end','interrupted','failed','superseded','clock_unknown','recording_gap']),
+  detail:prefixFailureSchema.optional()}).strict();
 export type Attempt=z.infer<typeof attemptSchema>;
 export function buildDataset(records:readonly ResearchRecord[]):{samples:Sample[];attempts:Attempt[];excluded:Record<string,number>}{
   const forecasts=new Map<string,Extract<ResearchRecord,{kind:'forecast'}>>(),terminals=new Map<string,Extract<ResearchRecord,{kind:'terminal'}>>();
@@ -16,7 +17,8 @@ export function buildDataset(records:readonly ResearchRecord[]):{samples:Sample[
     else sequences.set(seqKey,{serialized,key});
     if(row.kind==='unavailable_forecast'){
       const prediction=JSON.stringify([key,row.predictionId]);
-      attempts.set(prediction,{identity:row.identity,predictionId:row.predictionId,reason:'prefix_unavailable'});continue;
+      attempts.set(prediction,{identity:row.identity,predictionId:row.predictionId,reason:'prefix_unavailable',
+        ...(row.detail===undefined?{}:{detail:row.detail})});continue;
     }
     if(row.kind==='invalidate'){invalid.add(key);continue;}
     if(row.kind==='terminal'){

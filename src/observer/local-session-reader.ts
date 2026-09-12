@@ -340,6 +340,7 @@ function normalizeMessage(
   const record: ConversationRecord = {
     id: sourceId(context.threadId, offset, value.id ?? value.message_id),
     turnId: turnIdFrom(value, context.activeTurnId, context.options.inferTurnId),
+    sourceTurnId: turnIdFrom(value, null, false),
     atMs,
     kind: role
   };
@@ -368,6 +369,7 @@ function normalizeTool(
   const record: ConversationRecord = {
     id: recordId(context.threadId, offset, value.id, result ? "tool_result" : "tool_start"),
     turnId: turnIdFrom(value, context.activeTurnId, context.options.inferTurnId),
+    sourceTurnId: turnIdFrom(value, null, false),
     atMs,
     kind: result ? "tool_result" : "tool_start",
     actionId
@@ -422,6 +424,7 @@ function normalizeHostDelegation(
   const task: ConversationRecord = {
     id: recordId(context.threadId, offset, `host-delegation:${actionId}`, "user"),
     turnId: context.activeTurnId,
+    sourceTurnId: turnIdFrom(value, null, false),
     atMs,
     kind: "user",
     text: taskText
@@ -446,6 +449,7 @@ function normalizeCommand(
     id: recordId(context.threadId, offset, value.id, result ? "tool_result" : "tool_start"),
     turnId: turnIdFrom(value as unknown as Record<string, unknown>, context.activeTurnId,
       context.options.inferTurnId),
+    sourceTurnId: turnIdFrom(value as unknown as Record<string, unknown>, null, false),
     atMs,
     kind: result ? "tool_result" : "tool_start",
     actionId
@@ -514,6 +518,7 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     const record: ConversationRecord = {
       id: sourceId(context.threadId, context.offset, payload.id) + ":running",
       turnId,
+      sourceTurnId: turnIdFrom(payload, null, false),
       atMs,
       kind: "runtime",
       runtime: "running"
@@ -531,6 +536,7 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     const record: ConversationRecord = {
       id: sourceId(context.threadId, context.offset, payload.id) + `:${runtime}`,
       turnId,
+      sourceTurnId: turnIdFrom(payload, null, false),
       atMs,
       kind: "runtime",
       runtime,
@@ -544,11 +550,19 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
 
   const item = itemObject(payload.item);
   const itemType = item.type;
+  // Keep legacy/strict estimator turnId behavior intact. Research may use an
+  // explicit outer event ID, but conflicting explicit IDs are never inferred.
+  const outerTurn=turnIdFrom(payload,null,false);
+  const withSourceTurn=(records:ConversationRecord[])=>records.map(record=>{
+    const innerTurn=record.sourceTurnId??null;
+    const sourceTurnId=innerTurn!==null&&outerTurn!==null&&innerTurn!==outerTurn?null:innerTurn??outerTurn;
+    return {...record,sourceTurnId};
+  });
   if (itemType === "UserMessage" || itemType === "AgentMessage") {
-    return normalizeMessage(context, item as unknown as Record<string, unknown>, atMs, context.offset, itemType);
+    return withSourceTurn(normalizeMessage(context, item as unknown as Record<string, unknown>, atMs, context.offset, itemType));
   }
   if (itemType === "CommandExecution" || itemType === "command_execution") {
-    return normalizeCommand(context, item, atMs, context.offset, eventType === "item_completed");
+    return withSourceTurn(normalizeCommand(context, item, atMs, context.offset, eventType === "item_completed"));
   }
   context.gaps.add("unsupported_payload");
   return [];

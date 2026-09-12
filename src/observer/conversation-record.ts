@@ -11,6 +11,8 @@ export type RuntimeOutcome = "completed" | "interrupted" | "failed";
 export interface ConversationRecord {
   id: string;
   turnId: string | null;
+  /** Explicit source attribution. Null means inferred/unknown; absent is legacy producer compatibility. */
+  sourceTurnId?: string | null;
   atMs: number;
   kind: ConversationRecordKind;
   text?: string;

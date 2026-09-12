@@ -20,9 +20,12 @@ it('records an accepted raw forecast and independent terminal without a model ar
 it('records unavailable accepted prefixes for coverage instead of dropping them',async()=>{
   const p=await mkdtemp(join(tmpdir(),'residual-runtime-'));roots.push(p);const runtime=await createResidualRuntime(p);
   runtime.unavailable(owner,1,60,35,versions);
+  runtime.unavailable(owner,2,60,35,versions,'unknown_attribution');
   await runtime.close();
   const result=buildDataset((await readResidualSegments(p)).records);
-  expect(result.attempts).toHaveLength(1);expect(result.attempts[0]?.reason).toBe('prefix_unavailable');
+  expect(result.attempts).toHaveLength(2);expect(result.attempts[0]?.reason).toBe('prefix_unavailable');
+  expect(result.attempts[0]).not.toHaveProperty('detail');
+  expect(result.attempts[1]).toMatchObject({reason:'prefix_unavailable',detail:'unknown_attribution'});
 });
 it('rejects old conversation ownership and duplicate settlement',async()=>{
   const p=await mkdtemp(join(tmpdir(),'residual-runtime-'));roots.push(p);const runtime=await createResidualRuntime(p);

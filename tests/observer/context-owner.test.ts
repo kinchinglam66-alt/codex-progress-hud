@@ -10,6 +10,20 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('research attribution does not consume the production context retention budget',async()=>{
+  const ordinary=setup(),research=setup();
+  const records=[...batch.records,...Array.from({length:600},(_,i)=>({id:`r${i}`,turnId:'t1',atMs:i+1,kind:'tool_result',text:'x'.repeat(512)}))];
+  try{
+    for(const f of [ordinary,research]){f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();}
+    ordinary.calls[0]!.finish({...batch,records});
+    research.calls[0]!.finish({...batch,records:records.map(r=>({...r,sourceTurnId:'t1'}))});
+    await ordinary.flush();await research.flush();
+    const a=ordinary.owner.snapshot('one')!,b=research.owner.snapshot('one')!;
+    expect(b.health).toBe(a.health);expect(b.historyComplete).toBe(a.historyComplete);
+    expect(b.records.map(({sourceTurnId:_research,...record})=>record)).toEqual(a.records);
+    expect(b.records.every(r=>r.sourceTurnId==='t1')).toBe(true);
+  }finally{await ordinary.owner.close();await research.owner.close();}
+});
 it('times out a stuck read, retries, and ignores its late result after recovery',async()=>{
   vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});
   const f=setup();

@@ -32,7 +32,7 @@ function history(records: ReadBatch["records"], closed: {value: number}): Histor
   };
 }
 
-function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime} = {}) {
+function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime;advancingClock?:boolean} = {}) {
   let now = 0;
   let resolveHistory!: (value: HistorySnapshot) => void;
   let resolvePreparation!: (value: PreparedContext) => void;
@@ -87,7 +87,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;re
     disable: () => { disabled = true; },
     close: async () => { disabled = true; }
   };
-  const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => now,
+  const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => options.advancingClock?now++:now,
     onObservation: record => observations.push(record),...(options.research?{research:options.research}:{})});
   const envelope = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "first"}, now, token).envelope;
   goals.observe(envelope, true, now);
@@ -132,9 +132,9 @@ it('captures the full-context prefix without changing production ETA when resear
   await ordinary.scheduler.close();await withResearch.scheduler.close();
 });
 
-it('joins a real scheduler forecast with independent same-turn source completion',async()=>{
+it.each([false,true])('joins a real scheduler forecast with independent same-turn source completion (advancing clock: %s)',async advancingClock=>{
   const directory=await mkdtemp(join(tmpdir(),'residual-scheduler-'));
-  const research=await createResidualRuntime(directory),f=fixture({research});
+  const research=await createResidualRuntime(directory),f=fixture({research,advancingClock});
   f.worker.provenance=()=>({input:'i1',prompt:'p1',model:'m1',algorithm:'a1'});
   try{
     await f.flush();
@@ -148,18 +148,21 @@ it('joins a real scheduler forecast with independent same-turn source completion
     await f.scheduler.close();await research.close();
     const result=buildDataset((await readResidualSegments(directory)).records);
     expect(result.samples,JSON.stringify(result)).toHaveLength(1);
-    expect(result.samples[0]).toMatchObject({actualSeconds:4,features:{rawSeconds:100}});
+    expect(result.samples[0]).toMatchObject({features:{rawSeconds:100}});
+    expect(result.samples[0]!.actualSeconds).toBeCloseTo(4,1);
   }finally{await f.scheduler.close();await research.close();await rm(directory,{recursive:true,force:true});}
 });
 it('keeps accepted forecasts with a later history watermark in the coverage denominator',async()=>{
   let captured=0,unavailable=0;
-  const research:ResidualRuntime={capture(){captured++;return {};},accept(){return true;},unavailable(){unavailable++;},boundary(){},forget(){},async close(){}};
+  let detail:unknown;
+  const research:ResidualRuntime={capture(){captured++;return {};},accept(){return true;},unavailable(_o,_p,_r,_a,_v,reason){unavailable++;detail=reason;},boundary(){},forget(){},async close(){}};
   const f=fixture({research,deferHistory:true});f.worker.provenance=()=>({input:'i',prompt:'p',model:'m',algorithm:'a'});
   await f.start();
   f.resolveHistory(history([{id:'user',turnId:'first',atMs:1,kind:'user',text:'work'},
     {id:'late',turnId:'first',atMs:17000,kind:'tool_result',actionId:'late',exitCode:0}],{value:0}));
   await f.flush();
   expect(f.counts().observed).toBe(1);expect(captured).toBe(0);expect(unavailable).toBe(1);
+  expect(detail).toBe('fingerprint_changed');
   await f.scheduler.close();
 });
 

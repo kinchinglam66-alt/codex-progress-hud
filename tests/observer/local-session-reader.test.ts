@@ -6,6 +6,8 @@ import {pairCompletedToolCapture} from "../../src/estimation/vitest-pace-adapter
 import {packObserverInput} from "../../src/estimation/observer-input.js";
 import {assembleContext} from "../../src/observer/context-assembler.js";
 import {createLocalSessionReader} from "../../src/observer/local-session-reader.js";
+import {createPrefixFingerprint} from '../../src/estimation/residual/fingerprint.js';
+import {captureHistoryFeatures} from '../../src/estimation/residual/capture.js';
 
 const THREAD_A = "11111111-1111-4111-8111-111111111111";
 const THREAD_B = "22222222-2222-4222-8222-222222222222";
@@ -14,6 +16,31 @@ const PARENT_THREAD = "33333333-3333-7333-8333-333333333333";
 const CHILD_THREAD = "44444444-4444-7444-8444-444444444444";
 const cleanups: Array<() => Promise<void>> = [];
 
+it('preserves estimator attribution differences but canonicalizes research fingerprints',async()=>{
+  const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('turn')+user('work','u','turn')+
+    line('response_item',{type:'message',id:'a',role:'assistant',content:[{type:'output_text',text:'working'}]},1_700_000_002_000));
+  const reader=createLocalSessionReader({root:f.root});
+  try{
+    const batch=await reader.read(THREAD_A,signal()),snapshot=await reader.snapshot(THREAD_A,signal());
+    const full=[];for await(const entry of snapshot.records(signal()))full.push(entry.record);
+    expect(batch.records.find(r=>r.id==='a')?.turnId).toBe('turn');
+    expect(full.find(r=>r.id==='a')?.turnId).toBeNull();
+    expect(batch.records.find(r=>r.id==='a')?.sourceTurnId).toBeNull();
+    expect(full.find(r=>r.id==='a')?.sourceTurnId).toBeNull();
+    const legacyHash=createPrefixFingerprint(),fullHash=createPrefixFingerprint();
+    batch.records.filter(r=>r.turnId==='turn').forEach(r=>legacyHash.add(r));
+    full.filter(r=>r.turnId==='turn').forEach(r=>fullHash.add(r));
+    const expectedFingerprint=legacyHash.finish();
+    expect(expectedFingerprint).toBe(fullHash.finish());
+    const capture=captureHistoryFeatures(snapshot,'turn');
+    for await(const entry of capture.snapshot.records(signal()))void entry;
+    expect(capture.fingerprint()).toBe(expectedFingerprint);
+    expect(capture.result()).toMatchObject({completedActions:0,prefixComplete:false});
+    expect(snapshot.coverage.complete).toBe(false);
+    await snapshot.close();
+  }finally{await reader.close();}
+});
+
 it('distinguishes public commentary from a final answer',async()=>{
   const message=(phase:string,id:string)=>line('response_item',{type:'message',role:'assistant',id,
     phase,turn_id:'turn',content:[{type:'output_text',text:'public message'}]});
@@ -21,6 +48,24 @@ it('distinguishes public commentary from a final answer',async()=>{
   const reader=createLocalSessionReader({root:f.root});
   try{const batch=await reader.read(THREAD_A,signal());
     expect(batch.records.map(record=>record.assistantPhase)).toEqual(['commentary','final']);
+  }finally{await reader.close();}
+});
+it.each([false,true])('research respects outer command attribution and rejects conflicting IDs (conflict: %s)',async conflict=>{
+  const start=conflict?line('event_msg',{type:'item_started',turn_id:'turn',
+    item:{type:'CommandExecution',id:'x',command:'test',turn_id:'other'}}):commandStarted('x','turn');
+  const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('turn')+user('work','u','turn')+start+commandCompleted('x','turn'));
+  const reader=createLocalSessionReader({root:f.root});
+  try{
+    const batch=await reader.read(THREAD_A,signal()),snapshot=await reader.snapshot(THREAD_A,signal());
+    const capture=captureHistoryFeatures(snapshot,'turn');
+    for await(const item of capture.snapshot.records(signal()))void item;
+    if(conflict){expect(capture.result()).toBeNull();expect(capture.reason()).toBe('unknown_attribution');}
+    else{
+      const hash=createPrefixFingerprint();batch.records.filter(r=>r.turnId==='turn').forEach(r=>hash.add(r));
+      expect(capture.fingerprint()).toBe(hash.finish());
+      expect(capture.result()).toMatchObject({completedActions:1,outstandingActions:0});
+    }
+    await snapshot.close();
   }finally{await reader.close();}
 });
 

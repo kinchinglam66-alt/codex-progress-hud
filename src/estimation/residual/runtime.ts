@@ -3,7 +3,7 @@ import {readFile,lstat} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {createResidualRecorder} from './recorder.js';
 import {parseArtifact,predictResidual,type ResidualArtifact} from './predict.js';
-import {prefixSchema,freezeData,parseResearchRecord,type Prefix,type Identity} from './contract.js';
+import {prefixSchema,freezeData,parseResearchRecord,type Prefix,type Identity,type PrefixFailure} from './contract.js';
 import {ResearchLifecycle} from './lifecycle.js';
 import type {ActionFeatures} from './capture.js';
 import type {ResearchOwner,ResearchBoundary} from './telemetry.js';
@@ -12,7 +12,7 @@ import type {ForecastVersions} from '../forecast-record.js';
 export interface ResidualRuntime {
   capture(owner:ResearchOwner,predictionId:number,watermark:string,activeSeconds:number,actions:ActionFeatures):object;
   accept(ticket:object,rawSeconds:number,deliveredActiveSeconds:number,versions:ForecastVersions):boolean;
-  unavailable(owner:ResearchOwner,predictionId:number,rawSeconds:number,deliveredActiveSeconds:number,versions:ForecastVersions):void;
+  unavailable(owner:ResearchOwner,predictionId:number,rawSeconds:number,deliveredActiveSeconds:number,versions:ForecastVersions,detail?:PrefixFailure):void;
   boundary(event:ResearchBoundary):void;
   forget(sessionKey:string):void;
   close():Promise<void>;
@@ -59,11 +59,11 @@ export async function createResidualRuntime(directory:string):Promise<ResidualRu
         return true;
       }catch{recorder.record(life.invalidate(captured.owned.identity,'recording_gap'));return false;}
     },
-    unavailable(owner,predictionId,rawSeconds,deliveredActiveSeconds,versions){
+    unavailable(owner,predictionId,rawSeconds,deliveredActiveSeconds,versions,detail){
       if(closed)return;
       recorder.record(parseResearchRecord({schemaVersion:1,kind:'unavailable_forecast',sequence:++sequence,
         identity:{...recorder.identify('local',owner.sessionKey,owner.turnKey),runId,sourceEpoch:owner.sourceEpoch,generation:owner.generation},
-        predictionId,rawSeconds,deliveredActiveSeconds,versions,reason:'prefix_unavailable'}));
+        predictionId,rawSeconds,deliveredActiveSeconds,versions,reason:'prefix_unavailable',...(detail===undefined?{}:{detail})}));
     },
     boundary(event){
       if(closed)return;const owned=owners.get(event.sessionKey);
