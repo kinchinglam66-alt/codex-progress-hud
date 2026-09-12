@@ -741,6 +741,7 @@ describe("desktop lifecycle", () => {
         level: "info",
         event: "startup_requested",
         lifecycleState: "starting",
+        role: "desktop", childPid: 12_345, generation: 1,
         protocolVersion: 3
       },
       {
@@ -748,6 +749,7 @@ describe("desktop lifecycle", () => {
         level: "info",
         event: "startup_ready",
         lifecycleState: "hidden",
+        role: "desktop", childPid: 12_345, generation: 1,
         protocolVersion: 3,
         elapsedMs: 0
       }
@@ -783,6 +785,7 @@ describe("desktop lifecycle", () => {
       level: "info",
       event: "startup_ready",
       lifecycleState: "hidden",
+      role: "desktop", childPid: 12_345, generation: 1,
       protocolVersion: 3,
       elapsedMs: 275
     });
@@ -1138,6 +1141,9 @@ describe("desktop lifecycle", () => {
       "shutdown_requested",
       "shutdown_complete"
     ]);
+    for(const [entry] of vi.mocked(harness.dependencies.operationalLogger!.write).mock.calls){
+      expect(entry).toMatchObject({role:'desktop',childPid:12_345,generation:1});
+    }
   });
 
   it("does not wait for a permanently pending logger before cleanup and quit", async () => {
@@ -1204,6 +1210,7 @@ describe("desktop lifecycle", () => {
       level: "error",
       event: "startup_failed",
       lifecycleState: "stopped",
+      role: "desktop", childPid: 12_345, generation: 1,
       protocolVersion: 3,
       elapsedMs: 0
     });

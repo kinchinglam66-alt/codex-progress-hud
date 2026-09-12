@@ -359,7 +359,8 @@ export async function runDesktop(
       recentOperationalEvents.push({ code: entry.event, at: timestamp });
       if (recentOperationalEvents.length > 20) recentOperationalEvents.shift();
       void resolved.operationalLogger
-        ?.write({ at: timestamp, ...entry })
+        ?.write({ at: timestamp, ...entry, role:'desktop',childPid:resolved.pid,
+          ...(launchSettings===undefined?{}:{generation:launchSettings.generation}) })
         .catch(() => undefined);
     } catch {
       // Operational logging is best effort and must not alter desktop lifecycle behavior.
