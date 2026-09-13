@@ -33,6 +33,34 @@ function accounting(): ReleaseAccountingRecoveryOwner {
 
 afterEach(() => vi.restoreAllMocks());
 
+it('releases the real scheduler after an allowed local check without requiring a trial', async () => {
+  const contexts = new PassiveContextStore();
+  let disabled = false;
+  const worker: ObserverWorker = {
+    observe: async () => { throw new Error('Local checks must not run inference'); },
+    status: () => ({active: false, disabled, poisoned: false}),
+    disable: () => { disabled = true; },
+    close: async () => { disabled = true; },
+  };
+  const scheduler = new ObserverScheduler({contexts, goals: new PassiveGoals(contexts), workers: [worker], now: () => 0});
+  let generation: number | undefined;
+  const boundary: RecoveryRuntimeBoundary = {
+    enabled: () => true,
+    check: async () => {
+      generation = await scheduler.prepareRecovery();
+      return {binding: 'account:route:assets', closureConfirmed: true};
+    },
+    release: async () => { disabled = false; await scheduler.restoreRecovery(generation!); },
+    rebuild: async () => undefined,
+    runTrial: async () => { throw new Error('Local checks must not run inference'); },
+  };
+  const controller = createObserverRecoveryController({accounting: accounting(), runtime: boundary});
+  try {
+    await expect(controller.preflight()).resolves.toMatchObject({allowed: true});
+    expect(scheduler.stats().disabled).toBe(false);
+  } finally { await scheduler.close(); }
+});
+
 it('projects detailed diagnostics with a category allowlist and detached status arrays',async()=>{
   const controller=createObserverRecoveryController({accounting:accounting(),runtime:{
     enabled:()=>true,check:async()=>({binding:'account:route:assets',closureConfirmed:true}),

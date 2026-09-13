@@ -133,7 +133,9 @@ export function createObserverRecoveryController(options: {
       const result = await options.accounting.preflightRecovery(checked.binding);
       binding = checked.binding;
       override = undefined;
-      if (!result.allowed) await releaseRuntime();
+      // A local check must not hold ordinary estimation paused while waiting
+      // for optional user confirmation. confirm() checks ownership again.
+      await releaseRuntime();
       return result;
     } catch (error) {
       await releaseRuntime();
