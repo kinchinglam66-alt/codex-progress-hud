@@ -80,6 +80,22 @@ it('continues to a forecast after several confirmed native compressions with unk
    expect(f.accounting.snapshot().unresolved).toBe(0);
  }finally{await f.worker.close();await f.accounting.close();}
 });
+it('continues after completed compressions with unverifiable runtime placeholder usage',async()=>{
+ const zero={totalTokens:0,inputTokens:0,outputTokens:0,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0};
+ const notification={method:'thread/tokenUsage/updated',params:{threadId:'t',turnId:'c1',tokenUsage:{total:zero,last:{...zero,totalTokens:102241}}}};
+ const simulated=compactionScript.replace("const id='c'+(++n);",`const id='c'+(++n);const notice=${JSON.stringify(notification)};notice.params.turnId=id;emit(notice);`);
+ const policy=persistentHistoryPolicy({contextTokens:258400,outputReserveTokens:16384,requestBytes:null,source:'configured'});
+ const f=await fixture(false,{script:simulated,...policy}),signal=new AbortController().signal;
+ try{
+   const prepared=await f.worker.prepareContext!(input,{snapshot:history([{id:'tail',turnId:'t',kind:'user',atMs:1,text:'retained history '.repeat(40000)}]),currentTurnId:'t'},signal,'source',0,0);
+   expect(prepared.representation.confirmedCompactions).toBeGreaterThanOrEqual(4);
+   expect(f.accounting.snapshot().knownTokens).toBe(0);
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+   expect(f.accounting.snapshot().unknown).toBeGreaterThanOrEqual(4);
+   const receipts=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+   expect(receipts.some(row=>row.kind==='usage_snapshot'&&row.last.totalTokens===102241)).toBe(true);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
 it('bootstraps the native source window once before incremental tail and reports its provenance',async()=>{
  const f=await fixture(),signal=new AbortController().signal;
  const checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[

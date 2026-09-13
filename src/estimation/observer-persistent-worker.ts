@@ -119,12 +119,16 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
         }catch(error){receiptFailure=true;throw error;}
       };
       const result=await live.compact(signal,persistEvidence,()=>{dispatched=true;onDispatch();});
+      if(!result.terminalConfirmed||result.cancelled)throw Error('SESSION_COMPACTION_UNCONFIRMED');
       try{await journal!.operationTerminal({operationId,admissionId:id,ownerUuid:processOwnerUuid,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,
         ...(result.turnId===undefined?{}:{turnId:result.turnId}),terminalState:'completed',usageCompleteness:result.usageCompleteness,operationKind:'context_compression'});}
       catch(error){receiptFailure=true;throw error;}
       await view.updateInvocation!(id,{phase:'settling',cleanupOutcome:'pending'});
       settlementAttempted=true;
-      await view.settle(id,null,result.usageCompleteness==='missing'?'confirmed_compression_unknown':'safe_unknown');settled=true;
+      // Native compression counters may be absent, placeholder or otherwise
+      // unverifiable. Its confirmed completion is independent of usage quality;
+      // retain unknown usage and raw evidence without treating it as failure.
+      await view.settle(id,null,'confirmed_compression_unknown');settled=true;
       return result;
     }catch(error){
       const sessionFailure=error as PersistentSessionError;
