@@ -1,4 +1,6 @@
 import {createHash} from 'node:crypto';
+import {performance} from 'node:perf_hooks';
+import {setTimeout as yieldToEventLoop} from 'node:timers/promises';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import type {ConversationRecord} from '../observer/conversation-record.js';
 import {assembleContext} from '../observer/context-assembler.js';
@@ -49,6 +51,18 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     signal.throwIfAborted();
     if(capacity===null)throw Error('capacity_unknown');
     if(!Number.isSafeInteger(options.observedAtMs)||options.observedAtMs<0)throw Error('invalid_observation_time');
+    // Buffered async iterators may only yield microtasks. Cooperatively budget
+    // CPU work so HTTP, lease renewals and cancellation can run. Individual
+    // synchronous operations remain indivisible; this is not a hard deadline.
+    let sliceStarted=performance.now();
+    const cooperate=async()=>{
+      signal.throwIfAborted();
+      if(performance.now()-sliceStarted<8)return;
+      // A timer turn also drains already-due cancellation timers before resume.
+      await yieldToEventLoop(0,undefined,{signal});
+      sliceStarted=performance.now();
+      signal.throwIfAborted();
+    };
     type Entry={ordinal:number;record:ConversationRecord};
     let retained:Entry[]=[];
     const requirements:Entry[]=[],active=new Map<string,Entry>();
@@ -62,13 +76,17 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     const protectedEntries=()=>[...requirements,...active.values(),...latestPair];
     const combined=()=>[...new Map([...retained,...protectedEntries()].map(e=>[e.ordinal,e])).values()]
       .sort((a,b)=>a.ordinal-b.ordinal);
-    const trim=()=>{
-      while(retained.length&&!fits(assemble(combined(),false),suffixBudget))retained.shift();
+    const trim=async()=>{
+      while(retained.length){
+        await cooperate();
+        if(fits(assemble(combined(),false),suffixBudget))break;
+        retained.shift();
+      }
       const protectedAndRetained=combined();
       if(protectedAndRetained.length&&!fits(assemble(protectedAndRetained,false)))throw Error('context_too_large');
     };
     for await(const entry of snapshot.records(signal)) {
-      signal.throwIfAborted();
+      await cooperate();
       const {record}=entry;
       if(record.turnId===options.currentTurnId)currentSeen=true;
       else if(currentSeen&&record.turnId!==null)laterTurn=true;
@@ -92,7 +110,7 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
       if(!Number.isSafeInteger(originalTextBytes)||!Number.isSafeInteger(originalTextTokenEstimate))throw Error('context_too_large');
       retained.push(entry);
       if(!overflow&&!fits(assemble(retained,false)))overflow=true;
-      if(overflow)trim();
+      if(overflow)await trim();
     }
     if(!currentSeen)throw Error('current_turn_missing');
     signal.throwIfAborted();
@@ -106,13 +124,14 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
         text:JSON.stringify({previousSummary:summary?.text??null,records:chunk})});
       const flush=async()=>{
         if(!chunk.length)return;
-        signal.throwIfAborted();
+        await cooperate();
         const request=makeRequest();
         if(!requestFits(options.serializeCompression(request),capacity,options.sizer))throw Error('context_too_large');
         const cacheKey=options.cacheScope?createHash('sha256').update(JSON.stringify({
           version:1,scope:options.cacheScope,source:snapshot.identity,epoch:snapshot.sourceEpoch,
           capacity,request
         })).digest('hex'):undefined;
+        await cooperate();
         const cached=cacheKey?options.summaryCache?.get(cacheKey):undefined;
         if(cached)cachedCompressionCalls++;else compressionCalls++;
         const answer=cached??await options.compressor.summarize(request,signal);
@@ -124,7 +143,7 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
         summary={...answer};chunk=[];
       };
       for await(const {ordinal,record} of snapshot.records(signal)){
-        signal.throwIfAborted();
+        await cooperate();
         if(ordinal>=cutoff)break;
         if(!record.text||record.kind==='runtime')continue;
         const item={ordinal,kind:record.kind,text:record.text,atMs:record.atMs};
@@ -147,9 +166,11 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
       input.representation!.compressedThroughOrdinal=summary.lastOrdinal;input.truncated=true;}
     const serialized=options.serialize(input);
     if(!requestFits(serialized,capacity,options.sizer))throw Error('context_too_large');
-    return {input,representation:input.representation!,metrics:{sizing:options.sizer.kind,originalTextBytes,originalTextTokenEstimate,
+    const result={input,representation:input.representation!,metrics:{sizing:options.sizer.kind,originalTextBytes,originalTextTokenEstimate,
       preparedRequestBytes:Buffer.byteLength(serialized,'utf8'),preparedTokenEstimate:options.sizer.count(serialized),
       compressionCalls,cachedCompressionCalls}};
+    await cooperate();
+    return result;
   } finally {await snapshot.close();}
 
   function assemble(entries:Array<{ordinal:number;record:ConversationRecord}>,complete:boolean):ObserverInput {

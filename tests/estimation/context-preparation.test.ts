@@ -8,6 +8,93 @@ import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 const base:ObserverInput={goalSummary:null,activeSeconds:12,runtime:'running',messages:[{kind:'user',text:'projection',truncated:true}],truncated:true};
 const capacity={contextTokens:1000000,outputReserveTokens:2000,requestBytes:null,source:'configured' as const};
 const sizer={kind:'conservative' as const,count:(text:string)=>Buffer.byteLength(text)};
+
+it('services cancellation while assembling a buffered history page',async()=>{
+  const controller=new AbortController();
+  const records=[record('req','current','user','task'),
+    ...Array.from({length:1000},(_,i)=>record(String(i),'current','assistant','x'.repeat(256)))];
+  const timer=setTimeout(()=>controller.abort(),0);
+  try {
+    await expect(prepareContext({...options(source(records)),signal:controller.signal}).then(()=> 'completed')).rejects.toMatchObject({name:'AbortError'});
+    expect(controller.signal.aborted).toBe(true);
+  } finally {clearTimeout(timer);}
+});
+
+it('services another event-loop callback without changing lossless context output',async()=>{
+  let serviced=false;
+  const records=[record('req','current','user','task'),
+    ...Array.from({length:1000},(_,i)=>record(String(i),'current','assistant',`${i}:`+'x'.repeat(256)))];
+  const timer=setTimeout(()=>{serviced=true;},0);
+  try {
+    const result=await prepareContext(options(source(records)));
+    expect(serviced).toBe(true);
+    expect(result.input.messages.map(message=>message.text)).toEqual(records.map(record=>record.text));
+    expect(result.representation.mode).toBe('full');
+  } finally {clearTimeout(timer);}
+});
+
+it('services cancellation inside a long suffix eviction pass',async()=>{
+  const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined,largeSizingPasses=0;
+  const records=[record('req','current','user','task'),
+    ...Array.from({length:256},(_,i)=>record(String(i),'old','assistant','x'.repeat(512))),
+    record('large','old','assistant','marker:'+'y'.repeat(950000))];
+  // Keep every history record before the current turn so overflow must trim it.
+  records[0]!.turnId='old';records.push(record('current','current','user','current task'));
+  const input=options(source(records));
+  try {
+    const result=prepareContext({...input,signal:controller.signal,serialize:packet=>{
+      if(packet.messages.at(-1)?.text.startsWith('marker:')){
+        largeSizingPasses++;
+        if(timer===undefined)timer=setTimeout(()=>controller.abort(),0);
+      }
+      return JSON.stringify(packet);
+    }}).then(()=> 'completed',error=>error.name);
+    expect(await result).toBe('AbortError');
+    expect(controller.signal.aborted).toBe(true);
+    expect(largeSizingPasses).toBeLessThan(200);
+    expect(input.compressor.summarize).not.toHaveBeenCalled();
+  }finally{clearTimeout(timer);}
+});
+
+it('processes queued cancellation after expensive final serialization before returning success',async()=>{
+  const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;
+  const input=options(source([record('req','current','user','task')]));
+  try {
+    const result=prepareContext({...input,signal:controller.signal,serialize:packet=>{
+      if(packet.observation?.historyComplete){
+        timer=setTimeout(()=>controller.abort(),0);
+        // Simulate one indivisible expensive serializer, not a production wait.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25);
+      }
+      return JSON.stringify(packet);
+    }}).then(()=> 'completed',error=>error.name);
+    expect(await result).toBe('AbortError');
+  }finally{clearTimeout(timer);}
+});
+
+it('services cancellation during compression packing before dispatching a compressor',async()=>{
+  const controller=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined;
+  let previousOrdinal=-1,flushObserved=false;
+  const records=[...Array.from({length:40},(_,i)=>record(String(i),'old','assistant','x'.repeat(300))),
+    record('req','current','user','task')];
+  const input=options(source(records));
+  try {
+    const result=prepareContext({...input,signal:controller.signal,
+      capacity:{...capacity,contextTokens:5000,outputReserveTokens:500},
+      serializeCompression:request=>{
+        // Overflow pops the last record before flush serializes the smaller chunk.
+        if(request.lastOrdinal<previousOrdinal&&timer===undefined){
+          flushObserved=true;timer=setTimeout(()=>controller.abort(),0);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25);
+        }
+        previousOrdinal=request.lastOrdinal;
+        return JSON.stringify(request);
+      }}).then(()=> 'completed',error=>error.name);
+    expect(await result).toBe('AbortError');
+    expect(flushObserved).toBe(true);
+    expect(input.compressor.summarize).not.toHaveBeenCalled();
+  }finally{clearTimeout(timer);}
+});
 function source(records:ConversationRecord[],complete=true):HistorySnapshot {
   const coverage={complete:false,gaps:complete?[]:['upstream_truncated' as const]};
   let closed=false;
