@@ -70,6 +70,22 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it.each(['item_started','item_completed'] as const)('preserves MCP tool records as data: %s',async eventType=>{
+    const raw={type:'McpToolCall',id:'mcp-1',server:'fixture',tool:'read',status:'completed',
+      arguments:{query:'retain arguments'},result:{content:[{type:'text',text:'retain result'}]},
+      pluginId:'fixture-plugin',duration:{secs:1,nanos:0}};
+    const f=await fixture(meta()+line('event_msg',{type:eventType,thread_id:THREAD,turn_id:'turn-1',item:raw}));
+    const reader=createLocalSessionReader({root:f.root});let snapshot:HistorySnapshot|undefined;
+    try{
+      snapshot=await reader.snapshot(THREAD,signal());const records=[];
+      for await(const item of snapshot.records(signal()))records.push(item.record);
+      expect(snapshot.coverage).toMatchObject({complete:true,gaps:[]});
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({kind:eventType==='item_completed'?'tool_result':'tool_start',sourceTurnId:'turn-1',toolName:'codex:McpToolCall'});
+      expect(JSON.parse(records[0]!.text!)).toEqual(raw);
+    }finally{await snapshot?.close();await reader.close();}
+  });
+
   it('does not deduplicate a newly unsupported image as an unchanged text message',async()=>{
     const f=await fixture(meta()+message('user','same','u')+line('response_item',{
       type:'message',id:'u',role:'user',turn_id:'turn-1',content:[{type:'input_text',text:'same'},{type:'input_image',path:'invalid-shape'}]}));
@@ -193,6 +209,13 @@ describe("source-backed history snapshots", () => {
     {type:'token_count',info:null,rate_limits:['must not disappear']},
     {type:'thread_goal_updated',threadId:'different-thread',goal:{objective:'foreign'}},
     {type:'item_completed',item:{type:'FileChange',id:'broken',status:'completed'}},
+    {type:'item_completed',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',result:null}},
+    {type:'item_completed',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',arguments:{}}},
+    {type:'item_completed',thread_id:'foreign',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',arguments:{},result:null}},
+    {type:'item_completed',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',arguments:{},result:null,thread_id:'foreign'}},
+    {type:'item_completed',turn_id:'a',turnId:'b',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',arguments:{},result:null}},
+    {type:'item_completed',turn_id:'a',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',arguments:{},result:null,turnId:'b'}},
+    {type:'item_completed',turn_id:'',item:{type:'McpToolCall',id:'m',server:'s',tool:'t',status:'completed',arguments:{},result:null}},
     {type:'item_completed',item:{type:'ContextCompaction',id:'c',content:'must not disappear'}},
     {type:'item_completed',content:'must not disappear',item:{type:'ContextCompaction',id:'c'}},
     {type:'item_completed',thread_id:{content:'must not disappear'},item:{type:'ContextCompaction',id:'c'}},

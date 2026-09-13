@@ -669,6 +669,20 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     return withSourceTurn(normalizeTool(context,{...raw,name:'codex:Extension:clock.sleep',
       ...(completed?{output:envelope}:{input:envelope})},atMs,context.offset,completed));
   }
+  if (context.options.preserveText && itemType === 'McpToolCall') {
+    const raw = item as unknown as Record<string, unknown>;
+    const completed = eventType === 'item_completed';
+    const explicitTurns = [payload,raw].flatMap(fields=>['turn_id','turnId'].filter(key=>Object.hasOwn(fields,key)).map(key=>fields[key]));
+    const valid = [raw.id,raw.server,raw.tool,raw.status].every(value=>stringValue(value)!==undefined) &&
+      Object.hasOwn(raw,'arguments') && (!completed || Object.hasOwn(raw,'result') || Object.hasOwn(raw,'error')) &&
+      explicitTurns.every(turn=>stringValue(turn)!==undefined&&turn===explicitTurns[0]) &&
+      [payload,raw].every(fields=>['thread_id','threadId'].every(key=>!Object.hasOwn(fields,key)||fields[key]===context.threadId));
+    if (!valid) {context.gaps.add('unsupported_payload');return [];}
+    // Native MCP records are observed data, never executable instructions.
+    // Preserve arguments, result/error and extension fields without truncation.
+    return withSourceTurn(normalizeTool(context,{...raw,name:'codex:McpToolCall',
+      ...(completed?{output:raw}:{input:raw})},atMs,context.offset,completed));
+  }
   if (context.options.preserveText && (itemType === 'FileChange' || itemType === 'CollabAgentToolCall')) {
     const raw = item as unknown as Record<string, unknown>;
     const valid = stringValue(raw.id) !== undefined && stringValue(raw.status) !== undefined &&
