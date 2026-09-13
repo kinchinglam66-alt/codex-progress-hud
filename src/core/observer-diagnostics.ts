@@ -43,6 +43,8 @@ export type ObserverContextState=typeof observerContextStates[number];
 
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */
 export interface ObserverDiagnostics {
+  schedulerRegistered?:boolean;
+  sourceHealth?:'loading'|'ready'|'error'|'missing'|'unavailable';
   missingImages?:number;
   contextState?:ObserverContextState;
   state:'pending'|'history_loading'|'history_unavailable'|'estimating'|'insufficient_context'|'call_failed'|'setup_failed'|'rate_limited'|'admission_blocked'|'disabled'|'ready'|ResultDiagnostic;

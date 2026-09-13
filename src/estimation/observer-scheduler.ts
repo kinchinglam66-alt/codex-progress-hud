@@ -711,15 +711,18 @@ export class ObserverScheduler {
   }
   diagnostics(key:string):ObserverDiagnostics {
     const entry=this.entries.get(key);
+    const health=this.options.goals.contextHealth(key);
+    const sourceHealth:NonNullable<ObserverDiagnostics['sourceHealth']>=health===undefined?'unavailable':
+      health==='loading'||health==='ready'||health==='missing'?health:'error';
+    const routing={schedulerRegistered:entry!==undefined,sourceHealth};
     const contextState=entry?.contextState&&entry.contextStateTurnKey===this.options.goals.currentTurnKey(key)
       ?entry.contextState:undefined;
     const quality=entry?.qualityTurnKey===this.options.goals.currentTurnKey(key)&&entry?.missingImages!==undefined?
       {missingImages:entry.missingImages}:{};
-    if(this.stopReason)return {state:'disabled',stopReason:this.stopReason,stoppedAt:this.stoppedAt!,
+    if(this.stopReason)return {...routing,state:'disabled',stopReason:this.stopReason,stoppedAt:this.stoppedAt!,
       ...(contextState?{contextState}:{}),...quality,
       estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
     const at=this.stopReason ? this.lastClock : this.time(),view=this.options.goals.view(key,at);
-    const health=this.options.goals.contextHealth(key);
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':entry?.flight?'estimating':
       this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
       entry?.lastResultStatus==='admission_denied'?'admission_blocked':
@@ -727,7 +730,7 @@ export class ObserverScheduler {
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
       (entry?.lastResultDiagnostic ?? (view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending'));
-    return {state,...quality,...(contextState?{contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+    return {state,...routing,...quality,...(contextState?{contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
       ...(entry?.lastResultDiagnostic?{resultDiagnostic:entry.lastResultDiagnostic}:{}),
       ...(entry?.lastRejectionReason?{rejectionReason:entry.lastRejectionReason}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,

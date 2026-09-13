@@ -90,6 +90,19 @@ describe("CompanionHttpClient", () => {
       state:'rejected_result',resultDiagnostic:'rejected_result',rejectionReason:'result_not_accepted'
     }}]});
   });
+  it.each([0,2,-1,1.5,'2'])('validates missing-image counts alongside routing diagnostics (%s)',async(missingImages)=>{
+    const store=new TaskStore();
+    store.apply({taskId:'task',event:{type:'turn_started'}},0,
+      {conversationKey:'chat',turnKey:'turn',isCurrentTurn:true});
+    const snapshot=store.snapshot(0);
+    const observer={state:'pending',schedulerRegistered:true,sourceHealth:'ready',missingImages,
+      estimateAgeSeconds:null,callsLastHour:0,retryPending:false};
+    const row={...snapshot.rows![0],observer};
+    const {baseUrl,tokenPath}=await fixture((_request,response)=>json(response,200,{...snapshot,rows:[row]}));
+    const response=new CompanionHttpClient(baseUrl,tokenPath).status();
+    if(missingImages===0||missingImages===2)await expect(response).resolves.toMatchObject({rows:[{observer}]});
+    else await expect(response).rejects.toBeInstanceOf(HudClientError);
+  });
   const aggregateSnapshot = {
     revision: 3,
     selectedTaskId: "hud_abcdefghijklmnopqrstuvwxyz0123456789",

@@ -154,6 +154,8 @@ const aggregateSnapshotSchema = z.object({
     eta: etaSchema.nullable(),
     name: z.object({value:z.string().max(1024).nullable(),freshness:z.enum(['fresh','stale','unavailable'])}).strict(),
     observer:z.object({state:z.enum(['pending','history_loading','history_unavailable','estimating','insufficient_context','call_failed','setup_failed','rate_limited','admission_blocked','disabled','ready',...resultDiagnostics]),
+      schedulerRegistered:z.boolean().optional(),sourceHealth:z.enum(['loading','ready','error','missing','unavailable']).optional(),
+      missingImages:z.number().int().nonnegative().optional(),
       admissionReason:z.enum(admissionReasons).optional(),
       contextState:z.enum(observerContextStates).optional(),
       resultDiagnostic:z.enum(resultDiagnostics).optional(),rejectionReason:z.enum(resultRejectionReasons).optional(),

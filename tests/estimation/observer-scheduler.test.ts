@@ -7,6 +7,24 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('distinguishes an unregistered task from a registered task without changing admission',async()=>{
+  const f=fixture(1);
+  try{
+    expect(f.scheduler.diagnostics('absent')).toMatchObject({schedulerRegistered:false,sourceHealth:'unavailable'});
+    const key=f.hook('UserPromptSubmit');
+    expect(f.scheduler.diagnostics(key)).toMatchObject({schedulerRegistered:true,sourceHealth:'unavailable'});
+    expect(f.calls).toHaveLength(0);
+  }finally{await f.scheduler.close();}
+});
+it('reports source health even before scheduling has recorded a skip',async()=>{
+  const f=selectedSourceFixture();f.setAvailable(false);const key=f.hook();
+  try{
+    expect(f.scheduler.diagnostics(key)).toMatchObject({schedulerRegistered:true,sourceHealth:'error'});
+    f.setAvailable(true);
+    expect(f.scheduler.diagnostics(key).sourceHealth).toBe('ready');
+    expect(f.calls).toHaveLength(0);
+  }finally{await f.scheduler.close();}
+});
 it('retains a safe stop diagnosis when the tick clock fails',async()=>{
   const records:ObserverObservation[]=[];
   const f=fixture(1,6000,row=>records.push(row));const key=f.hook('UserPromptSubmit');f.time(Number.NaN);
