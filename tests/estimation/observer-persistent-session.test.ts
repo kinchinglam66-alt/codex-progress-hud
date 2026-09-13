@@ -4,7 +4,7 @@ import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 const input:ObserverInput={goalSummary:'current goal',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'goal',truncated:false}],truncated:false};
 const answer={relation:'continue',status:'running',summary:'current goal',estimate:{remainingSeconds:90,errorPercent:20}};
 const usage={totalTokens:110,inputTokens:100,outputTokens:10,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:2};
-function fixture(){
+function fixture(options:{delayTurnStart?:boolean}={}){
  const listeners=new Set<(n:{method:string;params:Record<string,unknown>})=>void>();
  const calls:Array<{method:string;params:any}>=[];let count=0;
  const emit=(method:string,params:Record<string,unknown>)=>{for(const l of listeners)l({method,params});};
@@ -15,7 +15,7 @@ function fixture(){
  };
  const rpc:SessionRpc={call:async(method,params:any)=>{calls.push({method,params});
    if(method==='thread/start')return {thread:{id:'thread'}};
-   if(method==='turn/start'){const id=`turn-${++count}`;respond(id);return {turn:{id}};}
+   if(method==='turn/start'){const id=`turn-${++count}`;respond(id);if(options.delayTurnStart)await new Promise(resolve=>setTimeout(resolve,10));return {turn:{id}};}
    if(method==='turn/interrupt')emit('turn/completed',{threadId:'thread',turn:{id:params.turnId,status:'interrupted'}});
    return {};
  },subscribe:l=>{listeners.add(l);return()=>listeners.delete(l);}};
@@ -83,6 +83,13 @@ it('records a gap when a token usage snapshot is malformed',async()=>{
 it('rejects a usage evidence callback failure even after turn completion',async()=>{
  const f=fixture(),s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});await s.start();
  await expect(s.estimate(input,new AbortController().signal,async()=>{throw Error('private journal detail');})).rejects.toMatchObject({
-   code:'SESSION_USAGE_EVIDENCE_FAILED',turnId:'turn-1',reason:'usage_evidence_write_failed',terminalConfirmed:true
+ code:'SESSION_USAGE_EVIDENCE_FAILED',turnId:'turn-1',reason:'usage_evidence_write_failed',terminalConfirmed:true
+   ,terminalStatus:'completed'
+ });
+});
+it('handles usage evidence failure before a delayed turn start acknowledgement',async()=>{
+ const f=fixture({delayTurnStart:true}),s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});await s.start();
+ await expect(s.estimate(input,new AbortController().signal,async()=>{throw Error('private journal detail');})).rejects.toMatchObject({
+   code:'SESSION_USAGE_EVIDENCE_FAILED',turnId:'turn-1',reason:'usage_evidence_write_failed',terminalConfirmed:true,terminalStatus:'completed'
  });
 });

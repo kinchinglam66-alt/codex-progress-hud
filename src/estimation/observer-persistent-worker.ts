@@ -149,16 +149,16 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          if(operationId&&!receiptFailure&&sessionFailure instanceof Error&&typeof sessionFailure.code==='string'&&
             (sessionFailure.code==='SESSION_TIMEOUT'||sessionFailure.code==='SESSION_PROTOCOL_FAILED')){
            try{await journal!.operationTerminal({operationId,admissionId:id!,ownerUuid:processOwnerUuid,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,
-             ...(sessionFailure.turnId===undefined?{}:{turnId:sessionFailure.turnId}),terminalState:sessionFailure.terminalConfirmed?'completed':'unconfirmed',usageCompleteness:sessionFailure.code==='SESSION_TIMEOUT'?'timeout_unconfirmed':'protocol_failed'});}
+             ...(sessionFailure.turnId===undefined?{}:{turnId:sessionFailure.turnId}),terminalState:!sessionFailure.terminalConfirmed?'unconfirmed':sessionFailure.terminalStatus==='completed'?'completed':sessionFailure.terminalStatus==='interrupted'?'cancelled':'failed',usageCompleteness:sessionFailure.code==='SESSION_TIMEOUT'?'timeout_unconfirmed':'protocol_failed'});}
            catch{receiptFailure=true;}
          }
          let cleaned=false;try{await reset();cleaned=true;}catch{poisoned=true;}
          if(receiptFailure){
-           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:'closed',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
+           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
            poisoned=true;return empty('accounting_error');
          }
          if(sessionFailure instanceof Error&&typeof sessionFailure.code==='string'&&sessionFailure.code.startsWith('SESSION_')){
-           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:'closed',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
+           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
            return empty('process_error');
          }
          if(id&&view&&!settled){

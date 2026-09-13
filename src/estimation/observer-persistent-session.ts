@@ -14,9 +14,9 @@ export type UsageEvidence =
 export type PersistentSessionErrorCode='SESSION_TIMEOUT'|'SESSION_PROTOCOL_FAILED'|'SESSION_USAGE_EVIDENCE_FAILED';
 export type PersistentSessionErrorReason='timeout'|'protocol_failed'|'interrupt_failed'|'usage_evidence_write_failed';
 export class PersistentSessionError extends Error {
- readonly code:PersistentSessionErrorCode;readonly reason:PersistentSessionErrorReason;readonly terminalConfirmed:boolean;readonly turnId?:string;
- constructor(code:PersistentSessionErrorCode,reason:PersistentSessionErrorReason,terminalConfirmed:boolean,turnId?:string){
-   super(code);this.name='PersistentSessionError';this.code=code;this.reason=reason;this.terminalConfirmed=terminalConfirmed;if(turnId!==undefined)this.turnId=turnId;
+ readonly code:PersistentSessionErrorCode;readonly reason:PersistentSessionErrorReason;readonly terminalConfirmed:boolean;readonly turnId?:string;readonly terminalStatus?:string;
+ constructor(code:PersistentSessionErrorCode,reason:PersistentSessionErrorReason,terminalConfirmed:boolean,turnId?:string,terminalStatus?:string){
+   super(code);this.name='PersistentSessionError';this.code=code;this.reason=reason;this.terminalConfirmed=terminalConfirmed;if(turnId!==undefined)this.turnId=turnId;if(terminalStatus!==undefined)this.terminalStatus=terminalStatus;
  }
 }
 function rawTokens(value:unknown):RawTokens|null {
@@ -92,8 +92,8 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:{cwd:stri
      const queueEvidence=(evidence:UsageEvidence,id:string)=>{
        if(!onUsageEvidence)return;
        const state=states.get(id),task=Promise.resolve().then(()=>onUsageEvidence(evidence)).catch(()=>{
-         const error=new PersistentSessionError('SESSION_USAGE_EVIDENCE_FAILED','usage_evidence_write_failed',state?.status!==undefined,id);
-         fail(error);throw error;
+         const error=new PersistentSessionError('SESSION_USAGE_EVIDENCE_FAILED','usage_evidence_write_failed',state?.status!==undefined,id,state?.status);
+         fail(error);
        });
        writeTasks.push(task);
      };
@@ -108,7 +108,7 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:{cwd:stri
          const item=object(n.params.item);
          if(item.type==='contextCompaction')state.compactions++;
          if(item.type==='agentMessage'&&typeof item.text==='string'&&(!state.final||item.phase==='final_answer')){
-          if(Buffer.byteLength(item.text)>262144){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',state.status!==undefined,id));return;}
+          if(Buffer.byteLength(item.text)>262144){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',state.status!==undefined,id,state.status));return;}
            state.text=item.text;state.final=item.phase==='final_answer';
          }
        }else if(n.method==='thread/tokenUsage/updated'){
@@ -120,15 +120,15 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:{cwd:stri
            usageGaps.push({observedAt:evidence.observedAt,source:evidence.source,reason:evidence.reason});queueEvidence(evidence,id);}
          state.total=tokens(u.total);state.last=tokens(u.last);
        }else if(n.method==='turn/completed'){
-         if(typeof turn.status!=='string'){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',false,id));return;}state.status=turn.status;complete();
+       if(typeof turn.status!=='string'){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',false,id));return;}state.status=turn.status;complete();
        }
      });
      const interrupt=()=>{
        if(!turnId||interrupted||states.get(turnId)?.status)return;
-       interrupted=true;const id=turnId;void rpc.call('turn/interrupt',{threadId,turnId:id}).catch(()=>fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','interrupt_failed',states.get(id)?.status!==undefined,id)));
+       interrupted=true;const id=turnId;void rpc.call('turn/interrupt',{threadId,turnId:id}).catch(()=>fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','interrupt_failed',states.get(id)?.status!==undefined,id,states.get(id)?.status)));
      };
      signal.addEventListener('abort',interrupt,{once:true});
-     const timer=setTimeout(()=>{if(!settled)fail(new PersistentSessionError('SESSION_TIMEOUT','timeout',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId));},timeoutMs);
+     const timer=setTimeout(()=>{if(!settled)fail(new PersistentSessionError('SESSION_TIMEOUT','timeout',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status));},timeoutMs);
      try{
        const r=object(await rpc.call('turn/start',{threadId,model:'gpt-5.6-luna',effort:'medium',serviceTierForTurn:'default',
          input:[{type:'text',text:JSON.stringify({currentObservation:input,importedThroughOrdinal:cursor})}],outputSchema:options.outputSchema}));
@@ -147,11 +147,12 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:{cwd:stri
          try{interpretation=observerResponseSchema.parse(JSON.parse(state.text??''));}catch{/* Invalid output never becomes a forecast. */}
        }
        await Promise.all(writeTasks);
+       if(failure)throw failure;
        const usageCompleteness=usageGaps.length>0?'malformed_snapshot':state.compactions>0?'compaction_observed':state.updates===0?'missing':state.updates===1&&usage?'single_update':
          state.updates===1?'inconsistent_delta':'multiple_updates';
        return {interpretation,usage,terminalConfirmed:true,cancelled:signal.aborted,compactions:state.compactions,turnId,
          usageCompleteness,usageSnapshots:state.snapshots,usageGaps};
-     }catch(e){uncertain=true;if(e instanceof PersistentSessionError)throw e;throw new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId);}
+     }catch(e){uncertain=true;if(e instanceof PersistentSessionError)throw e;throw new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status);}
      finally{clearTimeout(timer);unsubscribe();signal.removeEventListener('abort',interrupt);await Promise.allSettled(writeTasks);busy=false;}
    },
  };
