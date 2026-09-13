@@ -8,6 +8,7 @@ const pathSchema=z.string().min(1).max(4096).refine(value=>isAbsolute(value) && 
 const schema=z.object({executable:pathSchema,parentDirectory:pathSchema,cwd:pathSchema,
   version:z.string().refine(value=>codexRuntimeProfiles.some(profile=>profile.version===value)),
   executableSha256:z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  persistentObserver:z.boolean().optional(),
   proxyUrl:z.string().max(256).refine(value=>{
     try {const url=new URL(value);return url.protocol==='http:' && ['127.0.0.1','[::1]'].includes(url.hostname) &&
       !url.username && !url.password && url.pathname==='/' && !url.search && !url.hash;}catch{return false;}

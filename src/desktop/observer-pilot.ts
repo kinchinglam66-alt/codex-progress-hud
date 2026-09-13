@@ -97,8 +97,8 @@ export function subscriptionAccountingDirectory(dataDirectory:string,accountFing
     : resolve(dataDirectory,'observer-accounting','accounts',accountFingerprint);
 }
 
-export function shouldEnablePersistentObserver(options:{enablePersistentObserver?:boolean}):boolean{
-  return options.enablePersistentObserver===true;
+export function shouldEnablePersistentObserver(options:{enablePersistentObserver?:boolean},config?:{persistentObserver?:boolean|undefined}|null):boolean{
+  return (options.enablePersistentObserver??config?.persistentObserver)===true;
 }
 
 /** Explicit local pilot opt-in, never configuration taken from a chat/HTTP request.
@@ -141,7 +141,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
-      ...(shouldEnablePersistentObserver(options)?{persistentReceiptDirectory:accountingDirectory,
+      ...(shouldEnablePersistentObserver(options,config)?{persistentReceiptDirectory:accountingDirectory,
         persistentWorkerFactory:workerOptions=>createPersistentObserverWorker({...workerOptions,outputSchema:assets.schema})}:{}),
       contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
         const runner=createOwnedProcessRunner({...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes})});

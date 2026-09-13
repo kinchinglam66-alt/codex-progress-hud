@@ -2,9 +2,15 @@ import {mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {afterEach, expect, it} from 'vitest';
-import {ensureSubscriptionRootOwner, loadDesktopObserverPilot, subscriptionAccountingDirectory} from '../../src/desktop/observer-pilot.js';
+import {ensureSubscriptionRootOwner, loadDesktopObserverPilot, subscriptionAccountingDirectory,shouldEnablePersistentObserver} from '../../src/desktop/observer-pilot.js';
 
 const roots: string[] = [];
+it('requires host opt-in and allows the host to override its saved pilot choice',()=>{
+  expect(shouldEnablePersistentObserver({},null)).toBe(false);
+  expect(shouldEnablePersistentObserver({},{persistentObserver:true})).toBe(true);
+  expect(shouldEnablePersistentObserver({enablePersistentObserver:false},{persistentObserver:true})).toBe(false);
+  expect(shouldEnablePersistentObserver({enablePersistentObserver:true},{persistentObserver:false})).toBe(true);
+});
 const protection = {
   protect: (value: string) => value,
   unprotect: (value: string) => value,

@@ -6,6 +6,11 @@ import {parseObserverPilotConfig,observerPilotEnvironment,readObserverPilotConfi
 
 const config={executable:resolve('codex.exe'),parentDirectory:resolve('private-pilot'),cwd:resolve('private-pilot/empty'),version:'0.153.4',proxyUrl:'http://127.0.0.1:7890'};
 describe('local observer pilot configuration',()=>{
+  it('accepts only an explicit boolean persistent-session opt-in',()=>{
+    expect(parseObserverPilotConfig({...config,persistentObserver:true})).toMatchObject({persistentObserver:true});
+    expect(parseObserverPilotConfig({...config,persistentObserver:false})).toMatchObject({persistentObserver:false});
+    expect(()=>parseObserverPilotConfig({...config,persistentObserver:'true'})).toThrow('OBSERVER_PILOT_CONFIG_INVALID');
+  });
   it('preserves an explicitly verified build selector and rejects unknown or mismatched pins',()=>{
     const executableSha256='e5aa76d19c7c94e2e9ef9b707d590206a73ac0e97c8ddc8382181242494bef75';
     expect(parseObserverPilotConfig({...config,executableSha256})).toMatchObject({executableSha256});
