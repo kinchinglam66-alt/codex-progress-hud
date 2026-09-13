@@ -60,6 +60,7 @@ export function createObserverIdentityRuntime(options:Options) {
       pending=Promise.resolve().then(async()=>{
         let stage:PreparationStage='home-prepare';
         let accountAttempts=0;
+        let readerDiagnostic:import('./account-inspection-failure.js').AccountInspectionDiagnostic['reader'];
         const startedAt=performance.now();
         const emit=(outcome:PreparationDiagnostic['outcome'],detail?:AccountReadDiagnostic)=>{
           try{config.onDiagnostic?.({stage,outcome,elapsedMs:Math.round(performance.now()-startedAt),...(detail?{reader:detail}:{})});}catch{/* No diagnostic can authorize or reject work. */}
@@ -77,8 +78,13 @@ export function createObserverIdentityRuntime(options:Options) {
           if(mode!=='logout') {
             const setupInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
             for (;;) {
-              check();accountAttempts++;
-              reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
+              check();accountAttempts++;readerDiagnostic=undefined;
+              reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>{
+                if(['passed','login_required','timeout','cancelled','rpc_error','read_failed'].includes(detail.reason)&&
+                  Number.isInteger(detail.phase)&&detail.phase>=0&&detail.phase<=11)
+                  readerDiagnostic=Object.freeze({reason:detail.reason,phase:detail.phase});
+                emit('reader',detail);
+              });
               try {account=await reader.read(combined);break;}
               catch(error) {
                 if(loginMode && error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED')break;
@@ -127,6 +133,7 @@ export function createObserverIdentityRuntime(options:Options) {
           if(typeof mode==='object' && stage==='account-read' && !combined.aborted && !disabled && !ownersBusy()
             && error instanceof ObserverAccountTimeout)throw new ObserverPreDispatchTransient();
           if(mode==='inspect')throw new AccountInspectionFailure({stage,attempts:accountAttempts,
+            ...(readerDiagnostic?{reader:readerDiagnostic}:{}),
             reason:ownersBusy()?'ownership_unconfirmed':combined.aborted||disabled?'cancelled':
               error instanceof ObserverAccountTimeout?'timeout':'check_failed'});
           throw fail();

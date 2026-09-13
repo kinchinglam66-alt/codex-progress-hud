@@ -1,7 +1,7 @@
 type SettingsState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'checking' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' | 'unconfigured' | 'unauthorized' | 'repair_environment';
 interface SettingsStatus {state: SettingsState; reason?:string; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
 interface ProviderDraft {selected: 'subscription'|'api'; contextCapacity?:{model:string;contextTokens:number;outputReserveTokens:number;requestBytes:number|null}; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
-interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';accountDiagnostic?:{stage:string;reason:string;attempts:number};recipient?:string}
+interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';accountDiagnostic?:{stage:string;reason:string;attempts:number;reader?:{reason:string;phase:number}};recipient?:string}
 interface SettingsApi {
   getStatus(): Promise<SettingsStatus>; preflight(): Promise<SettingsStatus & {allowed: boolean; challenge?: string}>; confirm(revision: number, challenge: string): Promise<SettingsStatus>; revokeConsent(): Promise<SettingsStatus & {consentRevoked:boolean}>;
   readProviderSettings?(): Promise<ProviderSettings>; saveProviderSettings?(payload: unknown): Promise<ProviderSettings>; replaceSubscriptionAccount?(payload: unknown): Promise<{outcome:string}>;
@@ -203,7 +203,8 @@ function renderProvider(value: ProviderSettings): void {
   if (accountTime) accountTime.textContent = value.account ? `观察时间：${new Date(value.account.observedAt).toLocaleString('zh-CN')}；有效至：${new Date(value.account.expiresAt).toLocaleString('zh-CN')}` : '—';
   if(accountTime&&!value.account&&value.accountDiagnostic){
     const detail=value.accountDiagnostic;
-    accountTime.textContent=`检查阶段：${detail.stage}；原因：${detail.reason}；账户读取次数：${detail.attempts}。仅元数据检查，未运行模型。`;
+    const reader=detail.reader?`；读取步骤：${detail.reader.phase}；读取结果：${detail.reader.reason}`:'';
+    accountTime.textContent=`检查阶段：${detail.stage}；原因：${detail.reason}；账户读取次数：${detail.attempts}${reader}。仅元数据检查，未运行模型。`;
   }
   if (dirty) dirty.textContent = '已保存';
   renderProviderView();

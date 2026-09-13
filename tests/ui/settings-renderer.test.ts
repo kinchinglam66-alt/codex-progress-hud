@@ -46,10 +46,11 @@ it('shows bounded account failure stage and attempts without disguising it as lo
   const elements=new Map<string,any>();
   for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-account-time','#provider-start'])elements.set(id,{textContent:'',disabled:false,addEventListener:()=>{}});
   vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
-  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'unauthorized',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:async()=>({generation:0,revision:0,state:'inactive',selected:'subscription',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:null,accountStatus:'unavailable',accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3}})}});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'unauthorized',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:async()=>({generation:0,revision:0,state:'inactive',selected:'subscription',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:null,accountStatus:'unavailable',accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3,reader:{reason:'rpc_error',phase:2}}})}});
   await import('../../src/ui/settings-renderer.js');
   await vi.waitFor(()=>expect(elements.get('#provider-account-time').textContent).toContain('account-read'));
   expect(elements.get('#provider-account-time').textContent).toContain('timeout');
+  expect(elements.get('#provider-account-time').textContent).toContain('rpc_error');
   expect(elements.get('#provider-account-time').textContent).toContain('3');
   expect(elements.get('#state').textContent).not.toBe('unauthorized');
 });
