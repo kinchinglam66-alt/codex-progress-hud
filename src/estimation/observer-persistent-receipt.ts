@@ -10,7 +10,22 @@ const sourceKey=z.string().min(1).max(512), sourceEpoch=z.string().max(4096).nul
 const ownerUuid=z.string().uuid(), operationId=z.string().uuid();
 export interface PersistentReceiptBinding {accountFingerprint:string;routeFingerprint:string;assetsFingerprint:string}
 export type PersistentOperationKind='eta'|'context_compression';
+const preparationStages=['session_setup','checkpoint_import','history_import','context_compression'] as const;
+export type PersistentPreparationStage=typeof preparationStages[number];
+const preparationCodes=['PREPARATION_UNKNOWN','CHECKPOINT_INVALID','CHECKPOINT_REBUILD_REQUIRED','CHECKPOINT_ACK_INVALID',
+ 'APP_SERVER_RPC_ERROR','APP_SERVER_RPC_CLOSED','APP_SERVER_RPC_EOF','APP_SERVER_RPC_TIMEOUT','APP_SERVER_RPC_FRAME_TOO_LARGE',
+ 'APP_SERVER_RPC_WRITE_FAILED','SESSION_THREAD_MISSING','SESSION_PROTOCOL_FAILED','SESSION_TIMEOUT',
+ 'SOURCE_REWRITE','SOURCE_GAP','SOURCE_INVALID','capacity_unknown','context_too_large','ABORTED'] as const;
+export function preparationErrorCode(error:unknown):typeof preparationCodes[number]{
+ if(error instanceof Error){
+   if(error.name==='AbortError')return 'ABORTED';
+   if(error.message.startsWith('context_too_large:'))return 'context_too_large';
+   for(const code of preparationCodes)if(error.message===code)return code;
+ }
+ return 'PREPARATION_UNKNOWN';
+}
 export interface PersistentReceiptJournal {
+ preparationFailed?(value:{ownerUuid:string;sourceKey:string;generation:number;stage:PersistentPreparationStage;code:string}):Promise<void>;
  ownerStarted(value:{ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;pid:number;creationIdentity:string;binding?:PersistentReceiptBinding}):Promise<void>;
   operationStarted(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;operationKind?:PersistentOperationKind}):Promise<void>;
  usageSnapshot(value:{operationId:string;sourceKey:string;sourceEpoch?:string|null;generation:number;total:RawTokens;last:RawTokens;observedAt:number;completenessReason:string}):Promise<void>;
@@ -38,6 +53,10 @@ export function createPersistentReceiptJournal(directory:string):PersistentRecei
  };
  const base=(kind:string,value:RecordValue)=>record({kind,at:Date.now(),fullPipelineVerified:false,...value});
  return {
+   preparationFailed:async value=>{
+     await append(base('preparation_failure',{ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),
+       generation:z.number().int().nonnegative().safe().parse(value.generation),stage:z.enum(preparationStages).parse(value.stage),code:z.enum(preparationCodes).parse(value.code)}));
+   },
    ownerStarted:async value=>{
      const source=sourceKey.parse(value.sourceKey),epoch=sourceEpoch.parse(value.sourceEpoch??null);
      const binding={accountFingerprint:z.string().regex(/^[a-f0-9]{64}$/).parse(value.binding?.accountFingerprint),routeFingerprint:z.string().regex(/^[a-f0-9]{64}$/).parse(value.binding?.routeFingerprint),assetsFingerprint:z.string().regex(/^[a-f0-9]{64}$/).parse(value.binding?.assetsFingerprint)};

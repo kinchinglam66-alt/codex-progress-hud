@@ -8,7 +8,7 @@ import type {SubscriptionAccounting} from './subscription-accounting.js';
 import type {Invocation} from './owned-process.js';
 import {createObserverSessionProcess} from './observer-session-process.js';
 import {createPersistentObserverSession, type PersistentCompactionResult, type PersistentSessionError, type PersistentContextCapacityPolicy} from './observer-persistent-session.js';
-import {createPersistentReceiptJournal,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
+import {createPersistentReceiptJournal,preparationErrorCode,type PersistentPreparationStage,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
 import {normalizeAdmissionReason} from '../core/observer-diagnostics.js';
 
 export interface PersistentWorkerOptions {
@@ -168,13 +168,15 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    prepareContext(input,history,signal,key,g){
      if(pending||!authorized())return history.snapshot.close().then(()=>{throw Error(`CONTEXT_UNAVAILABLE:${pending?'pending':'unauthorized'}`);});
      return operation(signal,async combined=>{
+       let preparationStage:PersistentPreparationStage='session_setup';
        try{
          bind(key,g);check(combined);
          const epoch=JSON.stringify([history.snapshot.identity,history.snapshot.sourceEpoch,history.snapshot.checkpoint?.fingerprint??null]);
          if(sourceEpoch!==undefined&&sourceEpoch!==epoch)await reset();
          sourceEpoch=epoch;
          const live=await ensure(combined);sourceEpoch=epoch;
-         if(history.snapshot.checkpoint)await live.bootstrapCheckpoint(history.snapshot.checkpoint,combined);
+         if(history.snapshot.checkpoint){preparationStage='checkpoint_import';await live.bootstrapCheckpoint(history.snapshot.checkpoint,combined);}
+         preparationStage='history_import';
           let count=0,sourceBytes=0,compactionCount=0,confirmedCompactionThroughOrdinal:number|null=null,lastCommittedOrdinal=-1;
           for await(const item of history.snapshot.records(combined)){
            check(combined);
@@ -190,7 +192,9 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
             const compact=budget===undefined?undefined:async(compactSignal:AbortSignal,onDispatch?:()=>void)=>{
               if(compactionCount>=budget.maxCompactionOperations)throw Error('context_too_large:compaction_budget_exhausted');
               const checkpoint=lastCommittedOrdinal;
+              preparationStage='context_compression';
               const result=await runCompaction(live,compactSignal,key,g,()=>onDispatch?.());
+              preparationStage='history_import';
               compactionCount+=1;confirmedCompactionThroughOrdinal=checkpoint>=0?checkpoint:null;
               return result;
             };
@@ -214,7 +218,12 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
             budgetStatus:budget===undefined?'unconfigured' as const:'trusted' as const};
          return {input:{...input,representation,
            ...(input.observation?{observation:{...input.observation,historyComplete:representation.sourceComplete}}:{})},representation};
-       }catch(e){await reset();throw e;}finally{await history.snapshot.close();}
+       }catch(e){
+         // Diagnostic metadata is best effort; never skip process cleanup or
+         // replace the original failure if the diagnostic journal is unavailable.
+         try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(e)});}catch{}
+         await reset();throw e;
+       }finally{await history.snapshot.close();}
      });
    },
    observe(input,signal,key,g=0,onStage){

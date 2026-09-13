@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {Script} from 'node:vm';
 import {createPersistentObserverWorker,type PersistentHistoryBudget} from '../../src/estimation/observer-persistent-worker.js';
 import {createObserverSessionProcess} from '../../src/estimation/observer-session-process.js';
-import {createPersistentReceiptJournal} from '../../src/estimation/observer-persistent-receipt.js';
+import {createPersistentReceiptJournal,preparationErrorCode} from '../../src/estimation/observer-persistent-receipt.js';
 import {openReleaseAccounting} from '../../src/estimation/release-accounting.js';
 import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
@@ -35,6 +35,40 @@ function history(records:ConversationRecord[],epoch=0):HistorySnapshot{
  return {identity:'local-only-source-identity',sourceEpoch:epoch,revision:records.length,coverage:{complete:true,gaps:[]},
    async *records(){for(const [ordinal,record]of records.entries())yield {ordinal,record};},close:async()=>{}};
 }
+it('records a bounded preparation stage without leaking a source exception or admitting a model call',async()=>{
+ const f=await fixture(),signal=new AbortController().signal;
+ const snapshot=history([]);
+ snapshot.records=async function*(){throw Error('private source content and credentials');};
+ try{
+   await expect(f.worker.prepareContext!(input,{snapshot,currentTurnId:'t'},signal,'source',0,0)).rejects.toThrow('private source');
+   const raw=await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8');
+   const records=raw.trim().split('\n').map(line=>JSON.parse(line));
+   expect(records.find(row=>row.kind==='preparation_failure')).toMatchObject({stage:'history_import',code:'PREPARATION_UNKNOWN',generation:0});
+   expect(raw).not.toContain('private source');
+   expect(records.some(row=>row.kind==='operation')).toBe(false);
+   expect(records.at(-1)).toMatchObject({kind:'process_exit',processExitState:'closed'});
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('keeps checkpoint rejection separate from history and compression failures',async()=>{
+ const f=await fixture(),signal=new AbortController().signal;
+ const checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[{type:'compaction',encrypted_content:'private summary'}]}})!;
+ try{
+   await expect(f.worker.prepareContext!(input,{snapshot:{...history([]),checkpoint:{...checkpoint,fingerprint:'wrong'}},currentTurnId:'t'},signal,'source',0,0)).rejects.toThrow('CHECKPOINT_INVALID');
+   const raw=await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8');
+   const rows=raw.trim().split('\n').map(line=>JSON.parse(line));
+   expect(rows.find(row=>row.kind==='preparation_failure')).toMatchObject({stage:'checkpoint_import',code:'CHECKPOINT_INVALID'});
+   expect(raw).not.toContain('private summary');
+   expect(rows.some(row=>row.kind==='operation')).toBe(false);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it.each([
+ ['APP_SERVER_RPC_ERROR','APP_SERVER_RPC_ERROR'],
+ ['APP_SERVER_RPC_ERROR private payload','PREPARATION_UNKNOWN'],
+ ['context_too_large:private payload','context_too_large'],
+ ['private credentials','PREPARATION_UNKNOWN'],
+])('records only allowlisted preparation errors: %s',(message,expected)=>{
+ expect(preparationErrorCode(Error(message))).toBe(expected);
+});
 it('continues to a forecast after several confirmed native compressions with unknown usage',async()=>{
  const policy=persistentHistoryPolicy({contextTokens:258400,outputReserveTokens:16384,requestBytes:null,source:'configured'});
  const f=await fixture(false,{script:compactionScript,...policy}),signal=new AbortController().signal;
