@@ -718,7 +718,9 @@ export async function openReleaseAccounting(directory: string, now: () => number
     const retry = database.prepare('SELECT next_eligible, claim_admission_id FROM conversation_retries WHERE conversation = ?').get(key) as Row | undefined;
     if (nextEligible !== null && current < nextEligible) return null;
     if (retry !== undefined) {
-      if (admissionKind !== 'retry') return null;
+      // A global half-open grant can also satisfy an elapsed per-conversation
+      // retry. Keep both claim fences; do not reject the grant we just issued.
+      if (admissionKind !== 'retry' && admissionKind !== 'half_open') return null;
       if (retry.claim_admission_id !== null) return null;
       if (retry.next_eligible !== null && current < safeInteger(retry.next_eligible)) return null;
     } else if (admissionKind === 'retry') return null;
@@ -729,7 +731,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     if (safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state IN ('pending', 'recovery_trial') AND conversation = ?").get(key) as Row).count) > 0) return null;
     const id = randomUUID();
     database.prepare("INSERT INTO admissions (id, ordinal, conversation, admitted_at, state, input_tokens, output_tokens, cached_input_tokens, settlement_classification, purpose) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, 'legacy', ?)").run(id, starts + 1, key, current, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, MAX_TOKENS_PER_FIELD, purpose);
-    if (admissionKind === 'retry') {
+    if (admissionKind === 'retry' || (admissionKind === 'half_open' && retry !== undefined)) {
       const claimed = database.prepare('UPDATE conversation_retries SET claim_admission_id = ?, updated_at = ? WHERE conversation = ? AND claim_admission_id IS NULL').run(id, current, key);
       if (claimed.changes !== 1) fail('RELEASE_RECOVERY_INVALID');
     }
@@ -1239,7 +1241,16 @@ export async function openReleaseAccounting(directory: string, now: () => number
           const stored = metadata();
           const unknown = safeInteger(stored.unknown_count), revision = safeInteger(stored.recovery_revision), starts = safeInteger(stored.cumulative_starts);
           if (unknown > MAX_SAFE - rows.length || revision > MAX_SAFE - rows.length) fail('RELEASE_COUNTER_OVERFLOW');
-          for (const row of rows) database.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = 'safe_unknown', recovery_attempt_id = NULL WHERE id = ?").run(String(row.id));
+          for (const row of rows) {
+            const id=String(row.id);
+            database.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = 'safe_unknown', recovery_attempt_id = NULL WHERE id = ?").run(id);
+            const retry=database.prepare('SELECT failure_count FROM conversation_retries WHERE claim_admission_id = ?').get(id) as Row|undefined;
+            if(retry){
+              const count=Math.min(5,safeInteger(retry.failure_count)+1);
+              database.prepare('UPDATE conversation_retries SET failure_count = ?, next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE claim_admission_id = ?')
+                .run(count,current+RETRY_DELAYS_MS[count-1]!,current,id);
+            }
+          }
           database.prepare('UPDATE metadata SET unknown_count = ?, recovery_revision = ?, unknown_admission_ceiling = ? WHERE id = 1')
             .run(unknown + rows.length, revision + rows.length, starts);
           database.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();

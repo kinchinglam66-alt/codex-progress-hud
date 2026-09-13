@@ -9,6 +9,47 @@ const directories: string[] = [];
 const owners: ReleaseAccountingOwner[] = [];
 const DB_NAME = 'release-observer-accounting.sqlite';
 const usage = {inputTokens: 10, outputTokens: 2, cachedInputTokens: 5};
+it('reserves the granted half-open compression when that conversation also has an expired retry',async()=>{
+ let now=0;const owner=await open(await directory(),()=>now);
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ await owner.recordRecoveryEvent!({kind:'recoverable_failure',at:now,conversationKey:'current'});
+ now=300_000;
+ const admission=await owner.recoveryAdmission!(now,true,'current');
+ expect(admission).toMatchObject({allowed:true,kind:'half_open'});
+ const view=owner.forConversation('current'),id=await view.reserve(admission.kind,'context_compression');
+ expect(id).not.toBeNull();
+ expect((await owner.recoveryAdmission!(now,true,'other')).allowed).toBe(false);
+ await view.cancelBeforeDispatch(id!);
+ await owner.releaseRecoveryAdmission!('current');
+ const next=await owner.recoveryAdmission!(now,true,'current');
+ expect(next).toMatchObject({allowed:true,kind:'half_open'});
+ const nextId=await view.reserve(next.kind,'context_compression');
+ expect(nextId).not.toBeNull();
+ await view.cancelBeforeDispatch(nextId!);
+});
+it('does not let half-open reservation bypass an unexpired conversation retry',async()=>{
+ let now=0;const owner=await open(await directory(),()=>now);
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ now=290_000;await owner.recordRecoveryEvent!({kind:'recoverable_failure',at:now,conversationKey:'current'});
+ now=300_000;
+ expect(await owner.recoveryAdmission!(now,true,'current')).toMatchObject({allowed:false,reason:'retry_backoff'});
+ expect(await owner.forConversation('current').reserve('half_open','context_compression')).toBeNull();
+});
+it('releases a half-open retry claim when reboot evidence reconciles its pending admission',async()=>{
+ let now=0;const path=await directory();let owner=await open(path,()=>now);
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ await owner.recordRecoveryEvent!({kind:'recoverable_failure',at:now,conversationKey:'current'});
+ now=300_000;
+ const admission=await owner.recoveryAdmission!(now,true,'current');
+ expect(await owner.forConversation('current').reserve(admission.kind,'context_compression')).not.toBeNull();
+ await owner.close();now=320_000;owner=await open(path,()=>now);
+ expect(await owner.reconcileRecoveredPending({source:'windows-win32-operating-system',bootAt:310_001,observedAt:now})).toBe(1);
+ now=500_000;
+ const next=await owner.recoveryAdmission!(now,true,'current');
+ expect(next.allowed).toBe(true);
+ const view=owner.forConversation('current'),id=await view.reserve(next.kind,'context_compression');
+ expect(id).not.toBeNull();await view.cancelBeforeDispatch(id!);
+});
 it('rejects a settled token-bearing row forged as confirmed compression unknown on reopen',async()=>{
  const path=await directory(),owner=await open(path,()=>0),view=owner.forConversation('compression');
  const id=(await view.reserve('ordinary','context_compression'))!;
