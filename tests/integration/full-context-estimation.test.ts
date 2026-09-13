@@ -196,16 +196,18 @@ it("prepares complete local history, scopes ETA to the current turn, and re-obse
   await f.close();
 });
 
-it("keeps unsupported payload coverage incomplete after the local source is fully read", async () => {
+it("stops unsupported payload history before configuring or calling the provider", async () => {
+  let configured=false;
   const unsupported = line("response_item", {type: "message", id: "image", role: "user", turn_id: "current",
     content: [{type: "input_image", path: "synthetic-not-read.txt"}]});
   const f = await harness({contents: meta(THREAD_A) + unsupported + taskStarted("current") +
-    message("user", "current", "requirement", "CURRENT-INCOMPLETE")});
+    message("user", "current", "requirement", "CURRENT-INCOMPLETE"),configure:async()=>{
+      configured=true;return config({summarize:async request=>({...request,text:'summary'})});
+    }});
   await f.start();
   await f.waitForIdle();
-  expect(f.inputs).toHaveLength(1);
-  expect(f.inputs[0]?.representation).toMatchObject({mode: "incomplete", sourceComplete: false});
-  expect(f.inputs[0]?.observation?.historyComplete).toBe(false);
+  expect(f.inputs).toHaveLength(0);
+  expect(configured).toBe(false);
   expect(f.observations.at(-1)).toMatchObject({kind: "result", contextState: "history_incomplete"});
   await f.close();
 });

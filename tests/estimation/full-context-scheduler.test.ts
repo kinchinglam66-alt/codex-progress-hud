@@ -4,6 +4,7 @@ import {PassiveContextStore} from "../../src/server/passive-context-store.js";
 import {PassiveGoals} from "../../src/server/passive-goals.js";
 import {createConversationSource} from "../../src/observer/conversation-source.js";
 import type {HistoryRecord, HistorySnapshot} from "../../src/observer/history-snapshot.js";
+import {createHistorySnapshot} from "../../src/observer/history-snapshot.js";
 import type {ReadBatch} from "../../src/observer/conversation-record.js";
 import {ObserverScheduler, type ObserverObservation, type ObserverWorker} from "../../src/estimation/observer-scheduler.js";
 import type {ObserverInput} from "../../src/estimation/observer-contract.js";
@@ -121,6 +122,27 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;re
   };
 }
 
+it.each(['late-gap','read-error','complete'] as const)('scans history before any provider preparation: %s',async scenario=>{
+  const f=fixture({deferHistory:true});let scanFinished=false,closed=0;
+  const snapshot=createHistorySnapshot({identity:'fixed',sourceEpoch:1,revision:1,open:()=>({
+    async readPage(offset){
+      expect(f.counts().prepared).toBe(0);expect(f.counts().observed).toBe(0);
+      if(offset===0)return {records:[{id:'large',kind:'user' as const,turnId:'first',atMs:1,text:'x'.repeat(200000)}],nextOffset:1,done:false,coverage:{complete:true,gaps:[]}};
+      if(scenario==='read-error')throw Error('unreadable source');
+      scanFinished=true;
+      return {records:[],nextOffset:2,done:true,coverage:scenario==='late-gap'?{complete:false,gaps:['unsupported_payload' as const]}:{complete:true,gaps:[]}};
+    },async close(){}
+  }),async close(){closed++;}});
+  try{
+    await f.start();f.resolveHistory(snapshot);await f.flush();
+    expect(f.counts()).toMatchObject({prepared:scenario==='complete'?1:0,observed:scenario==='complete'?1:0});
+    if(scenario!=='complete'){
+      expect(closed).toBe(1);
+      expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('history_incomplete');
+    }else expect(scanFinished).toBe(true);
+  }finally{await snapshot.close();await f.scheduler.close();await f.source.close();}
+});
+
 it('captures the full-context prefix without changing production ETA when research fails',async()=>{
   let captures=0;
   const research:ResidualRuntime={capture(){captures++;throw Error('recording failure');},accept(){throw Error('recording failure');},unavailable(){},boundary(){},forget(){},async close(){}};
@@ -130,6 +152,33 @@ it('captures the full-context prefix without changing production ETA when resear
   expect(withResearch.counts()).toEqual(ordinary.counts());
   expect(withResearch.goals.view(withResearch.envelope.sessionKey,16000)).toEqual(ordinary.goals.view(ordinary.envelope.sessionKey,16000));
   await ordinary.scheduler.close();await withResearch.scheduler.close();
+});
+
+it('does not prepare a source whose turn changed during the local scan',async()=>{
+  const f=fixture({deferHistory:true});let release!:()=>void;
+  const snapshot=history([],{value:0});let closed=0;
+  snapshot.close=async()=>{closed++;};
+  snapshot.records=async function*(){
+    yield {ordinal:0,record:{id:'u',turnId:'first',atMs:1,kind:'user',text:'work'}};
+    await new Promise<void>(resolve=>{release=resolve;});
+  };
+  try{
+    await f.start();f.resolveHistory(snapshot);await f.flush();
+    const next=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'second'},17000,token).envelope;
+    f.time(17000);f.goals.observe(next,true,17000);f.setSourceTurn(next.turnKey!);
+    f.source.attach(next.sessionKey,'conversation-id',next.turnKey!);
+    release();await f.flush();
+    expect(f.counts()).toMatchObject({prepared:0,observed:0});expect(closed).toBe(1);
+  }finally{release?.();await f.scheduler.close();await f.source.close();}
+});
+
+it('does not observe a representation that became incomplete during provider preparation',async()=>{
+  const f=fixture();const value=f.preparedContext();
+  f.prepareResult({...value,representation:{...value.representation,mode:'incomplete',sourceComplete:false}});
+  try{
+    await f.start();expect(f.counts()).toMatchObject({prepared:1,observed:0});
+    expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('history_incomplete');
+  }finally{await f.scheduler.close();await f.source.close();}
 });
 
 it.each([false,true])('joins a real scheduler forecast with independent same-turn source completion (advancing clock: %s)',async advancingClock=>{

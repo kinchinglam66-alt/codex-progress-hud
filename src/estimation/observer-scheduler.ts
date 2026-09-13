@@ -183,6 +183,7 @@ export class ObserverScheduler {
     const code=error instanceof Error?error.message:'';
     if(code==='capacity_unknown')return 'capacity_unknown';
     if(code==='context_too_large'||code.startsWith('context_too_large:'))return 'context_too_large';
+    if(code==='history_incomplete')return 'history_incomplete';
     if(flight.contextState==='history_loading')return 'history_incomplete';
     return 'compression_failed';
   }
@@ -203,15 +204,23 @@ export class ObserverScheduler {
       try {
         const opened=await this.options.goals.openHistory?.(flight.ticket,flight.controller.signal);
         if(!opened)throw Error('history_unavailable');
-        const researchCapture=this.options.research?captureHistoryFeatures(opened.snapshot,opened.currentTurnId):undefined;
-        this.contextState(flight,'context_preparing');
         let handedToPlanner=false;
         let promise:Promise<PreparedContext>;
         try {
+          // Coverage is authoritative only after reaching the fixed watermark.
+          // Scan locally before any provider preparation can import or compress.
+          for await(const _record of opened.snapshot.records(flight.controller.signal)){
+            if(flight.controller.signal.aborted)throw Error('history_unavailable');
+          }
+          if(!opened.snapshot.coverage.complete||opened.snapshot.coverage.gaps.length)throw Error('history_incomplete');
+          if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('history_unavailable');
+          const researchCapture=this.options.research?captureHistoryFeatures(opened.snapshot,opened.currentTurnId):undefined;
+          this.contextState(flight,'context_preparing');
           promise=flight.worker.prepareContext(input,researchCapture?{...opened,snapshot:researchCapture.snapshot}:opened,flight.controller.signal,flight.key,flight.generation,flight.requestedAt);
           handedToPlanner=true;
           const value=await promise;
           if(!value){await opened.snapshot.close();throw Error('preparation_empty');}
+          if(!value.representation.sourceComplete||value.representation.mode==='incomplete')throw Error('history_incomplete');
           prepared=value.input;
           try{
             const actions=researchCapture?.result(),owner=this.options.goals.researchOwner(flight.ticket);
@@ -225,8 +234,7 @@ export class ObserverScheduler {
               flight.researchGeneration=owner.generation;
             }
           }catch{flight.researchFailure='capture_error';/* Research capture cannot fail context preparation. */}
-          this.contextState(flight,value.representation.mode==='compressed'?'context_compressed':
-            value.representation.mode==='incomplete'||!value.representation.sourceComplete?'history_incomplete':'context_full',value.metrics);
+          this.contextState(flight,value.representation.mode==='compressed'?'context_compressed':'context_full',value.metrics);
         }catch(error){
           if(!handedToPlanner){try{await opened.snapshot.close();}catch{/* acquisition ownership was not transferred */}}
           throw error;

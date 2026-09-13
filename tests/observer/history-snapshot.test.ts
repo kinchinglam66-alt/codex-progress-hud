@@ -77,6 +77,7 @@ describe("source-backed history snapshots", () => {
       line('event_msg', {type:'token_count', info:{total_token_usage:{total_tokens:10}},rate_limits:null}),
       line('event_msg', {type:'item_completed',thread_id:THREAD,turn_id:'turn-1',started_at_ms:100,completed_at_ms:200,item:{type:'ContextCompaction',id:'compact'}}),
       line('event_msg', {type:'item_completed',turn_id:'turn-1',item:{type:'AgentMessage',id:'agent-text',content:[{type:'Text',text:'native capitalized text'}],phase:'commentary'}}),
+      JSON.stringify({type:'event_msg',timestamp:'2026-09-13T00:00:00.000Z',ordinal:42,payload:{type:'item_completed',thread_id:THREAD,turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'sleep',durationMs:100000,detail:'retain extension detail'}}})+'\n',
       line('event_msg', {type:'item_completed',turn_id:'turn-1',item:{type:'FileChange',id:'patch',changes:{'a.ts':{type:'update',diff:'+fixture'}},status:'completed',stdout:'patched',stderr:''}}),
       line('event_msg', {type:'item_completed',turn_id:'turn-1',item:{type:'CollabAgentToolCall',id:'collab',tool:'wait',status:'completed',sender_thread_id:THREAD,receiver_thread_ids:['child'],receiver_agents:[],agents_states:{child:{status:'completed',message:'fixture reviewed'}}}}),
     ].join('');
@@ -92,6 +93,9 @@ describe("source-backed history snapshots", () => {
       expect(records.map(r=>r.text).join('\n')).toContain('finish fixture');
       expect(records.map(r=>r.text).join('\n')).toContain('test-model');
       expect(records.map(r=>r.text).join('\n')).toContain('native capitalized text');
+      expect(records.map(r=>r.text).join('\n')).toContain('retain extension detail');
+      expect(records.find(r=>r.toolName==='codex:Extension:clock.sleep')).toMatchObject({kind:'tool_result',sourceTurnId:'turn-1'});
+      expect(JSON.parse(records.find(r=>r.toolName==='codex:Extension:clock.sleep')!.text!)).toMatchObject({ordinal:42,type:'event_msg',timestamp:'2026-09-13T00:00:00.000Z'});
       expect(records.some(r=>r.runtime!==undefined||r.outcome!==undefined)).toBe(false);
       expect(records.filter(r=>r.turnId===null&&r.sourceTurnId==null)).toHaveLength(2);
       const live = await reader.read(THREAD,signal());
@@ -125,6 +129,12 @@ describe("source-backed history snapshots", () => {
     {type:'item_completed',turn_id:'a',turnId:'b',item:{type:'ContextCompaction',id:'c'}},
     {type:'item_completed',started_at_ms:{content:'must not disappear'},item:{type:'ContextCompaction',id:'c'}},
     {type:'new_unknown_event',text:'future content'},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:-1}},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'unknown.extension',id:'bad',durationMs:1}},
+    {type:'item_completed',thread_id:'foreign',turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:1}},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:1,thread_id:'foreign'}},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:1,turn_id:'turn-1',turnId:'other'}},
+    {type:'item_completed',turn_id:'turn-1',started_at_ms:{text:'not a timestamp'},item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:1}},
   ])("retains a gap for malformed, foreign or unknown native event %#", async event => {
     const f=await fixture(meta()+checkpoint('guard')+line('event_msg',event));
     const reader=createLocalSessionReader({root:f.root});

@@ -622,6 +622,22 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
   if (itemType === "CommandExecution" || itemType === "command_execution") {
     return withSourceTurn(normalizeCommand(context, item, atMs, context.offset, eventType === "item_completed"));
   }
+  if(context.options.preserveText&&itemType==='Extension'){
+    const raw=item as unknown as Record<string,unknown>;
+    const identityFields=[payload,raw];
+    const explicitTurns=identityFields.flatMap(fields=>['turn_id','turnId'].filter(key=>Object.hasOwn(fields,key)).map(key=>fields[key]));
+    const valid=raw.kind==='clock.sleep'&&stringValue(raw.id)!==undefined&&
+      typeof raw.durationMs==='number'&&Number.isFinite(raw.durationMs)&&raw.durationMs>=0&&
+      identityFields.every(fields=>['thread_id','threadId'].every(key=>!Object.hasOwn(fields,key)||fields[key]===context.threadId)&&
+        ['started_at_ms','completed_at_ms'].every(key=>!Object.hasOwn(fields,key)||
+          (typeof fields[key]==='number'&&Number.isFinite(fields[key])&&fields[key]>=0)))&&
+      explicitTurns.every(turn=>stringValue(turn)!==undefined&&turn===explicitTurns[0]);
+    if(!valid){context.gaps.add('unsupported_payload');return [];}
+    // Preserve the full structured envelope as data, never a lifecycle signal.
+    const completed=eventType==='item_completed';
+    return withSourceTurn(normalizeTool(context,{...raw,name:'codex:Extension:clock.sleep',
+      ...(completed?{output:envelope}:{input:envelope})},atMs,context.offset,completed));
+  }
   if (context.options.preserveText && (itemType === 'FileChange' || itemType === 'CollabAgentToolCall')) {
     const raw = item as unknown as Record<string, unknown>;
     const valid = stringValue(raw.id) !== undefined && stringValue(raw.status) !== undefined &&
