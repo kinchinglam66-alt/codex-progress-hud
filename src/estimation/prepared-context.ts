@@ -6,6 +6,7 @@ export interface ContextRepresentation {
   mode:ContextMode;
   sourceComplete:boolean;
   originalRecords:number;
+  sessionCoveredRecords?:number;
   compressedThroughOrdinal:number|null;
   sizing:'tokenizer'|'conservative';
 }

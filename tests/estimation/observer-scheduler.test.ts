@@ -301,11 +301,14 @@ it('does not let a late old flight overwrite a newer turn diagnostic or forecast
 });
 function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false, dynamic = false) {
   let now = 0, id = 0;
+  let dynamicMismatches = 0;
   const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts);
   const calls: Array<{signal: AbortSignal; key: string; input: unknown; finish(value: ObserverResult, closed?: boolean): void}> = [];
-  const makeWorker = (): ObserverWorker => {
+  const makeWorker = (boundKey?: string): ObserverWorker => {
     let active = false, disabled = false;
-    return {observe: (input, signal, key) => {active = true; return new Promise<ObserverResult>(resolve => {
+    return {observe: (input, signal, key) => {
+      if (boundKey !== undefined && boundKey !== key) { dynamicMismatches++; return Promise.resolve({status:'process_error',interpretation:null,usage:null}); }
+      active = true; return new Promise<ObserverResult>(resolve => {
       calls.push({signal, key, input, finish(value, closed = true) {active = !closed; resolve(value);}});
     });}, disable() {disabled = true;}, async close() {disabled = true;},
       status: () => ({active, disabled, poisoned: false}),
@@ -314,8 +317,8 @@ function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:
   const workers: ObserverWorker[] = Array.from({length: workerCount}, makeWorker);
   const owners = new Map<string, ObserverWorker>();
   const workerSource = dynamic ? {
-    acquire(key: string) { const worker = owners.get(key) ?? makeWorker(); owners.set(key, worker); if (!workers.includes(worker)) workers.push(worker); return worker; },
-    async release(key: string) { owners.delete(key); },
+    acquire(key: string) { const worker = owners.get(key) ?? makeWorker(key); owners.set(key, worker); if (!workers.includes(worker)) workers.push(worker); return worker; },
+    async release(_key: string) { /* healthy source workers remain reusable */ },
     all() { return workers; }
   } : undefined;
   const scheduler = new ObserverScheduler({contexts, goals, now: () => now, closeTimeoutMs, ...(workerSource ? {workerSource} : {workers}), ...(onObservation?{onObservation}:{})});
@@ -330,7 +333,7 @@ function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:
   };
   const time = (value: number) => {now = value;};
   const flush = async () => {await Promise.resolve(); await Promise.resolve();};
-  return {scheduler, goals, contexts, calls, hook, time, flush};
+  return {scheduler, goals, contexts, calls, hook, time, flush, dynamicMismatches: () => dynamicMismatches};
 }
 
 function paceFixture(onObservation?:(record:ObserverObservation)=>void) {
@@ -675,6 +678,20 @@ it('admits distinct user-only conversations without a global two-slot ceiling', 
   await f.scheduler.close();
 });
 
+it('allocates each dynamic source key through its own retained worker', async () => {
+  const f = fixture(2, 6000, undefined, false, true);
+  const first = f.hook('UserPromptSubmit', 'one');
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.calls[0]!.finish(result()); await f.flush();
+  const second = f.hook('UserPromptSubmit', 'two');
+  f.time(30000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  expect(f.calls[0]!.key).toBe(first);
+  expect(f.calls[1]!.key).toBe(second);
+  expect(f.dynamicMismatches()).toBe(0);
+  f.calls[1]!.finish(result()); await f.flush();
+  await f.scheduler.close();
+});
+
 it.each(['paused','interrupted','stopped','failed'] as const)('does not start an initial user-only estimate while %s', state=>{
   const f=fixture(1);const key=f.hook('UserPromptSubmit');
   const turn=f.contexts.read(key)!.entries[0]!.turnKey;
@@ -744,6 +761,28 @@ it('cancels an in-flight call on pause and resumes only after event coalescing',
   f.goals.runtime(session, turn, 'running', 100000); f.scheduler.changed(session, 'runtime');
   f.time(109999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
   f.time(110000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+});
+
+it('interrupts an in-flight source estimate when the source reaches waiting', async () => {
+  const f = fixture(); const session = f.hook('UserPromptSubmit');
+  f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(16000); f.hook('Stop');
+  expect(f.calls[0]!.signal.aborted).toBe(true);
+  f.calls[0]!.finish({status:'aborted', interpretation:null, usage}); await f.flush();
+  await f.scheduler.close();
+  expect(f.goals.view(session,16000)?.runtime).toBe('waiting');
+});
+
+it('invalidates A before starting B and rejects A after a source-turn boundary', async()=>{
+ const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));const session=f.hook('UserPromptSubmit','one','a');
+ f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+ let aborts=0;f.calls[0]!.signal.addEventListener('abort',()=>{aborts++;});
+ f.time(16000);f.hook('Stop','one','a');expect(f.calls[0]!.signal.aborted).toBe(true);expect(aborts).toBe(1);
+ f.calls[0]!.finish({status:'aborted',interpretation:null,usage});await f.flush();
+ expect(records.find(row=>row.kind==='result'&&row.requestId===1)?.accepted).toBe(false);
+ f.hook('UserPromptSubmit','one','b');expect(f.goals.view(session,16000)?.generation).toBe(1);
+ f.time(80000);f.scheduler.tick();expect(f.calls).toHaveLength(2);expect(f.calls[1]!.signal.aborted).toBe(false);
+ f.calls[1]!.finish(result());await f.flush();await f.scheduler.close();
 });
 
 it('retains its original worker ownership when the caller mutates the configuration array', async () => {

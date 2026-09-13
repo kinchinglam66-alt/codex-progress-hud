@@ -22,6 +22,22 @@ const input: ObserverInput = {
   messages: [{kind: 'user', text: 'Build the report', truncated: false}],
   truncated: false,
 };
+it('retains a healthy persistent worker between scheduler operations and closes it on shutdown',async()=>{
+  const events:string[]=[];let created=0,released=0,closed=0;
+  const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events),
+    persistentReceiptDirectory:'test-receipts',
+    persistentWorkerFactory:()=>{created++;return {observe:async()=>({status:'interpreted',interpretation:JSON.parse(interpretation),usage:null}),
+      status:()=>({active:false,disabled:false,poisoned:false}),disable(){},close:async()=>{closed++;},release:async()=>{released++;}};}});
+  try{
+    await runtime.start(new AbortController().signal);
+    const first=runtime.workerSource.acquire('persistent');
+    await first.observe(input,new AbortController().signal,'persistent',0);
+    await runtime.workerSource.release('persistent');
+    expect(runtime.workerSource.acquire('persistent')).toBe(first);
+    expect(created).toBe(1);expect(released).toBe(1);expect(closed).toBe(0);
+  }finally{await runtime.close();}
+  expect(closed).toBeGreaterThan(0);
+});
 it.each(['dynamic','compatibility'])('forwards stage diagnostics through the %s runtime worker',async mode=>{
   const events:string[]=[],stages:string[]=[];
   const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events)});

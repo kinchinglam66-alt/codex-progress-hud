@@ -13,6 +13,7 @@ const representationSchema=z.object({
   mode:z.enum(['full','compressed','incomplete']),
   sourceComplete:z.boolean(),
   originalRecords:ordinal,
+  sessionCoveredRecords:ordinal.optional(),
   compressedThroughOrdinal:ordinal.nullable(),
   sizing:z.enum(['tokenizer','conservative']),
 }).strict();

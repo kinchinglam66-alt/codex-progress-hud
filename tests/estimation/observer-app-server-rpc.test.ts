@@ -131,9 +131,9 @@ describe('observer app-server JSONL RPC transport', () => {
     await expect(eofPending).rejects.toThrow('APP_SERVER_RPC_EOF');
     expect(eof.rpc.closed()).toBe(true);
 
-    const oversized = fixture({maxFrameBytes: 20});
+    const oversized = fixture({maxFrameBytes: 64});
     const oversizedPending = oversized.rpc.call('oversized', {});
-    oversized.output.write(Buffer.from(`${'x'.repeat(21)}\n`, 'utf8'));
+    oversized.output.write(Buffer.from(`${'x'.repeat(65)}\n`, 'utf8'));
     await expect(oversizedPending).rejects.toThrow('APP_SERVER_RPC_FRAME_TOO_LARGE');
     expect(oversized.rpc.closed()).toBe(true);
   });
@@ -185,12 +185,27 @@ describe('observer app-server JSONL RPC transport', () => {
     await expect(Promise.all(pending)).rejects.toThrow('APP_SERVER_RPC_CLOSED');
   });
 
-  it('validates positive safe timeout and frame bounds', () => {
+it('validates positive safe timeout and frame bounds', () => {
     expect(() => fixture({timeoutMs: 0})).toThrow();
     expect(() => fixture({timeoutMs: 1.5})).toThrow();
     expect(() => fixture({timeoutMs: Number.MAX_SAFE_INTEGER + 1})).toThrow();
     expect(() => fixture({maxFrameBytes: 0})).toThrow();
     expect(() => fixture({maxFrameBytes: 1.5})).toThrow();
     expect(() => fixture({maxFrameBytes: Number.MAX_SAFE_INTEGER + 1})).toThrow();
-  });
+});
+
+it('closes on an oversized outbound request frame', async()=>{
+ const {rpc}=fixture({maxFrameBytes:64});
+ await expect(rpc.call('oversized',{text:'x'.repeat(256)})).rejects.toThrow('APP_SERVER_RPC_FRAME_TOO_LARGE');
+ expect(rpc.closed()).toBe(true);
+});
+
+it('closes when backpressure leaves too many outbound frames queued', async()=>{
+ const input=new PassThrough({highWaterMark:1});
+ const output=new PassThrough();
+ const rpc=createObserverAppServerRpc({input,output,maxQueuedFrames:3,maxQueuedBytes:1024});
+ for(let index=0;index<10;index++)rpc.notify('progress',{index});
+ await flush();
+ expect(rpc.closed()).toBe(true);
+});
 });

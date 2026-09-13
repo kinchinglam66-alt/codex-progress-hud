@@ -162,11 +162,14 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     if(input.observation)input.observation.currentAction=currentAction?.text?
       {text:currentAction.text,elapsedSeconds:Math.max(0,(options.observedAtMs-currentAction.atMs)/1000)}:null;
     input.representation!.originalRecords=originalRecords;
+    input.representation!.sessionCoveredRecords=originalRecords;
     if(summary){input.historySummary=summary;input.representation!.mode='compressed';
       input.representation!.compressedThroughOrdinal=summary.lastOrdinal;input.truncated=true;}
+    const preparedRepresentation={...input.representation!,sessionCoveredRecords:input.representation!.sessionCoveredRecords!};
     const serialized=options.serialize(input);
     if(!requestFits(serialized,capacity,options.sizer))throw Error('context_too_large');
-    const result={input,representation:input.representation!,metrics:{sizing:options.sizer.kind,originalTextBytes,originalTextTokenEstimate,
+    input.representation=preparedRepresentation;
+    const result={input,representation:preparedRepresentation,metrics:{sizing:options.sizer.kind,originalTextBytes,originalTextTokenEstimate,
       preparedRequestBytes:Buffer.byteLength(serialized,'utf8'),preparedTokenEstimate:options.sizer.count(serialized),
       compressionCalls,cachedCompressionCalls}};
     await cooperate();

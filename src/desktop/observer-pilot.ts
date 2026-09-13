@@ -4,6 +4,7 @@ import {mkdir, open as openFile, readFile} from 'node:fs/promises';
 import {z} from 'zod';
 import {readObserverPilotConfig,observerPilotEnvironment} from './observer-pilot-config.js';
 import {createObserverIdentityRuntime} from '../estimation/observer-identity-runtime.js';
+import {createPersistentObserverWorker} from '../estimation/observer-persistent-worker.js';
 import {openThreadedReleaseAccounting} from '../estimation/accounting-worker-owner.js';
 import {createDesktopObserverRuntime, type ObserverInlineConsent} from './observer-runtime.js';
 import {createPilotJournal} from '../evaluation/pilot-journal.js';
@@ -96,9 +97,13 @@ export function subscriptionAccountingDirectory(dataDirectory:string,accountFing
     : resolve(dataDirectory,'observer-accounting','accounts',accountFingerprint);
 }
 
+export function shouldEnablePersistentObserver(options:{enablePersistentObserver?:boolean}):boolean{
+  return options.enablePersistentObserver===true;
+}
+
 /** Explicit local pilot opt-in, never configuration taken from a chat/HTTP request.
  * Construction reads settings only. Account/process work begins after HUD readiness. */
-export async function loadDesktopObserverPilot(options:{dataDirectory:string;resourcesDirectory:string;dialog:ObserverConsentDialog;environment:NodeJS.ProcessEnv;consentProtection:ConsentProtection}) {
+export async function loadDesktopObserverPilot(options:{dataDirectory:string;resourcesDirectory:string;dialog:ObserverConsentDialog;environment:NodeJS.ProcessEnv;consentProtection:ConsentProtection;enablePersistentObserver?:boolean}) {
   let config: Awaited<ReturnType<typeof readObserverPilotConfig>>;
   try {
     config=await readObserverPilotConfig(resolve(options.dataDirectory,'observer-pilot.json'));
@@ -136,6 +141,8 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
+      ...(shouldEnablePersistentObserver(options)?{persistentReceiptDirectory:accountingDirectory,
+        persistentWorkerFactory:workerOptions=>createPersistentObserverWorker({...workerOptions,outputSchema:assets.schema})}:{}),
       contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
         const runner=createOwnedProcessRunner({...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes})});
         const view=owner.forConversation(scope.conversationKey);

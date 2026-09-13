@@ -2,6 +2,7 @@ import type {Readable, Writable} from 'node:stream';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_QUEUED_FRAMES = 256;
 const MAX_PENDING_REQUESTS = 32;
 
 export type AppServerNotification = {
@@ -14,6 +15,8 @@ export interface ObserverAppServerRpcOptions {
   output: Readable;
   timeoutMs?: number;
   maxFrameBytes?: number;
+  maxQueuedFrames?: number;
+  maxQueuedBytes?: number;
 }
 
 export interface ObserverAppServerRpc {
@@ -46,19 +49,24 @@ function transportError(code: string): Error {
   return new Error(code);
 }
 
-function encodeFrame(value: unknown): Buffer {
+function encodeFrame(value: unknown,maxFrameBytes:number): Buffer {
   const encoded = JSON.stringify(value);
   if (encoded === undefined) throw transportError('APP_SERVER_RPC_SERIALIZE_FAILED');
-  return Buffer.from(`${encoded}\n`, 'utf8');
+  const frame=Buffer.from(`${encoded}\n`, 'utf8');
+  if(frame.length>maxFrameBytes)throw transportError('APP_SERVER_RPC_FRAME_TOO_LARGE');
+  return frame;
 }
 
 export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions): ObserverAppServerRpc {
   const timeoutMs = optionLimit(options.timeoutMs, DEFAULT_TIMEOUT_MS, 'RPC timeout');
   const maxFrameBytes = optionLimit(options.maxFrameBytes, DEFAULT_MAX_FRAME_BYTES, 'RPC frame size');
+  const maxQueuedFrames = optionLimit(options.maxQueuedFrames, DEFAULT_MAX_QUEUED_FRAMES, 'RPC queued frame count');
+  const maxQueuedBytes = optionLimit(options.maxQueuedBytes, Math.min(Number.MAX_SAFE_INTEGER,maxFrameBytes*maxQueuedFrames), 'RPC queued bytes');
   const {input, output} = options;
   const pending = new Map<number, PendingRequest>();
   const subscribers = new Set<(notification: AppServerNotification) => void>();
   const outgoing: OutgoingFrame[] = [];
+  let outgoingBytes=0;
   const activeWriteRejectors = new Set<(reason: Error) => void>();
   const frameParts: Buffer[] = [];
   let frameBytes = 0;
@@ -84,6 +92,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
     const error = transportError(reason);
     rejectPending(error);
     outgoing.length = 0;
+    outgoingBytes=0;
     for (const reject of activeWriteRejectors) reject(error);
     activeWriteRejectors.clear();
     subscribers.clear();
@@ -153,6 +162,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
       while (!isClosed && outgoing.length > 0) {
         const frame = outgoing.shift();
         if (frame === undefined) continue;
+        outgoingBytes-=frame.length;
         await writeFrame(frame);
       }
     } catch {
@@ -165,7 +175,10 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
 
   const enqueue = (frame: OutgoingFrame): void => {
     if (isClosed) return;
+    if(frame.length>maxFrameBytes){close('APP_SERVER_RPC_FRAME_TOO_LARGE');throw transportError('APP_SERVER_RPC_FRAME_TOO_LARGE');}
+    if(outgoing.length>=maxQueuedFrames||outgoingBytes>maxQueuedBytes-frame.length){close('APP_SERVER_RPC_OUTBOUND_QUEUE_LIMIT');throw transportError('APP_SERVER_RPC_OUTBOUND_QUEUE_LIMIT');}
     outgoing.push(frame);
+    outgoingBytes+=frame.length;
     void pump();
   };
 
@@ -180,7 +193,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
 
   const sendMethodNotFound = (id: number): void => {
     try {
-      enqueue(encodeFrame({jsonrpc: '2.0', id, error: {code: -32601, message: 'Method not found'}}));
+      enqueue(encodeFrame({jsonrpc: '2.0', id, error: {code: -32601, message: 'Method not found'}},maxFrameBytes));
     } catch {
       close('APP_SERVER_RPC_WRITE_FAILED');
     }
@@ -305,22 +318,24 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
         nextId = nextId >= Number.MAX_SAFE_INTEGER ? 1 : nextId + 1;
         let frame: Buffer;
         try {
-          frame = encodeFrame({jsonrpc: '2.0', id, method, params});
-        } catch {
+          frame = encodeFrame({jsonrpc: '2.0', id, method, params},maxFrameBytes);
+        } catch (error) {
+          if(error instanceof Error&&error.message==='APP_SERVER_RPC_FRAME_TOO_LARGE'){close(error.message);reject(error);return;}
           reject(transportError('APP_SERVER_RPC_SERIALIZE_FAILED'));
           return;
         }
         const timer = setTimeout(() => close('APP_SERVER_RPC_TIMEOUT'), timeoutMs);
         timer.unref?.();
         pending.set(id, {resolve, reject, timer});
-        enqueue(frame);
+        try{enqueue(frame);}catch(error){if(pending.has(id)){pending.delete(id);cleanupPending({resolve,reject,timer});reject(error);}}
       });
     },
     notify(method, params) {
       if (isClosed || typeof method !== 'string' || method.length === 0) return;
       try {
-        enqueue(encodeFrame({jsonrpc: '2.0', method, params}));
-      } catch {
+        enqueue(encodeFrame({jsonrpc: '2.0', method, params},maxFrameBytes));
+      } catch (error) {
+        if(error instanceof Error&&error.message==='APP_SERVER_RPC_FRAME_TOO_LARGE'){close(error.message);return;}
         close('APP_SERVER_RPC_SERIALIZE_FAILED');
       }
     },

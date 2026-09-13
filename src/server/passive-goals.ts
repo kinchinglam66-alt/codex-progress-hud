@@ -39,6 +39,7 @@ interface Goal {
   timingUncertain?: boolean;
   runtimeUncertain?: boolean;
   turnKey: string;
+  turnGenerationStarted?: boolean;
   generation: number;
   estimateRevision: number;
   epoch: number;
@@ -303,6 +304,8 @@ export class PassiveGoals {
   }
 
   private startTurn(goal:Goal,turnKey:string,nowMs:number):void {
+    goal.generation++;
+    goal.turnGenerationStarted=true;
     delete goal.recoveryPending;delete goal.recovered;delete goal.recoveryGapSeconds;goal.progressFloor=0;
     delete goal.terminalHook;delete goal.sourceStopped;delete goal.executionIdentity;delete goal.runtimeUncertain;delete goal.terminalSince;
     goal.turnKey=turnKey;goal.elapsed=0;goal.since=nowMs;goal.candidateBase=0;
@@ -610,7 +613,8 @@ export class PassiveGoals {
       goal.since = nowMs;
       anchor -= base;
       goal.candidateBase = 0;
-      goal.generation++;
+      if(!goal.turnGenerationStarted)goal.generation++;
+      delete goal.turnGenerationStarted;
       goal.identity = {};
       this.rotateMeasurementScope(goal);
     }

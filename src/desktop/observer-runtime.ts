@@ -1,4 +1,5 @@
 import {createObserverConsentGate, observerConsentScope, type ObserverAttestation} from '../estimation/observer-consent.js';
+import type {PersistentReceiptBinding} from '../estimation/observer-persistent-receipt.js';
 import type {ObserverConsentStore} from '../estimation/observer-consent-store.js';
 import {createAccountedObserverWorker, type ObserverWorker} from '../estimation/observer-worker.js';
 import type {ObserverInput} from '../estimation/observer-contract.js';
@@ -27,6 +28,7 @@ const RECOVERY_INPUT: ObserverInput = Object.freeze({
 
 export interface DesktopObserverIdentity {
   inspect(signal: AbortSignal): Promise<{accountLabel: string; evidence: ObserverAttestation}>;
+  prepareSession?(signal:AbortSignal):Promise<{accountLabel:string;evidence:ObserverAttestation;invocation:Invocation}>;
   prepareEstimate(input: ObserverInput, signal: AbortSignal): Promise<{
     accountLabel: string;
     evidence: ObserverAttestation;
@@ -66,6 +68,11 @@ export interface DesktopObserverRuntimeOptions {
   consentStore?: ObserverConsentStore;
   inspectRecoveryBootBoundary?: () => Promise<RecoveryBootBoundaryProof>;
   contextPreparation?: DesktopObserverContextPreparation;
+  /** Host-selected implementation; never selected by source conversation text. */
+  persistentWorkerFactory?:(options:{accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding}>;
+    receiptDirectory:string;
+    authorize:()=>boolean;now:()=>number})=>ObserverWorker;
+  persistentReceiptDirectory?:string;
 }
 
 export interface ObserverInlineConsent {
@@ -119,7 +126,7 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * wired before first-use setup without creating an admission path early.
  */
 export function createDesktopObserverRuntime({identity, openAccounting, dialog, now = Date.now, consentStore,
-  inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation}: DesktopObserverRuntimeOptions) {
+  inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation,persistentWorkerFactory,persistentReceiptDirectory}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
   let setupFailed = false;
@@ -214,14 +221,17 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
       }
       const owner = accounting;
       if (!owner) throw new Error('OBSERVER_NOT_READY');
-      const delegate = createAccountedObserverWorker({
+      if (persistentWorkerFactory && !persistentReceiptDirectory) throw new Error('PERSISTENT_RECEIPT_REQUIRED');
+      const delegate = persistentWorkerFactory ? persistentWorkerFactory({accounting:owner,prepareSession,
+        receiptDirectory:persistentReceiptDirectory!,
+        authorize:()=>!disabled&&ready&&gate.authorized(),now}) : createAccountedObserverWorker({
         accounting: owner,
         prepare,
         authorize: gate.authorized,
         now,
         ...(contextPreparation?.inputBudgetBytes === undefined ? {} : {inputBudgetBytes: contextPreparation.inputBudgetBytes}),
       });
-      const worker = contextPreparation === undefined ? delegate : withContextPreparation(delegate,
+      const worker = persistentWorkerFactory || contextPreparation === undefined ? delegate : withContextPreparation(delegate,
         scope => contextPreparation.configure(scope, prepareCompression, () => !disabled && ready && gate.authorized(), owner));
       delegates.set(conversationKey, worker);
       return worker;
@@ -232,6 +242,11 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
       if(releasingDelegates.has(conversationKey))return;
       releasingDelegates.add(conversationKey);
       try {
+        if(delegate.release){
+          await delegate.release();
+          const state=delegate.status();
+          if(!state.active&&!state.disabled&&!state.poisoned)return;
+        }
         await delegate.close();
         if(delegate.status().active)throw new Error('OBSERVER_WORKER_CLOSE_UNCONFIRMED');
         if(delegates.get(conversationKey)===delegate)delegates.delete(conversationKey);
@@ -275,6 +290,21 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     });
     metadataTail = queued.next;
     return queued.result;
+  }
+
+  function prepareSession(signal:AbortSignal):Promise<{invocation:Invocation;binding:PersistentReceiptBinding}> {
+    const queued=serial(metadataTail,async()=>{
+      check(signal);
+      if(!identity.prepareSession)throw Error('OBSERVER_SESSION_UNAVAILABLE');
+      const prepared=await identity.prepareSession(signal);
+      check(signal);gate.update(prepared.evidence);
+      if(!gate.authorized()||authorizedBinding===undefined||binding(prepared.evidence)!==authorizedBinding){
+        disable();throw Error('OBSERVER_IDENTITY_CHANGED');
+      }
+      return {invocation:prepared.invocation,binding:{accountFingerprint:prepared.evidence.accountFingerprint,
+        routeFingerprint:prepared.evidence.routeFingerprint,assetsFingerprint:prepared.evidence.assetsFingerprint}};
+    });
+    metadataTail=queued.next;return queued.result;
   }
 
   const prepareCompression: TrustedCompressionPreparation = (request, signal) => {

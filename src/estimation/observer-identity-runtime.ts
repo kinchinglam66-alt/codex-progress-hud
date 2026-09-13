@@ -42,7 +42,7 @@ export function createObserverIdentityRuntime(options:Options) {
   let cancel:(()=>void)|undefined,owned:(()=>boolean)|undefined;
   const fail=()=>Error('OBSERVER_IDENTITY_UNAVAILABLE');
   const disable=()=>{disabled=true;runtimeCache.invalidate();cancel?.();};
-    function perform(signal:AbortSignal,mode:'inspect'|SetupAction|ObserverInput|CompressionRequest):Promise<Snapshot|Invocation|PreparedEstimate> {
+    function perform(signal:AbortSignal,mode:'inspect'|'session'|SetupAction|ObserverInput|CompressionRequest):Promise<Snapshot|Invocation|PreparedEstimate> {
       const setupMode=mode==='login'||mode==='device-auth'||mode==='logout';
       const loginMode=mode==='login'||mode==='device-auth';
       if(disabled || poisoned || pending || signal.aborted) return Promise.reject(fail());
@@ -90,6 +90,7 @@ export function createObserverIdentityRuntime(options:Options) {
           const snapshot:Snapshot={accountLabel:account.email && account.email.length<=256?account.email:`ChatGPT (${account.planType})`,
             evidence:{accountFingerprint:digest(['observer-account-v1',account.accountId]),routeFingerprint:account.routeFingerprint,
               assetsFingerprint,observedAt,expiresAt:observedAt+300000}};
+          if(mode==='session')return {...snapshot,invocation:buildObserverSetupInvocation(profile,'metadata',env,authHome)};
           if(typeof mode!=='object')return snapshot;
           const invocation = typeof mode === 'object' && 'text' in mode
             ? buildObserverCompressionInvocation(profile, JSON.stringify(validateCompressionRequest(mode)), env, authHome)
@@ -120,6 +121,9 @@ export function createObserverIdentityRuntime(options:Options) {
     }
     return {
       inspect:(signal:AbortSignal)=>perform(signal,'inspect') as Promise<Snapshot>,
+      // Attestation and invocation preparation only: the caller must separately
+      // authorize, own and account for every model operation in this server.
+      prepareSession:(signal:AbortSignal)=>perform(signal,'session') as Promise<PreparedEstimate>,
       prepareLogin:(signal:AbortSignal)=>perform(signal,'login') as Promise<Invocation>,
       prepareDeviceLogin:(signal:AbortSignal)=>perform(signal,'device-auth') as Promise<Invocation>,
       prepareDeviceAuth:(signal:AbortSignal)=>perform(signal,'device-auth') as Promise<Invocation>,

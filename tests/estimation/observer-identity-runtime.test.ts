@@ -11,6 +11,20 @@ vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvoc
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:()=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure)throw Error(state.failure);return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:'b'.repeat(64)};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.failure='';state.active=false;state.compressionInputs=[];});
+it('prepares a persistent server only after identity attestation without dispatch',async()=>{
+  const runtime=createObserverIdentityRuntime(config());
+  const prepared=await runtime.prepareSession(new AbortController().signal);
+  expect(prepared.invocation.args).toEqual(['metadata']);
+  expect(prepared.evidence.expiresAt).toBe(301000);
+  expect(state.events.filter(x=>x==='home')).toHaveLength(2);
+  expect(state.events).toContain('account');
+  await runtime.close();
+});
+it('requires a logged-in account for persistent server preparation',async()=>{
+  const runtime=createObserverIdentityRuntime(config());state.failure='OBSERVER_LOGIN_REQUIRED';
+  await expect(runtime.prepareSession(new AbortController().signal)).rejects.toThrow('OBSERVER_LOGIN_REQUIRED');
+  await runtime.close();
+});
 const config=()=>({resourcesDirectory:resolve('resources'),parentDirectory:resolve('private'),powershell:resolve('powershell.exe'),executable:resolve('codex.exe'),cwd:resolve('empty'),version:'0.153.4',now:()=>1000});
 it('binds identity to backend account and verified assets rather than email',async()=>{
   const runtime=createObserverIdentityRuntime(config());

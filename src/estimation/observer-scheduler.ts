@@ -21,6 +21,9 @@ export interface ObserverWorker {
   status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
   disable(): void;
   close(): Promise<void>;
+  /** Finish scheduler ownership of one operation, retaining healthy model context.
+   * Global shutdown still calls close(), never release(). */
+  release?(): Promise<void>;
   provenance?: () => ForecastVersions|null;
   recoveryStatus?: () => {state: string; nextEligibleAt?: number | null | undefined; cooldownUntil?: number | null | undefined} | undefined;
 }
@@ -84,6 +87,7 @@ export class ObserverScheduler {
   private readonly entries = new Map<string, Entry>();
   private readonly flights = new Map<string, Flight>();
   private readonly workerSource: ObserverWorkerSource;
+  private readonly sourceAwareWorkers: boolean;
   private disabled = false;
   private stopReason: ObserverDiagnostics['stopReason'];
   private stoppedAt: number | undefined;
@@ -96,6 +100,7 @@ export class ObserverScheduler {
   constructor(private readonly options: Options) {
     const closeTimeout = options.closeTimeoutMs ?? 6000;
     if (!Number.isSafeInteger(closeTimeout) || closeTimeout < 1 || closeTimeout > 10000) throw new Error('INVALID_OBSERVER_CLOSE_TIMEOUT');
+    this.sourceAwareWorkers = options.workerSource !== undefined;
     if (options.workerSource) this.workerSource = options.workerSource;
     else {
       const workers = [...(options.workers ?? [])];
@@ -328,9 +333,12 @@ export class ObserverScheduler {
         entry.statusEvidence = true;
       }
       entry.sourceFinalAvailable = state.finalAvailable;
-    } else {
-      entry.version++;
-    }
+      } else {
+        entry.version++;
+      }
+    if(entry.flight && (entry.flight.turnKey!==(this.options.goals.currentTurnKey(key)??'') ||
+      entry.flight.goalIdentity!==state.goalIdentity || state.view.runtime!=='running'))
+      entry.flight.controller.abort();
     const resumed=entry.runtime!=='running'&&state.view.runtime==='running';
     if(event==='prompt')this.markEvent(entry,now,'important_event');
     if(event==='final'&&state.finalAvailable){entry.statusEvidence=true;this.markEvent(entry,now,'status_evidence');}
@@ -377,7 +385,10 @@ export class ObserverScheduler {
     const now = this.time(); this.prune(now);
     for (const [key, entry] of [...this.entries]) {
       if(entry.ended)continue;
-      let worker = this.workers().find(candidate => {
+      // Source-aware enumeration is health/shutdown inspection only. Allocation
+      // still goes through acquire(key) below.
+      this.workers();
+      let worker = this.sourceAwareWorkers ? undefined : this.workers().find(candidate => {
         const state = this.workerState(candidate);
         if (this.workerInFlight(candidate) || state.active || state.disabled || state.poisoned) return false;
         try {
@@ -388,6 +399,11 @@ export class ObserverScheduler {
       });
       const state = this.options.goals.scheduling(key, now);
       if (!state) {entry.flight?.controller.abort(); continue;}
+      const currentTurnKey=this.options.goals.currentTurnKey(key)??'';
+      const runtime = state.view.status === 'completed' || ['stopped', 'failed', 'interrupted'].includes(state.view.runtime)
+        ? 'terminal' : state.view.runtime === 'paused' ? 'paused' : state.view.runtime === 'waiting' ? 'waiting' : 'running';
+      if(entry.flight && (entry.flight.turnKey!==currentTurnKey || entry.flight.goalIdentity!==state.goalIdentity || runtime!=='running'))
+        entry.flight.controller.abort();
       const selectedSource = state.revision !== undefined;
       if (selectedSource) {
         this.syncSource(entry, state.revision!);
@@ -399,9 +415,9 @@ export class ObserverScheduler {
       this.syncGoal(entry,state);
       this.syncContent(entry,state);
       this.syncSourceClock(entry,state);
+      if(entry.flight && (entry.flight.turnKey!==currentTurnKey || entry.flight.goalIdentity!==state.goalIdentity ||
+        state.view.runtime!=='running'))entry.flight.controller.abort();
       const view = state.view;
-      const runtime = view.status === 'completed' || ['stopped', 'failed', 'interrupted'].includes(view.runtime)
-        ? 'terminal' : view.runtime === 'paused' ? 'paused' : view.runtime === 'waiting' ? 'waiting' : 'running';
       const prediction = view.prediction;
       const remaining = prediction ? Math.max(0, prediction.remainingSeconds - Math.max(0,
         view.activeSeconds - prediction.observedActiveSeconds - (entry.predictionExcludedSeconds??0))) : null;

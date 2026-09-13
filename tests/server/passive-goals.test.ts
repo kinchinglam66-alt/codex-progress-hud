@@ -135,6 +135,13 @@ describe('passive goal interpretation owner', () => {
     f.hook('UserPromptSubmit',6000,'two');
     expect(f.goals.view(session,7000)).toMatchObject({runtime:'running',activeSeconds:1});
   });
+  it('increments the source generation when a new turn starts', () => {
+    const f=fixture(),session=f.hook('UserPromptSubmit',0,'one');
+    expect(f.goals.view(session,0)?.generation).toBe(0);
+    f.hook('Stop',1000,'one');
+    f.hook('UserPromptSubmit',2000,'two');
+    expect(f.goals.view(session,2000)).toMatchObject({generation:1,runtime:'running',activeSeconds:0});
+  });
   it('keeps stop fences conversation-local and permits an explicit verified resume',()=>{
     const f=fixture(),a=f.hook('UserPromptSubmit',0,'one',true,'a');
     const b=f.hook('UserPromptSubmit',0,'one',true,'b');
