@@ -1,7 +1,7 @@
 type SettingsState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'checking' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' | 'unconfigured' | 'unauthorized' | 'repair_environment';
 interface SettingsStatus {state: SettingsState; reason?:string; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
 interface ProviderDraft {selected: 'subscription'|'api'; contextCapacity?:{model:string;contextTokens:number;outputReserveTokens:number;requestBytes:number|null}; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
-interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';recipient?:string}
+interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';accountDiagnostic?:{stage:string;reason:string;attempts:number};recipient?:string}
 interface SettingsApi {
   getStatus(): Promise<SettingsStatus>; preflight(): Promise<SettingsStatus & {allowed: boolean; challenge?: string}>; confirm(revision: number, challenge: string): Promise<SettingsStatus>; revokeConsent(): Promise<SettingsStatus & {consentRevoked:boolean}>;
   readProviderSettings?(): Promise<ProviderSettings>; saveProviderSettings?(payload: unknown): Promise<ProviderSettings>; replaceSubscriptionAccount?(payload: unknown): Promise<{outcome:string}>;
@@ -20,8 +20,17 @@ const recover = document.querySelector<HTMLButtonElement>('#recover')!;
 const revoke = document.querySelector<HTMLButtonElement>('#revoke')!;
 let revision = 0;
 let challenge: string | undefined;
+let recoveryState:SettingsState|undefined;
+function showAccountUnavailable():void {
+  if(recoveryState==='unauthorized'&&providerSnapshot?.selected==='subscription'&&providerSnapshot.accountStatus==='unavailable'){
+    state.textContent='账户检查不可用';
+    known.textContent='未知';unknown.textContent='未知';
+    message.textContent='账户检查未通过，估时尚未就绪；这不代表登录、授权或历史用量已丢失。请查看上方账户诊断。';
+  }
+}
 
 function render(value: SettingsStatus): void {
+  recoveryState=value.state;
   if(diagnostic){
     const detail=value.lastDiagnostic;
     diagnostic.textContent=detail ? `最近试探（本次启动）：阶段 ${detail.stage}；结果 ${detail.outcome}；调用分类 ${detail.callReason??'unknown'}；用量${detail.usagePresent?'已返回':'未返回'}；资源清理${detail.closureConfirmed?'已确认':'未确认'}（不代表请求已发出）。` : '';
@@ -39,6 +48,7 @@ function render(value: SettingsStatus): void {
   known.textContent = String(value.knownTokens);
   unknown.textContent = String(value.unknown);
   recover.disabled = challenge === undefined || !value.recoveryAllowed || value.state === 'checking' || value.state === 'probing' || value.state === 'awaiting_confirmation';
+  showAccountUnavailable();
 }
 
 let refreshGeneration = 0;
@@ -191,8 +201,13 @@ function renderProvider(value: ProviderSettings): void {
   if (keyState) keyState.textContent = (draft?.keyConfigured ?? false) ? '已配置（密钥不会显示）' : '未配置密钥';
   if (account) account.textContent = value.account?.label ?? (value.accountStatus==='signed_out'?'未登录订阅账户':value.accountStatus==='unavailable'?'账户检查失败；不代表已退出登录':value.accountStatus==='checking'?'正在检查订阅账户…':'订阅账户尚未检查');
   if (accountTime) accountTime.textContent = value.account ? `观察时间：${new Date(value.account.observedAt).toLocaleString('zh-CN')}；有效至：${new Date(value.account.expiresAt).toLocaleString('zh-CN')}` : '—';
+  if(accountTime&&!value.account&&value.accountDiagnostic){
+    const detail=value.accountDiagnostic;
+    accountTime.textContent=`检查阶段：${detail.stage}；原因：${detail.reason}；账户读取次数：${detail.attempts}。仅元数据检查，未运行模型。`;
+  }
   if (dirty) dirty.textContent = '已保存';
   renderProviderView();
+  showAccountUnavailable();
 }
 function providerEnvelope(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {generation: providerSnapshot?.generation ?? 0, revision: providerSnapshot?.revision ?? 0, ...extra};
@@ -208,9 +223,13 @@ function markDirty(): void {
   }
 }
 function providerInputChanged(): void { markDirty(); renderProviderView(); }
+let providerRefreshGeneration=0;
 async function refreshProvider(): Promise<void> {
   if (!providerApi?.readProviderSettings) return;
-  try { renderProvider(await providerApi.readProviderSettings()); } catch { message.textContent = '无法读取提供方设置'; }
+  const request=++providerRefreshGeneration,actionGeneration=providerActionGeneration;
+  const current=()=>request===providerRefreshGeneration&&actionGeneration===providerActionGeneration;
+  try { const value=await providerApi.readProviderSettings();if(current())renderProvider(value); }
+  catch { if(current())message.textContent = '无法读取提供方设置'; }
 }
 let providerActionGeneration = 0;
 let providerCancelling = false;
@@ -218,7 +237,13 @@ async function providerAction(operation: () => Promise<unknown>, success: string
   if (providerBusy) return; setProviderBusy(true);
   const generation = ++providerActionGeneration;
   try { await operation(); if (generation !== providerActionGeneration) return; await refreshProvider(); if (generation !== providerActionGeneration) return; challenge=undefined; const refreshed=await refresh(); if (generation === providerActionGeneration) message.textContent = refreshed ? success : '操作已完成，但状态刷新失败；请重新打开设置查看。'; }
-  catch (error) { if (generation !== providerActionGeneration) return; const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : error instanceof Error && error.message === 'PROVIDER_INLINE_CONSENT_REQUIRED' ? '请先同意接收方和用量说明。' : '提供方操作失败；估时保持停用。'; message.textContent = text; }
+  catch (error) {
+    if (generation !== providerActionGeneration) return;
+    await refreshProvider();
+    if (generation !== providerActionGeneration) return;
+    const text = error instanceof Error && error.message === 'SETTINGS_INVALID_REQUEST' ? '设置请求无效' : error instanceof Error && error.message === 'PROVIDER_ACTION_CANCELLED' ? '已取消账户操作。' : error instanceof Error && error.message === 'PROVIDER_INLINE_CONSENT_REQUIRED' ? '请先同意接收方和用量说明。' : '提供方操作失败；请查看当前提供方状态与账户诊断。';
+    message.textContent = text;
+  }
   finally { if (generation === providerActionGeneration) setProviderBusy(false); }
 }
 for (const control of [profileId, providerName, baseUrl, model, protocol, reasoningEffort, maxOutputTokens, dailyCallLimit,contextModel,contextTokens,contextReserve,contextBytes]) control?.addEventListener('input', providerInputChanged);

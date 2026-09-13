@@ -141,6 +141,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     const cacheScope=JSON.stringify(['subscription',account.evidence.accountFingerprint,SUBSCRIPTION_MODEL,
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
+      accountingAccountFingerprint:account.evidence.accountFingerprint,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
       ...(shouldEnablePersistentObserver(options,config)?{persistentReceiptDirectory:accountingDirectory,
         persistentWorkerFactory:workerOptions=>createPersistentObserverWorker({...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema})}:{}),

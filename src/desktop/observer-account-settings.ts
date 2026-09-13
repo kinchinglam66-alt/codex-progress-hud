@@ -6,6 +6,7 @@ import {
   type ObserverLoginOwner,
 } from '../estimation/observer-login-owner.js';
 import type { ObserverAttestation } from '../estimation/observer-consent.js';
+import {AccountInspectionFailure} from '../estimation/account-inspection-failure.js';
 
 export interface ObserverAccountSnapshot {
   accountLabel: string;
@@ -88,6 +89,7 @@ export function createObserverAccountSettings({identity, loginOwner, onDeviceAut
       return snapshot;
     } catch (error) {
       deactivate('inactive');
+      if(error instanceof AccountInspectionFailure)throw error;
       if (error instanceof Error && ['OBSERVER_LOGIN_REQUIRED', 'OBSERVER_ACCOUNT_SETTINGS_CLOSED', 'OBSERVER_ACCOUNT_SETTINGS_STALE'].includes(error.message)) throw error;
       throw new Error('OBSERVER_IDENTITY_UNAVAILABLE');
     }

@@ -42,6 +42,44 @@ it('explains unresolved previous calls before and after a denied recovery check'
   expect(elements.get('#recover').disabled).toBe(true);
 });
 
+it('shows bounded account failure stage and attempts without disguising it as lost consent',async()=>{
+  const elements=new Map<string,any>();
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-account-time','#provider-start'])elements.set(id,{textContent:'',disabled:false,addEventListener:()=>{}});
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'unauthorized',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:async()=>({generation:0,revision:0,state:'inactive',selected:'subscription',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:null,accountStatus:'unavailable',accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3}})}});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#provider-account-time').textContent).toContain('account-read'));
+  expect(elements.get('#provider-account-time').textContent).toContain('timeout');
+  expect(elements.get('#provider-account-time').textContent).toContain('3');
+  expect(elements.get('#state').textContent).not.toBe('unauthorized');
+});
+it('refreshes account diagnostics after the primary start action rejects',async()=>{
+  const elements=new Map<string,any>(),listeners=new Map<string,()=>void>();let failed=false;
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-account-time','#provider-start','#provider-consent'])elements.set(id,{textContent:'',disabled:false,checked:true,addEventListener:(_event:string,handler:()=>void)=>listeners.set(id,handler)});
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'unauthorized',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),
+    readProviderSettings:async()=>({generation:0,revision:0,state:'inactive',selected:'subscription',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:null,accountStatus:failed?'unavailable':'unknown',...(failed?{accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3}}:{})}),
+    startProvider:async()=>{failed=true;throw Error('PRIVATE_BACKEND_ERROR');}}});
+  await import('../../src/ui/settings-renderer.js');
+  await vi.waitFor(()=>expect(elements.get('#provider-account').textContent).toContain('尚未检查'));
+  elements.get('#provider-consent').checked=true;listeners.get('#provider-start')!();
+  await vi.waitFor(()=>expect(elements.get('#provider-account-time').textContent).toContain('account-read'));
+  expect(elements.get('#message').textContent).not.toContain('PRIVATE_BACKEND_ERROR');
+});
+it('does not let an older provider read overwrite a newer failure diagnostic',async()=>{
+  const elements=new Map<string,any>(),listeners=new Map<string,()=>void>();let reads=0;
+  let release!:(value:unknown)=>void;const oldRead=new Promise(resolve=>{release=resolve;});
+  const snapshot={generation:0,revision:0,state:'inactive',selected:'subscription',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:null,accountStatus:'unknown'};
+  for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-account-time','#provider-start','#provider-consent'])elements.set(id,{textContent:'',disabled:false,checked:true,addEventListener:(_event:string,handler:()=>void)=>listeners.set(id,handler)});
+  vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+  vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'unauthorized',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),
+    readProviderSettings:async()=>++reads===1?oldRead:{...snapshot,accountStatus:'unavailable',accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3}},startProvider:async()=>{throw Error('PRIVATE');}}});
+  await import('../../src/ui/settings-renderer.js');
+  listeners.get('#provider-start')!();
+  await vi.waitFor(()=>expect(elements.get('#provider-account-time').textContent).toContain('timeout'));
+  release(snapshot);await new Promise(resolve=>setTimeout(resolve,0));
+  expect(elements.get('#provider-account-time').textContent).toContain('timeout');
+});
 it.each([['unknown','尚未检查'],['unavailable','检查失败'],['signed_out','未登录']])('renders account status %s without inferring sign-out from missing metadata',async(accountStatus,expected)=>{
   const elements=new Map<string,any>();
   for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-start'])elements.set(id,{textContent:'',disabled:false,addEventListener:()=>{}});

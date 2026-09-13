@@ -1,4 +1,4 @@
-import {expect,it,vi,beforeEach} from 'vitest';
+import {expect,it,vi,beforeEach,afterEach} from 'vitest';
 import {resolve} from 'node:path';
 import {ObserverAccountTimeout,ObserverPreDispatchTransient} from '../../src/estimation/observer-call-failure.js';
 const state=vi.hoisted(()=>({events:[] as string[],accountId:'account-one',failure:'',active:false,compressionInputs:[] as string[]}));
@@ -11,6 +11,79 @@ vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvoc
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:()=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure)throw Error(state.failure);return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:'b'.repeat(64)};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.failure='';state.active=false;state.compressionInputs=[];});
+afterEach(()=>vi.useRealTimers());
+it('recovers metadata inspection after a closed account timeout without preparing login or inference',async()=>{
+  vi.useFakeTimers();state.failure='trusted-timeout';
+  const runtime=createObserverIdentityRuntime(config());
+  const result=runtime.inspect(new AbortController().signal);
+  const assertion=expect(result).resolves.toHaveProperty('evidence');
+  void assertion.catch(()=>undefined); // Keep the assertion awaited after advancing time.
+  await vi.advanceTimersByTimeAsync(999);
+  expect(state.events.filter(x=>x==='account')).toHaveLength(1);
+  state.failure='';
+  await vi.advanceTimersByTimeAsync(1);
+  await assertion;
+  expect(state.events.filter(x=>x==='account')).toHaveLength(2);
+  expect(state.compressionInputs).toEqual([]);
+  await runtime.close();
+});
+it('bounds closed account-timeout inspection retries and exposes only safe failure details',async()=>{
+  vi.useFakeTimers();state.failure='trusted-timeout';
+  const runtime=createObserverIdentityRuntime(config());
+  const assertion=expect(runtime.inspect(new AbortController().signal)).rejects.toMatchObject({
+    message:'OBSERVER_IDENTITY_UNAVAILABLE',diagnostic:{stage:'account-read',reason:'timeout',attempts:3},
+  });
+  void assertion.catch(()=>undefined);
+  await vi.advanceTimersByTimeAsync(4000);await assertion;
+  expect(state.events.filter(x=>x==='account')).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(state.events.filter(x=>x==='account')).toHaveLength(3);
+  await runtime.close();
+});
+it('cancels inspection backoff without starting another account reader',async()=>{
+  vi.useFakeTimers();state.failure='trusted-timeout';
+  const runtime=createObserverIdentityRuntime(config()),controller=new AbortController();
+  const assertion=expect(runtime.inspect(controller.signal)).rejects.toThrow('OBSERVER_IDENTITY_UNAVAILABLE');
+  await vi.advanceTimersByTimeAsync(500);controller.abort();
+  await assertion;await vi.advanceTimersByTimeAsync(5000);
+  expect(state.events.filter(x=>x==='account')).toHaveLength(1);
+  await runtime.close();
+});
+it('does not retry inspection when timeout cleanup is unconfirmed',async()=>{
+  state.failure='trusted-timeout';state.active=true;
+  const runtime=createObserverIdentityRuntime(config());
+  await expect(runtime.inspect(new AbortController().signal)).rejects.toMatchObject({
+    diagnostic:{stage:'account-read',reason:'ownership_unconfirmed',attempts:1},
+  });
+  expect(state.events.filter(x=>x==='account')).toHaveLength(1);
+  await expect(runtime.close()).rejects.toThrow('OBSERVER_IDENTITY_CLOSE_UNCONFIRMED');
+});
+it('holds identity ownership throughout inspection backoff and closes without another read',async()=>{
+  vi.useFakeTimers();state.failure='trusted-timeout';
+  const runtime=createObserverIdentityRuntime(config());
+  const result=runtime.inspect(new AbortController().signal);
+  const rejected=expect(result).rejects.toThrow('OBSERVER_IDENTITY_UNAVAILABLE');
+  await vi.advanceTimersByTimeAsync(500);
+  await expect(runtime.inspect(new AbortController().signal)).rejects.toThrow('OBSERVER_IDENTITY_UNAVAILABLE');
+  await expect(runtime.prepareLogin(new AbortController().signal)).rejects.toThrow('OBSERVER_IDENTITY_UNAVAILABLE');
+  const closed=runtime.close();await rejected;await closed;
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(state.events.filter(x=>x==='account')).toHaveLength(1);
+});
+it('does not extend metadata-only retries to persistent session preparation',async()=>{
+  state.failure='trusted-timeout';
+  const runtime=createObserverIdentityRuntime(config());
+  await expect(runtime.prepareSession(new AbortController().signal)).rejects.toThrow('OBSERVER_IDENTITY_UNAVAILABLE');
+  expect(state.events.filter(x=>x==='account')).toHaveLength(1);
+  await runtime.close();
+});
+it.each(['OBSERVER_LOGIN_REQUIRED','malformed private response'])('does not retry non-timeout inspection failures (%s)',async failure=>{
+  state.failure=failure;
+  const runtime=createObserverIdentityRuntime(config());
+  await expect(runtime.inspect(new AbortController().signal)).rejects.toThrow(failure==='OBSERVER_LOGIN_REQUIRED'?failure:'OBSERVER_IDENTITY_UNAVAILABLE');
+  expect(state.events.filter(x=>x==='account')).toHaveLength(1);
+  await runtime.close();
+});
 it('prepares a persistent server only after identity attestation without dispatch',async()=>{
   const runtime=createObserverIdentityRuntime(config());
   const prepared=await runtime.prepareSession(new AbortController().signal);

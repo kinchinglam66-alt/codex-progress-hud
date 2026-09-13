@@ -4,6 +4,8 @@ import {join} from 'node:path';
 import {describe, expect, it, vi} from 'vitest';
 import {createObserverProviderHost, type ProviderWorkerOwner, type ObserverProviderHostOptions} from '../../src/desktop/observer-provider-host.js';
 import type {ObserverWorker} from '../../src/estimation/observer-scheduler.js';
+import {AccountInspectionFailure} from '../../src/estimation/account-inspection-failure.js';
+import {createObserverAccountSettings} from '../../src/desktop/observer-account-settings.js';
 
 const apiDraft = {
   selected: 'api' as const,
@@ -29,6 +31,42 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it('propagates host cancellation into post-login account inspection',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-post-login-cancel-'));
+    let inspectionSignal:AbortSignal|undefined;
+    const pending=deferred<{label:string;observedAt:number;expiresAt:number}>();
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owner('synthetic'),
+      subscriptionAccount:{login:async()=> 'process_exited'} as any,
+      readSubscriptionAccount:signal=>{inspectionSignal=signal;return pending.promise;}});
+    const action=host.replaceSubscriptionAccount({...host.status(),action:'login'}).catch(()=>undefined);
+    try{
+      await vi.waitFor(()=>expect(inspectionSignal).toBeDefined());
+      const cancelling=host.cancelProviderAction();
+      const aborted=inspectionSignal!.aborted;
+      pending.resolve({label:'synthetic',observedAt:0,expiresAt:300000});
+      await action;await cancelling;
+      expect(aborted).toBe(true);expect(host.status().account).toBeNull();
+    }finally{pending.resolve({label:'synthetic',observedAt:0,expiresAt:300000});await action;await host.close();}
+  });
+  it('retains safe startup inspection diagnostics through account settings and clears them after recovery',async()=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-startup-diagnostic-'));
+    let failing=true;
+    const settings=createObserverAccountSettings({identity:{
+      inspect:async()=>{if(failing)throw new AccountInspectionFailure({stage:'account-read',reason:'timeout',attempts:3});return {accountLabel:'synthetic',evidence:{accountFingerprint:'a'.repeat(64),routeFingerprint:'b'.repeat(64),assetsFingerprint:'c'.repeat(64),observedAt:0,expiresAt:300000}};},
+      prepareLogin:async()=>{throw Error('unexpected login');},prepareDeviceLogin:async()=>{throw Error('unexpected login');},prepareLogout:async()=>{throw Error('unexpected logout');},disable(){},close:async()=>{},
+    }});
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},autoStartSubscription:true,
+      readSubscriptionAccount:async signal=>{const s=await settings.inspect(signal);return {label:s.accountLabel,observedAt:s.evidence.observedAt,expiresAt:s.evidence.expiresAt};},
+      openSubscription:async()=>owner('synthetic')});
+    try{
+      await host.start(new AbortController().signal);
+      expect(await host.readProviderSettings()).toMatchObject({state:'inactive',accountStatus:'unavailable',accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3}});
+      expect(host.status()).toMatchObject({accountDiagnostic:{stage:'account-read',reason:'timeout',attempts:3}});
+      failing=false;await host.start(new AbortController().signal);
+      expect(await host.readProviderSettings()).toMatchObject({state:'ready',accountStatus:'ready'});
+      expect((await host.readProviderSettings()) as any).not.toHaveProperty('accountDiagnostic');
+    }finally{await host.close();await settings.close();}
+  });
   it('aborts context preparation when the provider generation is disabled',async()=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-context-generation-'));
     const pending=deferred<any>();let received:AbortSignal|undefined;

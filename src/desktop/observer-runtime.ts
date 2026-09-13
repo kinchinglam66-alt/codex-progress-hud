@@ -62,6 +62,8 @@ type TrustedCompressionPreparation = (request: CompressionRequest, signal: Abort
 
 export interface DesktopObserverRuntimeOptions {
   identity: DesktopObserverIdentity;
+  /** Account selected by the host for this runtime's ledger and receipt directory. */
+  accountingAccountFingerprint?: string;
   openAccounting: () => Promise<ReleaseAccountingOwner>;
   dialog: ObserverConsentDialog;
   now?: () => number;
@@ -125,7 +127,7 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * exposes two stable, initially unavailable slots so the scheduler can be
  * wired before first-use setup without creating an admission path early.
  */
-export function createDesktopObserverRuntime({identity, openAccounting, dialog, now = Date.now, consentStore,
+export function createDesktopObserverRuntime({identity, openAccounting, accountingAccountFingerprint, dialog, now = Date.now, consentStore,
   inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation,persistentWorkerFactory,persistentReceiptDirectory}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
@@ -493,6 +495,8 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
         if (combined.aborted) throw new Error('OBSERVER_SETUP_CANCELLED');
         const snapshot = await identity.inspect(combined);
         if (combined.aborted) throw new Error('OBSERVER_SETUP_CANCELLED');
+        if(accountingAccountFingerprint!==undefined&&snapshot.evidence.accountFingerprint!==accountingAccountFingerprint)
+          throw new Error('OBSERVER_ACCOUNT_BINDING_CHANGED');
         gate.update(snapshot.evidence);
         authorizedBinding = binding(snapshot.evidence);
         const stored = await readConsent();
@@ -546,7 +550,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, dialog, 
     });
     await setup;
     // One-step activation must not turn a swallowed setup error into provider ready.
-    if (inlineConsent !== undefined && (disabled || !ready)) throw new Error('OBSERVER_SETUP_UNAVAILABLE');
+    if ((inlineConsent !== undefined || accountingAccountFingerprint !== undefined) && (disabled || !ready)) throw new Error('OBSERVER_SETUP_UNAVAILABLE');
   }
 
   async function readConsent() {

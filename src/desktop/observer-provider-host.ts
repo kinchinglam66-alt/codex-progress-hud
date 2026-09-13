@@ -11,6 +11,7 @@ import type {ObserverWorker, ObserverWorkerSource} from '../estimation/observer-
 import type {ProviderOwner} from './observer-provider-selection.js';
 import {createProviderSelection} from './observer-provider-selection.js';
 import type {ObserverAccountSettings} from './observer-account-settings.js';
+import {AccountInspectionFailure,type AccountInspectionDiagnostic} from '../estimation/account-inspection-failure.js';
 
 const activePath = (root: string): string => join(root, 'observer-provider-active.json');
 const draftPath = (root: string): string => join(root, 'observer-provider-draft.json');
@@ -43,6 +44,7 @@ export interface ProviderSettingsPublic {
   keyConfigured: boolean;
   account: ProviderAccountMetadata | null;
   accountStatus?: 'unknown' | 'checking' | 'ready' | 'signed_out' | 'unavailable';
+  accountDiagnostic?: Readonly<AccountInspectionDiagnostic>;
   recipient: string;
   proxyUrl?: string;
 }
@@ -120,15 +122,17 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   let state: ProviderSettingsPublic['state'] = 'inactive';
   let account: ProviderAccountMetadata | null = null;
   let accountStatus: NonNullable<ProviderSettingsPublic['accountStatus']> = 'unknown';
+  let accountDiagnostic:Readonly<AccountInspectionDiagnostic>|undefined;
 
   async function readAccount(signal: AbortSignal): Promise<void> {
     if (!options.readSubscriptionAccount) return;
-    accountStatus='checking';
+    accountStatus='checking';accountDiagnostic=undefined;
     try {
       const value=await options.readSubscriptionAccount(signal);
       signal.throwIfAborted(); account=value; accountStatus='ready';
     } catch(error) {
       account=null;
+      accountDiagnostic=error instanceof AccountInspectionFailure?error.diagnostic:undefined;
       accountStatus=error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED' ? 'signed_out' : 'unavailable';
       throw error;
     }
@@ -201,6 +205,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       active: toPublicProviderConfig(active, await keyConfigured(active)),
       draft: toPublicProviderConfig(draft, await keyConfigured(draft)),
       keyConfigured: await keyConfigured(active), account, accountStatus,
+      ...(accountDiagnostic?{accountDiagnostic}:{}),
       recipient: disclosure, ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
     };
   }
@@ -424,13 +429,14 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       const settings = options.subscriptionAccount;
       if (!settings) throw fixedFailure('OBSERVER_SUBSCRIPTION_ACCOUNT_UNAVAILABLE');
       let loginRequired = false;
-      accountStatus='checking';
+      accountStatus='checking';accountDiagnostic=undefined;
       try {
         const snapshot=await settings.inspect(controller.signal);
         controller.signal.throwIfAborted();
         account={label:snapshot.accountLabel,observedAt:snapshot.evidence.observedAt,expiresAt:snapshot.evidence.expiresAt};accountStatus='ready';
       }
       catch (error) {
+        accountDiagnostic=error instanceof AccountInspectionFailure?error.diagnostic:undefined;
         account=null;accountStatus=error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED'?'signed_out':'unavailable';
         if (!(error instanceof Error) || error.message !== 'OBSERVER_LOGIN_REQUIRED') throw error;
         loginRequired = true;
@@ -505,7 +511,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   async function replaceSubscriptionAccount(input: ProviderMutation & {action:'login'|'device-auth'|'logout'}, signal = new AbortController().signal): Promise<{outcome: string; account: ProviderAccountMetadata | null}> {
     checkMutation(input);
     const {controller,token}=acquireAction();
-    const previous=current;
+    const previous=current;accountDiagnostic=undefined;
     setDispatchGeneration(++generation); state='switching'; current=null;
     const settings = options.subscriptionAccount;
     try { await writeState({version:1,generation,revision,state:'switching',selected:active.selected});
@@ -513,7 +519,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       await drainSelection(); controller.signal.throwIfAborted();
       if (!settings) throw fixedFailure('OBSERVER_SUBSCRIPTION_ACCOUNT_UNAVAILABLE');
       const kind=input.action; const outcome = kind === 'login' ? await settings.login(AbortSignal.any([signal,controller.signal])) : kind === 'device-auth' ? await settings.deviceAuth(AbortSignal.any([signal,controller.signal])) : await settings.logout(AbortSignal.any([signal,controller.signal]));
-      if (outcome === 'process_exited' && kind !== 'logout') await readAccount(signal);
+      if (outcome === 'process_exited' && kind !== 'logout') await readAccount(AbortSignal.any([signal,controller.signal]));
       if (kind === 'logout') {account = null; accountStatus=outcome==='process_exited'?'signed_out':'unknown';}
       state='inactive'; await writeState({version:1,generation,revision,state:'inactive',selected:active.selected});
       return {outcome, account};
@@ -533,6 +539,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   }
   return {workers, workerSource, status: () => ({
     generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account, accountStatus,
+    ...(accountDiagnostic?{accountDiagnostic}:{}),
     recipient: draft.selected==='api'&&draft.api?`${new URL(draft.api.baseUrl).origin}${new URL(draft.api.baseUrl).pathname} · ${draft.api.model}`:(options.recipient ?? 'Codex Progress HUD observer'), ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
   }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
     disable: () => {setDispatchGeneration(++generation); state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of ownerWorkers(current)) worker.disable();}, close};

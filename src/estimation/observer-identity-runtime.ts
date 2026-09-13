@@ -14,6 +14,7 @@ import type {ObserverAttestation} from './observer-consent.js';
 import type {ForecastVersions} from './forecast-record.js';
 import {OBSERVER_INPUT_FACTS_VERSION} from './observer-input.js';
 import {ObserverAccountTimeout,ObserverPreDispatchTransient} from './observer-call-failure.js';
+import {AccountInspectionFailure} from './account-inspection-failure.js';
 
 type SetupAction='login'|'device-auth'|'logout';
 type PreparationStage='home-prepare'|'runtime-preflight'|'account-read'|'home-recheck'|'binding'|'ready';
@@ -58,6 +59,7 @@ export function createObserverIdentityRuntime(options:Options) {
       const check=()=>{if(disabled || combined.aborted)throw fail();};
       pending=Promise.resolve().then(async()=>{
         let stage:PreparationStage='home-prepare';
+        let accountAttempts=0;
         const startedAt=performance.now();
         const emit=(outcome:PreparationDiagnostic['outcome'],detail?:AccountReadDiagnostic)=>{
           try{config.onDiagnostic?.({stage,outcome,elapsedMs:Math.round(performance.now()-startedAt),...(detail?{reader:detail}:{})});}catch{/* No diagnostic can authorize or reject work. */}
@@ -74,9 +76,24 @@ export function createObserverIdentityRuntime(options:Options) {
           let account;
           if(mode!=='logout') {
             const setupInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
-            reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
-            try {account=await reader.read(combined);}
-            catch(error) {if(!loginMode || !(error instanceof Error) || error.message!=='OBSERVER_LOGIN_REQUIRED')throw error;}
+            for (;;) {
+              check();accountAttempts++;
+              reader=createObserverAccountReader(()=>spawn(setupInvocation.executable,setupInvocation.args,{cwd:setupInvocation.cwd,env:setupInvocation.env,windowsHide:true,stdio:['pipe','pipe','pipe']}),undefined,detail=>emit('reader',detail));
+              try {account=await reader.read(combined);break;}
+              catch(error) {
+                if(loginMode && error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED')break;
+                // Only metadata inspection can retry here. A trusted timeout is
+                // emitted by the reader only after its child has actually closed.
+                if(mode!=='inspect'||!(error instanceof ObserverAccountTimeout)||accountAttempts>=3||
+                  disabled||combined.aborted||ownersBusy())throw error;
+                await new Promise<void>((resolve,reject)=>{
+                  const cancelled=()=>{clearTimeout(timer);combined.removeEventListener('abort',cancelled);reject(fail());};
+                  const timer=setTimeout(()=>{combined.removeEventListener('abort',cancelled);resolve();},accountAttempts===1?1000:3000);
+                  combined.addEventListener('abort',cancelled,{once:true});
+                  if(combined.aborted)cancelled();
+                });
+              }
+            }
           }
           check();
           emit('passed');stage='home-recheck';
@@ -109,6 +126,9 @@ export function createObserverIdentityRuntime(options:Options) {
           if(!combined.aborted && !disabled && !ownersBusy() && error instanceof Error && error.message==='OBSERVER_LOGIN_REQUIRED')throw error;
           if(typeof mode==='object' && stage==='account-read' && !combined.aborted && !disabled && !ownersBusy()
             && error instanceof ObserverAccountTimeout)throw new ObserverPreDispatchTransient();
+          if(mode==='inspect')throw new AccountInspectionFailure({stage,attempts:accountAttempts,
+            reason:ownersBusy()?'ownership_unconfirmed':combined.aborted||disabled?'cancelled':
+              error instanceof ObserverAccountTimeout?'timeout':'check_failed'});
           throw fail();
         } finally {
           combined.removeEventListener('abort',abort);

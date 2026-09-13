@@ -157,6 +157,17 @@ function dialogFor(events: string[], response = 0) {
 
 describe('desktop observer runtime composition', () => {
   afterEach(() => {vi.useRealTimers();});
+  it('rejects startup account drift before consent or an account-scoped ledger is opened',async()=>{
+    const events:string[]=[];
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>0,events,{inspect:()=>evidence(0,'b'.repeat(64))}),
+      dialog:dialogFor(events),now:()=>0,accountingAccountFingerprint:'a'.repeat(64),
+      openAccounting:async()=>{events.push('open-accounting');return owner(events);}});
+    try{
+      await expect(runtime.start(new AbortController().signal)).rejects.toThrow('OBSERVER_SETUP_UNAVAILABLE');
+      expect(events).not.toContain('dialog');expect(events).not.toContain('open-accounting');
+      expect(runtime.workers.every(worker=>worker.status().disabled)).toBe(true);
+    }finally{await runtime.close();}
+  });
 
   it('rejects an inline activation when setup fails instead of reporting completion', async () => {
     const events: string[] = [];
