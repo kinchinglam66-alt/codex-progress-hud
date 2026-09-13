@@ -1,5 +1,6 @@
 import type {ConversationRecord,ReadBatch} from './conversation-record.js';
 import type {HistorySnapshot} from './history-snapshot.js';
+import {createHash} from 'node:crypto';
 
 interface Source {
   read(id:string,signal:AbortSignal):Promise<ReadBatch>;
@@ -7,6 +8,8 @@ interface Source {
   remove(id:string):void;close():Promise<void>;
 }
 export interface ContextSnapshot {
+  /** Source-owned instruction identity, independent of the bounded text projection. */
+  instructionFingerprint:string;
   lastSuccessfulReadAt?:number;
   records:ConversationRecord[];revision:number;sourceEpoch:number;
   health:'loading'|'ready'|'error';historyComplete:boolean;partialLine:boolean;
@@ -16,7 +19,11 @@ interface Entry extends ContextSnapshot {
   hostId:string;turnKey:string;due:number;active:boolean;failures:number;
   bytes:number;historyTrimmed:boolean;flight?:AbortController;operation?:Promise<void>;
   goalRetentionFailed?:boolean;historyFlights:Set<AbortController>;
+  instructionDigests:Map<string,string>;
 }
+
+const EMPTY_INSTRUCTIONS=createHash('sha256').update('hud-instructions-v1').digest('hex');
+const hashInstruction=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 const PROJECTION_TEXT_BYTES=16*1024;
 function productionRecordBytes(record:ConversationRecord):number {
@@ -52,7 +59,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
   };
   const snapshot=(key:string):ContextSnapshot|null=>{
     const e=entries.get(key);if(!e)return null;
-    return {records:e.records.map(r=>({...r})),revision:e.revision,sourceEpoch:e.sourceEpoch,
+    return {records:e.records.map(r=>({...r})),revision:e.revision,sourceEpoch:e.sourceEpoch,instructionFingerprint:e.instructionFingerprint,
       ...(e.lastSuccessfulReadAt===undefined?{}:{lastSuccessfulReadAt:e.lastSuccessfulReadAt}),
       health:e.health,historyComplete:e.historyComplete,partialLine:e.partialLine,reason:e.reason,projectionOnly:true};
   };
@@ -85,7 +92,23 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       let records=batch.reset?[]:[...e.records];
       const known=new Set(records.map(r=>r.id));
       let changed=batch.reset;
-      for(const record of batch.records){if(!known.has(record.id)){known.add(record.id);records.push({...record});changed=true;}}
+      const instructionDigests=batch.reset?new Map<string,string>():new Map(e.instructionDigests);
+      let instructionFingerprint=batch.reset?EMPTY_INSTRUCTIONS:e.instructionFingerprint;
+      for(const record of batch.records){
+        let revisedUser=false;
+        if(record.kind==='user'){
+          const id=hashInstruction(record.id),digest=hashInstruction([record.id,record.turnId,record.text??'']);
+          revisedUser=instructionDigests.get(id)!==digest;
+          if(revisedUser){instructionFingerprint=hashInstruction([instructionFingerprint,digest]);changed=true;}
+          instructionDigests.delete(id);instructionDigests.set(id,digest);
+          // Match the source reader's bounded dedupe window. A replay beyond it
+          // conservatively invalidates an estimate; it never reuses stale identity.
+          if(instructionDigests.size>4096)instructionDigests.delete(instructionDigests.keys().next().value!);
+          if(!revisedUser&&!known.has(record.id))continue;
+        }
+        if(!known.has(record.id)){known.add(record.id);records.push({...record});changed=true;}
+        else if(revisedUser){records[records.findIndex(r=>r.id===record.id)]={...record};}
+      }
       let trimmed=false;
       records=records.map(record=>{const projected=projectRecord(record);trimmed ||= projected.trimmed;return projected.record;});
       // Exact production JSON array size, without repeatedly serializing the entire
@@ -141,6 +164,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       if(bytes>256*1024){e.goalRetentionFailed=true;throw Error('SOURCE_GOAL_LIMIT');}
       if(totalBytes-e.bytes+bytes>8*1024*1024)throw Error('SOURCE_LIMIT');
       totalBytes+=bytes-e.bytes;e.bytes=bytes;e.records=records;
+      e.instructionFingerprint=instructionFingerprint;e.instructionDigests=instructionDigests;
       if(batch.reset)e.sourceEpoch++;
       if(changed)e.revision++;
       e.historyTrimmed=(batch.reset?false:e.historyTrimmed)||trimmed||
@@ -169,6 +193,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       else if(existing){existing.turnKey=turnKey;existing.active=true;existing.due=Math.min(existing.due,clock()+500);return;}
       if(entries.size>=32)throw Error('SOURCE_CAPACITY');
       entries.set(key,{hostId,turnKey,records:[],revision:0,sourceEpoch:0,health:'loading',
+        instructionFingerprint:EMPTY_INSTRUCTIONS,instructionDigests:new Map(),
         historyComplete:true,partialLine:false,reason:null,projectionOnly:true,due:clock()+500,active:true,failures:0,bytes:0,
         historyTrimmed:false,historyFlights:new Set()});
     },

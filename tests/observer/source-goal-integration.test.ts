@@ -20,6 +20,39 @@ function setup(){
   return {goals,contexts,envelope,available:()=>{available=true;},reset:()=>{epoch++;},advance:()=>{revision++;}};
 }
 const answer={relation:'replace',status:'running',summary:'sleep',estimate:{remainingSeconds:90,errorPercent:20}};
+it.each(['output','duplicate','new-user','same-id-edit','rewrite'] as const)('preserves instruction fences independently of projection eviction: %s',async(change)=>{
+  let now=0;
+  const envelope=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'turn'},0,
+    'protected-eviction-identity-token-1234567890').envelope;
+  const initial:ReadBatch['records']=[{id:'first',turnId:'old',atMs:0,kind:'user',text:'x'.repeat(20000)},
+    {id:'middle',turnId:'old',atMs:1,kind:'user',text:'Prior requirement'},
+    {id:'user',turnId:'turn',atMs:2,kind:'user',text:'Current task'}];
+  let batch:ReadBatch={records:initial,caughtUp:true,partialLine:false,reset:false};
+  const source=createConversationSource({source:{read:async()=>batch,remove(){},async close(){}},
+    now:()=>now,wallNow:()=>now,turnKeyFor:(_,turn)=>turn==='turn'?envelope.turnKey!:turn});
+  const goals=new PassiveGoals(new PassiveContextStore(),source.goals);
+  goals.observe(envelope,true,0);source.attach(envelope.sessionKey,'host',envelope.turnKey!);
+  const flush=async()=>{source.tick();await new Promise(r=>setImmediate(r));};
+  try{
+    now=500;await flush();
+    const request=goals.request(envelope.sessionKey,now)!;expect(request).not.toBeNull();
+    batch={...batch,records:Array.from({length:20},(_,i)=>({id:`tool-${i}`,turnId:'turn',atMs:3+i,kind:'tool_result',text:'y'.repeat(16384)}))};
+    now=6000;await flush();
+    expect(source.snapshot(envelope.sessionKey)?.records.some(r=>r.id==='middle')).toBe(false);
+    if(change!=='output'){
+      batch={...batch,records:change==='duplicate'?[initial[1]!]:change==='new-user'?
+        [{id:'new-user',turnId:'turn',atMs:7000,kind:'user',text:'Additional requirement'}]:change==='same-id-edit'?
+        [{...initial[2]!,text:'Changed task'}]:initial.map(r=>r.id==='user'?{...r,text:'Changed task'}:r),
+        reset:change==='rewrite'};
+      now=12000;await flush();
+      if(change==='duplicate')expect(source.snapshot(envelope.sessionKey)?.records.some(r=>r.id==='middle')).toBe(false);
+      if(change==='same-id-edit')expect(source.goals.read(envelope.sessionKey,envelope.turnKey!,
+        {goalSummary:null,activeSeconds:0,runtime:'running',previousEstimate:null})?.input.messages.some(m=>m.text==='Changed task')).toBe(true);
+    }
+    expect(goals.settle(request.ticket,answer,now+100)).toBe(change==='output'||change==='duplicate');
+    expect(goals.view(envelope.sessionKey,now+100)?.prediction!==null).toBe(change==='output'||change==='duplicate');
+  }finally{await source.close();}
+});
 it('stops charging active time at a persisted end even when later output evicts old bodies',async()=>{
   let monotonic=0;
   const envelope=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'turn'},0,

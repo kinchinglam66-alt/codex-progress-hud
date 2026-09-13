@@ -10,6 +10,21 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('conservatively invalidates old instruction replays beyond the dedupe window and resets identity on source rebuild',async()=>{
+  const f=setup();
+  try{
+    f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();f.calls[0]!.finish(batch);await f.flush();
+    const initial=f.owner.snapshot('one')!.instructionFingerprint;
+    f.time(5500);f.owner.tick();f.calls[1]!.finish({...batch,records:Array.from({length:4097},(_,i)=>({
+      id:`u-${i}`,turnId:'t1',atMs:i+1,kind:'user',text:`instruction ${i}`}))});await f.flush();
+    const expanded=f.owner.snapshot('one')!.instructionFingerprint;expect(expanded).not.toBe(initial);
+    f.time(10500);f.owner.tick();f.calls[2]!.finish(batch);await f.flush();
+    expect(f.owner.snapshot('one')!.instructionFingerprint).not.toBe(expanded);
+    f.time(15500);f.owner.tick();f.calls[3]!.finish({...batch,reset:true});await f.flush();
+    expect(f.owner.snapshot('one')!.instructionFingerprint).toBe(initial);
+    expect(f.owner.snapshot('one')!.sourceEpoch).toBe(1);
+  }finally{await f.owner.close();}
+});
 it('research attribution does not consume the production context retention budget',async()=>{
   const ordinary=setup(),research=setup();
   const records=[...batch.records,...Array.from({length:600},(_,i)=>({id:`r${i}`,turnId:'t1',atMs:i+1,kind:'tool_result',text:'x'.repeat(512)}))];

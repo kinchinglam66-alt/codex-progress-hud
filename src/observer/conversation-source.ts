@@ -72,8 +72,7 @@ export function createConversationSource(options:OwnerOptions & {
     // Local proof of unchanged instructions, never a public identity or model input.
     // Also fence later user turns already persisted before their Hook arrives.
     // They affect local validity only; `records` sent to inference stays turn-bounded.
-    const userFingerprint=createHash('sha256').update(JSON.stringify(snapshot.records.filter(r=>r.kind==='user')
-      .map(r=>[r.id,r.turnId,r.text??'']))).digest('hex');
+    const userFingerprint=snapshot.instructionFingerprint;
     const nextTurn=snapshot.records[end];
     return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,
       currentTurnId:current[0]?.turnId??null,actions,finalAvailable,userFingerprint,contentFingerprint,nextTurn};
