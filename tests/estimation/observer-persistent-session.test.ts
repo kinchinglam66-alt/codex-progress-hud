@@ -80,3 +80,9 @@ it('records a gap when a token usage snapshot is malformed',async()=>{
  expect(r.usage).toBeNull();expect(r.usageCompleteness).toBe('malformed_snapshot');
  expect(r.usageGaps).toEqual([{observedAt:expect.any(Number),source:'thread/tokenUsage/updated',reason:'malformed_token_snapshot'}]);
 });
+it('rejects a usage evidence callback failure even after turn completion',async()=>{
+ const f=fixture(),s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});await s.start();
+ await expect(s.estimate(input,new AbortController().signal,async()=>{throw Error('private journal detail');})).rejects.toMatchObject({
+   code:'SESSION_USAGE_EVIDENCE_FAILED',turnId:'turn-1',reason:'usage_evidence_write_failed',terminalConfirmed:true
+ });
+});

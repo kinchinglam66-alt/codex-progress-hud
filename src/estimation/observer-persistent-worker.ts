@@ -7,13 +7,14 @@ import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {SubscriptionAccounting} from './subscription-accounting.js';
 import type {Invocation} from './owned-process.js';
 import {createObserverSessionProcess} from './observer-session-process.js';
-import {createPersistentObserverSession} from './observer-persistent-session.js';
+import {createPersistentObserverSession, type PersistentSessionError} from './observer-persistent-session.js';
 import {createPersistentReceiptJournal,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
 
 export interface PersistentWorkerOptions {
  accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding}>;
  authorize:()=>boolean;now:()=>number;outputSchema:unknown;
  receiptDirectory:string;
+ sessionTimeoutMs?:number;receiptJournalFactory?:(directory:string)=>PersistentReceiptJournal;
  processFactory?:()=>ReturnType<typeof createObserverSessionProcess>;
 }
 const empty=(status:ObserverResult['status']):ObserverResult=>({status,interpretation:null,usage:null});
@@ -29,7 +30,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  let sourceKey:string|undefined,sourceEpoch:string|undefined,generation=-1;
  let processOwnerUuid=randomUUID(),journal:PersistentReceiptJournal|undefined;
  if(!options.receiptDirectory)throw Error('PERSISTENT_RECEIPT_REQUIRED');
- journal=createPersistentReceiptJournal(options.receiptDirectory);
+ journal=(options.receiptJournalFactory??createPersistentReceiptJournal)(options.receiptDirectory);
  let closing:Promise<void>|undefined;
  const turns=new Map<string,number>();
  const authorized=()=>{try{return !disabled&&!poisoned&&options.authorize()===true;}catch{return false;}};
@@ -57,7 +58,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    await journal!.ownerStarted({ownerUuid:processOwnerUuid,sourceKey:sourceKey??'unknown',sourceEpoch:sourceEpoch??null,pid:opened.pid,creationIdentity:opened.creationIdentity,binding:prepared.binding});
    await opened.rpc.call('initialize',{clientInfo:{name:'codex_progress_hud',version:'0.2.1'},capabilities:{experimentalApi:true,requestAttestation:false}});
    opened.rpc.notify('initialized',{});
-   session=createPersistentObserverSession(opened.rpc,{cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now});
+   session=createPersistentObserverSession(opened.rpc,{cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now,...(options.sessionTimeoutMs===undefined?{}:{timeoutMs:options.sessionTimeoutMs})});
    await session.start();check(signal);return session;
  }
  function operation<T>(signal:AbortSignal,work:(combined:AbortSignal)=>Promise<T>):Promise<T>{
@@ -122,9 +123,13 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          // Recheck trusted authorization at the irreversible request boundary.
          check(combined);await view.updateInvocation(id,{phase:'dispatching'});check(combined);
          dispatched=true;reportObserverStage(onStage,'dispatch');
-         const result=await live.estimate(parsed.data,combined,evidence=>evidence.kind==='snapshot'
-           ?journal!.usageSnapshot({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence,completenessReason:'observed'})
-           :journal!.usageGap({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence}));
+         const persistEvidence=async(evidence:Parameters<NonNullable<Parameters<typeof live.estimate>[2]>>[0])=>{
+           try{
+             if(evidence.kind==='snapshot')await journal!.usageSnapshot({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence,completenessReason:'observed'});
+             else await journal!.usageGap({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence});
+           }catch(error){receiptFailure=true;throw error;}
+         };
+         const result=await live.estimate(parsed.data,combined,persistEvidence);
          reportObserverStage(onStage,'provider_returned');
          if(operationId){
            try{
@@ -139,9 +144,23 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          settlementAttempted=true;
          await view.settle(id,accountedUsage,result.usage?(accepted?'known_success':'known_non_success'):'safe_unknown');settled=true;
          return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage} as ObserverResult;
-       }catch{
+       }catch(error){
+         const sessionFailure=error as PersistentSessionError;
+         if(operationId&&!receiptFailure&&sessionFailure instanceof Error&&typeof sessionFailure.code==='string'&&
+            (sessionFailure.code==='SESSION_TIMEOUT'||sessionFailure.code==='SESSION_PROTOCOL_FAILED')){
+           try{await journal!.operationTerminal({operationId,admissionId:id!,ownerUuid:processOwnerUuid,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,
+             ...(sessionFailure.turnId===undefined?{}:{turnId:sessionFailure.turnId}),terminalState:sessionFailure.terminalConfirmed?'completed':'unconfirmed',usageCompleteness:sessionFailure.code==='SESSION_TIMEOUT'?'timeout_unconfirmed':'protocol_failed'});}
+           catch{receiptFailure=true;}
+         }
          let cleaned=false;try{await reset();cleaned=true;}catch{poisoned=true;}
-         if(receiptFailure){poisoned=true;return empty('accounting_error');}
+         if(receiptFailure){
+           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:'closed',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
+           poisoned=true;return empty('accounting_error');
+         }
+         if(sessionFailure instanceof Error&&typeof sessionFailure.code==='string'&&sessionFailure.code.startsWith('SESSION_')){
+           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:'closed',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
+           return empty('process_error');
+         }
          if(id&&view&&!settled){
            try{
              if(bound)await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});

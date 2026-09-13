@@ -11,6 +11,14 @@ export type RawTokens=Tokens;
 export type UsageEvidence =
   | {kind:'snapshot';total:RawTokens;last:RawTokens;observedAt:number;source:'thread/tokenUsage/updated'}
   | {kind:'gap';observedAt:number;source:'thread/tokenUsage/updated';reason:'malformed_token_snapshot'};
+export type PersistentSessionErrorCode='SESSION_TIMEOUT'|'SESSION_PROTOCOL_FAILED'|'SESSION_USAGE_EVIDENCE_FAILED';
+export type PersistentSessionErrorReason='timeout'|'protocol_failed'|'interrupt_failed'|'usage_evidence_write_failed';
+export class PersistentSessionError extends Error {
+ readonly code:PersistentSessionErrorCode;readonly reason:PersistentSessionErrorReason;readonly terminalConfirmed:boolean;readonly turnId?:string;
+ constructor(code:PersistentSessionErrorCode,reason:PersistentSessionErrorReason,terminalConfirmed:boolean,turnId?:string){
+   super(code);this.name='PersistentSessionError';this.code=code;this.reason=reason;this.terminalConfirmed=terminalConfirmed;if(turnId!==undefined)this.turnId=turnId;
+ }
+}
 function rawTokens(value:unknown):RawTokens|null {
  const u=object(value);
  if(!fields.every(k=>Number.isSafeInteger(u[k])&&(u[k] as number)>=0))return null;
@@ -75,49 +83,58 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:{cwd:stri
    },
  async estimate(input:ObserverInput,signal:AbortSignal,onUsageEvidence?:(evidence:UsageEvidence)=>Promise<void>|void):Promise<PersistentSessionResult>{
      ready();signal.throwIfAborted();busy=true;
-     const states=new Map<string,TurnState>();let turnId:string|undefined,interrupted=false,settled=false;
+     const states=new Map<string,TurnState>();let turnId:string|undefined,interrupted=false,settled=false,failure:PersistentSessionError|undefined;
      const writeTasks:Promise<void>[]=[];const usageGaps:Array<{observedAt:number;source:'thread/tokenUsage/updated';reason:'malformed_token_snapshot'}>=[];
      let resolve!:()=>void,reject!:(e:Error)=>void;
      const done=new Promise<void>((a,b)=>{resolve=a;reject=b;});void done.catch(()=>undefined);
-     const fail=()=>{uncertain=true;if(!settled){settled=true;reject(Error('SESSION_PROTOCOL_FAILED'));}};
+     const fail=(error:PersistentSessionError)=>{uncertain=true;if(failure===undefined)failure=error;if(!settled){settled=true;reject(error);}};
      const complete=()=>{if(turnId&&states.get(turnId)?.status&&!settled){settled=true;resolve();}};
+     const queueEvidence=(evidence:UsageEvidence,id:string)=>{
+       if(!onUsageEvidence)return;
+       const state=states.get(id),task=Promise.resolve().then(()=>onUsageEvidence(evidence)).catch(()=>{
+         const error=new PersistentSessionError('SESSION_USAGE_EVIDENCE_FAILED','usage_evidence_write_failed',state?.status!==undefined,id);
+         fail(error);throw error;
+       });
+       writeTasks.push(task);
+     };
      const unsubscribe=rpc.subscribe(n=>{
        if(n.params.threadId!==threadId)return;
        const turn=object(n.params.turn),id=n.params.turnId??turn.id;
        if(typeof id!=='string')return;
        if(turnId&&id!==turnId)return;
-       if(!states.has(id)){if(states.size>=8){fail();return;}states.set(id,{final:false,total:null,last:null,updates:0,compactions:0,snapshots:[]});}
+        if(!states.has(id)){if(states.size>=8){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',false,id));return;}states.set(id,{final:false,total:null,last:null,updates:0,compactions:0,snapshots:[]});}
        const state=states.get(id)!;
        if(n.method==='item/completed'){
          const item=object(n.params.item);
          if(item.type==='contextCompaction')state.compactions++;
          if(item.type==='agentMessage'&&typeof item.text==='string'&&(!state.final||item.phase==='final_answer')){
-           if(Buffer.byteLength(item.text)>262144){fail();return;}
+          if(Buffer.byteLength(item.text)>262144){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',state.status!==undefined,id));return;}
            state.text=item.text;state.final=item.phase==='final_answer';
          }
        }else if(n.method==='thread/tokenUsage/updated'){
          const u=object(n.params.tokenUsage),total=rawTokens(u.total),last=rawTokens(u.last);
          state.updates++;
          if(total&&last){const evidence:UsageEvidence={kind:'snapshot',total:{...total},last:{...last},observedAt:now(),source:'thread/tokenUsage/updated'};
-           state.snapshots.push(evidence);if(onUsageEvidence)writeTasks.push(Promise.resolve().then(()=>onUsageEvidence(evidence)).then(()=>undefined).catch(fail));}
+           state.snapshots.push(evidence);queueEvidence(evidence,id);}
          else {const evidence:UsageEvidence={kind:'gap',observedAt:now(),source:'thread/tokenUsage/updated',reason:'malformed_token_snapshot'};
-           usageGaps.push({observedAt:evidence.observedAt,source:evidence.source,reason:evidence.reason});if(onUsageEvidence)writeTasks.push(Promise.resolve().then(()=>onUsageEvidence(evidence)).then(()=>undefined).catch(fail));}
+           usageGaps.push({observedAt:evidence.observedAt,source:evidence.source,reason:evidence.reason});queueEvidence(evidence,id);}
          state.total=tokens(u.total);state.last=tokens(u.last);
        }else if(n.method==='turn/completed'){
-         if(typeof turn.status!=='string'){fail();return;}state.status=turn.status;complete();
+         if(typeof turn.status!=='string'){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',false,id));return;}state.status=turn.status;complete();
        }
      });
      const interrupt=()=>{
        if(!turnId||interrupted||states.get(turnId)?.status)return;
-       interrupted=true;void rpc.call('turn/interrupt',{threadId,turnId}).catch(fail);
+       interrupted=true;const id=turnId;void rpc.call('turn/interrupt',{threadId,turnId:id}).catch(()=>fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','interrupt_failed',states.get(id)?.status!==undefined,id)));
      };
      signal.addEventListener('abort',interrupt,{once:true});
-     const timer=setTimeout(fail,timeoutMs);
+     const timer=setTimeout(()=>{if(!settled)fail(new PersistentSessionError('SESSION_TIMEOUT','timeout',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId));},timeoutMs);
      try{
        const r=object(await rpc.call('turn/start',{threadId,model:'gpt-5.6-luna',effort:'medium',serviceTierForTurn:'default',
          input:[{type:'text',text:JSON.stringify({currentObservation:input,importedThroughOrdinal:cursor})}],outputSchema:options.outputSchema}));
        const id=object(r.turn).id;if(typeof id!=='string'||!id)throw Error('SESSION_TURN_MISSING');turnId=id;
        if(signal.aborted)interrupt();complete();await done;
+       if(failure)throw failure;
        const state=states.get(turnId)!;
        let usage:ObserverUsage|null=null;
        if(state.compactions===0&&state.updates===1&&state.total&&state.last&&
@@ -134,7 +151,7 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:{cwd:stri
          state.updates===1?'inconsistent_delta':'multiple_updates';
        return {interpretation,usage,terminalConfirmed:true,cancelled:signal.aborted,compactions:state.compactions,turnId,
          usageCompleteness,usageSnapshots:state.snapshots,usageGaps};
-     }catch(e){uncertain=true;throw e;}
+     }catch(e){uncertain=true;if(e instanceof PersistentSessionError)throw e;throw new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId);}
      finally{clearTimeout(timer);unsubscribe();signal.removeEventListener('abort',interrupt);await Promise.allSettled(writeTasks);busy=false;}
    },
  };

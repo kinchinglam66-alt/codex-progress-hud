@@ -14,7 +14,7 @@ export interface PersistentReceiptJournal {
  operationStarted(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number}):Promise<void>;
  usageSnapshot(value:{operationId:string;sourceKey:string;sourceEpoch?:string|null;generation:number;total:RawTokens;last:RawTokens;observedAt:number;completenessReason:string}):Promise<void>;
  usageGap(value:{operationId:string;sourceKey:string;sourceEpoch?:string|null;generation:number;observedAt:number;reason:string}):Promise<void>;
- operationTerminal(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;turnId?:string;terminalState:'completed'|'cancelled'|'failed';usageCompleteness:string}):Promise<void>;
+ operationTerminal(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;turnId?:string;terminalState:'completed'|'cancelled'|'failed'|'unconfirmed';usageCompleteness:string}):Promise<void>;
  processExit(value:{ownerUuid:string;sourceKey?:string;sourceEpoch?:string|null;processExitState:'closed'|'unconfirmed';at:number}):Promise<void>;
 }
 type RecordValue=Record<string,unknown>;
@@ -55,7 +55,7 @@ export function createPersistentReceiptJournal(directory:string):PersistentRecei
      await append(base('usage_gap',{operationId:operationId.parse(value.operationId),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),observedAt:z.number().int().nonnegative().safe().parse(value.observedAt),reason:z.string().min(1).max(128).parse(value.reason)}));
    },
    operationTerminal:async value=>{
-     await append(base('operation',{operationId:operationId.parse(value.operationId),admissionId:z.string().uuid().parse(value.admissionId),ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),...(value.turnId===undefined?{}:{turnId:z.string().min(1).max(256).parse(value.turnId)}),terminalState:value.terminalState,usageCompleteness:z.string().min(1).max(128).parse(value.usageCompleteness)}));
+     await append(base('operation',{operationId:operationId.parse(value.operationId),admissionId:z.string().uuid().parse(value.admissionId),ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),...(value.turnId===undefined?{}:{turnId:z.string().min(1).max(256).parse(value.turnId)}),terminalState:z.enum(['completed','cancelled','failed','unconfirmed']).parse(value.terminalState),usageCompleteness:z.string().min(1).max(128).parse(value.usageCompleteness)}));
    },
    processExit:async value=>{
      await append(base('process_exit',{ownerUuid:ownerUuid.parse(value.ownerUuid),...(value.sourceKey===undefined?{}:{sourceKey:sourceKey.parse(value.sourceKey)}),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),processExitState:value.processExitState,at:z.number().int().nonnegative().safe().parse(value.at)}));
