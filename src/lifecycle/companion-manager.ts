@@ -408,7 +408,7 @@ export function createCompanionManager(
       }
       if (code === "REQUEST_TIMEOUT") {
         return withDesiredState(settings.desiredState, {
-          observedState: runtime === null ? "stopped" : "crashed",
+          observedState: "unresponsive",
           code: "START_TIMEOUT"
         });
       }
@@ -442,7 +442,7 @@ export function createCompanionManager(
       }
       if (code === "REQUEST_TIMEOUT") {
         return withDesiredState(settings.desiredState, {
-          observedState: runtime === null ? "stopped" : "crashed",
+          observedState: "unresponsive",
           code: "START_TIMEOUT"
         });
       }
@@ -865,6 +865,12 @@ export function createCompanionManager(
     }
     if (!(await currentOnGeneration(generation, deadline))) return staleStartupResult(generation, deadline);
     const snapshot = await observe(deadline);
+    // A request deadline proves neither process exit nor ownership loss. Keep
+    // the live instance and recovery allowance intact until a later observation.
+    if (snapshot.observedState === "unresponsive") {
+      remember("START_TIMEOUT");
+      return { kind: "error", code: "START_TIMEOUT", snapshot };
+    }
     if (snapshot.observedState === "running" || snapshot.observedState === "hidden") {
       if (!(await currentOnGeneration(generation, deadline))) return staleStartupResult(generation, deadline);
       return { kind: "ready", generation, snapshot };
@@ -924,7 +930,11 @@ export function createCompanionManager(
       } catch (error) {
         const code = errorCode(error);
         if (code === "OFFLINE") return ensureRunningOnce(generation, deadline);
-        if (code === "REQUEST_TIMEOUT") break;
+        if (code === "REQUEST_TIMEOUT") {
+          remember("START_TIMEOUT");
+          return { kind: "error", code: "START_TIMEOUT",
+            snapshot: { desiredState: "on", observedState: "unresponsive", code: "START_TIMEOUT" } };
+        }
         throw error;
       }
     }
@@ -1413,10 +1423,10 @@ export function createCompanionManager(
             : { lastEventAt: hookActivity.lastEventAt })
         },
         lease: { active: currentLease !== undefined, count: currentLease === undefined ? 0 : 1 },
-        compatibility: {
+        ...(snapshot.observedState === "unresponsive" ? {} : {compatibility: {
           compatible: snapshot.observedState !== "incompatible",
           incompatibleClientSeen
-        },
+        }}),
         tracking: {
           taskCount: taskSnapshot?.tasks.length ?? 0,
           ...(selectedTask?.status === undefined ? {} : { selectedStatus: selectedTask.status }),

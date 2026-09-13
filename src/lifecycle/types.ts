@@ -4,7 +4,7 @@ export const PROTOCOL_VERSION = RELEASE_CAPABILITIES.protocol.current;
 export type DesiredHudState = "on" | "off";
 export type ObservedHudState =
   | "starting" | "running" | "hidden" | "stopped"
-  | "crashed" | "incompatible" | "port_conflict";
+  | "crashed" | "unresponsive" | "incompatible" | "port_conflict";
 
 export interface HudSettings {
   desiredState?: DesiredHudState;

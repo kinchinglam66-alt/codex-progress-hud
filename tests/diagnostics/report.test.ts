@@ -28,6 +28,14 @@ afterEach(async () => {
 });
 
 describe("diagnostic report", () => {
+  it("does not turn an unresponsive companion into a confirmed offline process", () => {
+    const input = validInput("unused");
+    input.lifecycle.observedState = "unresponsive";
+    const report = renderDiagnosticReport(input);
+    expect(report).toContain("Companion process: unresponsive");
+    expect(report).not.toContain("Companion process: offline");
+    expect(report).toContain("Protocol compatibility: not reported");
+  });
   it("reports window rendering separately and strips arbitrary diagnostic content", () => {
     const input = { ...validInput("unused"), windowDiagnostics: {
       exists: true, visible: true, page: "failed", renderer: "gone", domReady: false, readyToShow: true,

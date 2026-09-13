@@ -42,7 +42,7 @@ export interface DiagnosticReportInput {
 
 const DESIRED_STATES = new Set<DesiredHudState>(["on", "off"]);
 const OBSERVED_STATES = new Set<ObservedHudState>([
-  "starting", "running", "hidden", "stopped", "crashed", "incompatible", "port_conflict"
+  "starting", "running", "hidden", "stopped", "crashed", "unresponsive", "incompatible", "port_conflict"
 ]);
 const ERROR_CODES = new Set<HudErrorCode | "OFFLINE">([
   "COMPANION_NOT_INSTALLED", "MANUALLY_DISABLED", "PORT_CONFLICT", "VERSION_MISMATCH",
@@ -213,7 +213,8 @@ function formatSnapshot(snapshot: Omit<DiagnosticReportInput, "directory">): str
         : !snapshot.hooks.activitySeen ? "trusted; no activity" : "trusted; activity seen";
   const leaseConclusion = snapshot.lease === undefined
     ? "not reported" : snapshot.lease.active ? `connected (${snapshot.lease.count})` : "disconnected";
-  const companionConclusion = ["running", "starting", "hidden", "incompatible"].includes(snapshot.lifecycle.observedState) ? "online" : "offline";
+  const companionConclusion = snapshot.lifecycle.observedState === "unresponsive" ? "unresponsive"
+    : ["running", "starting", "hidden", "incompatible"].includes(snapshot.lifecycle.observedState) ? "online" : "offline";
   const compatibilityConclusion = snapshot.compatibility === undefined
     ? "not reported" : snapshot.compatibility.compatible ? "compatible" : "mismatch";
   const compatibilityDetail = snapshot.compatibility?.incompatibleClientSeen

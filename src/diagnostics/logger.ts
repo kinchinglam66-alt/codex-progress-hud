@@ -73,6 +73,7 @@ const LIFECYCLE_STATES = new Set<ObservedHudState>([
   "hidden",
   "stopped",
   "crashed",
+  "unresponsive",
   "incompatible",
   "port_conflict"
 ]);

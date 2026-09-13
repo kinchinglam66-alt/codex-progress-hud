@@ -769,6 +769,36 @@ describe("companion lifecycle manager", () => {
     }
   );
 
+  it.each(["identity", "health"] as const)("does not restart or consume crash recovery after a %s timeout", async (endpoint) => {
+    const fixture = await harness({ desiredState: "on", runtime: true, online: true });
+    fixture.client[endpoint].mockRejectedValueOnce(new HudClientError("REQUEST_TIMEOUT", "slow live server"));
+    const result = await fixture.manager.ensureForWrite("progress_report");
+    expect(result).toMatchObject({ kind: "error", code: "START_TIMEOUT", snapshot: { observedState: "unresponsive" } });
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+    expect(fixture.terminate).not.toHaveBeenCalled();
+    expect(fixture.logger.write).not.toHaveBeenCalledWith(expect.objectContaining({ event: "crash_recovery" }));
+    expect(await fixture.manager.ensureForWrite("progress_report")).toMatchObject({ kind: "ready" });
+    fixture.setOnline(false);
+    expect(await fixture.manager.ensureForWrite("progress_report")).toMatchObject({ kind: "ready" });
+    expect(fixture.launcher.spawnHud).toHaveBeenCalledOnce();
+  });
+
+  it("retains uncertainty when shutdown handoff health times out", async () => {
+    const fixture = await harness({desiredState: "on", runtime: true, online: true});
+    fixture.client.show.mockRejectedValueOnce(new HudClientError("SHUTTING_DOWN", "retiring"));
+    fixture.client.health.mockResolvedValueOnce(compatibleHealth).mockRejectedValueOnce(new HudClientError("REQUEST_TIMEOUT", "slow"));
+    expect(await fixture.manager.open()).toMatchObject({observedState: "unresponsive", code: "START_TIMEOUT"});
+    expect(fixture.launcher.spawnHud).not.toHaveBeenCalled();
+  });
+
+  it("does not claim verified compatibility after an identity timeout", async () => {
+    const reportWriter = vi.fn(async (_input: any) => ({path: "unused"}));
+    const fixture = await harness({desiredState: "on", online: true, reportWriter});
+    fixture.client.identity.mockRejectedValueOnce(new HudClientError("REQUEST_TIMEOUT", "slow"));
+    await fixture.manager.diagnose();
+    expect(reportWriter.mock.calls[0]![0].compatibility).toBeUndefined();
+  });
+
   it("recovers a crash once and rate-limits another recovery across calls", async () => {
     const { manager, launcher, logger, setOnline } = await harness({
       desiredState: "on",
