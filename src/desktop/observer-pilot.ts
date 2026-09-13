@@ -5,6 +5,7 @@ import {z} from 'zod';
 import {readObserverPilotConfig,observerPilotEnvironment} from './observer-pilot-config.js';
 import {createObserverIdentityRuntime} from '../estimation/observer-identity-runtime.js';
 import {createPersistentObserverWorker} from '../estimation/observer-persistent-worker.js';
+import {persistentHistoryPolicy} from '../estimation/persistent-history-policy.js';
 import {openThreadedReleaseAccounting} from '../estimation/accounting-worker-owner.js';
 import {createDesktopObserverRuntime, type ObserverInlineConsent} from './observer-runtime.js';
 import {createPilotJournal} from '../evaluation/pilot-journal.js';
@@ -142,7 +143,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
       ...(shouldEnablePersistentObserver(options,config)?{persistentReceiptDirectory:accountingDirectory,
-        persistentWorkerFactory:workerOptions=>createPersistentObserverWorker({...workerOptions,outputSchema:assets.schema})}:{}),
+        persistentWorkerFactory:workerOptions=>createPersistentObserverWorker({...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema})}:{}),
       contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
         const runner=createOwnedProcessRunner({...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes})});
         const view=owner.forConversation(scope.conversationKey);

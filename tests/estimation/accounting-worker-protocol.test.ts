@@ -12,6 +12,14 @@ describe('accounting recovery protocol', () => {
     })).toMatchObject({operation: 'recovery_confirm', revision: 3});
   });
 
+  it('accepts the confirmed compression unknown settlement classification', () => {
+    expect(parseRequest({
+      kind: 'request', version: 1, requestId, operation: 'settle',
+      conversationKey: 'compression', clock: 4, reservationId: attemptId,
+      usage: null, settlement: 'confirmed_compression_unknown',
+    })).toMatchObject({operation: 'settle', settlement: 'confirmed_compression_unknown'});
+  });
+
   it('rejects forged, malformed, and unknown recovery commands', () => {
     expect(parseRequest({
       kind: 'request', version: 1, requestId, operation: 'recovery_confirm',

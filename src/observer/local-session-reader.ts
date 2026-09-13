@@ -3,6 +3,7 @@ import {lstat, open, opendir, realpath, type FileHandle} from "node:fs/promises"
 import type {Dirent, Stats} from "node:fs";
 import {isAbsolute, relative, resolve} from "node:path";
 import type {ConversationRecord, ReadBatch, RuntimeOutcome, RuntimeState} from "./conversation-record.js";
+import {parseCodexCheckpoint, type NativeCodexCheckpoint} from "./codex-checkpoint.js";
 import {createHistorySnapshot, type HistoryGap, type HistorySnapshot, type HistorySnapshotPage} from "./history-snapshot.js";
 
 const PASS_BYTES = 4 * 1024 * 1024;
@@ -28,7 +29,8 @@ export type LocalSessionSourceErrorCode =
   | "source_identity_mismatch"
   | "source_limit"
   | "source_oversize"
-  | "source_malformed";
+  | "source_malformed"
+  | "source_checkpoint_unsupported";
 
 export class LocalSessionSourceError extends Error {
   readonly code: LocalSessionSourceErrorCode;
@@ -117,11 +119,17 @@ interface SnapshotState {
   nextOffset: number;
   validation: string;
   prefixValidation: string;
+  prefixLength: number;
   activeTurnId: string | null;
   seen: Set<string>;
   seenOrder: string[];
   gaps: Set<HistoryGap>;
   closed: boolean;
+}
+
+interface CheckpointScanResult {
+  checkpoint?: NativeCodexCheckpoint;
+  startOffset: number;
 }
 
 interface Envelope {
@@ -309,7 +317,15 @@ function dedupeHash(value: string): string {
 }
 
 function addRecord(context: ParseContext, record: ConversationRecord, dedupeKey: string): ConversationRecord[] {
-  const hash = dedupeHash(dedupeKey);
+  // Identity is only a replay key. Bind it to the complete normalized body so
+  // an identity reuse with changed text/output/completion evidence is retained.
+  // Timestamp and representation-specific labels differ between mirrored
+  // envelopes. These canonical content/completion fields preserve conflicts
+  // while allowing an exact replay of the same semantic record to collapse.
+  const content = {kind:record.kind,text:record.text,output:record.output,
+    outputComplete:record.outputComplete,complete:record.complete,exitCode:record.exitCode,
+    assistantPhase:record.assistantPhase,runtime:record.runtime,outcome:record.outcome};
+  const hash = dedupeHash(`${dedupeKey}\0${JSON.stringify(content)}`);
   if (context.seen.has(hash)) return [];
   if (context.options.dedupeLimit !== null && context.seen.size >= context.options.dedupeLimit) {
     const oldest = context.seenOrder.shift();
@@ -490,7 +506,7 @@ function normalizeCommand(
 function normalizeEnvelope(context: ParseContext, envelope: Envelope): ConversationRecord[] {
   const atMs = timestampMs(envelope.timestamp);
   const payload = payloadObject(envelope.payload);
-  if (envelope.type === "session_meta") return [];
+  if (["session_meta", "world_state", "turn_context", "token_usage_record"].includes(envelope.type)) return [];
 
   if (envelope.type === "response_item") {
     const itemType = payload.type;
@@ -546,15 +562,28 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     if (turnId === context.activeTurnId) context.activeTurnId = null;
     return output;
   }
-  if (eventType !== "item_started" && eventType !== "item_completed") return [];
+  if (eventType !== "item_started" && eventType !== "item_completed") {
+    // These envelope events carry lifecycle/telemetry only and are not source
+    // task text. Everything else is conservatively treated as potentially
+    // content-bearing until a parser is added for it.
+    const knownNonContent = new Set([
+      "turn_started", "turn_completed", "token_usage_updated", "thread_started",
+      "thread_completed", "model_selected"
+    ]);
+    if (typeof eventType !== "string" || !knownNonContent.has(eventType)) context.gaps.add("unsupported_payload");
+    return [];
+  }
 
   const item = itemObject(payload.item);
   const itemType = item.type;
+  // Match response_item/reasoning: internal reasoning is not source task text.
+  if (itemType === "Reasoning") return [];
   // Keep legacy/strict estimator turnId behavior intact. Research may use an
   // explicit outer event ID, but conflicting explicit IDs are never inferred.
   const outerTurn=turnIdFrom(payload,null,false);
   const withSourceTurn=(records:ConversationRecord[])=>records.map(record=>{
     const innerTurn=record.sourceTurnId??null;
+    if(innerTurn!==null&&outerTurn!==null&&innerTurn!==outerTurn)context.gaps.add('unattributed_record');
     const sourceTurnId=innerTurn!==null&&outerTurn!==null&&innerTurn!==outerTurn?null:innerTurn??outerTurn;
     return {...record,sourceTurnId};
   });
@@ -681,6 +710,115 @@ async function prefixValidation(file: FileHandle, length: number, signal: AbortS
   const buffer = Buffer.allocUnsafe(length);
   const read = await file.read(buffer, 0, length, 0);
   return createHash("sha256").update(buffer.subarray(0, read.bytesRead)).digest("hex");
+}
+
+function checkpointObject(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function inspectCheckpointLine(bytes: Buffer): NativeCodexCheckpoint | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes)) as unknown;
+  } catch {
+    throw new LocalSessionSourceError("source_checkpoint_unsupported");
+  }
+  const object = checkpointObject(raw);
+  if (object?.type !== "compacted") return null;
+  const payload = checkpointObject(object.payload);
+  // Preserve the legacy compacted/truncated marker. Only envelopes carrying
+  // native replacement history are checkpoint candidates.
+  if (payload === null || !("replacement_history" in payload)) return null;
+  try {
+    const checkpoint = parseCodexCheckpoint(raw);
+    if (checkpoint === null) throw new Error("CHECKPOINT_UNSUPPORTED");
+    return checkpoint;
+  } catch {
+    throw new LocalSessionSourceError("source_checkpoint_unsupported");
+  }
+}
+
+async function scanLatestCheckpoint(
+  file: FileHandle,
+  watermark: number,
+  signal: AbortSignal
+): Promise<CheckpointScanResult> {
+  let latest: NativeCodexCheckpoint | undefined;
+  let latestStartOffset = 0;
+  let latestError = false;
+  let readPosition = 0;
+  let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  let pendingStart = 0;
+  let skippingOversized = false;
+
+  const inspect = (bytes: Buffer, offset: number): void => {
+    const checkpoint = inspectCheckpointLine(bytes);
+    if (checkpoint === null) return;
+    latest = checkpoint;
+    latestStartOffset = offset + bytes.byteLength + 1;
+    latestError = false;
+  };
+
+  const consume = (input: Buffer, inputStart: number): void => {
+    let remaining = input;
+    let remainingStart = inputStart;
+    while (remaining.byteLength > 0) {
+      if (skippingOversized) {
+        const newline = remaining.indexOf(0x0a);
+        if (newline < 0) return;
+        latestError = true;
+        skippingOversized = false;
+        pending = Buffer.alloc(0);
+        remaining = remaining.subarray(newline + 1);
+        remainingStart += newline + 1;
+        continue;
+      }
+
+      const newline = remaining.indexOf(0x0a);
+      if (newline < 0) {
+        if (pending.byteLength === 0) pendingStart = remainingStart;
+        if (pending.byteLength + remaining.byteLength > SNAPSHOT_MAX_LINE_BYTES) {
+          pending = Buffer.alloc(0);
+          skippingOversized = true;
+        } else {
+          pending = Buffer.concat([pending, remaining]);
+        }
+        return;
+      }
+
+      const line = Buffer.concat([pending, remaining.subarray(0, newline)]);
+      const lineStart = pending.byteLength === 0 ? remainingStart : pendingStart;
+      pending = Buffer.alloc(0);
+      if (line.byteLength <= SNAPSHOT_MAX_LINE_BYTES) {
+        try {
+          inspect(line, lineStart);
+        } catch {
+          latest = undefined;
+          latestStartOffset = 0;
+          latestError = true;
+        }
+      } else {
+        latestError = true;
+      }
+      remaining = remaining.subarray(newline + 1);
+      remainingStart = lineStart + line.byteLength + 1;
+    }
+  };
+
+  while (readPosition < watermark) {
+    checkCancelled(signal);
+    const size = Math.min(64 * 1024, watermark - readPosition);
+    const chunk = Buffer.allocUnsafe(size);
+    const read = await file.read(chunk, 0, size, readPosition);
+    if (read.bytesRead === 0) throw new LocalSessionSourceError("source_identity_mismatch");
+    const chunkStart = readPosition;
+    readPosition += read.bytesRead;
+    consume(chunk.subarray(0, read.bytesRead), chunkStart);
+  }
+
+  if (latestError) throw new LocalSessionSourceError("source_checkpoint_unsupported");
+  return latest === undefined ? {startOffset: 0} : {checkpoint: latest, startOffset: latestStartOffset};
 }
 
 async function runPass(
@@ -868,7 +1006,7 @@ async function readSnapshotPage(
       const parsed = parseLine(context, bytes);
       state.activeTurnId = context.activeTurnId;
       records.push(...parsed);
-      if (parsed.some(record => record.turnId === null)) state.gaps.add("unattributed_record");
+      if (parsed.some(record => record.turnId === null && record.sourceTurnId == null)) state.gaps.add("unattributed_record");
     } catch {
       // Snapshot parsing is best-effort per record; malformed records remain visible
       // as a coverage gap while later readable records continue to stream.
@@ -920,7 +1058,7 @@ async function readSnapshotPage(
       throw new LocalSessionSourceError("source_identity_mismatch");
     }
     assertSessionIdentity(await firstLine(file, signal), threadId);
-    const actualPrefixValidation = await prefixValidation(file, Math.min(4 * 1024, state.watermark), signal);
+    const actualPrefixValidation = await prefixValidation(file, state.prefixLength, signal);
     if (actualPrefixValidation !== state.prefixValidation) {
       throw new LocalSessionSourceError("source_identity_mismatch");
     }
@@ -989,6 +1127,9 @@ export function createLocalSessionReader({root}: {root: string}): {
     watermark: number;
     epoch: number;
     prefixValidation: string;
+    checkpointFingerprint: string | undefined;
+    prefixLength: number;
+    startOffset: number;
   }>();
   let snapshotRevision = 0;
   let closed = false;
@@ -1107,34 +1248,51 @@ export function createLocalSessionReader({root}: {root: string}): {
       }
       assertSessionIdentity(await firstLine(file, signal), threadId);
       const identity = identityOf(stats);
-      const currentPrefixValidation = await prefixValidation(file, Math.min(4 * 1024, stats.size), signal);
+      const checkpointScan = await scanLatestCheckpoint(file, stats.size, signal);
+      const checkpoint = checkpointScan.checkpoint;
+      const startOffset = checkpointScan.startOffset;
       const previous = snapshotEpochs.get(threadId);
+      // Compare hashes over the same byte range, even while a small source grows.
+      const prefixLength = Math.min(previous?.prefixLength ?? 4 * 1024, stats.size);
+      const currentPrefixValidation = await prefixValidation(
+        file,
+        prefixLength,
+        signal
+      );
       const sameEpoch = previous !== undefined && samePath(previous.path, candidate.path) &&
         sameIdentity(previous.identity, identity) && stats.size >= previous.watermark &&
-        previous.prefixValidation === currentPrefixValidation;
+        previous.prefixValidation === currentPrefixValidation &&
+        previous.checkpointFingerprint === checkpoint?.fingerprint &&
+        previous.startOffset === startOffset;
       const epoch = sameEpoch ? previous.epoch : (previous?.epoch ?? 0) + 1;
       snapshotEpochs.set(threadId, {
         path: candidate.path,
         identity,
         watermark: stats.size,
         epoch,
-        prefixValidation: currentPrefixValidation
+        prefixValidation: currentPrefixValidation,
+        prefixLength,
+        checkpointFingerprint: checkpoint?.fingerprint,
+        startOffset
       });
+      const startValidation = startOffset > 0 ? await cursorValidation(file, startOffset, signal) : "";
       const states = new Set<SnapshotState>();
       let sourceClosed = false;
       return createHistorySnapshot({
         identity: snapshotIdentity(threadId, candidate.path, identity),
         sourceEpoch: epoch,
         revision: ++snapshotRevision,
+        ...(checkpoint === undefined ? {} : {checkpoint, startOffset}),
         open: () => {
           if (sourceClosed) throw new LocalSessionSourceError("source_closed");
           const state: SnapshotState = {
             path: candidate.path,
             identity,
             watermark: stats.size,
-            nextOffset: 0,
-            validation: "",
+            nextOffset: startOffset,
+            validation: startValidation,
             prefixValidation: currentPrefixValidation,
+            prefixLength,
             activeTurnId: null,
             seen: new Set(),
             seenOrder: [],

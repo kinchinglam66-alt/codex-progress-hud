@@ -1,4 +1,5 @@
 import type {ConversationRecord} from "./conversation-record.js";
+import type {NativeCodexCheckpoint} from "./codex-checkpoint.js";
 
 export type HistoryGap =
   | "upstream_truncated"
@@ -23,6 +24,7 @@ export interface HistorySnapshot {
   sourceEpoch: number;
   revision: number;
   coverage: HistoryCoverage;
+  checkpoint?: NativeCodexCheckpoint;
   // Each call opens a fresh reader over this snapshot's fixed watermark. The
   // iterator closes its page reader automatically; callers may replay the
   // snapshot for another planner pass until close() is called.
@@ -46,6 +48,8 @@ export interface HistorySnapshotSource {
   identity: string;
   sourceEpoch: number;
   revision: number;
+  checkpoint?: NativeCodexCheckpoint;
+  startOffset?: number;
   open(): HistorySnapshotReader;
   close(): Promise<void>;
 }
@@ -86,7 +90,7 @@ export function createHistorySnapshot(source: HistorySnapshotSource): HistorySna
   async function* records(signal: AbortSignal): AsyncIterable<HistoryRecord> {
     if (closed) throw snapshotError("source_closed", "history snapshot is closed");
     const reader = source.open();
-    let offset = 0;
+    let offset = source.startOffset ?? 0;
     let ordinal = 0;
     try {
       while (!closed) {
@@ -120,6 +124,7 @@ export function createHistorySnapshot(source: HistorySnapshotSource): HistorySna
     sourceEpoch: source.sourceEpoch,
     revision: source.revision,
     coverage,
+    ...(source.checkpoint === undefined ? {} : {checkpoint: source.checkpoint}),
     records,
     close
   };

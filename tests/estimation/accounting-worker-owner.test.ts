@@ -10,6 +10,7 @@ import type {ReleaseAccountingOwner, ReleaseAccountingRecoveryOwner} from '../..
 const paths: string[] = [];
 const owners: ReleaseAccountingOwner[] = [];
 const usage = {inputTokens: 10, outputTokens: 2, cachedInputTokens: 5};
+const DB_NAME = 'release-observer-accounting.sqlite';
 
 async function directory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'hud-accounting-worker-'));
@@ -23,6 +24,13 @@ async function waitForFile(path: string): Promise<void> {
     catch { await new Promise(resolve => setTimeout(resolve, 5)); }
   }
   throw new Error(`TEST_FILE_NOT_READY:${path}`);
+}
+
+async function mutateDatabase(path: string, mutation: (db: import('node:sqlite').DatabaseSync) => void): Promise<void> {
+  const {DatabaseSync} = await import('node:sqlite');
+  const db = new DatabaseSync(join(path, DB_NAME), {readOnly: true});
+  try { mutation(db); }
+  finally { db.close(); }
 }
 
 type FixtureMode = 'none' | 'suppress' | 'exit' | 'shutdown-error' | 'malformed-response' | 'duplicate-ready' | 'regressing-snapshot' | 'busy-storage';
@@ -225,6 +233,63 @@ it('propagates compression purpose through the production worker into SQLite', a
     expect(db.prepare('SELECT purpose FROM invocation_records WHERE admission_id = ?').get(compressionId)).toEqual({purpose: 'context_compression'});
     expect(db.prepare('SELECT purpose FROM admissions WHERE id = ?').get(legacyId)).toEqual({purpose: 'eta'});
   } finally { db.close(); }
+});
+
+it('settles four confirmed compression unknowns through SQLite without cooldown and permits ETA admission', async () => {
+  const path = await directory();
+  const owner = await openCompiled(path, () => 0) as ReleaseAccountingRecoveryOwner;
+  for (let index = 0; index < 4; index++) {
+    const view = owner.forConversation(`compression-${index}`);
+    const id = (await view.reserve('ordinary', 'context_compression'))!;
+    await view.settle(id, null, 'confirmed_compression_unknown');
+  }
+  expect(owner.snapshot()).toMatchObject({starts: 4, unknown: 4, inFlight: 0});
+  expect(owner.recoveryStatus()).toMatchObject({cooldownUntil: null});
+  const eta = owner.forConversation('eta');
+  const etaId = await eta.reserve();
+  expect(etaId).toMatch(/^[0-9a-f-]{36}$/);
+  await eta.cancelBeforeDispatch(etaId!);
+});
+
+it('preserves confirmed compression unknown totals and classification across threaded reopen', async () => {
+  const path = await directory();
+  let owner = await openCompiled(path, () => 0);
+  const view = owner.forConversation('compression');
+  const id = (await view.reserve('ordinary', 'context_compression'))!;
+  await view.settle(id, null, 'confirmed_compression_unknown');
+  await owner.close();
+  owners.pop();
+  await mutateDatabase(path, db => {
+    expect(db.prepare('SELECT state, purpose, settlement_classification FROM admissions WHERE id = ?').get(id)).toEqual({
+      state: 'unknown', purpose: 'context_compression', settlement_classification: 'confirmed_compression_unknown',
+    });
+  });
+  owner = await openCompiled(path, () => 0);
+  expect(owner.snapshot()).toMatchObject({starts: 1, unknown: 1, inFlight: 0});
+});
+
+it('does not erase an existing cooldown or unsafe failure when compression usage is unknown', async () => {
+  const path = await directory();
+  const owner = await openCompiled(path, () => 0) as ReleaseAccountingRecoveryOwner;
+  const compression = owner.forConversation('compression');
+  const compressionId = (await compression.reserve('ordinary', 'context_compression'))!;
+  const unsafeCompression = owner.forConversation('unsafe-compression');
+  const unsafeCompressionId = (await unsafeCompression.reserve('ordinary', 'context_compression'))!;
+  const failure = owner.forConversation('failure');
+  const failureId = (await failure.reserve())!;
+  for (const key of ['one', 'two', 'three']) {
+    const view = owner.forConversation(key);
+    const id = (await view.reserve())!;
+    await view.settle(id, null, 'safe_unknown');
+  }
+  expect(owner.recoveryStatus()).toMatchObject({state: 'cooldown', cooldownUntil: 300_000});
+  await compression.settle(compressionId, null, 'confirmed_compression_unknown');
+  expect(owner.recoveryStatus()).toMatchObject({state: 'cooldown', cooldownUntil: 300_000});
+
+  await failure.settle(failureId, null, 'unsafe_unknown');
+  expect(owner.recoveryStatus()).toMatchObject({reason: 'unsafe_unknown'});
+  await unsafeCompression.settle(unsafeCompressionId, null, 'confirmed_compression_unknown');
+  expect(owner.recoveryStatus()).toMatchObject({reason: 'unsafe_unknown'});
 });
 
 it('carries revision-bound recovery commands through the worker and rejects stale confirmations', async () => {

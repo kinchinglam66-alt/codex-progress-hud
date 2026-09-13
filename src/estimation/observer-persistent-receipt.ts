@@ -9,12 +9,13 @@ const token=z.object({totalTokens:z.number().int().nonnegative().safe(),inputTok
 const sourceKey=z.string().min(1).max(512), sourceEpoch=z.string().max(4096).nullable().optional();
 const ownerUuid=z.string().uuid(), operationId=z.string().uuid();
 export interface PersistentReceiptBinding {accountFingerprint:string;routeFingerprint:string;assetsFingerprint:string}
+export type PersistentOperationKind='eta'|'context_compression';
 export interface PersistentReceiptJournal {
  ownerStarted(value:{ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;pid:number;creationIdentity:string;binding?:PersistentReceiptBinding}):Promise<void>;
- operationStarted(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number}):Promise<void>;
+  operationStarted(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;operationKind?:PersistentOperationKind}):Promise<void>;
  usageSnapshot(value:{operationId:string;sourceKey:string;sourceEpoch?:string|null;generation:number;total:RawTokens;last:RawTokens;observedAt:number;completenessReason:string}):Promise<void>;
  usageGap(value:{operationId:string;sourceKey:string;sourceEpoch?:string|null;generation:number;observedAt:number;reason:string}):Promise<void>;
- operationTerminal(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;turnId?:string;terminalState:'completed'|'cancelled'|'failed'|'unconfirmed';usageCompleteness:string}):Promise<void>;
+  operationTerminal(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;turnId?:string;terminalState:'completed'|'cancelled'|'failed'|'unconfirmed';usageCompleteness:string;operationKind?:PersistentOperationKind}):Promise<void>;
  processExit(value:{ownerUuid:string;sourceKey?:string;sourceEpoch?:string|null;processExitState:'closed'|'unconfirmed';at:number}):Promise<void>;
 }
 type RecordValue=Record<string,unknown>;
@@ -42,8 +43,8 @@ export function createPersistentReceiptJournal(directory:string):PersistentRecei
      const binding={accountFingerprint:z.string().regex(/^[a-f0-9]{64}$/).parse(value.binding?.accountFingerprint),routeFingerprint:z.string().regex(/^[a-f0-9]{64}$/).parse(value.binding?.routeFingerprint),assetsFingerprint:z.string().regex(/^[a-f0-9]{64}$/).parse(value.binding?.assetsFingerprint)};
      await append(base('process_owner',{ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:source,sourceEpoch:epoch,pid:z.number().int().positive().safe().parse(value.pid),creationIdentity:z.string().min(1).max(256).parse(value.creationIdentity),binding}));
    },
-   operationStarted:async value=>{
-     await append(base('operation',{operationId:operationId.parse(value.operationId),admissionId:z.string().uuid().parse(value.admissionId),ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),terminalState:'pending'}));
+    operationStarted:async value=>{
+      await append(base('operation',{operationId:operationId.parse(value.operationId),admissionId:z.string().uuid().parse(value.admissionId),ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),operationKind:z.enum(['eta','context_compression']).default('eta').parse(value.operationKind),terminalState:'pending'}));
    },
    usageSnapshot:async value=>{
      const total=token.parse(value.total),last=token.parse(value.last),key=JSON.stringify([value.operationId,total,last]);
@@ -55,7 +56,7 @@ export function createPersistentReceiptJournal(directory:string):PersistentRecei
      await append(base('usage_gap',{operationId:operationId.parse(value.operationId),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),observedAt:z.number().int().nonnegative().safe().parse(value.observedAt),reason:z.string().min(1).max(128).parse(value.reason)}));
    },
    operationTerminal:async value=>{
-     await append(base('operation',{operationId:operationId.parse(value.operationId),admissionId:z.string().uuid().parse(value.admissionId),ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),...(value.turnId===undefined?{}:{turnId:z.string().min(1).max(256).parse(value.turnId)}),terminalState:z.enum(['completed','cancelled','failed','unconfirmed']).parse(value.terminalState),usageCompleteness:z.string().min(1).max(128).parse(value.usageCompleteness)}));
+      await append(base('operation',{operationId:operationId.parse(value.operationId),admissionId:z.string().uuid().parse(value.admissionId),ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),generation:z.number().int().nonnegative().safe().parse(value.generation),...(value.turnId===undefined?{}:{turnId:z.string().min(1).max(256).parse(value.turnId)}),operationKind:z.enum(['eta','context_compression']).default('eta').parse(value.operationKind),terminalState:z.enum(['completed','cancelled','failed','unconfirmed']).parse(value.terminalState),usageCompleteness:z.string().min(1).max(128).parse(value.usageCompleteness)}));
    },
    processExit:async value=>{
      await append(base('process_exit',{ownerUuid:ownerUuid.parse(value.ownerUuid),...(value.sourceKey===undefined?{}:{sourceKey:sourceKey.parse(value.sourceKey)}),sourceEpoch:sourceEpoch.parse(value.sourceEpoch??null),processExitState:value.processExitState,at:z.number().int().nonnegative().safe().parse(value.at)}));

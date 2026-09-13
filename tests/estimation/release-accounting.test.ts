@@ -9,6 +9,13 @@ const directories: string[] = [];
 const owners: ReleaseAccountingOwner[] = [];
 const DB_NAME = 'release-observer-accounting.sqlite';
 const usage = {inputTokens: 10, outputTokens: 2, cachedInputTokens: 5};
+it('rejects a settled token-bearing row forged as confirmed compression unknown on reopen',async()=>{
+ const path=await directory(),owner=await open(path,()=>0),view=owner.forConversation('compression');
+ const id=(await view.reserve('ordinary','context_compression'))!;
+ await view.settle(id,usage,'known_success');await owner.close();
+ await mutateDatabase(path,db=>{db.prepare("UPDATE admissions SET settlement_classification='confirmed_compression_unknown' WHERE id=?").run(id);});
+ await expect(open(path,()=>0)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
+});
 it('persists not-dispatched separately, releases concurrency and retains hourly starts',async()=>{
   const path=await directory(),owner=await open(path,()=>0),view=owner.forConversation('one');
   const id=(await view.reserve())!;await view.cancelBeforeDispatch(id);
@@ -190,6 +197,30 @@ it('treats null settlement as unknown while allowing bounded future admission', 
   expect(next).toMatch(/^[0-9a-f-]{36}$/);
   await reopened.forConversation('conversation-a').cancelBeforeDispatch(next!);
   expect(reopened.snapshot()).toEqual(expect.objectContaining({unknown: 1}));
+});
+
+it('requires confirmed compression unknown to use a compression admission', async () => {
+  const owner = await open(await directory(), () => 0);
+  const eta = owner.forConversation('eta');
+  const etaId = (await eta.reserve())!;
+  await expect(eta.settle(etaId, null, 'confirmed_compression_unknown')).rejects.toThrow('RELEASE_USAGE_INVALID');
+  expect(owner.snapshot()).toMatchObject({starts: 1, inFlight: 1, unknown: 0, knownTokens: 0});
+  const compression = owner.forConversation('compression');
+  const compressionId = (await compression.reserve('ordinary', 'context_compression'))!;
+  await expect(compression.settle(compressionId, usage, 'confirmed_compression_unknown')).rejects.toThrow('RELEASE_USAGE_INVALID');
+  expect(owner.snapshot()).toMatchObject({starts: 2, inFlight: 2, unknown: 0, knownTokens: 0});
+});
+
+it('rejects a forged confirmed compression unknown with ETA purpose on reopen', async () => {
+  const path = await directory();
+  const owner = await open(path, () => 0);
+  const view = owner.forConversation('compression');
+  const id = (await view.reserve('ordinary', 'context_compression'))!;
+  await view.settle(id, null, 'confirmed_compression_unknown');
+  await owner.close();
+  owners.pop();
+  await mutateDatabase(path, db => db.prepare("UPDATE admissions SET purpose = 'eta' WHERE id = ?").run(id));
+  await expect(open(path, () => 0)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
 });
 
 it('rejects already queued reservations after the first admission commit fails', async () => {

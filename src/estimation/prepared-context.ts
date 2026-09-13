@@ -7,8 +7,22 @@ export interface ContextRepresentation {
   sourceComplete:boolean;
   originalRecords:number;
   sessionCoveredRecords?:number;
+  sourceRepresentation?:'raw_history'|'upstream_compacted'|undefined;
+  checkpointBootstrapped?:boolean|undefined;
+  checkpointEncodedBytes?:number|undefined;
+  checkpointItemCount?:number|undefined;
   compressedThroughOrdinal:number|null;
   sizing:'tokenizer'|'conservative';
+  importedThroughOrdinal?:number|null|undefined;
+  importedRecords?:number|undefined;
+  importedEncodedBytes?:number|undefined;
+  confirmedCompactions?:number|undefined;
+  confirmedCompactionThroughOrdinal?:number|null|undefined;
+  compressionState?:'none'|'confirmed'|undefined;
+  residentBound?:'policy_assumed'|'unverified'|undefined;
+  retainedSummaryReserveBytes?:number|undefined;
+  contextCapacityBytes?:number|undefined;
+  budgetStatus?:'trusted'|'unconfigured'|'exhausted'|undefined;
 }
 
 export interface PreparedContext {

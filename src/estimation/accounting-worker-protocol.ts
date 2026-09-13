@@ -24,7 +24,7 @@ const usage = z.object({
 }).strict().refine(value => value.cachedInputTokens === null || value.cachedInputTokens <= value.inputTokens);
 const admissionKind = z.enum(['ordinary', 'retry', 'half_open']);
 const accountingPurpose = z.enum(['eta', 'context_compression']);
-const settlementClassification = z.enum(['known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown']);
+const settlementClassification = z.enum(['known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'confirmed_compression_unknown']);
 
 export const accountingSnapshotSchema = z.object({
   starts: z.number().int().nonnegative().safe().max(MAX_SAFE),

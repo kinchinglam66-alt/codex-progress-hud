@@ -35,6 +35,22 @@ function toolResult(output: string, actionId = "large-tool", turnId = "turn-1"):
   });
 }
 
+function checkpoint(label: string, includeImage = false): string {
+  const items: Array<Record<string, unknown>> = [
+    {type: "message", role: "user", content: [{type: "input_text", text: `checkpoint-${label}`}]},
+    {type: "compaction", encrypted_content: `encrypted-${label}`}
+  ];
+  if (includeImage) {
+    items.push({type: "message", role: "assistant", content: [
+      {type: "input_image", image_url: "data:image/png;base64,AA=="}
+    ]});
+  }
+  return line("compacted", {
+    replacement_history: items,
+    guardian_history: [{private: "must-not-be-imported"}]
+  });
+}
+
 async function fixture(contents: string): Promise<{root: string; file: string}> {
   const root = await mkdtemp(join(tmpdir(), "history-snapshot-"));
   const directory = join(root, "2026", "09", "06");
@@ -54,6 +70,260 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it("starts a snapshot iterator at its source offset while resetting tail ordinals", async () => {
+    let firstOffset = -1;
+    const snapshot = createHistorySnapshot({
+      identity: "offset-source",
+      sourceEpoch: 1,
+      revision: 1,
+      startOffset: 42,
+      open: () => ({
+        readPage: async (offset, _signal) => {
+          firstOffset = offset;
+          return {
+            records: [{id: "tail", turnId: "turn-1", atMs: 1, kind: "user", text: "tail"}],
+            nextOffset: 43,
+            done: true,
+            coverage: {complete: true, gaps: []}
+          };
+        },
+        close: async () => {}
+      }),
+      close: async () => {}
+    });
+
+    const entries: HistoryRecord[] = [];
+    for await (const entry of snapshot.records(signal())) entries.push(entry);
+    expect(firstOffset).toBe(42);
+    expect(entries).toMatchObject([{ordinal: 0, record: {id: "tail"}}]);
+    await snapshot.close();
+  });
+
+  it("selects the latest complete checkpoint and streams only its tail", async () => {
+    const f = await fixture(meta() + message("user", "old", "old") + checkpoint("latest") +
+      message("assistant", "tail", "tail"));
+    const reader = createLocalSessionReader({root: f.root});
+    const snapshot = await reader.snapshot(THREAD, signal());
+    try {
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(snapshot.checkpoint).toMatchObject({
+        kind: "native_compacted_window",
+        sourceRepresentation: "upstream_compacted",
+        itemCount: 2,
+        encryptedSummaryCount: 1
+      });
+      expect(received.map(entry => entry.record.text)).toEqual(["tail"]);
+      expect(received[0]?.ordinal).toBe(0);
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
+  });
+
+  it("uses a newer checkpoint and changes source epoch when its fingerprint changes", async () => {
+    const f = await fixture(meta() + checkpoint("first") + message("user", "between", "between"));
+    const reader = createLocalSessionReader({root: f.root});
+    const first = await reader.snapshot(THREAD, signal());
+    const firstEpoch = first.sourceEpoch;
+    await first.close();
+    await appendFile(f.file, checkpoint("second") + message("user", "new tail", "new-tail"));
+
+    const second = await reader.snapshot(THREAD, signal());
+    try {
+      const received: HistoryRecord[] = [];
+      for await (const entry of second.records(signal())) received.push(entry);
+      expect(second.checkpoint?.fingerprint).not.toBe(first.checkpoint?.fingerprint);
+      expect(second.sourceEpoch).not.toBe(firstEpoch);
+      expect(received.map(entry => entry.record.text)).toEqual(["new tail"]);
+    } finally {
+      await second.close();
+      await reader.close();
+    }
+  });
+
+  it("fails explicitly when the latest checkpoint is malformed", async () => {
+    const malformed = line("compacted", {replacement_history: [{type: "future_item"}]});
+    const f = await fixture(meta() + checkpoint("valid") + malformed + message("user", "tail", "tail"));
+    const reader = createLocalSessionReader({root: f.root});
+    try {
+      await expect(reader.snapshot(THREAD, signal())).rejects.toMatchObject({code: "source_checkpoint_unsupported"});
+    } finally {
+      await reader.close();
+    }
+  });
+
+  it("allows an older malformed checkpoint when a newer valid one supersedes it", async () => {
+    const malformed = line("compacted", {replacement_history: [{type: "future_item"}]});
+    const f = await fixture(meta() + malformed + checkpoint("newer-valid") +
+      message("user", "new tail", "new-tail"));
+    const reader = createLocalSessionReader({root: f.root});
+    const snapshot = await reader.snapshot(THREAD, signal());
+    try {
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(snapshot.checkpoint?.items[1]).toEqual({
+        type: "compaction",
+        encrypted_content: "encrypted-newer-valid"
+      });
+      expect(received.map(entry => entry.record.text)).toEqual(["new tail"]);
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
+  });
+
+  it("fails closed on an unreadable complete line after a checkpoint", async () => {
+    const unreadable = '{"type":"compacted","payload":{"replacement_history":[}\n';
+    const f = await fixture(meta() + checkpoint("old") + unreadable +
+      message("user", "tail", "tail"));
+    const reader = createLocalSessionReader({root: f.root});
+    try {
+      await expect(reader.snapshot(THREAD, signal())).rejects.toMatchObject({code: "source_checkpoint_unsupported"});
+    } finally {
+      await reader.close();
+    }
+  });
+
+  it("fails closed on an oversized complete line after a checkpoint", async () => {
+    const oversized = "{\"type\":\"compacted\",\"payload\":{\"replacement_history\":[{\"type\":\"compaction\",\"encrypted_content\":\"" +
+      "x".repeat(16 * 1024 * 1024) +
+      "\"}]}}\n";
+    const f = await fixture(meta() + checkpoint("old") + oversized + message("user", "tail", "tail"));
+    const reader = createLocalSessionReader({root: f.root});
+    try {
+      await expect(reader.snapshot(THREAD, signal())).rejects.toMatchObject({code: "source_checkpoint_unsupported"});
+    } finally {
+      await reader.close();
+    }
+  });
+
+  it("keeps the checkpoint and tail bounded by the snapshot watermark", async () => {
+    const f = await fixture(meta() + checkpoint("fixed") + message("user", "before-watermark", "before"));
+    const reader = createLocalSessionReader({root: f.root});
+    const snapshot = await reader.snapshot(THREAD, signal());
+    await appendFile(f.file, checkpoint("newer") + message("user", "after-watermark", "after"));
+    try {
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(snapshot.checkpoint?.fingerprint).toBeDefined();
+      expect(received.map(entry => entry.record.text)).toEqual(["before-watermark"]);
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
+  });
+
+  it("bumps source epoch for a repeated identical checkpoint at a new offset", async () => {
+    const repeated = checkpoint("same");
+    const f = await fixture(meta() + repeated + message("user", "first tail", "first"));
+    const reader = createLocalSessionReader({root: f.root});
+    const first = await reader.snapshot(THREAD, signal());
+    const firstEpoch = first.sourceEpoch;
+    const firstReceived: HistoryRecord[] = [];
+    for await (const entry of first.records(signal())) firstReceived.push(entry);
+    expect(firstReceived.map(entry => entry.record.text)).toEqual(["first tail"]);
+    await first.close();
+    await appendFile(f.file, repeated + message("user", "second tail", "second"));
+
+    const second = await reader.snapshot(THREAD, signal());
+    try {
+      expect(second.sourceEpoch).not.toBe(firstEpoch);
+      const received: HistoryRecord[] = [];
+      for await (const entry of second.records(signal())) received.push(entry);
+      expect(received.map(entry => entry.record.text)).toEqual(["second tail"]);
+    } finally {
+      await second.close();
+      await reader.close();
+    }
+  });
+
+  it("keeps the epoch across three growing snapshots below 4 KiB", async () => {
+    const f = await fixture(meta() + checkpoint("small"));
+    const reader = createLocalSessionReader({root: f.root});
+    const epochs: number[] = [];
+    try {
+      for (let i = 0; i < 3; i++) {
+        await appendFile(f.file, message("user", `tail-${i}`, `id-${i}`));
+        expect((await stat(f.file)).size).toBeLessThan(4096);
+        const snapshot = await reader.snapshot(THREAD, signal());
+        try { epochs.push(snapshot.sourceEpoch); for await (const entry of snapshot.records(signal())) void entry; }
+        finally { await snapshot.close(); }
+      }
+      expect(new Set(epochs).size).toBe(1);
+    } finally { await reader.close(); }
+  });
+
+  it("preserves opaque checkpoint items and images separately from the tail", async () => {
+    const f = await fixture(meta() + checkpoint("opaque", true) + message("user", "tail", "tail"));
+    const reader = createLocalSessionReader({root: f.root});
+    const snapshot = await reader.snapshot(THREAD, signal());
+    try {
+      expect(snapshot.checkpoint?.items).toEqual([
+        {type: "message", role: "user", content: [{type: "input_text", text: "checkpoint-opaque"}]},
+        {type: "compaction", encrypted_content: "encrypted-opaque"},
+        {type: "message", role: "assistant", content: [{type: "input_image", image_url: "data:image/png;base64,AA=="}]}
+      ]);
+      expect(JSON.stringify(snapshot.checkpoint?.items)).not.toContain("must-not-be-imported");
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(received.map(entry => entry.record.text)).toEqual(["tail"]);
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
+  });
+
+  it("keeps the legacy full snapshot path when no checkpoint exists", async () => {
+    const f = await fixture(meta() + message("user", "legacy", "legacy"));
+    const reader = createLocalSessionReader({root: f.root});
+    const snapshot = await reader.snapshot(THREAD, signal());
+    try {
+      expect(snapshot.checkpoint).toBeUndefined();
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(received.map(entry => entry.record.text)).toEqual(["legacy"]);
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
+  });
+
+  it("uses explicit outer source turns for coverage without inferring unlabelled records", async () => {
+    const f=await fixture(meta()+line('event_msg',{type:'item_completed',turn_id:'outer',item:{
+      type:'UserMessage',id:'outer-message',content:[{type:'input_text',text:'explicit outer turn'}]
+    }}));
+    const reader=createLocalSessionReader({root:f.root});const snapshot=await reader.snapshot(THREAD,signal());
+    try{
+      const records=[];for await(const entry of snapshot.records(signal()))records.push(entry.record);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({text:'explicit outer turn',turnId:null,sourceTurnId:'outer'});
+      expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+    }finally{await snapshot.close();await reader.close();}
+  });
+  it("does not mark known ancillary envelopes and reasoning events as missing task text",async()=>{
+    const ancillary=['world_state','turn_context','token_usage_record'].map(type=>line(type,{})).join('');
+    const f=await fixture(meta()+ancillary+line('event_msg',{type:'item_completed',item:{type:'Reasoning'}})+
+      message('user','retained task','task'));
+    const reader=createLocalSessionReader({root:f.root});const snapshot=await reader.snapshot(THREAD,signal());
+    try{
+      const records=[];for await(const entry of snapshot.records(signal()))records.push(entry.record);
+      expect(records.map(r=>r.text)).toEqual(['retained task']);
+      expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+    }finally{await snapshot.close();await reader.close();}
+  });
+  it("retains an attribution warning for conflicting explicit inner and outer turns",async()=>{
+    const f=await fixture(meta()+line('event_msg',{type:'item_completed',turn_id:'outer',item:{
+      type:'UserMessage',id:'conflict',turn_id:'inner',content:[{type:'input_text',text:'conflicting turn'}]
+    }}));
+    const reader=createLocalSessionReader({root:f.root});const snapshot=await reader.snapshot(THREAD,signal());
+    try{
+      const records=[];for await(const entry of snapshot.records(signal()))records.push(entry.record);
+      expect(records[0]).toMatchObject({text:'conflicting turn',sourceTurnId:null});
+      expect(snapshot.coverage.complete).toBe(false);
+      expect(snapshot.coverage.gaps).toContain('unattributed_record');
+    }finally{await snapshot.close();await reader.close();}
+  });
   it("bounds dedupe metadata while retaining text beyond the window and flags uncertainty", async () => {
     const f=await fixture(meta()+Array.from({length:4200},(_,i)=>message('assistant',`text-${i}`,`id-${i}`)).join('')+
       message('assistant','text-0','id-0'));
@@ -178,6 +448,43 @@ describe("source-backed history snapshots", () => {
     expect(snapshot.coverage.gaps).toEqual(expect.arrayContaining([
       "unsupported_payload", "unattributed_record", "upstream_truncated", "unreadable_record"
     ]));
+  });
+
+  it("retains distinct bodies when a source identity is reused", async () => {
+    const f = await fixture(meta() +
+      message("user", "first body", "reused-id") +
+      message("user", "changed body", "reused-id"));
+    const reader = createLocalSessionReader({root: f.root}) as SnapshotReader;
+    const snapshot = await reader.snapshot(THREAD, signal());
+    try {
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(received.map(entry => entry.record.text)).toEqual(["first body", "changed body"]);
+      expect(snapshot.coverage.complete).toBe(true);
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
+  });
+
+  it("marks an unknown event message as unsupported instead of treating it as harmless metadata", async () => {
+    const unknown = line("event_msg", {
+      type: "future_content_event", id: "future-1", turn_id: "turn-1",
+      content: [{type: "output_text", text: "must not be silently dropped"}]
+    });
+    const f = await fixture(meta() + message("user", "neighbor", "neighbor") + unknown);
+    const reader = createLocalSessionReader({root: f.root}) as SnapshotReader;
+    const snapshot = await reader.snapshot(THREAD, signal());
+    try {
+      const received: HistoryRecord[] = [];
+      for await (const entry of snapshot.records(signal())) received.push(entry);
+      expect(received.map(entry => entry.record.text)).toContain("neighbor");
+      expect(snapshot.coverage.complete).toBe(false);
+      expect(snapshot.coverage.gaps).toContain("unsupported_payload");
+    } finally {
+      await snapshot.close();
+      await reader.close();
+    }
   });
 
   it("rejects a snapshot when the verified source is replaced before paging", async () => {
