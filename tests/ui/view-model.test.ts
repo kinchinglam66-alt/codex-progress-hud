@@ -3,6 +3,20 @@ import { buildConversationViews, buildHudView, createConversationViewProjector, 
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 import type { ConversationRow } from "../../src/server/conversation-projection.js";
+it('shows missing-image warning beside ETA and in diagnostics',()=>{
+  const row=overdueConversation('running','ready');
+  row.observer!.contextState='context_images_missing';
+  const view=buildConversationViews([row])[0]!;
+  expect(view.etaLabel).toContain('部分历史图片缺失');
+  expect(view.diagnosticLabel).toContain('部分历史图片缺失');
+});
+it('retains the image warning while preparing a replacement estimate',()=>{
+ const row=overdueConversation('running','estimating');
+ row.observer={...row.observer!,contextState:'context_preparing',missingImages:2};
+ const view=buildConversationViews([row])[0]!;
+ expect(view.etaLabel).toContain('部分历史图片缺失');
+ expect(view.diagnosticLabel).toContain('部分历史图片缺失');
+});
 it('shows the current scheduler failure separately from historical unknown usage',()=>{
   const row=overdueConversation('running','disabled');
   row.observer!.stopReason='scheduler_exception';row.observer!.stoppedAt=1234;

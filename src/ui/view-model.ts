@@ -5,6 +5,8 @@ import {projectCountdown} from './countdown.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics,type ObserverContextState} from '../core/observer-diagnostics.js';
 
 const contextLabels:Record<ObserverContextState,string>={history_loading:'正在读取完整对话',context_preparing:'正在准备完整上下文',
+  context_images_missing:'部分历史图片缺失',
+  image_context_unsupported:'当前估时路径不支持图片上下文',
   context_full:'已使用完整可读上下文',context_compressed:'早期历史已压缩',history_incomplete:'部分历史不可读，估时依据不完整',
   capacity_unknown:'模型容量未知，请在设置中填写',context_too_large:'上下文超出模型容量，无法完整发送',compression_failed:'历史压缩失败，等待后续重试'};
 
@@ -32,7 +34,7 @@ function observerLabel(observer:ObserverDiagnostics):string{
 function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number){
   const age=observer.estimateAgeSeconds===null?null:observer.estimateAgeSeconds+(Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
   return {freshnessLabel:age===null?'':age<60?'估值刚刚更新':age<3600?`估值更新于 ${Math.floor(age/60)} 分钟前`:`估值更新于 ${Math.floor(age/3600)} 小时前`,
-    diagnosticLabel:`${observerLabel(observer)}${observer.contextState&&observerLabel(observer)!==contextLabels[observer.contextState]?` · ${contextLabels[observer.contextState]}`:''} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
+    diagnosticLabel:`${observerLabel(observer)}${observer.contextState&&observerLabel(observer)!==contextLabels[observer.contextState]?` · ${contextLabels[observer.contextState]}`:''}${(observer.missingImages??0)>0&&observer.contextState!=='context_images_missing'?' · 部分历史图片缺失':''} · 小时内尝试 ${observer.callsLastHour} 次${observer.retryPending?' · 冷却后重试一次':''}`};
 }
 
 export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = [],displayedSeconds:ReadonlyMap<string,number>=new Map()) {
@@ -50,7 +52,8 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
       statusLabel: view.statusLabel, tone: view.tone,
       progressMode: view.progressMode, progressPercent: view.progressPercent,
       progressLabel: row.goal === undefined ? '任务进度' : '预估进度',
-      etaLabel: view.etaLabel + (row.goal?.prediction != null && updatedKeys.includes(row.conversationKey) ? ' · 已更新' : ''),
+      etaLabel: view.etaLabel + (row.goal?.prediction != null && updatedKeys.includes(row.conversationKey) ? ' · 已更新' : '')+
+        (row.observer?.contextState==='context_images_missing'||(row.observer?.missingImages??0)>0?' · 部分历史图片缺失':''),
       nameFreshness: row.name.freshness,
       ...(row.observer?observerPresentation(row.observer,elapsedSeconds):{})
     };

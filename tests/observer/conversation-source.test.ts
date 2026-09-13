@@ -3,6 +3,20 @@ import {createConversationSource} from '../../src/observer/conversation-source.j
 import type {ReadBatch} from '../../src/observer/conversation-record.js';
 
 const query={goalSummary:null,activeSeconds:15,runtime:'running' as const,previousEstimate:null};
+it('uses image-only source messages for readiness and fences changed image content',async()=>{
+ const f=setup();f.source.attach('key','host','opaque-current');
+ const image=(url:string):ReadBatch=>({records:[{id:'image',turnId:'current',atMs:1,kind:'user',text:'',contentParts:[{type:'input_image',imageUrl:url}]}],caughtUp:true,partialLine:false,reset:false});
+ f.set(image('data:image/png;base64,AA=='));f.time(500);f.source.tick();await f.flush();
+ try{
+  const first=f.source.goals.inspect?.('key','opaque-current',query);
+  expect(first?.ready).toBe(true);expect(f.source.goals.read('key','opaque-current',query)).not.toBeNull();
+  f.set(image('data:image/png;base64,AQ=='));f.time(5500);f.source.tick();await f.flush();
+  const second=f.source.goals.inspect?.('key','opaque-current',query);
+  expect(second?.userFingerprint).not.toBe(first?.userFingerprint);
+  expect(second?.contentFingerprint).not.toBe(first?.contentFingerprint);
+  expect(JSON.stringify(f.source.snapshot('key')?.records)).not.toContain('base64');
+ }finally{await f.source.close();}
+});
 it('does not trust research terminal time after a wall-clock jump',async()=>{
   let now=0,wall=10000;
   let batch:ReadBatch={records:[{id:'start',turnId:'current',atMs:10000,kind:'runtime',runtime:'running'}],caughtUp:true,partialLine:false,reset:false};

@@ -280,13 +280,15 @@ function turnIdFrom(value: Record<string, unknown>, fallback: string | null, inf
   return inferFallback ? fallback : null;
 }
 
-function messageText(value: unknown, options: ParseOptions, markUnsupported: () => void): string | undefined {
+function messageText(value: unknown, options: ParseOptions, markUnsupported: () => void,
+  ordered?: NonNullable<ConversationRecord['contentParts']>,allowLocalImages=false): string | undefined {
   if (typeof value === "string") return boundedText(value, options.preserveText);
   if (!Array.isArray(value)) throw new LocalSessionSourceError("source_malformed");
   const parts: string[] = [];
   for (const part of value) {
     if (typeof part === "string") {
       parts.push(part);
+      ordered?.push({type:'text',text:part});
       continue;
     }
     if (part === null || typeof part !== "object" || Array.isArray(part)) {
@@ -297,6 +299,25 @@ function messageText(value: unknown, options: ParseOptions, markUnsupported: () 
     if (type === "input_text" || type === "output_text" || type === "text" || (options.preserveText && type === "Text")) {
       if (typeof content.text !== "string") throw new LocalSessionSourceError("source_malformed");
       parts.push(content.text);
+      ordered?.push({type:'text',text:content.text});
+      continue;
+    }
+    if(ordered&&type==='local_image'){
+      if(!allowLocalImages){markUnsupported();continue;}
+      if(typeof content.path!=='string'||content.path.trim().length===0){
+        // Live projection remains readable; full-history preflight owns fidelity.
+        if(!options.preserveText){markUnsupported();continue;}
+        throw new LocalSessionSourceError('source_malformed');
+      }
+      ordered.push({type:'local_image',path:content.path});
+      continue;
+    }
+    if(ordered&&type==='input_image'){
+      if(typeof content.image_url!=='string'||content.image_url.trim().length===0){
+        if(!options.preserveText){markUnsupported();continue;}
+        throw new LocalSessionSourceError('source_malformed');
+      }
+      ordered.push({type:'input_image',imageUrl:content.image_url});
       continue;
     }
     markUnsupported();
@@ -322,7 +343,7 @@ function addRecord(context: ParseContext, record: ConversationRecord, dedupeKey:
   // Timestamp and representation-specific labels differ between mirrored
   // envelopes. These canonical content/completion fields preserve conflicts
   // while allowing an exact replay of the same semantic record to collapse.
-  const content = {kind:record.kind,text:record.text,output:record.output,
+  const content = {kind:record.kind,text:record.text,contentParts:record.contentParts,imageFingerprint:record.imageFingerprint,imageContextPending:record.imageContextPending,output:record.output,
     outputComplete:record.outputComplete,complete:record.complete,exitCode:record.exitCode,
     assistantPhase:record.assistantPhase,runtime:record.runtime,outcome:record.outcome};
   const hash = dedupeHash(`${dedupeKey}\0${JSON.stringify(content)}`);
@@ -360,8 +381,18 @@ function normalizeMessage(
     atMs,
     kind: role
   };
-  const text = messageText(content, context.options, () => context.gaps.add("unsupported_payload"));
+  const ordered:NonNullable<ConversationRecord['contentParts']>=[];
+  const conflictingRole=(fallbackType==='AgentMessage'&&role!=='assistant')||
+    (fallbackType==='UserMessage'&&role!=='user');
+  const unsupported=()=>{context.gaps.add('unsupported_payload');record.imageContextPending=true;};
+  if(conflictingRole){unsupported();return addRecord(context,record,`message:${record.id}`);}
+  const text = messageText(content, context.options, unsupported,ordered,role==='user');
   if (text !== undefined) record.text = text;
+  if(ordered.some(part=>part.type!=='text')){
+    record.imageCount=ordered.filter(part=>part.type!=='text').length;
+    record.imageFingerprint=dedupeHash(JSON.stringify(ordered));
+    if(context.options.preserveText)record.contentParts=ordered;
+  }
   if(role==='assistant'&&value.phase==='commentary')record.assistantPhase='commentary';
   if(role==='assistant'&&value.phase==='final_answer')record.assistantPhase='final';
   return addRecord(context, record, `message:${record.id}`);

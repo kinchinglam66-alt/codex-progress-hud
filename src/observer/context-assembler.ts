@@ -4,6 +4,7 @@ import {retainObserverInput} from '../estimation/observer-retention.js';
 
 type Estimate={remainingSeconds:number;errorPercent:number;observedActiveSeconds:number};
 export interface AssemblyOptions {
+  imageContextPending?:boolean;
   summary:string|null;summaryThroughSequence:number;sequence:number;
   activeSeconds:number;activeTimeKnown:boolean;historyComplete:boolean;nowMs:number;
   previousEstimate:Estimate|null;runtime?:ObserverInput['runtime'];currentTurnId?:string|null;
@@ -31,10 +32,10 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
     if(record.turnId!==null&&record.turnId!==actionTurn){actions.clear();actionTurn=record.turnId;}
     if(record.kind==='runtime'&&record.runtime!=='running')actions.clear();
     if(record.kind==='tool_result'&&record.actionId)actions.delete(record.actionId);
-    if(!record.text||record.kind==='runtime')continue;
+    if((!record.text&&!(record.imageCount??0))||record.kind==='runtime')continue;
     const kind=record.kind==='user'?'user':record.kind==='assistant'?'assistant':'tool';
     loss.suppliedMessages++;
-    const text=record.text;
+    const text=record.text||'[Image-bearing source message; actual images must be loaded from source history.]';
     let pairOrdinal:number|undefined;
     if(kind==='tool'&&record.actionId&&record.turnId!==null){
       const key=JSON.stringify([record.turnId,record.actionId]);
@@ -60,6 +61,7 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
   let summary=options.summary;
   if(summary&&summary.length>2048){summary=summary.slice(0,2048).replace(/[\uD800-\uDBFF]$/u,'');truncated=true;omitted.add('summary');}
   const result:AssembledContext={goalSummary:summary||null,activeSeconds:options.activeSeconds,
+    ...(options.imageContextPending===true||records.some(record=>record.imageContextPending===true||(record.imageCount??0)>0||record.contentParts?.some(part=>part.type!=='text'))?{imageContextPending:true}:{}),
     runtime:options.runtime??'running',messages,truncated,packingLoss:loss,observation:{sequence:options.sequence,
       summaryThroughSequence:options.summaryThroughSequence,activeTimeKnown:options.activeTimeKnown,
       historyComplete:options.historyComplete,currentAction:action?{text:action.text,

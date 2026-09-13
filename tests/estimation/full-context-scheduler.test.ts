@@ -122,6 +122,39 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;re
   };
 }
 
+it('never dispatches an image projection to a worker without native preparation',async()=>{
+ const f=fixture();delete f.worker.prepareContext;
+ f.setRecords([{id:'image',turnId:'first',atMs:1,kind:'user',text:'inspect',imageCount:1,imageFingerprint:'a'.repeat(64)}]);
+ await f.flush();f.time(5500);f.source.changed(f.envelope.sessionKey);f.source.tick();await f.flush();
+ try{await f.start();f.time(22000);f.source.tick();await f.flush();f.scheduler.tick();await f.flush();expect(f.counts().observed).toBe(0);
+   expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('image_context_unsupported');
+ }finally{await f.scheduler.close();await f.source.close();}
+});
+it('keeps missing-image quality through subsequent preparation and clears after verified full context',async()=>{
+ const options={deferPreparation:false};const f=fixture(options),full=f.preparedContext();
+ f.prepareResult({...full,representation:{...full.representation,mode:'incomplete',sourceComplete:false,missingImages:1,inferenceEligible:true,sourceGaps:['missing_image']}});
+ try{
+   await f.start();expect(f.counts().observed).toBe(1);
+   options.deferPreparation=true;
+   f.time(300000);f.source.tick();await f.flush();f.scheduler.changed(f.envelope.sessionKey,'failure');
+   f.time(316000);f.source.tick();await f.flush();f.scheduler.tick();await f.flush();
+   expect(f.counts().prepared).toBe(2);
+   expect(f.scheduler.diagnostics(f.envelope.sessionKey)).toMatchObject({contextState:'context_preparing',missingImages:1});
+   f.resolvePreparation(full);await f.flush();
+   expect(f.scheduler.diagnostics(f.envelope.sessionKey)).toMatchObject({contextState:'context_full',missingImages:0});
+ }finally{await f.scheduler.close();await f.source.close();}
+});
+it.each([false,true])('permits missing images but not unrelated prepared gaps (otherGap=%s)',async otherGap=>{
+ const f=fixture();const previous=f.preparedContext();
+ f.prepareResult({...previous,representation:{...previous.representation,mode:'incomplete',sourceComplete:false,
+   missingImages:1,inferenceEligible:true,sourceGaps:otherGap?['missing_image','unsupported_payload']:['missing_image']}});
+ try{
+   await f.start();
+   expect(f.counts().observed).toBe(otherGap?0:1);
+   if(!otherGap)expect(f.scheduler.diagnostics(f.envelope.sessionKey)).toMatchObject({missingImages:1});
+   expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe(otherGap?'history_incomplete':'context_images_missing');
+ }finally{await f.scheduler.close();await f.source.close();}
+});
 it.each(['late-gap','read-error','complete'] as const)('scans history before any provider preparation: %s',async scenario=>{
   const f=fixture({deferHistory:true});let scanFinished=false,closed=0;
   const snapshot=createHistorySnapshot({identity:'fixed',sourceEpoch:1,revision:1,open:()=>({

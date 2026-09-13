@@ -1,6 +1,6 @@
 # Image context for persistent ETA
 
-Status: approved direction; written specification awaiting user review.
+Status: written specification approved by the user on 2026-09-13.
 
 ## Outcome and decisions
 

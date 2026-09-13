@@ -1,4 +1,5 @@
 import type {ObserverInput} from './observer-contract.js';
+import {isInferenceEligible} from './observer-contract.js';
 import type {ObserverResult} from './observer-provider.js';
 import type {ObserverCallStage} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
@@ -69,6 +70,7 @@ interface Entry {
   sourceClockAvailable?:boolean;
   sourceActiveSeconds?:number; predictionExcludedSeconds?:number;
   contextState?:ObserverContextState; contextStateTurnKey?:string;
+  missingImages?:number;qualityTurnKey?:string;
   contentIdentity?:string; consumedContentIdentity?:string;
   bootstrapRecoveryEligible?:boolean; bootstrapRecoveryUsed?:boolean;
   lastResultDiagnostic?:ResultDiagnostic; lastRejectionReason?:ResultRejectionReason;
@@ -184,6 +186,7 @@ export class ObserverScheduler {
     if(code==='capacity_unknown')return 'capacity_unknown';
     if(code==='context_too_large'||code.startsWith('context_too_large:'))return 'context_too_large';
     if(code==='history_incomplete')return 'history_incomplete';
+    if(code==='image_context_unsupported')return 'image_context_unsupported';
     if(flight.contextState==='history_loading')return 'history_incomplete';
     return 'compression_failed';
   }
@@ -220,7 +223,10 @@ export class ObserverScheduler {
           handedToPlanner=true;
           const value=await promise;
           if(!value){await opened.snapshot.close();throw Error('preparation_empty');}
-          if(!value.representation.sourceComplete||value.representation.mode==='incomplete')throw Error('history_incomplete');
+          if(!isInferenceEligible(value.representation))throw Error('history_incomplete');
+          if(!flight.controller.signal.aborted&&this.options.goals.isTicketValid(flight.ticket,this.time())){
+            entry.missingImages=value.representation.missingImages??0;entry.qualityTurnKey=flight.turnKey;
+          }
           prepared=value.input;
           try{
             const actions=researchCapture?.result(),owner=this.options.goals.researchOwner(flight.ticket);
@@ -234,7 +240,7 @@ export class ObserverScheduler {
               flight.researchGeneration=owner.generation;
             }
           }catch{flight.researchFailure='capture_error';/* Research capture cannot fail context preparation. */}
-          this.contextState(flight,value.representation.mode==='compressed'?'context_compressed':'context_full',value.metrics);
+          this.contextState(flight,(value.representation.missingImages??0)>0?'context_images_missing':value.representation.mode==='compressed'?'context_compressed':'context_full',value.metrics);
         }catch(error){
           if(!handedToPlanner){try{await opened.snapshot.close();}catch{/* acquisition ownership was not transferred */}}
           throw error;
@@ -244,6 +250,9 @@ export class ObserverScheduler {
         this.failPreparation(entry,flight);
         return;
       }
+    }
+    if(prepared.imageContextPending){
+      this.contextState(flight,'image_context_unsupported');this.failPreparation(entry,flight);return;
     }
     const state=this.workerState(flight.worker);
     if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time())||
@@ -280,6 +289,7 @@ export class ObserverScheduler {
       if(state.contentIdentity===undefined)delete entry.contentIdentity;else entry.contentIdentity=state.contentIdentity;
       delete entry.consumedContentIdentity;
       delete entry.contextState;delete entry.contextStateTurnKey;
+      delete entry.missingImages;delete entry.qualityTurnKey;
       entry.bootstrapRecoveryEligible=false;entry.bootstrapRecoveryUsed=false;
       delete entry.lastResultDiagnostic;delete entry.lastRejectionReason;delete entry.lastResultStatus;
       if(state.view.prediction)entry.overdueEligibleActiveSeconds=
@@ -703,8 +713,10 @@ export class ObserverScheduler {
     const entry=this.entries.get(key);
     const contextState=entry?.contextState&&entry.contextStateTurnKey===this.options.goals.currentTurnKey(key)
       ?entry.contextState:undefined;
+    const quality=entry?.qualityTurnKey===this.options.goals.currentTurnKey(key)&&entry?.missingImages!==undefined?
+      {missingImages:entry.missingImages}:{};
     if(this.stopReason)return {state:'disabled',stopReason:this.stopReason,stoppedAt:this.stoppedAt!,
-      ...(contextState?{contextState}:{}),
+      ...(contextState?{contextState}:{}),...quality,
       estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
     const at=this.stopReason ? this.lastClock : this.time(),view=this.options.goals.view(key,at);
     const health=this.options.goals.contextHealth(key);
@@ -715,7 +727,7 @@ export class ObserverScheduler {
       entry?.lastSkip==='context_missing'?(health==='loading'?'history_loading':
         health==='error'||health==='missing'?'history_unavailable':'insufficient_context'):
       (entry?.lastResultDiagnostic ?? (view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending'));
-    return {state,...(contextState?{contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
+    return {state,...quality,...(contextState?{contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
       ...(entry?.lastResultDiagnostic?{resultDiagnostic:entry.lastResultDiagnostic}:{}),
       ...(entry?.lastRejectionReason?{rejectionReason:entry.lastRejectionReason}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,

@@ -10,6 +10,7 @@ interface Source {
 export interface ContextSnapshot {
   /** Source-owned instruction identity, independent of the bounded text projection. */
   instructionFingerprint:string;
+  imageContextPending?:boolean;
   lastSuccessfulReadAt?:number;
   records:ConversationRecord[];revision:number;sourceEpoch:number;
   health:'loading'|'ready'|'error';historyComplete:boolean;partialLine:boolean;
@@ -37,6 +38,11 @@ function boundProjectionText(text:string):string {
 }
 function projectRecord(record:ConversationRecord):{record:ConversationRecord;trimmed:boolean} {
   let trimmed=false;const projected={...record};
+  if(projected.contentParts?.some(part=>part.type!=='text')){
+    projected.imageCount=projected.contentParts.filter(part=>part.type!=='text').length;
+    projected.imageFingerprint=hashInstruction(projected.contentParts);
+    delete projected.contentParts;
+  }
   if(projected.text!==undefined){const text=boundProjectionText(projected.text);if(text!==projected.text){projected.text=text;trimmed=true;}}
   if(projected.output!==undefined){const output=boundProjectionText(projected.output);if(output!==projected.output){projected.output=output;projected.outputComplete=false;trimmed=true;}}
   return {record:projected,trimmed};
@@ -60,6 +66,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
   const snapshot=(key:string):ContextSnapshot|null=>{
     const e=entries.get(key);if(!e)return null;
     return {records:e.records.map(r=>({...r})),revision:e.revision,sourceEpoch:e.sourceEpoch,instructionFingerprint:e.instructionFingerprint,
+      imageContextPending:e.imageContextPending===true,
       ...(e.lastSuccessfulReadAt===undefined?{}:{lastSuccessfulReadAt:e.lastSuccessfulReadAt}),
       health:e.health,historyComplete:e.historyComplete,partialLine:e.partialLine,reason:e.reason,projectionOnly:true};
   };
@@ -92,12 +99,14 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       let records=batch.reset?[]:[...e.records];
       const known=new Set(records.map(r=>r.id));
       let changed=batch.reset;
+      const imageContextPending=(!batch.reset&&e.imageContextPending===true)||batch.records.some(record=>
+        record.imageContextPending===true||(record.imageCount??0)>0||record.contentParts?.some(part=>part.type!=='text'));
       const instructionDigests=batch.reset?new Map<string,string>():new Map(e.instructionDigests);
       let instructionFingerprint=batch.reset?EMPTY_INSTRUCTIONS:e.instructionFingerprint;
       for(const record of batch.records){
         let revisedUser=false;
         if(record.kind==='user'){
-          const id=hashInstruction(record.id),digest=hashInstruction([record.id,record.turnId,record.text??'']);
+          const id=hashInstruction(record.id),digest=hashInstruction([record.id,record.turnId,record.text??'',record.imageFingerprint??(record.contentParts?hashInstruction(record.contentParts):null)]);
           revisedUser=instructionDigests.get(id)!==digest;
           if(revisedUser){instructionFingerprint=hashInstruction([instructionFingerprint,digest]);changed=true;}
           instructionDigests.delete(id);instructionDigests.set(id,digest);
@@ -164,6 +173,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       if(bytes>256*1024){e.goalRetentionFailed=true;throw Error('SOURCE_GOAL_LIMIT');}
       if(totalBytes-e.bytes+bytes>8*1024*1024)throw Error('SOURCE_LIMIT');
       totalBytes+=bytes-e.bytes;e.bytes=bytes;e.records=records;
+      e.imageContextPending=imageContextPending;
       e.instructionFingerprint=instructionFingerprint;e.instructionDigests=instructionDigests;
       if(batch.reset)e.sourceEpoch++;
       if(changed)e.revision++;

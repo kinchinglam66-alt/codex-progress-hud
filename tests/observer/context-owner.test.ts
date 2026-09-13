@@ -10,6 +10,22 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('retains image delivery requirements after projection eviction until source reset',async()=>{
+  const f=setup();
+  try{
+    f.owner.attach('one','host1','t3');f.time(500);f.owner.tick();
+    f.calls[0]!.finish({...batch,records:[...batch.records,
+      {id:'image',turnId:'old',atMs:1,kind:'user',imageCount:1},
+      ...Array.from({length:600},(_,i)=>({id:`r${i}`,turnId:'t1',atMs:i+2,kind:'tool_result',text:'x'.repeat(512)})),
+      {id:'latest',turnId:'t3',atMs:999,kind:'user',text:'continue'}]});await f.flush();
+    expect(f.owner.snapshot('one')!.records.some(r=>r.id==='image')).toBe(false);
+    expect(f.owner.snapshot('one')).toMatchObject({imageContextPending:true});
+    f.time(5500);f.owner.tick();f.calls[1]!.finish({...batch,records:[]});await f.flush();
+    expect(f.owner.snapshot('one')).toMatchObject({imageContextPending:true});
+    f.time(10500);f.owner.tick();f.calls[2]!.finish({...batch,reset:true});await f.flush();
+    expect(f.owner.snapshot('one')).toMatchObject({imageContextPending:false});
+  }finally{await f.owner.close();}
+});
 it('conservatively invalidates old instruction replays beyond the dedupe window and resets identity on source rebuild',async()=>{
   const f=setup();
   try{

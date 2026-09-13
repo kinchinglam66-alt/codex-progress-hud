@@ -12,6 +12,9 @@ const packingLossSchema = z.object({suppliedMessages:ordinal,retainedMessages:or
 const representationSchema=z.object({
   mode:z.enum(['full','compressed','incomplete']),
   sourceComplete:z.boolean(),
+  missingImages:ordinal.optional(),
+  inferenceEligible:z.boolean().optional(),
+  sourceGaps:z.array(z.enum(['missing_image','upstream_truncated','unsupported_payload','unattributed_record','deduplication_window','unreadable_record'])).optional(),
   originalRecords:ordinal,
   sessionCoveredRecords:ordinal.optional(),
   sourceRepresentation:z.enum(['raw_history','upstream_compacted']).optional(),
@@ -73,6 +76,7 @@ const observationSchema = z.object({
   omittedCategories: z.array(z.enum(['user', 'assistant', 'tool', 'summary'])).max(4)
 }).strict();
 export const observerInputSchema = z.object({
+  imageContextPending:z.boolean().optional(),
   goalSummary: z.string().min(1).max(2048).nullable(),
   activeSeconds: seconds,
   runtime: z.enum(['running', 'waiting', 'paused']),
@@ -110,6 +114,10 @@ export const observerInputSchema = z.object({
   .refine(value=>{
     const representation=value.representation;
     if(!representation)return value.historySummary===undefined;
+    if(representation.sourceComplete&&(representation.sourceGaps?.length??0)>0)return false;
+    if(((representation.missingImages??0)>0)!==(representation.sourceGaps?.includes('missing_image')===true))return false;
+    if(representation.inferenceEligible===true&&!isInferenceEligible(representation))return false;
+    if((representation.missingImages??0)>0&&representation.sourceComplete)return false;
     if(representation.originalRecords<value.messages.length)return false;
     if(value.observation&&value.observation.historyComplete!==representation.sourceComplete)return false;
     if(representation.mode==='compressed')return value.historySummary!==undefined&&
@@ -119,3 +127,10 @@ export const observerInputSchema = z.object({
       !representation.sourceComplete;
   });
 export type ObserverInput = z.infer<typeof observerInputSchema>;
+
+/** Missing attachments are the only approved incomplete-context exception. */
+export function isInferenceEligible(value:{sourceComplete:boolean;mode:string;inferenceEligible?:boolean|undefined;missingImages?:number|undefined;sourceGaps?:readonly string[]|undefined}):boolean {
+  if(value.inferenceEligible===false||!Number.isSafeInteger(value.missingImages??0)||(value.missingImages??0)<0)return false;
+  if(value.sourceComplete)return value.mode!=='incomplete'&&!(value.missingImages??0)&&!(value.sourceGaps?.length);
+  return value.inferenceEligible===true&&(value.missingImages??0)>0&&value.sourceGaps?.length===1&&value.sourceGaps[0]==='missing_image';
+}

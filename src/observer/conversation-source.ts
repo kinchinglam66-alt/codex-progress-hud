@@ -67,8 +67,8 @@ export function createConversationSource(options:OwnerOptions & {
     // state and other source bookkeeping so it represents only current-turn
     // text that could improve an inference.
     const contentFingerprint=createHash('sha256').update(JSON.stringify(current
-      .filter(record=>record.kind!=='runtime'&&typeof record.text==='string'&&record.text.length>0)
-      .map(record=>[record.kind,record.text]))).digest('hex');
+      .filter(record=>record.kind!=='runtime'&&(!!record.text||(record.imageCount??0)>0))
+      .map(record=>[record.kind,record.text,record.imageFingerprint??null]))).digest('hex');
     // Local proof of unchanged instructions, never a public identity or model input.
     // Also fence later user turns already persisted before their Hook arrives.
     // They affect local validity only; `records` sent to inference stays turn-bounded.
@@ -188,7 +188,7 @@ export function createConversationSource(options:OwnerOptions & {
      return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,contentFingerprint:selected.contentFingerprint,
        currentActionId:[...selected.actions.keys()].at(-1)??null,
       finalAvailable:selected.finalAvailable,
-      ready:selected.records.some(record=>!!record.text&&(record.kind==='user'||
+      ready:selected.records.some(record=>(!!record.text||(record.imageCount??0)>0)&&(record.kind==='user'||
         (query.goalSummary!==null&&record.kind!=='runtime')))};
   },read(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
@@ -196,6 +196,7 @@ export function createConversationSource(options:OwnerOptions & {
     try{
       const researchHash=createPrefixFingerprint();for(const record of selected.current)researchHash.add(record);
       const input=assembleContext(records,{summary:query.goalSummary,
+        imageContextPending:snapshot.imageContextPending===true,
         summaryThroughSequence:Math.min(query.summaryThroughSequence??0,snapshot.revision),
         sequence:snapshot.revision,activeSeconds:query.activeSeconds,activeTimeKnown:false,
         historyComplete:snapshot.historyComplete&&floor>=0,nowMs:options.wallNow(),previousEstimate:query.previousEstimate,

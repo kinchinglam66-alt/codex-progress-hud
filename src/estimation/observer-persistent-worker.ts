@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {observerInputSchema} from './observer-contract.js';
+import {observerInputSchema,isInferenceEligible} from './observer-contract.js';
 import type {ObserverWorker} from './observer-scheduler.js';
 import type {ObserverResult} from './observer-provider.js';
 import {reportObserverStage} from './observer-provider.js';
@@ -7,11 +7,13 @@ import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {SubscriptionAccounting} from './subscription-accounting.js';
 import type {Invocation} from './owned-process.js';
 import {createObserverSessionProcess} from './observer-session-process.js';
-import {createPersistentObserverSession, type PersistentCompactionResult, type PersistentSessionError, type PersistentContextCapacityPolicy} from './observer-persistent-session.js';
+import {createPersistentObserverSession, type PersistentCompactionResult, type PersistentSessionError, type PersistentContextCapacityPolicy,type PersistentSourcePart} from './observer-persistent-session.js';
+import {resolveImageAttachment} from '../observer/image-attachment.js';
 import {createPersistentReceiptJournal,preparationErrorCode,type PersistentPreparationStage,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
 import {normalizeAdmissionReason} from '../core/observer-diagnostics.js';
 
 export interface PersistentWorkerOptions {
+ nativeRequestByteLimit?:number;
  accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding}>;
  authorize:()=>boolean;now:()=>number;outputSchema:unknown;
  receiptDirectory:string;
@@ -39,6 +41,18 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  let processBinding:PersistentReceiptBinding|undefined;
  let session:ReturnType<typeof createPersistentObserverSession>|undefined;
  let sourceKey:string|undefined,sourceEpoch:string|undefined,generation=-1;
+ const preparedOwners=new WeakMap<object,{ownerUuid:string;generation:number}>();
+ // Local-only prepared attachment manifest: no bytes, paths in receipts, or remote serialization.
+ let attachments:Array<{path:string;digest:string|null;maxEncodedBytes:number}>=[];
+ async function attachmentsUnchanged(signal:AbortSignal):Promise<boolean>{
+   for(const attachment of attachments){
+     try{
+       const current=await resolveImageAttachment({type:'local_image',path:attachment.path},{signal,maxEncodedBytes:attachment.maxEncodedBytes});
+       if((current.state==='missing'?null:current.digest)!==attachment.digest)return false;
+     }catch{signal.throwIfAborted();return false;}
+   }
+   return true;
+ }
  let processOwnerUuid=randomUUID(),journal:PersistentReceiptJournal|undefined;
   if(!options.receiptDirectory)throw Error('PERSISTENT_RECEIPT_REQUIRED');
   const budget=options.historyBudget;
@@ -63,7 +77,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    if(owner){try{await owner.close();}catch{poisoned=true;throw Error('SESSION_PROCESS_CLOSE_UNCONFIRMED');}
      if(processIdentity)await journal!.processExit({ownerUuid:processOwnerUuid,...(sourceKey===undefined?{}:{sourceKey}),sourceEpoch:sourceEpoch??null,processExitState:'closed',at:options.now()});
    }
-   owner=undefined;session=undefined;processIdentity=undefined;processBinding=undefined;sourceEpoch=undefined;turns.clear();
+   owner=undefined;session=undefined;processIdentity=undefined;processBinding=undefined;sourceEpoch=undefined;turns.clear();attachments=[];
    processOwnerUuid=randomUUID();
  }
  async function ensure(signal:AbortSignal){
@@ -79,6 +93,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    await opened.rpc.call('initialize',{clientInfo:{name:'codex_progress_hud',version:'0.2.1'},capabilities:{experimentalApi:true,requestAttestation:false}});
    opened.rpc.notify('initialized',{});
     session=createPersistentObserverSession(opened.rpc,{cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now,
+      ...(options.nativeRequestByteLimit===undefined?{}:{nativeRequestByteLimit:options.nativeRequestByteLimit}),
       ...(options.sessionTimeoutMs===undefined?{}:{timeoutMs:options.sessionTimeoutMs}),
       ...(options.bootstrapBatchByteCapacity===undefined?{}:{bootstrapBatchByteCapacity:options.bootstrapBatchByteCapacity}),
        ...(options.retainedSummaryByteReserve===undefined?{}:{retainedSummaryByteReserve:options.retainedSummaryByteReserve}),
@@ -181,17 +196,41 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          const live=await ensure(combined);sourceEpoch=epoch;
          if(history.snapshot.checkpoint){preparationStage='checkpoint_import';await live.bootstrapCheckpoint(history.snapshot.checkpoint,combined);}
          preparationStage='history_import';
-          let count=0,sourceBytes=0,compactionCount=0,confirmedCompactionThroughOrdinal:number|null=null,lastCommittedOrdinal=-1;
+          let count=0,sourceBytes=0,compactionCount=0,missingImages=0,confirmedCompactionThroughOrdinal:number|null=null,lastCommittedOrdinal=-1;
+          const manifest:typeof attachments=[];let manifestBytes=0;
           for await(const item of history.snapshot.records(combined)){
            check(combined);
-           const {id:_id,turnId,sourceTurnId,actionId:_actionId,...data}=item.record;
+           const {id:_id,turnId,sourceTurnId,actionId:_actionId,contentParts,...data}=item.record;
+           let content:PersistentSourcePart[]|undefined;
+           if(contentParts!==undefined){
+             content=[];
+             const maxEncodedBytes=budget?Math.min(budget.maxSourceBytes,budget.contextCapacityBytes-budget.retainedSummaryReserveBytes):options.bootstrapBatchByteCapacity??65536;
+             for(const part of contentParts){
+               check(combined);
+               if(part.type==='text'){content.push({type:'input_text',text:part.text});continue;}
+               if(part.type==='local_image'&&item.record.kind!=='user')throw Error('IMAGE_PATH_REJECTED');
+               const image=await resolveImageAttachment(part,{signal:combined,maxEncodedBytes});
+               if(part.type==='local_image'){
+                 manifestBytes+=Buffer.byteLength(part.path)+128;
+                 if(manifestBytes>(budget?.maxSourceBytes??16*1024*1024))throw Error('context_too_large:attachment_manifest');
+                 manifest.push({path:part.path,digest:image.state==='missing'?null:image.digest,maxEncodedBytes});
+               }
+               if(image.state==='missing'){
+                 missingImages++;
+                 content.push({type:'input_text',text:'[Historical attachment missing: image content unavailable. Do not infer its visual contents.]'});
+                 continue;
+               }
+               content.push({type:'input_image',image_url:image.imageUrl});
+             }
+             delete data.text;
+           }
            // Canonicalize redundant aliases only; distinct output and completion
            // evidence remain intact, and the source snapshot is never mutated.
            if(typeof data.text==='string'&&data.output===data.text)delete data.output;
            const turn=sourceTurnId??turnId;
             if(turn!==null&&turn!==undefined&&!turns.has(turn))turns.set(turn,turns.size);
             const text=JSON.stringify({sourceTurn:turn===null||turn===undefined?null:turns.get(turn),...data});
-            const encodedSourceBytes=Buffer.byteLength(text,'utf8');
+            const encodedSourceBytes=Buffer.byteLength(text,'utf8')+(content===undefined?0:Buffer.byteLength(JSON.stringify(content),'utf8'));
             if(budget!==undefined&&sourceBytes+encodedSourceBytes>budget.maxSourceBytes)throw Error('context_too_large:source_budget_exhausted');
             const compact=budget===undefined?undefined:async(compactSignal:AbortSignal,onDispatch?:()=>void)=>{
               if(compactionCount>=budget.maxCompactionOperations)throw Error('context_too_large:compaction_budget_exhausted');
@@ -202,12 +241,15 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
               compactionCount+=1;confirmedCompactionThroughOrdinal=checkpoint>=0?checkpoint:null;
               return result;
             };
-            await live.append([{ordinal:item.ordinal,text}],combined,compact);count++;sourceBytes+=encodedSourceBytes;lastCommittedOrdinal=item.ordinal;
+            await live.append([{ordinal:item.ordinal,text,...(content===undefined?{}:{content})}],combined,compact);count++;sourceBytes+=encodedSourceBytes;lastCommittedOrdinal=item.ordinal;
           }
           check(combined);
+         attachments=manifest;
          const importStatus=live.status();
-         const representation={mode:history.snapshot.coverage.complete?'full' as const:'incomplete' as const,
-            sourceComplete:history.snapshot.coverage.complete,originalRecords:input.messages.length,
+         const sourceComplete=history.snapshot.coverage.complete&&missingImages===0;
+         const sourceGaps=[...history.snapshot.coverage.gaps,...(missingImages?['missing_image' as const]:[])];
+         const representation={mode:sourceComplete?'full' as const:'incomplete' as const,
+            sourceComplete,missingImages,sourceGaps,inferenceEligible:history.snapshot.coverage.complete&&history.snapshot.coverage.gaps.length===0,originalRecords:input.messages.length,
             sessionCoveredRecords:count,compressedThroughOrdinal:null,sizing:'conservative' as const,
             importedThroughOrdinal:importStatus.cursor>=0?importStatus.cursor:null,
             importedRecords:importStatus.importedRecords,importedEncodedBytes:importStatus.importedEncodedBytes,
@@ -220,8 +262,10 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
             residentBound:importStatus.residentBound,retainedSummaryReserveBytes:importStatus.retainedSummaryReserveBytes,
             ...(importStatus.contextCapacityBytes===null?{}:{contextCapacityBytes:importStatus.contextCapacityBytes}),
             budgetStatus:budget===undefined?'unconfigured' as const:'trusted' as const};
-         return {input:{...input,representation,
-           ...(input.observation?{observation:{...input.observation,historyComplete:representation.sourceComplete}}:{})},representation};
+         const preparedInput={...input,imageContextPending:false,representation,
+           ...(input.observation?{observation:{...input.observation,historyComplete:representation.sourceComplete}}:{})};
+         preparedOwners.set(preparedInput,{ownerUuid:processOwnerUuid,generation:g});
+         return {input:preparedInput,representation};
        }catch(e){
          // Diagnostic metadata is best effort; never skip process cleanup or
          // replace the original failure if the diagnostic journal is unavailable.
@@ -234,12 +278,18 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
      if(pending)return Promise.resolve(empty('busy'));
      if(!authorized())return Promise.resolve(empty('disabled'));
      const parsed=observerInputSchema.safeParse(input);if(!parsed.success)return Promise.resolve(empty('invalid_input'));
+     if(parsed.data.imageContextPending===true||
+       (parsed.data.representation&&!isInferenceEligible(parsed.data.representation)))return Promise.resolve(empty('invalid_input'));
+     const preparedOwner=preparedOwners.get(input);
+     if(parsed.data.representation&&!preparedOwner)return Promise.resolve(empty('invalid_input'));
      try{bind(key,g);}catch{return Promise.resolve(empty('invalid_input'));}
      return operation(signal,async combined=>{
        let view:SubscriptionAccounting|undefined,id:string|undefined,operationId:string|undefined,dispatched=false,settled=false,bound=false,settlementAttempted=false,receiptFailure=false;
        try{
          reportObserverStage(onStage,'preparation');
          const live=await ensure(combined);check(combined);
+         if(preparedOwner&&(preparedOwner.ownerUuid!==processOwnerUuid||preparedOwner.generation!==g))throw Error('SOURCE_PREPARATION_STALE');
+         if(!await attachmentsUnchanged(combined))throw Error('IMAGE_SOURCE_CHANGED');
          reportObserverStage(onStage,'admission');
           const admission=await beginModelOperation(key,g,combined,'eta');
           if('denialReason' in admission){view=admission.view;return {...empty('admission_denied'),admissionReason:admission.denialReason};}
@@ -260,18 +310,21 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          };
          const result=await live.estimate(parsed.data,combined,persistEvidence);
          reportObserverStage(onStage,'provider_returned');
+         // Once a terminal response exists, cancellation must not erase its usage.
+         const imageSourceValid=!combined.aborted&&await attachmentsUnchanged(combined).catch(()=>false);
          if(operationId){
            try{
              await journal!.operationTerminal({operationId,admissionId:id,ownerUuid:processOwnerUuid,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,
                 ...(result.turnId===undefined?{}:{turnId:result.turnId}),terminalState:result.cancelled?'cancelled':result.interpretation?'completed':'failed',usageCompleteness:result.usageCompleteness??'missing',operationKind:'eta'});
            }catch(error){receiptFailure=true;throw error;}
          }
-         const accepted=authorized()&&!combined.aborted&&result.interpretation!==null;
+         const accepted=imageSourceValid&&authorized()&&!combined.aborted&&result.interpretation!==null;
           await view.updateInvocation!(id,{phase:'settling',cleanupOutcome:'pending'});
          reportObserverStage(onStage,'settlement');
          const accountedUsage=result.usage?{inputTokens:result.usage.inputTokens,outputTokens:result.usage.outputTokens,cachedInputTokens:result.usage.cachedInputTokens}:null;
          settlementAttempted=true;
          await view.settle(id,accountedUsage,result.usage?(accepted?'known_success':'known_non_success'):'safe_unknown');settled=true;
+         if(!imageSourceValid)await reset();
          return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage} as ObserverResult;
        }catch(error){
          const sessionFailure=error as PersistentSessionError;

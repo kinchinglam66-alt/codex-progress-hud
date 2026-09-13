@@ -4,10 +4,26 @@ import {packObserverInput} from '../../src/estimation/observer-input.js';
 import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
 import type {ConversationRecord} from '../../src/observer/conversation-record.js';
 import type {ObserverInput} from '../../src/estimation/observer-contract.js';
+import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
 
 const base:ObserverInput={goalSummary:null,activeSeconds:12,runtime:'running',messages:[{kind:'user',text:'projection',truncated:true}],truncated:true};
 const capacity={contextTokens:1000000,outputReserveTokens:2000,requestBytes:null,source:'configured' as const};
 const sizer={kind:'conservative' as const,count:(text:string)=>Buffer.byteLength(text)};
+it('does not drop checkpoint images on the stateless preparation path',async()=>{
+ const snapshot=source([record('req','current','user','inspect')]);
+ snapshot.checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[
+   {type:'message',role:'user',content:[{type:'input_image',image_url:'data:image/png;base64,AA=='}]},
+   {type:'compaction',encrypted_content:'synthetic'}]}})!;
+ const setup=options(snapshot);
+ await expect(prepareContext(setup)).rejects.toThrow('image_context_unsupported');
+ expect(setup.compressor.summarize).not.toHaveBeenCalled();
+});
+it('rejects image-bearing history instead of silently claiming text-only full context',async()=>{
+ const image:ConversationRecord={id:'image',turnId:'current',atMs:1,kind:'user',text:'inspect',contentParts:[{type:'local_image',path:'C:/fixture/image.png'}]};
+ const setup=options(source([image]));
+ await expect(prepareContext(setup)).rejects.toThrow('image_context_unsupported');
+ expect(setup.compressor.summarize).not.toHaveBeenCalled();
+});
 
 it('services cancellation while assembling a buffered history page',async()=>{
   const controller=new AbortController();

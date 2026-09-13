@@ -13,6 +13,7 @@ export type PersistentOperationKind='eta'|'context_compression';
 const preparationStages=['session_setup','checkpoint_import','history_import','context_compression'] as const;
 export type PersistentPreparationStage=typeof preparationStages[number];
 const preparationCodes=['PREPARATION_UNKNOWN','CHECKPOINT_INVALID','CHECKPOINT_REBUILD_REQUIRED','CHECKPOINT_ACK_INVALID',
+ 'IMAGE_PATH_REJECTED','IMAGE_READ_FAILED','IMAGE_FORMAT_UNSUPPORTED','IMAGE_CAPACITY_EXCEEDED','NATIVE_REQUEST_TOO_LARGE',
  'APP_SERVER_RPC_ERROR','APP_SERVER_RPC_CLOSED','APP_SERVER_RPC_EOF','APP_SERVER_RPC_TIMEOUT','APP_SERVER_RPC_FRAME_TOO_LARGE',
  'APP_SERVER_RPC_WRITE_FAILED','SESSION_THREAD_MISSING','SESSION_PROTOCOL_FAILED','SESSION_TIMEOUT',
  'SOURCE_REWRITE','SOURCE_GAP','SOURCE_INVALID','capacity_unknown','context_too_large','ABORTED'] as const;

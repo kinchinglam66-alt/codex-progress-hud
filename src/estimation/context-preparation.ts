@@ -49,6 +49,8 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
   const {snapshot,signal,baseInput,capacity}=options;
   try {
     signal.throwIfAborted();
+    if(snapshot.checkpoint?.items.some(item=>Array.isArray(item.content)&&
+      item.content.some(part=>part?.type==='input_image')))throw Error('image_context_unsupported');
     if(capacity===null)throw Error('capacity_unknown');
     if(!Number.isSafeInteger(options.observedAtMs)||options.observedAtMs<0)throw Error('invalid_observation_time');
     // Buffered async iterators may only yield microtasks. Cooperatively budget
@@ -88,6 +90,7 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     for await(const entry of snapshot.records(signal)) {
       await cooperate();
       const {record}=entry;
+      if(record.imageContextPending===true||(record.imageCount??0)>0||record.contentParts?.some(part=>part.type!=='text'))throw Error('image_context_unsupported');
       if(record.turnId===options.currentTurnId)currentSeen=true;
       else if(currentSeen&&record.turnId!==null)laterTurn=true;
       if(laterTurn)continue;

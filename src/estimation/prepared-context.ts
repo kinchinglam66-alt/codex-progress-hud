@@ -5,6 +5,9 @@ export type ContextMode='full'|'compressed'|'incomplete';
 export interface ContextRepresentation {
   mode:ContextMode;
   sourceComplete:boolean;
+  missingImages?:number|undefined;
+  inferenceEligible?:boolean|undefined;
+  sourceGaps?:NonNullable<ObserverInput['representation']>['sourceGaps'];
   originalRecords:number;
   sessionCoveredRecords?:number;
   sourceRepresentation?:'raw_history'|'upstream_compacted'|undefined;

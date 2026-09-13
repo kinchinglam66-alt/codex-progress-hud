@@ -36,11 +36,14 @@ export const resultRejectionReasons = [
 export type ResultRejectionReason = typeof resultRejectionReasons[number];
 
 export const observerContextStates=['history_loading','context_preparing','context_full','context_compressed',
+  'context_images_missing',
+  'image_context_unsupported',
   'history_incomplete','capacity_unknown','context_too_large','compression_failed'] as const;
 export type ObserverContextState=typeof observerContextStates[number];
 
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */
 export interface ObserverDiagnostics {
+  missingImages?:number;
   contextState?:ObserverContextState;
   state:'pending'|'history_loading'|'history_unavailable'|'estimating'|'insufficient_context'|'call_failed'|'setup_failed'|'rate_limited'|'admission_blocked'|'disabled'|'ready'|ResultDiagnostic;
   admissionReason?:AdmissionReason;

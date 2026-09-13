@@ -5,7 +5,7 @@ import type {PersistentWorkerOptions} from './observer-persistent-worker.js';
  * Text uses a conservative byte budget; half is reserved for retained context.
  * No original records are cropped to meet this policy: exhaustion is explicit.
  */
-export function persistentHistoryPolicy(capacity:ContextCapacity|null):Pick<PersistentWorkerOptions,'bootstrapBatchByteCapacity'|'historyBudget'>{
+export function persistentHistoryPolicy(capacity:ContextCapacity|null):Pick<PersistentWorkerOptions,'bootstrapBatchByteCapacity'|'historyBudget'|'nativeRequestByteLimit'>{
  if(capacity===null)return {};
  if(!Number.isSafeInteger(capacity.contextTokens)||!Number.isSafeInteger(capacity.outputReserveTokens)||
    capacity.outputReserveTokens<0||capacity.contextTokens<=capacity.outputReserveTokens||
@@ -15,7 +15,7 @@ export function persistentHistoryPolicy(capacity:ContextCapacity|null):Pick<Pers
  if(newInput<1024||!Number.isSafeInteger(newInput*16))throw Error('INVALID_HISTORY_CAPACITY');
  const frame=Math.min(65536,newInput,capacity.requestBytes===null?65536:Math.floor(capacity.requestBytes/2));
  if(frame<1024)throw Error('INVALID_HISTORY_CAPACITY');
- return {bootstrapBatchByteCapacity:frame,historyBudget:{trusted:true,
+ return {bootstrapBatchByteCapacity:frame,...(capacity.requestBytes===null?{}:{nativeRequestByteLimit:Math.min(capacity.requestBytes,16*1024*1024)}),historyBudget:{trusted:true,
    contextCapacityBytes:available,retainedSummaryReserveBytes:reserve,
    maxSourceBytes:newInput*16,maxCompactionOperations:16}};
 }

@@ -11,6 +11,7 @@ it('derives a bounded cumulative input policy from the configured capacity',()=>
  expect(policy.historyBudget!.maxSourceBytes).toBe(1936128);
 });
 it('honors a smaller configured request-byte budget and rejects unusable capacity',()=>{
+ expect(persistentHistoryPolicy({contextTokens:258400,outputReserveTokens:16384,requestBytes:16384,source:'configured'})).toMatchObject({nativeRequestByteLimit:16384});
  expect(persistentHistoryPolicy({contextTokens:258400,outputReserveTokens:16384,requestBytes:16384,source:'configured'}).bootstrapBatchByteCapacity).toBe(8192);
  expect(persistentHistoryPolicy({contextTokens:258400,outputReserveTokens:16384,requestBytes:16384,source:'configured'}).historyBudget).toMatchObject({contextCapacityBytes:242016,retainedSummaryReserveBytes:121008,maxSourceBytes:1936128});
  expect(()=>persistentHistoryPolicy({contextTokens:1,outputReserveTokens:1,requestBytes:null,source:'configured'})).toThrow('INVALID_HISTORY_CAPACITY');

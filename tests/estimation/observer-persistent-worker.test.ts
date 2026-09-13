@@ -1,5 +1,5 @@
 import {expect,it} from 'vitest';
-import {mkdtemp,mkdir,readFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Script} from 'node:vm';
@@ -9,16 +9,120 @@ import {createPersistentReceiptJournal,preparationErrorCode} from '../../src/est
 import {openReleaseAccounting} from '../../src/estimation/release-accounting.js';
 import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
+import {createLocalSessionReader} from '../../src/observer/local-session-reader.js';
 import {persistentHistoryPolicy} from '../../src/estimation/persistent-history-policy.js';
 import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
 import type {ConversationRecord} from '../../src/observer/conversation-record.js';
 const input:ObserverInput={goalSummary:'current',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'current',truncated:false}],truncated:false};
+const imageBytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=','base64');
+it.each(['process','binding'] as const)('requires history re-import after prepared %s replacement',async replacement=>{
+ const f=await fixture(),signal=new AbortController().signal;
+ const records:ConversationRecord[]=[{id:'image',kind:'user',turnId:'t',atMs:1,
+   contentParts:[{type:'input_image',imageUrl:'data:image/png;base64,'+imageBytes.toString('base64')}]}];
+ try{
+   const prepared=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'t'},signal,'source',0,0);
+   if(replacement==='process')await f.lastProcess()!.close();else f.changeBinding();
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).not.toBe('interpreted');
+   expect(f.accounting.snapshot().starts).toBe(0);
+   const rebuilt=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'t'},signal,'source',0,0);
+   expect((await f.worker.observe(rebuilt.input,signal,'source',0)).status).toBe('interpreted');
+   expect(f.imports).toHaveLength(2);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('carries actual local post-checkpoint image bytes from source to RPC without receipt leakage',async()=>{
+ const f=await fixture(),signal=new AbortController().signal,root=join(f.receipts,'source');
+ await mkdir(root,{recursive:true});const path=join(root,'fixture.png');await writeFile(path,imageBytes);
+ const thread='22222222-2222-4222-8222-222222222222';
+ const directory=join(root,'2026','09','13');await mkdir(directory,{recursive:true});
+ await writeFile(join(directory,`rollout-2026-09-13T00-00-00-${thread}.jsonl`),[
+   {type:'session_meta',payload:{id:thread}},
+   {type:'compacted',payload:{replacement_history:[{type:'compaction',encrypted_content:'synthetic'}]}},
+   {type:'event_msg',payload:{type:'item_completed',turn_id:'t',item:{type:'UserMessage',id:'image',content:[
+     {type:'input_text',text:'before'},{type:'local_image',path},{type:'input_text',text:'after'}]}}}
+ ].map(record=>JSON.stringify({timestamp:'2026-09-13T00:00:00Z',...record})).join('\n')+'\n');
+ const reader=createLocalSessionReader({root});
+ try{
+   const snapshot=await reader.snapshot(thread,signal);
+   const prepared=await f.worker.prepareContext!(input,{snapshot,currentTurnId:'t'},signal,'source',0,0);
+   const imported=(f.imports.at(-1) as any).items[0].content;
+   expect(imported.slice(1)).toEqual([{type:'input_text',text:'before'},
+     {type:'input_image',image_url:'data:image/png;base64,'+imageBytes.toString('base64')},{type:'input_text',text:'after'}]);
+   expect(JSON.stringify(f.imports)).not.toContain(path);
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+   const receipt=await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8');
+   expect(receipt).not.toContain(path);expect(receipt).not.toContain(imageBytes.toString('base64'));
+ }finally{await reader.close();await f.worker.close();await f.accounting.close();}
+});
+it('preserves missing-image quality across compaction replay and a new turn until rebuilt',async()=>{
+ const f=await fixture(false,{script:compactionScript,bootstrapBatchByteCapacity:1024,historyBudget:controlledBudget()}),signal=new AbortController().signal;
+ const path=join(f.receipts,'restored.png');
+ const records:ConversationRecord[]=[{id:'missing',kind:'user',turnId:'t',atMs:1,contentParts:[{type:'local_image',path}]},
+   {id:'long',kind:'tool_result',turnId:'t',atMs:2,text:'history '.repeat(240)}];
+ try{
+   const first=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'t'},signal,'source',0,0);
+   expect(first.representation.confirmedCompactions).toBeGreaterThan(0);
+   expect(first.representation.missingImages).toBe(1);
+   const imports=f.imports.length;
+   const replay=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'t'},signal,'source',0,0);
+   expect(f.imports).toHaveLength(imports);expect(replay.representation.missingImages).toBe(1);
+   records.push({id:'next',kind:'user',turnId:'next',atMs:3,text:'continue'});
+   const next=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'next'},signal,'source',1,0);
+   expect(next.representation).toMatchObject({sourceComplete:false,missingImages:1,inferenceEligible:true});
+   expect((await f.worker.observe(next.input,signal,'source',1)).status).toBe('interpreted');
+   await writeFile(path,imageBytes);
+   await expect(f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'next'},signal,'source',1,0)).rejects.toThrow('SOURCE_REWRITE');
+   const rebuilt=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'next'},signal,'source',1,0);
+   expect(rebuilt.representation).toMatchObject({sourceComplete:true,missingImages:0});
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('rejects changed same-path images before admitting a forecast',async()=>{
+ const f=await fixture(),signal=new AbortController().signal,path=join(f.receipts,'image.png');
+ await mkdir(f.receipts,{recursive:true});await writeFile(path,imageBytes);
+ try{
+   const prepared=await f.worker.prepareContext!(input,{snapshot:history([{id:'image',kind:'user',turnId:'t',atMs:1,contentParts:[{type:'local_image',path}]}]),currentTurnId:'t'},signal,'source',0,0);
+   await writeFile(path,Buffer.concat([imageBytes,Buffer.from([0])]));
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).not.toBe('interpreted');
+   expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('rejects an image changed during inference but retains its actual token usage',async()=>{
+ const f=await fixture(),signal=new AbortController().signal,path=join(f.receipts,'image.png');
+ await mkdir(f.receipts,{recursive:true});await writeFile(path,imageBytes);
+ try{
+   const prepared=await f.worker.prepareContext!(input,{snapshot:history([{id:'image',kind:'user',turnId:'t',atMs:1,contentParts:[{type:'local_image',path}]}]),currentTurnId:'t'},signal,'source',0,0);
+   // Stage callback is before acceptance, after actual fake provider completion.
+   const {writeFileSync}=await import('node:fs');
+   const result=await f.worker.observe(prepared.input,signal,'source',0,stage=>{
+     if(stage==='provider_returned')writeFileSync(path,Buffer.concat([imageBytes,Buffer.from([1])]));
+   });
+   expect(result.status).not.toBe('interpreted');expect(result.interpretation).toBeNull();
+   expect(result.usage).toMatchObject({inputTokens:100,outputTokens:10});
+   expect(f.accounting.snapshot().knownTokens).toBe(110);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('blocks unresolved image projections at the worker admission boundary',async()=>{
+ const f=await fixture();try{
+   expect((await f.worker.observe({...input,imageContextPending:true},new AbortController().signal,'source',0)).status).toBe('invalid_input');
+   expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('settles known usage when cancellation wins after an image forecast returns',async()=>{
+ const f=await fixture(),controller=new AbortController(),path=join(f.receipts,'image.png');
+ await mkdir(f.receipts,{recursive:true});await writeFile(path,imageBytes);
+ try{
+   const prepared=await f.worker.prepareContext!(input,{snapshot:history([{id:'image',kind:'user',turnId:'t',atMs:1,contentParts:[{type:'local_image',path}]}]),currentTurnId:'t'},controller.signal,'source',0,0);
+   const result=await f.worker.observe(prepared.input,controller.signal,'source',0,stage=>{if(stage==='provider_returned')controller.abort();});
+   expect(result.interpretation).toBeNull();expect(result.usage).toMatchObject({inputTokens:100,outputTokens:10});
+   expect(f.accounting.snapshot().knownTokens).toBe(110);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
 const controlledBudget=(batch=1024,reserve=32):PersistentHistoryBudget=>({trusted:true,maxSourceBytes:256*1024,maxCompactionOperations:4,contextCapacityBytes:batch+reserve,retainedSummaryReserveBytes:reserve});
 const script=`let b='',n=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='turn/start'){const id='r'+(++n);emit({id:m.id,result:{turn:{id}}});emit({method:'item/completed',params:{threadId:'t',turnId:id,item:{type:'agentMessage',text:JSON.stringify({relation:'continue',status:'running',summary:'current',estimate:{remainingSeconds:90,errorPercent:20}})}}});emit({method:'thread/tokenUsage/updated',params:{threadId:'t',turnId:id,tokenUsage:{total:{inputTokens:100*n,outputTokens:10*n,totalTokens:110*n,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0},last:{inputTokens:100,outputTokens:10,totalTokens:110,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0}}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'completed'}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
 const timeoutScript=`let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='turn/start'){emit({id:m.id,result:{turn:{id:'r1'}}});emit({method:'item/completed',params:{threadId:'t',turnId:'r1',item:{type:'agentMessage',text:JSON.stringify({relation:'continue',status:'running',summary:'current',estimate:{remainingSeconds:90,errorPercent:20}})}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
 const compactionScript=`let b='',n=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='thread/compact/start'){const id='c'+(++n);emit({id:m.id,result:{}});emit({method:'item/started',params:{threadId:'t',turnId:id,item:{type:'contextCompaction',id:'ci'}}});emit({method:'item/completed',params:{threadId:'t',turnId:id,item:{type:'contextCompaction',id:'ci'}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'completed'}}});}else if(m.method==='turn/start'){const id='r'+(++n);emit({id:m.id,result:{turn:{id}}});emit({method:'item/completed',params:{threadId:'t',turnId:id,item:{type:'agentMessage',text:JSON.stringify({relation:'continue',status:'running',summary:'current',estimate:{remainingSeconds:90,errorPercent:20}})}}});emit({method:'thread/tokenUsage/updated',params:{threadId:'t',turnId:id,tokenUsage:{total:{inputTokens:100*n,outputTokens:10*n,totalTokens:110*n,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0},last:{inputTokens:100,outputTokens:10,totalTokens:110,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0}}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'completed'}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
 const failedCompactionScript=`let b='',n=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='thread/compact/start'){const id='c'+(++n);emit({id:m.id,result:{}});emit({method:'item/started',params:{threadId:'t',turnId:id,item:{type:'contextCompaction',id:'ci'}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'failed'}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
 async function fixture(failSettlement=false,options:{script?:string;sessionTimeoutMs?:number;receiptFailure?:boolean;compactionReceiptFailure?:boolean;compactionCloseFailure?:boolean;abortOnUpdate?:()=>void;bootstrapBatchByteCapacity?:number;retainedSummaryByteReserve?:number;historyBudget?:PersistentHistoryBudget}={}){
+ let accountFingerprint='a'.repeat(64);
  new Script(script);
  const dir=await mkdtemp(join(tmpdir(),'hud-persistent-worker-'));await mkdir(join(dir,'ledger'));
  const accounting=await openReleaseAccounting(join(dir,'ledger'),Date.now);let processes=0,preparations=0,authorized=true,settlementAttempts=0;const notifications:unknown[]=[];const imports:unknown[]=[];let lastProcess:ReturnType<typeof createObserverSessionProcess>|undefined;
@@ -27,9 +131,9 @@ async function fixture(failSettlement=false,options:{script?:string;sessionTimeo
  const baseJournal=createPersistentReceiptJournal(join(dir,'receipts'));
  const receiptJournalFactory=options.receiptFailure?()=>({...baseJournal,usageSnapshot:async()=>{throw Error('private journal detail');}}):options.compactionReceiptFailure?()=>({...baseJournal,operationTerminal:async()=>{throw Error('private journal detail');}}):undefined;
  const worker=createPersistentObserverWorker({...({accounting,authorize:()=>authorized,now:Date.now,outputSchema:{type:'object'},receiptDirectory:join(dir,'receipts'),sessionTimeoutMs:options.sessionTimeoutMs,bootstrapBatchByteCapacity:options.bootstrapBatchByteCapacity,retainedSummaryByteReserve:options.retainedSummaryByteReserve,historyBudget:options.historyBudget,receiptJournalFactory,
-   prepareSession:async()=>{preparations++;return {invocation:{executable:process.execPath,cwd:process.cwd(),env:process.env,args:['-e',options.script??script],input:''},binding:{accountFingerprint:'a'.repeat(64),routeFingerprint:'b'.repeat(64),assetsFingerprint:'c'.repeat(64)}};},
+   prepareSession:async()=>{preparations++;return {invocation:{executable:process.execPath,cwd:process.cwd(),env:process.env,args:['-e',options.script??script],input:''},binding:{accountFingerprint,routeFingerprint:'b'.repeat(64),assetsFingerprint:'c'.repeat(64)}};},
    processFactory:()=>{processes++;const p=createObserverSessionProcess({captureIdentity:async()=> '123'});lastProcess=p;const start=p.start;const close=p.close;return {...p,start:async(i:any)=>{const r=await start(i);r.rpc.subscribe(n=>notifications.push(n));const call=r.rpc.call;r.rpc.call=(m,p)=>{if(m==='thread/inject_items')imports.push(p);return call(m,p);};return r;},close:async()=>{if(options.compactionCloseFailure&&preparations>1)throw Error('simulated close failure');return close();}};}} as any)});
- return {accounting,worker,notifications,imports,settlementAttempts:()=>settlementAttempts,preparations:()=>preparations,processes:()=>processes,lastProcess:()=>lastProcess,receipts:join(dir,'receipts'),revoke:()=>{authorized=false;}};
+ return {accounting,worker,notifications,imports,changeBinding:()=>{accountFingerprint='d'.repeat(64);},settlementAttempts:()=>settlementAttempts,preparations:()=>preparations,processes:()=>processes,lastProcess:()=>lastProcess,receipts:join(dir,'receipts'),revoke:()=>{authorized=false;}};
 }
 function history(records:ConversationRecord[],epoch=0):HistorySnapshot{
  return {identity:'local-only-source-identity',sourceEpoch:epoch,revision:records.length,coverage:{complete:true,gaps:[]},
@@ -63,6 +167,11 @@ it('keeps checkpoint rejection separate from history and compression failures',a
 });
 it.each([
  ['APP_SERVER_RPC_ERROR','APP_SERVER_RPC_ERROR'],
+ ['IMAGE_PATH_REJECTED','IMAGE_PATH_REJECTED'],
+ ['IMAGE_READ_FAILED','IMAGE_READ_FAILED'],
+ ['IMAGE_FORMAT_UNSUPPORTED','IMAGE_FORMAT_UNSUPPORTED'],
+ ['IMAGE_CAPACITY_EXCEEDED','IMAGE_CAPACITY_EXCEEDED'],
+ ['NATIVE_REQUEST_TOO_LARGE','NATIVE_REQUEST_TOO_LARGE'],
  ['APP_SERVER_RPC_ERROR private payload','PREPARATION_UNKNOWN'],
  ['context_too_large:private payload','context_too_large'],
  ['private credentials','PREPARATION_UNKNOWN'],
@@ -94,6 +203,33 @@ it('continues after completed compressions with unverifiable runtime placeholder
    expect(f.accounting.snapshot().unknown).toBeGreaterThanOrEqual(4);
    const receipts=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
    expect(receipts.some(row=>row.kind==='usage_snapshot'&&row.last.totalTokens===102241)).toBe(true);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('continues with a missing-image marker and honest incomplete representation',async()=>{
+ const f=await fixture(),signal=new AbortController().signal;
+ const record:ConversationRecord={id:'missing',turnId:'t',kind:'user',atMs:1,text:'inspect',contentParts:[
+   {type:'text',text:'inspect'},{type:'local_image',path:join(f.receipts,'absent-image.png')}]};
+ try{
+   const prepared=await f.worker.prepareContext!(input,{snapshot:history([record]),currentTurnId:'t'},signal,'source',0,0);
+   expect(prepared.representation).toMatchObject({sourceComplete:false,mode:'incomplete',missingImages:1,inferenceEligible:true,sourceGaps:['missing_image']});
+   const imported=f.imports.at(-1) as any;
+   expect(imported.items[0].content.at(-1).text).toContain('image content unavailable');
+   expect(JSON.stringify(imported)).not.toContain('absent-image.png');
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('delivers post-checkpoint embedded image content natively without duplicate text projection',async()=>{
+ const f=await fixture(),signal=new AbortController().signal;
+ const imageUrl='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=';
+ const record:ConversationRecord={id:'image',turnId:'t',kind:'user',atMs:1,text:'beforeafter',contentParts:[
+   {type:'text',text:'before'},{type:'input_image',imageUrl},{type:'text',text:'after'}]};
+ const checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[{type:'compaction',encrypted_content:'synthetic-checkpoint'}]}})!;
+ try{
+   await f.worker.prepareContext!(input,{snapshot:{...history([record]),checkpoint},currentTurnId:'t'},signal,'source',0,0);
+   const imported=f.imports.at(-1) as any;
+   expect(imported.items[0].content.slice(1)).toEqual([
+     {type:'input_text',text:'before'},{type:'input_image',image_url:imageUrl},{type:'input_text',text:'after'}]);
+   expect(imported.items[0].content[0].text).not.toContain('beforeafter');
  }finally{await f.worker.close();await f.accounting.close();}
 });
 it('bootstraps the native source window once before incremental tail and reports its provenance',async()=>{
@@ -134,7 +270,8 @@ it('keeps current observation coverage consistent with the source snapshot',asyn
    const snapshot=history([]);snapshot.coverage={complete:false,gaps:['unsupported_payload']};
    const prepared=await f.worker.prepareContext!(current,{snapshot,currentTurnId:'t'},signal,'source',0,0);
    expect(prepared.input.observation?.historyComplete).toBe(false);
-   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('invalid_input');
+   expect(f.accounting.snapshot().starts).toBe(0);
  }finally{await f.worker.close();await f.accounting.close();}
 });
 it('imports identical tool text and output once without losing distinct content or mutating source',async()=>{

@@ -70,6 +70,78 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it('does not deduplicate a newly unsupported image as an unchanged text message',async()=>{
+    const f=await fixture(meta()+message('user','same','u')+line('response_item',{
+      type:'message',id:'u',role:'user',turn_id:'turn-1',content:[{type:'input_text',text:'same'},{type:'input_image',path:'invalid-shape'}]}));
+    const reader=createLocalSessionReader({root:f.root});
+    try{const live=await reader.read(THREAD,signal());expect(live.records.some(record=>record.imageContextPending)).toBe(true);}
+    finally{await reader.close();}
+  });
+  it.each([
+    {type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'local_image',path:'C:/synthetic.png'}]}},
+    {type:'event_msg',payload:{type:'item_completed',item:{type:'AgentMessage',role:'user',content:[{type:'local_image',path:'C:/synthetic.png'}]}}},
+    {type:'event_msg',payload:{type:'item_completed',item:{type:'AgentMessage',content:[{type:'local_image',path:'C:/synthetic.png'}]}}}
+  ])('rejects non-user attachment provenance: $type $payload.type',async envelope=>{
+    const f=await fixture(meta()+message('user','inspect','u')+line(envelope.type,envelope.payload));
+    const reader=createLocalSessionReader({root:f.root});let snapshot:HistorySnapshot|undefined;
+    try{
+      const live=await reader.read(THREAD,signal());
+      expect(live.records.some(record=>(record as any).imageContextPending===true)).toBe(true);
+      snapshot=await reader.snapshot(THREAD,signal());const records=[];
+      for await(const item of snapshot.records(signal()))records.push(item.record);
+      expect(snapshot.coverage.complete).toBe(false);
+      expect(records.some(record=>record.contentParts?.some(part=>part.type==='local_image'))).toBe(false);
+    }finally{await snapshot?.close();await reader.close();}
+  });
+  it('exposes bounded image identity from live reads without retaining image bytes',async()=>{
+    const f=await fixture(meta()+line('event_msg',{type:'item_completed',turn_id:'turn-1',item:{type:'UserMessage',id:'live-image',content:[{type:'input_image',image_url:'data:image/png;base64,AA=='}]}}));
+    const reader=createLocalSessionReader({root:f.root});
+    try{
+      const batch=await reader.read(THREAD,signal());const record=batch.records.find(r=>r.id==='live-image');
+      expect(record).toMatchObject({imageCount:1,imageFingerprint:expect.stringMatching(/^[a-f0-9]{64}$/)});
+      expect(JSON.stringify(record)).not.toContain('base64');
+    }finally{await reader.close();}
+  });
+  it('preserves embedded images and distinguishes changed attachments from duplicate replay',async()=>{
+    const msg=(url:string)=>line('response_item',{type:'message',role:'user',id:'same',turn_id:'turn-1',content:[
+      {type:'input_text',text:'inspect'},{type:'input_image',image_url:url}]});
+    const f=await fixture(meta()+msg('data:image/png;base64,AA==')+msg('data:image/png;base64,AA==')+msg('data:image/png;base64,AQ=='));
+    const reader=createLocalSessionReader({root:f.root});const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      const records=[];for await(const item of snapshot.records(signal()))records.push(item.record);
+      expect(records).toHaveLength(2);
+      expect(records.map(r=>r.contentParts?.[1])).toEqual([
+        {type:'input_image',imageUrl:'data:image/png;base64,AA=='},
+        {type:'input_image',imageUrl:'data:image/png;base64,AQ=='}]);
+      expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+    }finally{await snapshot.close();await reader.close();}
+  });
+  it.each([{type:'local_image',path:''},{type:'input_image',path:'not-a-url'}])('does not accept malformed image content %j', async part => {
+    const f=await fixture(meta()+line('response_item',{type:'message',role:'user',id:'bad-image',turn_id:'turn-1',content:[part]}));
+    const reader=createLocalSessionReader({root:f.root});const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      for await(const _item of snapshot.records(signal())) { /* consume fixed watermark */ }
+      expect(snapshot.coverage.complete).toBe(false);
+      expect(snapshot.coverage.gaps).toContain('unreadable_record');
+    } finally {await snapshot.close();await reader.close();}
+  });
+  it.each([false,true])('retains ordered native image content after a checkpoint (imageOnly=%s)', async imageOnly => {
+    const content=imageOnly?[{type:'local_image',path:'C:/fixture/image.png'}]:[
+      {type:'text',text:'before'},{type:'local_image',path:'C:/fixture/image.png'},{type:'text',text:'after'}];
+    const f=await fixture(meta()+checkpoint('image')+line('event_msg',{
+      type:'item_completed',turn_id:'turn-1',item:{type:'UserMessage',id:'image-message',content}
+    }));
+    const reader=createLocalSessionReader({root:f.root});
+    const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      const records=[];for await(const item of snapshot.records(signal()))records.push(item.record);
+      expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+      expect(records.find(r=>r.id==='image-message')).toMatchObject({
+        text:imageOnly?'':'beforeafter',contentParts:content
+      });
+    } finally {await snapshot.close();await reader.close();}
+  });
+
   it("preserves native file, collaboration and conversation metadata after a checkpoint", async () => {
     const events = [
       line('event_msg', {type:'thread_settings_applied', thread_id:THREAD, thread_settings:{model:'test-model'}}),
@@ -493,7 +565,7 @@ describe("source-backed history snapshots", () => {
   it("keeps coverage non-authoritative until unsupported and partial records are examined", async () => {
     const unsupported = line("response_item", {
       type: "message", id: "attachment-message", role: "user", turn_id: "turn-1",
-      content: [{type: "input_image", path: "must-not-be-read.txt"}]
+      content: [{type: "future_attachment", path: "must-not-be-read.txt"}]
     });
     const unattributed = line("response_item", {
       type: "message", id: "unattributed-message", role: "assistant",
@@ -609,7 +681,7 @@ describe("source-backed history snapshots", () => {
   it("keeps an earlier page gap authoritative across later clean pages", async () => {
     const unsupported = line("response_item", {
       type: "message", id: "early-unsupported", role: "user", turn_id: "turn-1",
-      content: [{type: "input_image", path: "not-read.txt"}]
+      content: [{type: "future_attachment", path: "not-read.txt"}]
     });
     const history = Array.from({length: 150}, (_, index) =>
       message("assistant", `page-${index}-${"y".repeat(40 * 1024)}`, `page-${index}`)

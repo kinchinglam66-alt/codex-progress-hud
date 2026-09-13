@@ -8,6 +8,12 @@ export type ConversationRecordKind =
 export type RuntimeState = "running" | "waiting" | "interrupted" | "failed";
 export type RuntimeOutcome = "completed" | "interrupted" | "failed";
 
+/** Source content only: local references require validation before provider import. */
+export type ConversationContentPart =
+  | {type:'text';text:string}
+  | {type:'local_image';path:string}
+  | {type:'input_image';imageUrl:string};
+
 export interface ConversationRecord {
   id: string;
   turnId: string | null;
@@ -18,6 +24,10 @@ export interface ConversationRecord {
   atMs: number;
   kind: ConversationRecordKind;
   text?: string;
+  contentParts?: ConversationContentPart[];
+  imageCount?:number;
+  imageContextPending?:boolean;
+  imageFingerprint?:string;
   actionId?: string;
   toolName?: string;
   cwd?: string;

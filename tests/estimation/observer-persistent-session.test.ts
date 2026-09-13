@@ -53,6 +53,52 @@ function checkpoint(text='opaque-summary'){
    {type:'compaction',encrypted_content:text}
  ]}})!;
 }
+it('rejects native requests exceeding the whole-frame limit before dispatch',async()=>{
+ const f=fixture();const options={cwd:'empty',outputSchema:{},nativeRequestByteLimit:140};
+ const s=createPersistentObserverSession(f.rpc,options);await s.start();
+ const record={ordinal:0,text:'metadata',content:[{type:'input_image' as const,image_url:'data:image/png;base64,AA=='}]};
+ await expect(s.append([record],new AbortController().signal)).rejects.toThrow('NATIVE_REQUEST_TOO_LARGE');
+ expect(f.calls.filter(c=>c.method==='thread/inject_items')).toHaveLength(0);
+ expect(s.status().cursor).toBe(-1);
+});
+it('rejects oversized requests before spending a compaction on populated history',async()=>{
+ const f=fixture({compact:'complete'}),signal=new AbortController().signal;
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},nativeRequestByteLimit:900,
+   bootstrapBatchByteCapacity:800,contextCapacityPolicy:{trusted:true,contextCapacityBytes:950,retainedSummaryReserveBytes:50}});
+ await s.start();await s.append([{ordinal:0,text:'x'.repeat(600)}],signal);
+ let compactions=0;
+ await expect(s.append([{ordinal:1,text:'metadata',content:[{type:'input_image',image_url:'data:image/png;base64,'+'A'.repeat(620)}]}],signal,
+   async()=>{compactions++;return s.compact(signal);})).rejects.toThrow('NATIVE_REQUEST_TOO_LARGE');
+ expect(compactions).toBe(0);
+});
+it('does not commit native content when cancelled during acknowledgement',async()=>{
+ const f=fixture(),controller=new AbortController(),original=f.rpc.call;
+ f.rpc.call=async(method,params)=>{const answer=await original(method,params);if(method==='thread/inject_items')controller.abort();return answer;};
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});await s.start();
+ const record={ordinal:0,text:'metadata',content:[{type:'input_image' as const,image_url:'data:image/png;base64,AA=='}]};
+ await expect(s.append([record],controller.signal)).rejects.toBeDefined();expect(s.status()).toMatchObject({cursor:-1,uncertain:true});
+});
+it('imports native ordered image parts once and rejects changed image replay',async()=>{
+ const f=fixture(),s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}}),signal=new AbortController().signal;
+ await s.start();
+ const record={ordinal:0,text:'source metadata',content:[
+   {type:'input_text' as const,text:'before'},{type:'input_image' as const,image_url:'data:image/png;base64,AA=='},
+   {type:'input_text' as const,text:'after'}]};
+ await s.append([record],signal);await s.append([record],signal);
+ const imports=f.calls.filter(c=>c.method==='thread/inject_items');
+ expect(imports).toHaveLength(1);
+ expect(imports[0]!.params.items[0].content.slice(1)).toEqual(record.content);
+ expect(s.status().cursor).toBe(0);
+ await expect(s.append([{...record,content:[{type:'input_image' as const,image_url:'data:image/png;base64,AQ=='}]}],signal)).rejects.toThrow('SOURCE_REWRITE');
+});
+it('does not commit native image import on an ambiguous acknowledgement',async()=>{
+ const f=fixture();const original=f.rpc.call;
+ f.rpc.call=async(method,params)=>method==='thread/inject_items'?null:original(method,params);
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});await s.start();
+ const record={ordinal:0,text:'metadata',content:[{type:'input_image' as const,image_url:'data:image/png;base64,AA=='}]};
+ await expect(s.append([record],new AbortController().signal)).rejects.toThrow('SOURCE_ACK_INVALID');
+ expect(s.status()).toMatchObject({cursor:-1,uncertain:true});
+});
 it('imports native checkpoint once before tail records and reapplies trusted observer instructions',async()=>{
  const f=fixture(),s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}}),signal=new AbortController().signal;
  const native=checkpoint();await s.start();await s.bootstrapCheckpoint(native,signal);
