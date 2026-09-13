@@ -12,6 +12,9 @@ export function captureHistoryFeatures(source:HistorySnapshot,turnId:string){
     const actions=new Set<string>(),hash=createPrefixFingerprint();
     for await(const item of source.records(signal)){
       const r=item.record;
+      // Keep source metadata in model context, but it describes neither a
+      // current-turn action nor an ambiguously attributed tool invocation.
+      if(r.sourceScope==='conversation'){yield item;continue;}
       const explicitTurn=researchTurnId(r);
       // An unowned tool may belong to this turn: never silently count it as zero.
       if(explicitTurn===null&&(r.kind==='tool_start'||r.kind==='tool_result'))unknown=true;

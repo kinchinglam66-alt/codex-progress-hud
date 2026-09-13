@@ -13,6 +13,8 @@ export interface ConversationRecord {
   turnId: string | null;
   /** Explicit source attribution. Null means inferred/unknown; absent is legacy producer compatibility. */
   sourceTurnId?: string | null;
+  /** Parser-attested conversation metadata, not a task/turn lifecycle signal. */
+  sourceScope?: 'conversation';
   atMs: number;
   kind: ConversationRecordKind;
   text?: string;

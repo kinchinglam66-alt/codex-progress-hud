@@ -5,6 +5,18 @@ import type {ConversationRecord} from '../../../src/observer/conversation-record
 import {createPrefixFingerprint} from '../../../src/estimation/residual/fingerprint.js';
 function snapshot(records:ConversationRecord[]):HistorySnapshot{return {identity:'source',sourceEpoch:1,revision:1,coverage:{complete:true,gaps:[]},
   async *records(){for(const [ordinal,record] of records.entries())yield {ordinal,record};},async close(){}};}
+it('preserves parser-attested metadata without counting it as an unowned action',async()=>{
+  const metadata:ConversationRecord={id:'meta',turnId:null,sourceTurnId:null,sourceScope:'conversation',atMs:0,
+    kind:'tool_result',toolName:'codex:thread_goal_updated',text:'conversation metadata'};
+  const capture=captureHistoryFeatures(snapshot([metadata,
+    {id:'a',turnId:'turn',atMs:1,kind:'tool_start',actionId:'work'},
+    {id:'b',turnId:'turn',atMs:2,kind:'tool_result',actionId:'work',complete:true}]),'turn');
+  const seen=[];
+  for await(const item of capture.snapshot.records(new AbortController().signal))seen.push(item.record);
+  expect(seen[0]).toEqual(metadata);
+  expect(capture.result()).toMatchObject({completedActions:1,outstandingActions:0,prefixComplete:true});
+  expect(capture.reason()).toBeNull();
+});
 it('collects current-turn counters during the existing scan without retaining text',async()=>{
   const source=snapshot([{id:'a',turnId:'other',atMs:0,kind:'tool_result',exitCode:1},
     {id:'b',turnId:'turn',atMs:1,kind:'tool_start',actionId:'x',text:'PRIVATE'},

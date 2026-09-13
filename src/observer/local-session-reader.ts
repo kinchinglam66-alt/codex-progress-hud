@@ -294,7 +294,7 @@ function messageText(value: unknown, options: ParseOptions, markUnsupported: () 
     }
     const content = part as Record<string, unknown>;
     const type = content.type;
-    if (type === "input_text" || type === "output_text" || type === "text") {
+    if (type === "input_text" || type === "output_text" || type === "text" || (options.preserveText && type === "Text")) {
       if (typeof content.text !== "string") throw new LocalSessionSourceError("source_malformed");
       parts.push(content.text);
       continue;
@@ -527,6 +527,25 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     return [];
   }
   const eventType = payload.type;
+  if (context.options.preserveText) {
+    if (eventType === 'token_count' && Object.keys(payload).every(key => ['type','info','rate_limits'].includes(key)) &&
+      'info' in payload && 'rate_limits' in payload &&
+      (payload.info === null || typeof payload.info === 'object' && !Array.isArray(payload.info)) &&
+      (payload.rate_limits === null || typeof payload.rate_limits === 'object' && !Array.isArray(payload.rate_limits))) return [];
+    if (eventType === 'thread_settings_applied' || eventType === 'thread_goal_updated') {
+      const sourceThread = eventType === 'thread_settings_applied' ? payload.thread_id : payload.threadId;
+      const content = eventType === 'thread_settings_applied' ? payload.thread_settings : payload.goal;
+      if (sourceThread !== context.threadId ||
+        !(content !== null && typeof content === 'object' && !Array.isArray(content) || eventType === 'thread_goal_updated' && content === null)) {
+        context.gaps.add('unsupported_payload'); return [];
+      }
+      // Preserve the full event as source data, including goal text. Do not
+      // synthesize a user request, active turn or completion from metadata.
+      const id = sourceId(context.threadId, context.offset, undefined);
+      return addRecord(context, {id,turnId:null,sourceTurnId:null,sourceScope:'conversation',atMs,
+        kind:'tool_result',toolName:`codex:${eventType}`,text:JSON.stringify(payload)}, `metadata:${id}`);
+    }
+  }
   if (eventType === "task_started") {
     const turnId = turnIdFrom(payload, null);
     if (turnId === null) throw new LocalSessionSourceError("source_malformed");
@@ -578,6 +597,16 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
   const itemType = item.type;
   // Match response_item/reasoning: internal reasoning is not source task text.
   if (itemType === "Reasoning") return [];
+  if (context.options.preserveText && itemType === 'ContextCompaction' &&
+    Object.keys(payload).every(key => ['type','item','thread_id','threadId','turn_id','turnId','started_at_ms','completed_at_ms'].includes(key)) &&
+    ['started_at_ms','completed_at_ms'].every(key => !Object.hasOwn(payload,key) ||
+      (typeof payload[key] === 'number' && Number.isFinite(payload[key]) && payload[key] >= 0)) &&
+    ['thread_id','threadId','turn_id','turnId'].every(key =>
+      !Object.hasOwn(payload,key) || stringValue(payload[key]) !== undefined) &&
+    ['thread_id','threadId'].every(key =>
+      !Object.hasOwn(payload,key) || payload[key] === context.threadId) &&
+    !(Object.hasOwn(payload,'turn_id') && Object.hasOwn(payload,'turnId') && payload.turn_id !== payload.turnId) &&
+    stringValue(item.id) !== undefined && Object.keys(item).every(key => ['type','id'].includes(key))) return [];
   // Keep legacy/strict estimator turnId behavior intact. Research may use an
   // explicit outer event ID, but conflicting explicit IDs are never inferred.
   const outerTurn=turnIdFrom(payload,null,false);
@@ -592,6 +621,16 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
   }
   if (itemType === "CommandExecution" || itemType === "command_execution") {
     return withSourceTurn(normalizeCommand(context, item, atMs, context.offset, eventType === "item_completed"));
+  }
+  if (context.options.preserveText && (itemType === 'FileChange' || itemType === 'CollabAgentToolCall')) {
+    const raw = item as unknown as Record<string, unknown>;
+    const valid = stringValue(raw.id) !== undefined && stringValue(raw.status) !== undefined &&
+      (itemType === 'FileChange' ? raw.changes !== null && typeof raw.changes === 'object' :
+        stringValue(raw.tool) !== undefined && Array.isArray(raw.receiver_thread_ids));
+    if (!valid) {context.gaps.add('unsupported_payload');return [];}
+    const completed = eventType === 'item_completed';
+    return withSourceTurn(normalizeTool(context, {...raw,name:`codex:${itemType}`,
+      ...(completed ? {output:raw} : {input:raw})},atMs,context.offset,completed));
   }
   context.gaps.add("unsupported_payload");
   return [];
@@ -1006,7 +1045,7 @@ async function readSnapshotPage(
       const parsed = parseLine(context, bytes);
       state.activeTurnId = context.activeTurnId;
       records.push(...parsed);
-      if (parsed.some(record => record.turnId === null && record.sourceTurnId == null)) state.gaps.add("unattributed_record");
+      if (parsed.some(record => record.turnId === null && record.sourceTurnId == null && record.sourceScope !== 'conversation')) state.gaps.add("unattributed_record");
     } catch {
       // Snapshot parsing is best-effort per record; malformed records remain visible
       // as a coverage gap while later readable records continue to stream.

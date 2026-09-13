@@ -70,6 +70,72 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it("preserves native file, collaboration and conversation metadata after a checkpoint", async () => {
+    const events = [
+      line('event_msg', {type:'thread_settings_applied', thread_id:THREAD, thread_settings:{model:'test-model'}}),
+      line('event_msg', {type:'thread_goal_updated', threadId:THREAD, goal:{objective:'finish fixture',status:'active'}}),
+      line('event_msg', {type:'token_count', info:{total_token_usage:{total_tokens:10}},rate_limits:null}),
+      line('event_msg', {type:'item_completed',thread_id:THREAD,turn_id:'turn-1',started_at_ms:100,completed_at_ms:200,item:{type:'ContextCompaction',id:'compact'}}),
+      line('event_msg', {type:'item_completed',turn_id:'turn-1',item:{type:'AgentMessage',id:'agent-text',content:[{type:'Text',text:'native capitalized text'}],phase:'commentary'}}),
+      line('event_msg', {type:'item_completed',turn_id:'turn-1',item:{type:'FileChange',id:'patch',changes:{'a.ts':{type:'update',diff:'+fixture'}},status:'completed',stdout:'patched',stderr:''}}),
+      line('event_msg', {type:'item_completed',turn_id:'turn-1',item:{type:'CollabAgentToolCall',id:'collab',tool:'wait',status:'completed',sender_thread_id:THREAD,receiver_thread_ids:['child'],receiver_agents:[],agents_states:{child:{status:'completed',message:'fixture reviewed'}}}}),
+    ].join('');
+    const f = await fixture(meta()+checkpoint('native')+events+message('user','continue','current'));
+    const reader = createLocalSessionReader({root:f.root});
+    const snapshot = await reader.snapshot(THREAD,signal());
+    try {
+      const records=[];
+      for await(const item of snapshot.records(signal())) records.push(item.record);
+      expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+      expect(records.map(r=>r.text).join('\n')).toContain('+fixture');
+      expect(records.map(r=>r.text).join('\n')).toContain('fixture reviewed');
+      expect(records.map(r=>r.text).join('\n')).toContain('finish fixture');
+      expect(records.map(r=>r.text).join('\n')).toContain('test-model');
+      expect(records.map(r=>r.text).join('\n')).toContain('native capitalized text');
+      expect(records.some(r=>r.runtime!==undefined||r.outcome!==undefined)).toBe(false);
+      expect(records.filter(r=>r.turnId===null&&r.sourceTurnId==null)).toHaveLength(2);
+      const live = await reader.read(THREAD,signal());
+      expect(live.records.some(r=>r.sourceScope==='conversation'||r.toolName?.startsWith('codex:'))).toBe(false);
+    } finally {await snapshot.close();await reader.close();}
+  });
+
+  it("does not accept a source-supplied conversation scope on an unattributed message", async () => {
+    const f=await fixture(meta()+checkpoint('scope')+line('response_item',{
+      type:'message',role:'user',id:'unattributed',sourceScope:'conversation',content:[{type:'input_text',text:'retain the gap'}]
+    }));
+    const reader=createLocalSessionReader({root:f.root});
+    const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      for await(const item of snapshot.records(signal())) expect(item.record.sourceScope).toBeUndefined();
+      expect(snapshot.coverage).toEqual({complete:false,gaps:['unattributed_record']});
+    } finally {await snapshot.close();await reader.close();}
+  });
+
+  it.each([
+    {type:'token_count',info:null,rate_limits:null,unexpected_content:'must not disappear'},
+    {type:'token_count',info:['must not disappear'],rate_limits:null},
+    {type:'token_count',info:null,rate_limits:['must not disappear']},
+    {type:'thread_goal_updated',threadId:'different-thread',goal:{objective:'foreign'}},
+    {type:'item_completed',item:{type:'FileChange',id:'broken',status:'completed'}},
+    {type:'item_completed',item:{type:'ContextCompaction',id:'c',content:'must not disappear'}},
+    {type:'item_completed',content:'must not disappear',item:{type:'ContextCompaction',id:'c'}},
+    {type:'item_completed',thread_id:{content:'must not disappear'},item:{type:'ContextCompaction',id:'c'}},
+    {type:'item_completed',turn_id:['content'],item:{type:'ContextCompaction',id:'c'}},
+    {type:'item_completed',thread_id:'foreign',item:{type:'ContextCompaction',id:'c'}},
+    {type:'item_completed',turn_id:'a',turnId:'b',item:{type:'ContextCompaction',id:'c'}},
+    {type:'item_completed',started_at_ms:{content:'must not disappear'},item:{type:'ContextCompaction',id:'c'}},
+    {type:'new_unknown_event',text:'future content'},
+  ])("retains a gap for malformed, foreign or unknown native event %#", async event => {
+    const f=await fixture(meta()+checkpoint('guard')+line('event_msg',event));
+    const reader=createLocalSessionReader({root:f.root});
+    const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      for await(const _item of snapshot.records(signal())) { /* finish scan */ }
+      expect(snapshot.coverage.complete).toBe(false);
+      expect(snapshot.coverage.gaps.length).toBeGreaterThan(0);
+    } finally {await snapshot.close();await reader.close();}
+  });
+
   it("starts a snapshot iterator at its source offset while resetting tail ordinals", async () => {
     let firstOffset = -1;
     const snapshot = createHistorySnapshot({
