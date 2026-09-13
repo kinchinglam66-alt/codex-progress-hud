@@ -19,7 +19,7 @@ export interface RecoveryRuntimeBoundary {
   rebuild(): Promise<void>;
   /** Release a preflight gate when the user does not continue. */
   release?(): Promise<void>;
-  /** Re-enable the scheduler only after durable recovery success. */
+  /** Restore the scheduler while the trial-settled ledger still fences dispatch. */
   enable?(): Promise<void>;
 }
 
@@ -177,6 +177,11 @@ export function createObserverRecoveryController(options: {
         try { await options.runtime.rebuild(); }
         catch { success = false; }
       }
+      if (success) {
+        lastDiagnostic.stage = 'enable';
+        try { await options.runtime.enable?.(); requireEnabled(); }
+        catch { success = false; }
+      }
       const failureStage = lastDiagnostic.stage;
       lastDiagnostic.stage = 'finish';
       await options.accounting.finishRecovery(confirmation.attemptId, {
@@ -184,8 +189,6 @@ export function createObserverRecoveryController(options: {
         closureConfirmed: trial.closureConfirmed && success,
       });
       if (!success) { lastDiagnostic.stage = failureStage; throw new Error('OBSERVER_RECOVERY_FAILED'); }
-      lastDiagnostic.stage = 'enable';
-      await options.runtime.enable?.();
       // Do not expose the transient `checking` override to the renderer. The
       // controller cleanup below must complete before the success response is
       // returned, so settings can render the durable recovered/failed state.

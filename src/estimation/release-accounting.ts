@@ -695,7 +695,11 @@ export async function openReleaseAccounting(directory: string, now: () => number
       revision,
       knownTokens: safeInteger(stored.known_tokens),
       unknown: safeInteger(stored.unknown_count),
-      recoveryAllowed: false,
+      // Manual recovery is only an eligibility signal. The settings challenge,
+      // explicit confirmation and single durable trial reservation still apply.
+      recoveryAllowed: (state === 'warning' || state === 'cooldown') && covered < revision &&
+        !(latest?.status === 'failed' && latest.usage_state !== 'known' && Number(latest.revision) + 1 === revision) &&
+        recoveredPending.size === 0 && pendingCount() === 0 && safeInteger(policy.half_open) === 0,
       ...(recoveredPending.size > 0 ? {reason: 'unresolved_previous_call' as const} : unsafeUnknown ? {reason: 'unsafe_unknown' as const} : {}),
       nextEligibleAt: inCooldown ? cooldownUntil : nextEligibleAt,
       cooldownUntil,
@@ -928,8 +932,9 @@ export async function openReleaseAccounting(directory: string, now: () => number
   async function preflightRecovery(bindingValue: string): Promise<ReleaseRecoveryPreflight> {
     const binding = copyBinding(bindingValue);
     return serial(async () => {
+      time();
       const status = recoveryStatusFromDatabase();
-      return {...status, allowed: (status.recoveryAllowed || status.state === 'warning') && binding.length > 0};
+      return {...status, allowed: status.recoveryAllowed && binding.length > 0};
     });
   }
   async function confirmRecovery(input: {revision: number; binding: string}): Promise<ReleaseRecoveryConfirmation> {
@@ -941,7 +946,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
         const result = transaction(database, () => {
           const status = recoveryStatusFromDatabase();
           if (status.revision !== revision) fail('RELEASE_RECOVERY_STALE');
-          if (!status.recoveryAllowed && status.state !== 'warning') fail('RELEASE_RECOVERY_NOT_ALLOWED');
+          if (!status.recoveryAllowed) fail('RELEASE_RECOVERY_NOT_ALLOWED');
           const attemptId = randomUUID();
           const now = time();
           database.prepare('INSERT INTO recovery_attempts (id, revision, binding, status, trial_reservation_id, usage_state, created_at, updated_at) VALUES (?, ?, ?, \'confirmed\', NULL, \'none\', ?, ?)')
@@ -1056,6 +1061,9 @@ export async function openReleaseAccounting(directory: string, now: () => number
           database.prepare("UPDATE recovery_attempts SET status = 'succeeded', updated_at = ? WHERE id = ?").run(now, attemptId);
           database.prepare('UPDATE metadata SET recovery_covered_revision = ? WHERE id = 1').run(revision);
           database.prepare('UPDATE recovery_safety SET unsafe_unknown = 0 WHERE id = 1').run();
+          // Only a verified, known-usage, closed manual trial releases cooldown.
+          // Unknown admissions and their accounting totals remain untouched.
+          database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL, cooldown_until = NULL, cooldown_level = 0, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
           appendRecoveryEvent(database, attemptId, revision, 'succeeded', now);
         });
       } catch (error) {

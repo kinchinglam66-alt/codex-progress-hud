@@ -42,7 +42,7 @@ it('keeps unknown history while allowing ordinary admission within the bounded a
   const ordinaryAfterRecovery = await view.reserve();
   expect(ordinaryAfterRecovery).toMatch(/^[0-9a-f-]{36}$/);
   await view.cancelBeforeDispatch(ordinaryAfterRecovery!);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', unknown: 1, recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', unknown: 1, recoveryAllowed: true});
 
   const preflight = await owner.preflightRecovery('account:route:assets');
   expect(preflight).toMatchObject({allowed: true, revision: 1});
@@ -103,7 +103,7 @@ it('reconciles only previous-owner pending calls after a verified reboot and is 
   const proof = {source: 'windows-win32-operating-system' as const, bootAt: 10_001, observedAt: now};
   await expect(owner.reconcileRecoveredPending(proof)).resolves.toBe(1);
   expect(owner.snapshot()).toMatchObject({starts: 1, inFlight: 0, unresolved: 0, unknown: 1, knownTokens: 0});
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: true});
   expect(await owner.forConversation('new-call').reserve()).not.toBeNull();
   await expect(owner.reconcileRecoveredPending(proof)).resolves.toBe(0);
 
@@ -162,7 +162,7 @@ it('allows an ordinary estimate after reboot reconciliation and preserves unknow
   owners.pop();
   owner = await open(path, () => 20_000);
   expect(owner.snapshot()).toMatchObject({unknown: 1, knownTokens: 10});
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: true});
 });
 
 it('never reconciles a current-owner pending call even with a future boot claim', async () => {
@@ -281,7 +281,7 @@ it('invalidates a successful recovery as soon as a new unknown result is recorde
   await owner.finishRecovery(confirmation.attemptId, {success: true, closureConfirmed: true});
   const ordinary = await first.reserve();
   await first.settle(ordinary!, null, 'safe_unknown');
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', revision: 2, recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', revision: 2, recoveryAllowed: true});
   const later = await first.reserve();
   expect(later).toMatch(/^[0-9a-f-]{36}$/);
   await first.cancelBeforeDispatch(later!);

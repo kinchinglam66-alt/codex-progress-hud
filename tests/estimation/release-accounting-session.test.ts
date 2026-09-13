@@ -220,7 +220,7 @@ it('closing a running session preserves unknown usage and permits the surviving 
   await waitForFile(laterBlockedGate.ready);
   await release(laterBlockedGate);
   await expect(laterPending).resolves.toMatchObject({status: 'interpreted', usage: {inputTokens:20,outputTokens:3}});
-  expect(owner.recoveryStatus?.()).toMatchObject({state: 'warning', recoveryAllowed: false});
+  expect(owner.recoveryStatus?.()).toMatchObject({state: 'warning', recoveryAllowed: true});
   expect(owner.snapshot()).toEqual(expect.objectContaining({starts: 3, knownTokens: 46, unresolved: 0, unknown: 1}));
 });
 

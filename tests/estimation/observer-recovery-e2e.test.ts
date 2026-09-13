@@ -87,7 +87,7 @@ it('keeps a valid framed unknown result enabled and records durable warning thro
   scheduler.tick();
   await eventually(() => owner.snapshot().unknown === 1);
   expect(scheduler.stats().disabled).toBe(false);
-  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: false});
+  expect(owner.recoveryStatus()).toMatchObject({state: 'warning', recoveryAllowed: true});
 });
 
 it('serializes half-open admission across two real workers and carries cooldown through restart', async () => {
