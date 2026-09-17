@@ -72,6 +72,7 @@ interface Cursor {
 interface NativeCursorState {
   index:NativeTurnIndex;hash:Hash;epoch:number;digest:string;
   baseDigest:string|null;sawCheckpoint:boolean;unsupportedCutoff:boolean;invalid:boolean;
+  scannedThrough?:number;pending?:{chunks:ReadonlyArray<Buffer>;bytes:number}|undefined;
 }
 
 interface Candidate {
@@ -80,7 +81,6 @@ interface Candidate {
 }
 
 interface ParseContext {
-  onEnvelope?:(raw:unknown,bytes:Buffer,offset:number)=>void;
   threadId: string;
   offset: number;
   seen: Set<string>;
@@ -552,6 +552,21 @@ function normalizeCommand(
   return addRecord(context, record, `${record.kind}:${actionId}`);
 }
 
+function validFunctionCallOutput(payload:Record<string,unknown>,raw:Record<string,unknown>,threadId:string):boolean {
+  const identityFields=[payload,raw];
+  const explicitTurns=identityFields.flatMap(fields=>
+    ['turn_id','turnId'].filter(key=>Object.hasOwn(fields,key)).map(key=>fields[key]));
+  return payload.type==='item_completed' &&
+    [raw.id,raw.name,raw.namespace].every(value=>stringValue(value)!==undefined) &&
+    typeof raw.output==='string' &&
+    Object.keys(payload).every(key=>['type','item','thread_id','threadId','turn_id','turnId','started_at_ms','completed_at_ms'].includes(key)) &&
+    Object.keys(raw).every(key=>['type','id','name','namespace','output','thread_id','threadId','turn_id','turnId'].includes(key)) &&
+    identityFields.every(fields=>['thread_id','threadId'].every(key=>!Object.hasOwn(fields,key)||fields[key]===threadId)) &&
+    ['started_at_ms','completed_at_ms'].every(key=>!Object.hasOwn(payload,key)||
+      (typeof payload[key]==='number'&&Number.isFinite(payload[key])&&payload[key]>=0)) &&
+    explicitTurns.every(turn=>stringValue(turn)!==undefined&&turn===explicitTurns[0]);
+}
+
 function normalizeEnvelope(context: ParseContext, envelope: Envelope): ConversationRecord[] {
   const atMs = timestampMs(envelope.timestamp);
   const payload = payloadObject(envelope.payload);
@@ -681,20 +696,7 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
   });
   if (context.options.preserveText && itemType === 'FunctionCallOutput') {
     const raw = item as unknown as Record<string, unknown>;
-    const identityFields = [payload, raw];
-    const explicitTurns = identityFields.flatMap(fields =>
-      ['turn_id','turnId'].filter(key => Object.hasOwn(fields,key)).map(key => fields[key]));
-    const valid = eventType === 'item_completed' &&
-      [raw.id,raw.name,raw.namespace].every(value => stringValue(value) !== undefined) &&
-      typeof raw.output === 'string' &&
-      Object.keys(payload).every(key => ['type','item','thread_id','threadId','turn_id','turnId','started_at_ms','completed_at_ms'].includes(key)) &&
-      Object.keys(raw).every(key => ['type','id','name','namespace','output','thread_id','threadId','turn_id','turnId'].includes(key)) &&
-      identityFields.every(fields => ['thread_id','threadId'].every(key =>
-        !Object.hasOwn(fields,key) || fields[key] === context.threadId)) &&
-      ['started_at_ms','completed_at_ms'].every(key => !Object.hasOwn(payload,key) ||
-        (typeof payload[key] === 'number' && Number.isFinite(payload[key]) && payload[key] >= 0)) &&
-      explicitTurns.every(turn => stringValue(turn) !== undefined && turn === explicitTurns[0]);
-    if (!valid) {context.gaps.add('unsupported_payload');return [];}
+    if (!validFunctionCallOutput(payload,raw,context.threadId)) {context.gaps.add('unsupported_payload');return [];}
     // Same output semantics as response_item/function_call_output. Normalize
     // before deduplication so mirrors collapse, while changed output survives.
     // A tool-result envelope is never promoted to a user/delegation instruction.
@@ -768,7 +770,6 @@ function parseLine(context: ParseContext, bytes: Buffer): ConversationRecord[] {
   const object = payloadObject(raw);
   if (typeof object.type !== "string") throw new LocalSessionSourceError("source_malformed");
   if (object.timestamp === undefined) throw new LocalSessionSourceError("source_malformed");
-  context.onEnvelope?.(raw,bytes,context.offset);
   return normalizeEnvelope(context, object as unknown as Envelope);
 }
 
@@ -1014,6 +1015,43 @@ async function runPass(
       native.baseDigest=native.hash.copy().digest('hex');
     }
   };
+  // The UI deliberately drops oversized rows and evicts dedupe keys. Neither
+  // is a gap in the on-disk native source. Attest its byte stream separately,
+  // retaining at most one incomplete line within the existing 8 MiB bound.
+  // UI passes may reread an incomplete row; never hash those bytes twice.
+  const consumeNative=(input:Buffer,inputStart:number)=>{
+    if(native.invalid)return;
+    const scanned=native.scannedThrough??0;
+    if(inputStart>scanned||inputStart+input.length>8*1024*1024){
+      native.invalid=true;native.pending=undefined;return;
+    }
+    if(inputStart+input.length<=scanned)return;
+    const fresh=input.subarray(scanned-inputStart);
+    const chunks=[...(native.pending?.chunks??[])];
+    let pendingBytes=native.pending?.bytes??0,start=0;
+    try{
+      for(let end=fresh.indexOf(0x0a);end>=0;end=fresh.indexOf(0x0a,start)){
+        const segment=fresh.subarray(start,end);
+        const row=chunks.length?Buffer.concat([...chunks,segment],pendingBytes+segment.length):segment;
+        const raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(row)) as unknown;
+        const object=payloadObject(raw);
+        if(typeof object.type!=='string'||object.timestamp===undefined)throw new Error('invalid envelope');
+        timestampMs(object.timestamp);
+        const payload=payloadObject(object.payload),item=checkpointObject(payload.item)??{};
+        if([object,payload,item].some(part=>['thread_id','threadId'].some(key=>Object.hasOwn(part,key)&&part[key]!==threadId)))throw new Error('foreign thread');
+        if(object.type==='event_msg'&&item.type==='FunctionCallOutput'&&!validFunctionCallOutput(payload,item,threadId))throw new Error('invalid tool event');
+        onEnvelope(raw,row,scanned+start-pendingBytes);
+        chunks.length=0;pendingBytes=0;
+        start=end+1;
+      }
+      if(start<fresh.length){const tail=Buffer.from(fresh.subarray(start));chunks.push(tail);pendingBytes+=tail.length;}
+      native.pending=pendingBytes?{chunks,bytes:pendingBytes}:undefined;
+      native.scannedThrough=inputStart+input.length;
+    }catch{
+      // Keep bounded UI projection available, but never attest malformed data.
+      native.invalid=true;native.pending=undefined;
+    }
+  };
   const seen = new Set(cursor.seen);
   const seenOrder = [...cursor.seenOrder];
   let activeTurnId = cursor.activeTurnId;
@@ -1070,7 +1108,6 @@ async function runPass(
         }
         const bytes = Buffer.concat([pending, remaining.subarray(0, newline)]);
         const context: ParseContext = {
-          onEnvelope,
           threadId,
           offset: pendingStart,
           seen,
@@ -1103,7 +1140,6 @@ async function runPass(
         return;
       }
       const context: ParseContext = {
-        onEnvelope,
         threadId,
         offset: remainingStart,
         seen,
@@ -1134,6 +1170,7 @@ async function runPass(
     }
     const chunkStart = physicalStart + readTotal;
     readTotal += read.bytesRead;
+    consumeNative(chunk.subarray(0, read.bytesRead), chunkStart);
     consume(chunk.subarray(0, read.bytesRead), chunkStart);
     scanOffset = physicalStart + readTotal;
   }
@@ -1141,7 +1178,6 @@ async function runPass(
   const partialLine = pending.byteLength > 0 || skippingOversized;
   if (!skippingOversized) scanOffset = offset;
   native.digest=native.hash.copy().digest('hex');
-  if(historyTruncated||skippingOversized)native.invalid=true;
   return {
     native,
     records,

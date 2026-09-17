@@ -35,6 +35,80 @@ async function records(snapshot:HistorySnapshot){
   const result=[];for await(const item of snapshot.records(signal))result.push(item.record);return result;
 }
 
+it.each([2,5])('preserves native context when the UI skips a %i MiB tool event',async mib=>{
+ const f=await fixture();let view,base;
+ const output='tool evidence '+'.'.repeat(mib*1024*1024);
+ try{
+  await appendFile(f.path,line('event_msg',{type:'item_completed',thread_id:id,turn_id:'seven',
+   item:{type:'FunctionCallOutput',id:'large-result',name:'read',namespace:'tools',output}}));
+  let truncated=false,caughtUp=false;
+  for(let pass=0;pass<4&&!caughtUp;pass++){
+   const batch=await f.reader.read(id,signal);truncated ||= batch.historyTruncated===true;caughtUp=batch.caughtUp;
+   expect(batch.records.some(row=>row.actionId==='large-result')).toBe(false);
+  }
+  expect(caughtUp).toBe(true);expect(truncated).toBe(true);
+  view=await f.reader.openNativeTurn(id,signal);
+  base=await view.openBase(f.target,signal);
+  expect(await readFile(base!.path,'utf8')).toBe(f.base);
+  const rows=await records(view.supplement);
+  expect(view.supplement.coverage).toEqual({complete:true,gaps:[]});
+  expect(rows.find(row=>row.actionId==='large-result')).toMatchObject({output,outputComplete:true,sourceTurnId:'seven'});
+  await appendFile(f.path,user('after large output'));await f.reader.read(id,signal);
+  await view.validate(signal);
+ }finally{await base?.close();await view?.close();await f.reader.close();}
+});
+
+it('retains native attestation when UI dedupe history is evicted',async()=>{
+ const f=await fixture();let view;
+ try{
+  await appendFile(f.path,Array.from({length:4200},(_,n)=>user('unique requirement '+n)).join(''));
+  const batch=await f.reader.read(id,signal);expect(batch.historyTruncated).toBe(true);
+  view=await f.reader.openNativeTurn(id,signal);await view.validate(signal);
+  expect(view.boundary.completed?.turnId).toBe('six');
+ }finally{await view?.close();await f.reader.close();}
+});
+
+it.each(['foreign-thread','invalid-shape','invalid-timestamp'] as const)('rejects invalid oversized tool data in the inherited base: %s',async mode=>{
+ const f=await fixture();
+ try{
+  const event=line('event_msg',{type:'item_completed',turn_id:'six',thread_id:mode==='foreign-thread'?'foreign':id,
+   item:{type:'FunctionCallOutput',id:'bad-base',name:'read',namespace:'tools',output:'.'.repeat(2*1024*1024),
+    ...(mode==='invalid-shape'?{unexpected:true}:{})}});
+  const inherited=mode==='invalid-timestamp'?event.replace('"timestamp":"2026-09-15T00:00:00Z"','"timestamp":null'):event;
+  await writeFile(f.path,meta+start('six')+inherited+end('six')+start('seven')+user('current'));
+  await f.reader.read(id,signal);await f.reader.read(id,signal);
+  await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:'source_unobserved'});
+ }finally{await f.reader.close();}
+});
+
+it('does not hash a reread partial tool event twice',async()=>{
+ const f=await fixture();let view;
+ const output='.'.repeat(2*1024*1024),event=line('response_item',{type:'function_call_output',call_id:'partial-large',output});
+ try{
+  await appendFile(f.path,event.slice(0,700000));
+  expect((await f.reader.read(id,signal)).partialLine).toBe(true);
+  await f.reader.read(id,signal);
+  await appendFile(f.path,event.slice(700000));await f.reader.read(id,signal);
+  view=await f.reader.openNativeTurn(id,signal);
+  expect((await records(view.supplement)).find(row=>row.actionId==='partial-large')?.output).toBe(output);
+ }finally{await view?.close();await f.reader.close();}
+});
+
+it.each(['malformed','conflicting-turn','over-limit','rewritten'] as const)(
+ 'rejects unsafe native acquisition despite a UI-skipped tool event: %s',async mode=>{
+ const f=await fixture();
+ try{
+  const output='.'.repeat((mode==='over-limit'?9:2)*1024*1024);
+  const event=line('event_msg',{type:'item_completed',turn_id:mode==='conflicting-turn'?'foreign':'seven',
+   item:{type:'FunctionCallOutput',id:'unsafe',name:'read',namespace:'tools',output}});
+  const suffix=mode==='malformed'?event.slice(0,-2)+'!\n':event;
+  await appendFile(f.path,suffix);
+  for(let pass=0;pass<5;pass++){if((await f.reader.read(id,signal)).caughtUp)break;}
+  if(mode==='rewritten')await writeFile(f.path,(f.data+suffix).replace('old fact','bad fact'));
+  await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:mode==='rewritten'?'source_identity_mismatch':'source_unobserved'});
+ }finally{await f.reader.close();}
+});
+
 it.each(['event-only','response-first','event-first','changed-output','inferred-response-first','inferred-event-first'] as const)(
  'keeps FunctionCallOutput native supplements complete without losing output: %s',async mode=>{
   const f=await fixture(true);let view;

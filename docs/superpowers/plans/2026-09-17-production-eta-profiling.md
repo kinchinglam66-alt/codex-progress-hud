@@ -86,3 +86,18 @@ Before resuming the pilot:
 - Resume a single approved test conversation first. Expand to the existing four
   only after a valid installed ETA; keep the repaired round separate from the
   failed original round. Do not create extra tasks or fabricate missing samples.
+
+### Native source versus UI projection
+
+The installed retry exposed a second acquisition gap: a valid tool envelope
+larger than the UI line limit was skipped, invalidating the native byte index.
+Keep native structural observation independent of UI row projection and dedupe
+eviction. Preserve the existing UI pass/line bounds, native total-byte bound,
+raw prefix digest, turn identity and malformed-source rejection. Incremental
+native observation must neither lose cross-pass rows nor hash reread bytes twice.
+
+Validate both opening the paired source and consuming its supplement; a full
+history snapshot alone does not test that production path. A checkpoint inside
+the current supplement remains an explicit unsupported/incomplete condition,
+not permission to restore the retired multi-minute full-import fallback. Record
+that separate limitation and do not count such requests as valid predictions.
