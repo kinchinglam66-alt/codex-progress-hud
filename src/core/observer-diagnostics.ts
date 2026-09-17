@@ -23,6 +23,7 @@ export const resultRejectionReasons = [
   'source_identity_changed',
   'schema_invalid',
   'aged_response_invalid',
+  'estimate_expired_on_arrival',
   'continue_without_summary',
   'replace_without_pending_relation',
   'completed_runtime_mismatch',
@@ -36,6 +37,7 @@ export const resultRejectionReasons = [
 export type ResultRejectionReason = typeof resultRejectionReasons[number];
 
 export const observerContextStates=['history_loading','context_preparing','context_full','context_compressed',
+  'context_native','native_context_failed','estimate_timeout',
   'context_images_missing',
   'image_context_unsupported',
   'history_incomplete','capacity_unknown','context_too_large','compression_failed'] as const;

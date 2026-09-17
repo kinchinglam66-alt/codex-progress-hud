@@ -40,6 +40,11 @@ export async function captureInvocationProcessIdentity(pid: number): Promise<str
   return identity !== null && /^\d{1,20}$/.test(identity) ? identity : null;
 }
 
+/** Read-only custody probe; never terminate or invent an accounting record. */
+export async function isInvocationProcessIdentityExited(identity:{pid:number;creationIdentity:string}):Promise<boolean>{
+  return await probe(identity.pid,identity.creationIdentity,false)==='closed';
+}
+
 export async function inspectInvocationProcess(record: InvocationRecord, terminateExpired: boolean): Promise<ProcessState> {
   if (record.providerKind !== 'subscription' || record.pid === undefined || record.creationIdentity === undefined) return 'unconfirmed';
   const state = await probe(record.pid, record.creationIdentity, terminateExpired);

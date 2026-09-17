@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import * as fs from 'node:fs/promises';
 import { mkdtemp, writeFile, rm, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { preflightCodex, preflightCodexRuntime, createRuntimePreflightCache } from "../../src/estimation/codex-preflight.js";
+// Copy exports so instrumentation can wrap open; all filesystem operations remain real.
+vi.mock('node:fs/promises',async importOriginal=>({...await importOriginal<typeof import('node:fs/promises')>()}));
 const roots:string[]=[];
 const names=["plugins","hooks","apps","remote_plugin","multi_agent","shell_tool","unified_exec","shell_snapshot",
   "browser_use","browser_use_external","browser_use_full_cdp_access","computer_use","image_generation","view_image",
@@ -19,6 +22,23 @@ async function fixture() {
   return files;
 }
 afterEach(async()=>{for(const root of roots.splice(0)) await rm(root,{recursive:true,force:true});});
+it('verifies a multi-megabyte executable including its tail with bounded read operations',async()=>{
+  const files=await fixture(),body=Buffer.alloc(2*1024*1024+17,37);body[body.length-1]=91;
+  await writeFile(files.executable,body);files.executableSha256=createHash('sha256').update(body).digest('hex');
+  const realOpen=fs.open,reads:Array<ReturnType<typeof vi.spyOn>>=[];
+  const opened=vi.spyOn(fs,'open').mockImplementation(async(path,flags,mode)=>{
+    const handle=await realOpen(path,flags,mode);
+    if(path===files.executable)reads.push(vi.spyOn(handle,'read'));
+    return handle;
+  });
+  try{
+    await preflightCodexRuntime(files,async()=>({version:evidence.version,features:evidence.features}));
+    expect(reads).toHaveLength(2); // full verification before AND after capability probe
+    expect(reads.reduce((sum,read)=>sum+read.mock.calls.length,0)).toBeLessThanOrEqual(8);
+    body[body.length-1]=92;await writeFile(files.executable,body);
+    await expect(preflightCodexRuntime(files,async()=>({version:evidence.version,features:evidence.features}))).rejects.toThrow('CODEX_PREFLIGHT_FAILED');
+  }finally{opened.mockRestore();}
+});
 it('reuses only runtime evidence briefly while rechecking pinned files on every hit',async()=>{
   const files=await fixture();let now=0,probes=0;
   const cache=createRuntimePreflightCache(files,()=>now);

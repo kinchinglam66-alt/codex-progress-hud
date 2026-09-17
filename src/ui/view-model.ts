@@ -5,6 +5,7 @@ import {projectCountdown} from './countdown.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics,type ObserverContextState} from '../core/observer-diagnostics.js';
 
 const contextLabels:Record<ObserverContextState,string>={history_loading:'正在读取完整对话',context_preparing:'正在准备完整上下文',
+  context_native:'已继承原生上下文',native_context_failed:'原生上下文准备失败',estimate_timeout:'估时超时（30秒），等待后续更新',
   context_images_missing:'部分历史图片缺失',
   image_context_unsupported:'当前估时路径不支持图片上下文',
   context_full:'已使用完整可读上下文',context_compressed:'早期历史已压缩',history_incomplete:'部分历史不可读，估时依据不完整',
@@ -28,7 +29,7 @@ function observerLabel(observer:ObserverDiagnostics):string{
     return `估时已停用：${reasons[observer.stopReason]}（不等同于历史未知用量）`;
   }
   if(observer.contextState&&['pending','estimating','process_error','call_failed'].includes(observer.state)&&
-    !['context_full','context_compressed'].includes(observer.contextState))return contextLabels[observer.contextState];
+    !['context_full','context_compressed','context_native'].includes(observer.contextState))return contextLabels[observer.contextState];
   return observer.state==='admission_blocked'?admissionLabels[normalizeAdmissionReason(observer.admissionReason)]:observerLabels[observer.state];
 }
 function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number){

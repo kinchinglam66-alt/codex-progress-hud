@@ -3,3 +3,4 @@
 *.cmd text eol=crlf
 # This release asset has a reviewed byte-level SHA256 pin.
 scripts/windows/observer-home.ps1 text eol=lf
+scripts/windows/native-guard.ps1 text eol=lf

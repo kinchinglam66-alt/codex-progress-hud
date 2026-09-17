@@ -5,8 +5,8 @@ import {afterEach, expect, it} from 'vitest';
 import {ensureSubscriptionRootOwner, loadDesktopObserverPilot, subscriptionAccountingDirectory,shouldEnablePersistentObserver} from '../../src/desktop/observer-pilot.js';
 
 const roots: string[] = [];
-it('requires host opt-in and allows the host to override its saved pilot choice',()=>{
-  expect(shouldEnablePersistentObserver({},null)).toBe(false);
+it('defaults to the persistent native host while preserving explicit host overrides',()=>{
+  expect(shouldEnablePersistentObserver({},null)).toBe(true);
   expect(shouldEnablePersistentObserver({},{persistentObserver:true})).toBe(true);
   expect(shouldEnablePersistentObserver({enablePersistentObserver:false},{persistentObserver:true})).toBe(false);
   expect(shouldEnablePersistentObserver({enablePersistentObserver:true},{persistentObserver:false})).toBe(true);

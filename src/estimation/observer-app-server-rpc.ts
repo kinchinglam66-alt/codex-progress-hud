@@ -17,6 +17,9 @@ export interface ObserverAppServerRpcOptions {
   maxFrameBytes?: number;
   maxQueuedFrames?: number;
   maxQueuedBytes?: number;
+  /** Opt-in local diagnostic hook. Message may be private: never persist raw
+   * text. Default exceptions remain generic; observer failures are ignored. */
+  onRemoteError?:(error:{code:number;message:string})=>void;
 }
 
 export interface ObserverAppServerRpc {
@@ -240,6 +243,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
         close('APP_SERVER_RPC_INVALID_RESPONSE');
         return;
       }
+      try{options.onRemoteError?.({code:message.error.code,message:message.error.message});}catch{/* Diagnostics cannot change transport semantics. */}
       settleResponse(message.id, undefined, transportError('APP_SERVER_RPC_ERROR'));
       return;
     }

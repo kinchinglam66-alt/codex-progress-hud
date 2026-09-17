@@ -2,6 +2,8 @@ import {expect, it} from "vitest";
 import {createConversationSource} from "../../src/observer/conversation-source.js";
 import type {HistoryRecord, HistorySnapshot} from "../../src/observer/history-snapshot.js";
 import type {ReadBatch} from "../../src/observer/conversation-record.js";
+import type {NativeSourceSnapshot} from '../../src/observer/native-source-snapshot.js';
+import type {NativeSourceDestination} from '../../src/observer/native-source-request.js';
 
 const turnKey = "verified-current";
 const queryBatch = (records: ReadBatch["records"]): ReadBatch => ({
@@ -28,6 +30,7 @@ function snapshotFor(records: ReadBatch["records"], closeCount: {value: number})
 function makeSource(options: {
   records: ReadBatch["records"];
   snapshot?: (id: string, signal: AbortSignal) => Promise<HistorySnapshot>;
+  nativeSnapshot?:(id:string,signal:AbortSignal,destination:NativeSourceDestination)=>Promise<NativeSourceSnapshot>;
 }) {
   let now = 0;
   const closeCount = {value: 0};
@@ -35,6 +38,7 @@ function makeSource(options: {
     source: {
       read: async () => queryBatch(options.records),
       ...(options.snapshot === undefined ? {} : {snapshot: options.snapshot}),
+      ...(options.nativeSnapshot===undefined?{}:{nativeSnapshot:options.nativeSnapshot}),
       remove: () => {},
       close: async () => {}
     },
@@ -54,6 +58,34 @@ function makeSource(options: {
     setNow: (value: number) => { now = value; }
   };
 }
+
+it('routes native snapshots through the bound source without opening parsed history',async()=>{
+ let requestedId='',destinationSeen:NativeSourceDestination|undefined,closes=0;
+ const destination={destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}};
+ const f=makeSource({records:[{id:'current',turnId:'current',atMs:1,kind:'user',text:'current task'}],
+  snapshot:async()=>{throw Error('PARSED_HISTORY_NOT_ALLOWED');},
+  nativeSnapshot:async(id,_signal,target)=>{requestedId=id;destinationSeen=target;return {kind:'native',sourceThreadId:id,sourceTurnId:'current',sourceEpoch:1,revision:2,
+    byteLength:300,path:'C:/owned/snapshot',close:async()=>{closes++;}};}});
+ try{
+  await f.attachAndRead();
+  const result=await f.source.goals.openNativeSource!('attachment',turnKey,new AbortController().signal,destination);
+  expect(result?.currentTurnId).toBe('current');expect(requestedId).toBe('conversation-id');expect(destinationSeen).toBe(destination);
+  expect(result?.snapshot.kind).toBe('native');await result!.snapshot.close();expect(closes).toBe(1);
+  expect(await f.source.goals.openNativeSource!('unbound',turnKey,new AbortController().signal,destination)).toBeNull();
+ }finally{await f.source.close();}
+});
+it('rejects a native watermark from a different turn than the bound projection',async()=>{
+ let closes=0;
+ const f=makeSource({records:[{id:'current',turnId:'current',atMs:1,kind:'user',text:'current task'}],
+  nativeSnapshot:async id=>({kind:'native',sourceThreadId:id,sourceTurnId:'future',sourceEpoch:1,revision:2,byteLength:300,
+   path:'C:/owned/snapshot',close:async()=>{closes++;}})});
+ try{
+  await f.attachAndRead();
+  await expect(f.source.goals.openNativeSource!('attachment',turnKey,new AbortController().signal,
+   {destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}})).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
+  expect(closes).toBe(1);
+ }finally{await f.source.close();}
+});
 
 it("opens complete source history by verified conversation id, not the bounded projection", async () => {
   const records: ReadBatch["records"] = [

@@ -1,0 +1,11 @@
+# Reuse source-correction diagnostic
+
+This completes the previously approved anchoring-risk test; it does not change production behavior or installed defaults.
+
+Use actual model outputs, not fabricated assistant history. First source snapshot describes a small repair. The second append-only snapshot supplies a paired tool result correcting that workload: a serial local computation now has 72 remaining units, each requiring 100 seconds of active execution, with no parallelism; the old quick-finish assumption is invalid. The latest source checkpoint confirms that work is required before the current turn finishes. The observer's first real prediction is retained in the reused child and becomes an obsolete prediction, never promoted to a source record.
+
+The correction is source evidence only. Trusted evidence instructions must not contain the numerical answer, job identifier or expected horizon. They may ask the observer to report the latest workload identifier from source. Original history markers and image remain required. Default fixture remains byte-identical when correction mode is absent. Current snapshot is a strict prefix of the correction snapshot; new-turn snapshot includes both but receives a fresh observer child.
+
+Pre-register the outcome before running: old ETA must be below 1,000 seconds for this to be an informative short-to-long anchoring challenge. Corrected ETA must be at least 7,000 seconds (allowing input age and rounding), and must report the latest workload identifier. A longer initial ETA makes the challenge inconclusive, not a pass. Small corrected ETA or missing fact fails the diagnostic; no tuning the threshold after seeing the answer. This is synthetic source-adherence evidence, not measured real-task accuracy or a claim of general anchoring immunity.
+
+Add an explicit diagnostic-only source-correction flag, compatible with completed 1MiB preflight and three-call sequence, and both fresh-child control and candidate reuse. Existing call budgets, ordinary cadence, source isolation, account authority and unknown-usage behavior remain unchanged. Record correction evaluation separately from the generic performance gate. Preserve all calls and failures. Final promotion still requires repeatable performance evidence; Series16's cache confound is not resolved by this test.

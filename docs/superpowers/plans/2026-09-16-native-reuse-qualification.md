@@ -1,0 +1,14 @@
+# Native reuse paired qualification
+
+Historical v1 plan: the original thresholds below remain the contract for Series22 and earlier results. On 2026-09-17 the user selected prospective split acceptance; future qualification follows `../specs/2026-09-17-native-reuse-split-acceptance.md`. No historical failure is converted into a pass. The v2 scorer and separate diagnostic output are implemented; explicit promotion selection and review remain pending (see `../reports/2026-09-17-split-scorer.md`).
+
+Follow the existing inline TDD workflow. No new production policy or installation change. Series16 baseline and Series17 source correction have passed functional checks, so enable a distinct explicit *paired qualification* diagnostic mode, not reuse of the native-only pass flag.
+
+1. Add explicit run/preflight reuse-completed modes for 1MiB and 85KiB. They use the same original history/native alternating comparison and original gate. Reject inline and source-correction combinations; no change to default mode. Existing per-operation authority, budget, unknown-usage accounting, source isolation and cadence remain unchanged.
+2. Use identical synthetic long-task source snapshots for both arms. Remaining serial active units are 15/12/20 at 100 seconds each, supporting source-grounded ETA longer than preparation. This prevents the earlier fixture's unrelated 180-second cold prediction from making a multi-minute preparation measurement necessarily expired. Do not change expiry evaluation, select successful answers, or alter gate thresholds. This is a different versioned fixture, not a retroactive replacement of Series14.
+3. Put a fresh synthetic run nonce in the earliest source user text, identical for both arms within a series. This limits previous-run prefix-cache contamination; it does not guarantee remote cache independence, so retain all cache counters and fixed alternating order.
+4. Test mode boundaries, append-only snapshots, workload facts, answer-free prompts and default fixture preservation. Run focused tests/typecheck/build then final full regression. Register before calls.
+5. First run one 1MiB series (six ETA; compactions separately accounted by existing bounded budget). Require all three valid pairs, >=30% median full preparation improvement, non-increasing median valid delivery and lifecycle cost, intact context/isolation/cleanup and no unexplained usage/continued-estimate regression. Preserve unknown usage. A failed gate is a failed qualification, not authorization to lower it or rerun blindly.
+6. Run the 85KiB stratum only if the 1MiB gate passes; otherwise stop expansion and report the failed requirement and structural bottleneck. Passing both is required for promotion; do not install from a single favorable observation.
+
+This plan uses the user's continuing synthetic-call/design authorization. No real history, credentials, public documents, merge, push or installation.

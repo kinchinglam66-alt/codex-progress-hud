@@ -106,4 +106,12 @@ describe('native completed-turn boundary',()=>{
     expect(index.snapshot()).toEqual({currentTurnId:'new',currentStartOffset:20,watermark:30,
       completed:{turnId:'old',endOffset:20}});
   });
+  it('stages an appended read without changing the previously committed index',()=>{
+    const index=createNativeTurnIndex();
+    index.observe(event('task_started','one'),0,10);
+    const staged=index.copy();
+    staged.observe(event('task_complete','one'),10,20);
+    expect(staged.snapshot()).toBeNull();
+    expect(index.snapshot()).toMatchObject({currentTurnId:'one',watermark:10});
+  });
 });

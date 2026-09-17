@@ -6,6 +6,8 @@ import {readObserverPilotConfig,observerPilotEnvironment} from './observer-pilot
 import {createObserverIdentityRuntime} from '../estimation/observer-identity-runtime.js';
 import {createPersistentObserverWorker} from '../estimation/observer-persistent-worker.js';
 import {persistentHistoryPolicy} from '../estimation/persistent-history-policy.js';
+import {assertNativeObserverRuntime,createNativeObserverTrial,type NativeObserverTrial} from './native-observer-trial.js';
+import {createDesktopPersistentWorker} from './native-production-worker.js';
 import {openThreadedReleaseAccounting} from '../estimation/accounting-worker-owner.js';
 import {createDesktopObserverRuntime, type ObserverInlineConsent} from './observer-runtime.js';
 import {createPilotJournal} from '../evaluation/pilot-journal.js';
@@ -99,12 +101,13 @@ export function subscriptionAccountingDirectory(dataDirectory:string,accountFing
 }
 
 export function shouldEnablePersistentObserver(options:{enablePersistentObserver?:boolean},config?:{persistentObserver?:boolean|undefined}|null):boolean{
-  return (options.enablePersistentObserver??config?.persistentObserver)===true;
+  return (options.enablePersistentObserver??config?.persistentObserver??true)===true;
 }
 
 /** Explicit local pilot opt-in, never configuration taken from a chat/HTTP request.
  * Construction reads settings only. Account/process work begins after HUD readiness. */
-export async function loadDesktopObserverPilot(options:{dataDirectory:string;resourcesDirectory:string;dialog:ObserverConsentDialog;environment:NodeJS.ProcessEnv;consentProtection:ConsentProtection;enablePersistentObserver?:boolean}) {
+export async function loadDesktopObserverPilot(options:{dataDirectory:string;resourcesDirectory:string;dialog:ObserverConsentDialog;environment:NodeJS.ProcessEnv;consentProtection:ConsentProtection;enablePersistentObserver?:boolean;nativeContextTrial?:NativeObserverTrial}) {
+  if(options.nativeContextTrial!==undefined&&options.enablePersistentObserver!==true)throw Error('NATIVE_TRIAL_REQUIRES_EXPLICIT_PERSISTENT_HOST');
   let config: Awaited<ReturnType<typeof readObserverPilotConfig>>;
   try {
     config=await readObserverPilotConfig(resolve(options.dataDirectory,'observer-pilot.json'));
@@ -129,6 +132,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
   let currentRuntime: ReturnType<typeof createDesktopObserverRuntime>|undefined;
   const openSubscription=async(signal:AbortSignal, inlineConsent?:ProviderInlineConsent, contextCapacity?:ProviderConfig['contextCapacity']):Promise<ProviderWorkerOwner>=>{
     if(identityOptions===undefined||accountSettings===undefined)throw Error('OBSERVER_SUBSCRIPTION_UNAVAILABLE');
+    if(shouldEnablePersistentObserver(options,config))assertNativeObserverRuntime(identityOptions);
     const [assets,compressionAssets]=await Promise.all([
       loadObserverApiAssets(options.resourcesDirectory), loadObserverCompressionAssets(options.resourcesDirectory),
     ]);
@@ -140,11 +144,18 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     const preparedInputBudgetBytes=inputBudgetBytes(capacity);
     const cacheScope=JSON.stringify(['subscription',account.evidence.accountFingerprint,SUBSCRIPTION_MODEL,
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
-    const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime(identityOptions),dialog:options.dialog,
+    const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime({...identityOptions,
+      reuseHomeCheckProcess:shouldEnablePersistentObserver(options,config)}),dialog:options.dialog,
       accountingAccountFingerprint:account.evidence.accountFingerprint,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
       ...(shouldEnablePersistentObserver(options,config)?{persistentReceiptDirectory:accountingDirectory,
-        persistentWorkerFactory:workerOptions=>createPersistentObserverWorker({...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema})}:{}),
+        persistentWorkerFactory:workerOptions=>{
+          if(options.nativeContextTrial===undefined)return createDesktopPersistentWorker(identityOptions,
+            {...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema},assets.instructions);
+          const nativeContext=createNativeObserverTrial(identityOptions,options.nativeContextTrial);
+          return createPersistentObserverWorker({...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema,
+            ...(nativeContext===undefined?{}:{nativeContext,nativeInstructions:assets.instructions,completedTurnContext:options.nativeContextTrial?.mode==='completed-turn'})});
+        }}:{}),
       contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
         const runner=createOwnedProcessRunner({...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes})});
         const view=owner.forConversation(scope.conversationKey);

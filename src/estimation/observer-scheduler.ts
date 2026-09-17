@@ -5,8 +5,11 @@ import type {ObserverCallStage} from './observer-provider.js';
 import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
+import type {VerifiedHistoryFallback} from '../observer/verified-history-fallback.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSample,NativeTurnSource} from '../observer/native-source-request.js';
 import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
-import {decideTrigger, type TriggerReason} from './long-task-policy.js';
+import {decideTrigger, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
+import {createNativeRetentionPermit,type NativeRetentionPermit,type NativeRetentionState,type NativeLifecycleDiagnostic} from './native-owner-retention.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverContextState, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
 export type {ObserverContextState} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
@@ -14,26 +17,36 @@ import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './
 import type {ResidualRuntime} from './residual/runtime.js';
 import {captureHistoryFeatures} from './residual/capture.js';
 export interface ObserverWorker {
+  prepareNativeHistoryFallback?(input:ObserverInput,history:VerifiedHistoryFallback,signal:AbortSignal,
+    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
+  prepareNativeTurnContext?(input:ObserverInput,source:NativeTurnSource,signal:AbortSignal,
+    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
+  nativeSourceDestination?(signal:AbortSignal):Promise<NativeSourceDestination>;
+  prepareNativeContext?(input:ObserverInput,source:OpenNativeSourceResult,signal:AbortSignal,
+    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<{input:ObserverInput;sourceBytes:number;sourceRevision:number}>;
   /** Authenticated local key is accounting metadata, never observer prompt data. */
   observe(input: ObserverInput, signal: AbortSignal, conversationKey: string, turnGeneration?: number,
     onStage?: (stage:ObserverCallStage)=>void): Promise<ObserverResult>;
   prepareContext?(input:ObserverInput,history:{snapshot:HistorySnapshot;currentTurnId:string},signal:AbortSignal,
     conversationKey:string,turnGeneration:number,observedAtMs:number):Promise<PreparedContext>;
-  status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean};
+  status(): {active: boolean; disabled: boolean; poisoned: boolean; setupFailed?:boolean;cleanupPending?:boolean;nativeLifecycle?:NativeLifecycleDiagnostic};
   disable(): void;
   close(): Promise<void>;
   /** Finish scheduler ownership of one operation, retaining healthy model context.
    * Global shutdown still calls close(), never release(). */
-  release?(): Promise<void>;
+  release?(permit?:NativeRetentionPermit|null): Promise<void>;
+  updateRetentionState?(state:NativeRetentionState|null):void;
   provenance?: () => ForecastVersions|null;
   recoveryStatus?: () => {state: string; nextEligibleAt?: number | null | undefined; cooldownUntil?: number | null | undefined} | undefined;
 }
 export interface ObserverWorkerSource {
   acquire(conversationKey: string): ObserverWorker;
-  release(conversationKey: string): Promise<void>;
+  release(conversationKey: string,permit?:NativeRetentionPermit|null): Promise<void>;
+  updateRetentionState?(conversationKey:string,state:NativeRetentionState|null):void;
   all(): readonly ObserverWorker[];
 }
 export interface ObserverObservation {
+  nativeFallbackReason?:'pair_unavailable'|'source_unobserved'|'source_checkpoint_unsupported'|'source_terminal_unsupported'|'source_limit'|'history_incomplete';
   kind:'runtime'|'request'|'result'|'skip'|'stage'; at:number; key:string; generation:number; activeSeconds:number;
   runtime:string; version:number; requestId?:number; requestedAt?:number; observedActiveSeconds?:number;
   accepted?:boolean; status?:string; relation?:string;
@@ -53,7 +66,7 @@ export interface ObserverObservation {
   contextState?:ObserverContextState;
   contextMetrics?:ContextPreparationMetrics;
 }
-interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void;research?:ResidualRuntime}
+interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; monotonicNow?:()=>number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void;research?:ResidualRuntime}
 interface Entry {
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
   eventSequence: number; consumedEventSequence: number;
@@ -75,11 +88,13 @@ interface Entry {
   bootstrapRecoveryEligible?:boolean; bootstrapRecoveryUsed?:boolean;
   lastResultDiagnostic?:ResultDiagnostic; lastRejectionReason?:ResultRejectionReason;
   expiredTimerResults:number;
+  expiredResultPending?:boolean;
   ended:boolean;
 }
 interface Flight {researchFailure?:import('./residual/contract.js').PrefixFailure;researchGeneration?:number;researchTicket?:object;key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
+  deadlineAt?:number; timedOut?:boolean;
   turnKey:string; contextState?:ObserverContextState; contextMetrics?:ContextPreparationMetrics; done?: Promise<void>}
 
 /** Admission timing is local; durable spend admission belongs to each owned worker.
@@ -119,12 +134,39 @@ export class ObserverScheduler {
           if (!worker) throw new Error('OBSERVER_WORKERS_BUSY');
           owners.set(key, worker); return worker;
         },
-        release: async key => { owners.delete(key); },
+        release: async (key,permit) => {const worker=owners.get(key);await worker?.release?.(permit);owners.delete(key);},
+        updateRetentionState:(key,state)=>owners.get(key)?.updateRetentionState?.(state),
         all: () => workers,
       };
     }
   }
   private workers(): readonly ObserverWorker[] { return this.workerSource.all(); }
+  private retentionState(key:string,state:ReturnType<PassiveGoals['scheduling']>):NativeRetentionState|null {
+    const turnKey=this.options.goals.currentTurnKey(key);
+    return state&&turnKey?{conversationKey:key,turnKey,generation:state.view.generation,
+      idleEligible:!this.disabled&&state.sourceAvailable!==false&&state.finalAvailable===true&&state.view.runtime==='waiting',
+      running:!this.disabled&&state.sourceAvailable!==false&&state.view.runtime==='running'&&state.view.status!=='completed'}:null;
+  }
+  private releaseRetention(entry:Entry,flight:Flight,accepted:boolean,live:ReturnType<PassiveGoals['scheduling']>):void {
+    let permit:NativeRetentionPermit|null=null;
+    try{
+    const state=this.retentionState(flight.key,live);
+    this.workerSource.updateRetentionState?.(flight.key,state);
+    if(accepted&&live&&state&&state.turnKey===flight.turnKey&&state.generation===flight.generation&&
+      live.goalIdentity===flight.goalIdentity&&Number.isFinite(live.view.activeSeconds)&&
+      entry.lastRequestActiveSeconds!==undefined){
+      const prediction=live.view.prediction;
+      const remaining=prediction?Math.max(0,prediction.remainingSeconds-Math.max(0,
+        live.view.activeSeconds-prediction.observedActiveSeconds-(entry.predictionExcludedSeconds??0))):null;
+      const until=Math.max(0,entry.lastRequestActiveSeconds+ordinaryRequestIntervalSeconds(remaining,entry.unknown)-live.view.activeSeconds);
+      const idleStartedAtMs=(this.options.monotonicNow??(()=>performance.now()))();
+      permit=createNativeRetentionPermit({...state,idleStartedAtMs,nextOrdinaryAtMs:idleStartedAtMs+until*1000});
+    }
+    }catch{permit=null;}
+    // Retention is optional. A failed clock/state provider must neither skip
+    // cleanup nor re-enter settlement and overwrite an already accepted ETA.
+    try{void this.workerSource.release(flight.key,permit).catch(()=>undefined);}catch{}
+  }
   private workerInFlight(worker: ObserverWorker): boolean { return [...this.flights.values()].some(flight => flight.worker === worker); }
   private time(): number {
     if(this.stopReason)return this.lastClock;
@@ -166,6 +208,7 @@ export class ObserverScheduler {
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
   }
   private contextState(flight:Flight,state:ObserverContextState,metrics?:ContextPreparationMetrics):void {
+    if(flight.timedOut&&state!=='estimate_timeout')return;
     flight.contextState=state;
     if(metrics)flight.contextMetrics={sizing:metrics.sizing,originalTextBytes:metrics.originalTextBytes,
       originalTextTokenEstimate:metrics.originalTextTokenEstimate,preparedRequestBytes:metrics.preparedRequestBytes,
@@ -187,22 +230,88 @@ export class ObserverScheduler {
     if(code==='context_too_large'||code.startsWith('context_too_large:'))return 'context_too_large';
     if(code==='history_incomplete')return 'history_incomplete';
     if(code==='image_context_unsupported')return 'image_context_unsupported';
+    if(flight.worker.prepareNativeTurnContext||flight.worker.prepareNativeContext)return 'native_context_failed';
     if(flight.contextState==='history_loading')return 'history_incomplete';
     return 'compression_failed';
   }
   private failPreparation(entry:Entry,flight:Flight):void {
+    this.checkDeadline(flight);
     const settledAt=this.time();
     try {this.options.goals.settle(flight.ticket,null,settledAt);}catch{/* opaque ticket cleanup is best effort */}
     const rejection=this.options.goals.rejectionReason(flight.ticket);
     this.flights.delete(flight.key);
     if(entry.flight===flight)delete entry.flight;
     this.recordResult(entry,flight,null,false,settledAt,null,this.schedulerRejectionReason(flight,this.workerState(flight.worker))??rejection);
-    void this.workerSource.release(flight.key).catch(() => undefined);
+    this.releaseRetention(entry,flight,false,null);
     this.notify();
   }
   private async dispatch(entry:Entry,flight:Flight,input:ObserverInput):Promise<void> {
+    let paired:NativeTurnSource|null=null;
+    const closePaired=async()=>{
+      const owned=paired;paired=null;
+      if(owned)try{await owned.close();}catch{/* Source owner retains unconfirmed custody evidence. */}
+    };
+    try{
     let prepared=input;
-    if(flight.worker.prepareContext){
+    if(flight.worker.prepareNativeTurnContext){
+      this.contextState(flight,'history_loading');
+      try{
+        paired=await this.options.goals.openNativeTurn(flight.ticket,flight.controller.signal);
+        if(!paired)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
+        // Only the fixed current-turn supplement is scanned, not inherited history.
+        for await(const _record of paired.supplement.records(flight.controller.signal)){}
+        if(!paired.supplement.coverage.complete||paired.supplement.coverage.gaps.length)throw Error('history_incomplete');
+        await paired.validate(flight.controller.signal);
+        if(this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('NATIVE_CONTEXT_STALE');
+        this.contextState(flight,'context_preparing');let sampled=false;
+        const value=await flight.worker.prepareNativeTurnContext(input,paired,flight.controller.signal,flight.key,flight.generation,flight.requestedAt,()=>{
+          if(sampled||flight.controller.signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
+          const fresh=this.options.goals.refreshNativeObservation(flight.ticket,this.time());if(!fresh)throw Error('NATIVE_CONTEXT_STALE');
+          sampled=true;flight.observedActiveSeconds=fresh.activeSeconds;flight.excludedActiveSeconds=0;return fresh;
+        });
+        if(!value||!sampled)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
+        if(!isInferenceEligible(value.representation))throw Error('history_incomplete');
+        prepared=value.input;flight.researchFailure='incomplete_scan';
+        this.contextState(flight,'context_native');
+      }catch(error){
+        // Never turn an unavailable native pair into a multi-minute full import.
+        if(paired)await closePaired();
+        this.contextState(flight,this.preparationFailureState(flight,error));this.failPreparation(entry,flight);return;
+      }
+    }else if(flight.worker.prepareNativeContext||flight.worker.nativeSourceDestination){
+      this.contextState(flight,'history_loading');
+      let opened:OpenNativeSourceResult|null|undefined,handedToWorker=false;
+      try{
+        if(!flight.worker.prepareNativeContext||!flight.worker.nativeSourceDestination)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
+        const destination=await flight.worker.nativeSourceDestination(flight.controller.signal);
+        opened=await this.options.goals.openNativeSource(flight.ticket,flight.controller.signal,destination);
+        if(!opened)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
+        if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('NATIVE_CONTEXT_STALE');
+        this.contextState(flight,'context_preparing');
+        handedToWorker=true;
+        let sampled=false;
+        const value=await flight.worker.prepareNativeContext(input,opened,flight.controller.signal,flight.key,flight.generation,flight.requestedAt,()=>{
+          if(sampled||flight.controller.signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
+          const fresh=this.options.goals.refreshNativeObservation(flight.ticket,this.time());
+          if(!fresh)throw Error('NATIVE_CONTEXT_STALE');
+          sampled=true;flight.observedActiveSeconds=fresh.activeSeconds;
+          // Outage exclusion before this genuine sample is already reflected
+          // in its clock; only later unavailable intervals belong to this ETA.
+          flight.excludedActiveSeconds=0;
+          return fresh;
+        });
+        if(!value||!sampled)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
+        prepared=value.input;
+        // No full scan is performed just to manufacture research features.
+        // Existing research handling records an unavailable prefix explicitly.
+        flight.researchFailure='incomplete_scan';
+        this.contextState(flight,'context_native');
+      }catch(error){
+        if(opened&&!handedToWorker)try{await opened.snapshot.close();}catch{/* Resource owner retains recovery evidence. */}
+        this.contextState(flight,this.preparationFailureState(flight,error));
+        this.failPreparation(entry,flight);return;
+      }
+    }else if(flight.worker.prepareContext){
       this.contextState(flight,'history_loading');
       try {
         const opened=await this.options.goals.openHistory?.(flight.ticket,flight.controller.signal);
@@ -252,19 +361,26 @@ export class ObserverScheduler {
       }
     }
     if(prepared.imageContextPending){
+      if(paired)await closePaired();
       this.contextState(flight,'image_context_unsupported');this.failPreparation(entry,flight);return;
     }
     const state=this.workerState(flight.worker);
+    this.checkDeadline(flight);
     if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time())||
       state.disabled||state.active||state.poisoned){
+      if(paired)await closePaired();
       this.failPreparation(entry,flight);
       return;
     }
     try {
       const result=await flight.worker.observe(prepared,flight.controller.signal,flight.key,flight.generation,
         stage=>this.record('stage',flight.key,entry,{requestId:flight.requestId,stage},flight));
+      if(paired)await closePaired();
       this.settle(entry,flight,result);
-    }catch{this.settle(entry,flight,null);}
+    }catch{if(paired)await closePaired();this.settle(entry,flight,null);}
+    }finally{
+      if(paired)await closePaired();
+    }
   }
   private markEvent(entry:Entry,now:number,reason:TriggerReason):void {
     const hadPending=entry.eventSequence>entry.consumedEventSequence;
@@ -285,6 +401,7 @@ export class ObserverScheduler {
       entry.predictionExcludedSeconds=0;
       entry.goalIdentity=state.goalIdentity;entry.predictionIdentity=state.predictionIdentity;
       entry.unknown=0;entry.expiredTimerResults=0;delete entry.overdueEligibleActiveSeconds;
+      delete entry.expiredResultPending;
       delete entry.overdueReservedPrediction;entry.lastRequestActiveSeconds=state.view.activeSeconds;
       if(state.contentIdentity===undefined)delete entry.contentIdentity;else entry.contentIdentity=state.contentIdentity;
       delete entry.consumedContentIdentity;
@@ -295,6 +412,7 @@ export class ObserverScheduler {
       if(state.view.prediction)entry.overdueEligibleActiveSeconds=
         state.view.prediction.observedActiveSeconds+state.view.prediction.remainingSeconds+15;
     } else if(entry.predictionIdentity!==state.predictionIdentity){
+      delete entry.expiredResultPending;
       entry.timerFailures=0;
       entry.predictionExcludedSeconds=0;
       entry.predictionIdentity=state.predictionIdentity;delete entry.overdueReservedPrediction;
@@ -327,13 +445,14 @@ export class ObserverScheduler {
   changed(key: string, event: 'prompt'|'activity'|'final'|'failure'|'runtime'): void {
     if (this.disabled) return;
     const now = this.time(), state = this.options.goals.scheduling(key, now);
+    this.workerSource.updateRetentionState?.(key,this.retentionState(key,state));
     if (!state) return;
     let entry = this.entries.get(key);
     const selectedSource = state.revision !== undefined;
     if (!entry) {
       this.prune(now);
       if (this.entries.size >= 128) {this.capacityReached = true; return;}
-      entry = {born: now, readyAfter: now + 15000, lastStart: null, eventAt: null,
+      entry = {born: now, readyAfter: now, lastStart: null, eventAt: null,
         eventSequence:0, consumedEventSequence:0,
         version: selectedSource ? 1 : 0, consumed: 0, unknown: 0, starts: [], runtime: state.view.runtime,
         statusEvidence: false, expiredTimerResults:0, ended:false, goalIdentity:state.goalIdentity,
@@ -362,6 +481,7 @@ export class ObserverScheduler {
     if(event==='final'&&state.finalAvailable){entry.statusEvidence=true;this.markEvent(entry,now,'status_evidence');}
     if(event==='failure'){entry.unknown=0;entry.expiredTimerResults=0;this.markEvent(entry,now,'important_event');}
     if(event==='runtime'&&resumed){entry.statusEvidence=false;entry.unknown=0;entry.expiredTimerResults=0;
+      delete entry.expiredResultPending;
       delete entry.overdueEligibleActiveSeconds;this.markEvent(entry,now,'important_event');}
     entry.runtime = state.view.runtime;
     if (['paused', 'stopped', 'failed', 'interrupted'].includes(entry.runtime)) entry.flight?.controller.abort();
@@ -416,6 +536,7 @@ export class ObserverScheduler {
         } catch { return false; }
       });
       const state = this.options.goals.scheduling(key, now);
+      this.workerSource.updateRetentionState?.(key,this.retentionState(key,state));
       if (!state) {entry.flight?.controller.abort(); continue;}
       const currentTurnKey=this.options.goals.currentTurnKey(key)??'';
       const runtime = state.view.status === 'completed' || ['stopped', 'failed', 'interrupted'].includes(state.view.runtime)
@@ -445,7 +566,10 @@ export class ObserverScheduler {
       const nearExpiryReady=state.predictionIdentity!==null&&prediction!==null&&remaining!==null&&
         remaining>0&&remaining<=prediction.remainingSeconds*0.2&&
         entry.nearExpiryReservedPrediction!==state.predictionIdentity;
-      const overdueReady=state.predictionIdentity!==null&&remaining===0&&
+      const expiredResultReady=entry.expiredResultPending===true&&entry.overdueEligibleActiveSeconds!==undefined&&
+        view.activeSeconds>=entry.overdueEligibleActiveSeconds;
+      const expiredResultBackoff=entry.expiredResultPending===true&&!expiredResultReady;
+      const overdueReady=!expiredResultBackoff&&state.predictionIdentity!==null&&remaining===0&&
         entry.overdueReservedPrediction!==state.predictionIdentity&&
         (entry.overdueEligibleActiveSeconds===undefined||view.activeSeconds>=entry.overdueEligibleActiveSeconds);
       const overdueAlready=state.predictionIdentity!==null&&remaining===0&&
@@ -467,8 +591,9 @@ export class ObserverScheduler {
          hasNewContent:entry.contentIdentity!==undefined&&entry.contentIdentity!==entry.consumedContentIdentity,
         lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,
         overdueActionRecheck: overdueReady,overdueAlreadyChecked:overdueAlready,
+        expiredResultRecheck:expiredResultReady,
         nearExpiryRecheck:nearExpiryReady,
-         overdueEligibleActiveSeconds:entry.overdueEligibleActiveSeconds??null,retryBackoff:retryBackoff||failureBackoff,
+         overdueEligibleActiveSeconds:entry.overdueEligibleActiveSeconds??null,retryBackoff:retryBackoff||failureBackoff||expiredResultBackoff,
          preDispatchRetry:entry.retryVersion===entry.version,
          bootstrapRecovery:entry.bootstrapRecoveryEligible===true&&entry.bootstrapRecoveryUsed!==true,
         state: runtime, statusEvidenceArrived: entry.statusEvidence,
@@ -487,6 +612,7 @@ export class ObserverScheduler {
       }
       const request = this.options.goals.request(key, now);
       if (!request) {this.skip(key,entry,'request_unavailable');continue;}
+      worker.updateRetentionState?.(this.retentionState(key,state));
       delete entry.lastSkip;
       const flight: Flight = {key, ticket: request.ticket, controller: new AbortController(), worker,
         requestId:++this.requestSequence,requestedAt:now,observedActiveSeconds:request.input.activeSeconds,
@@ -495,6 +621,7 @@ export class ObserverScheduler {
         goalIdentity:state.goalIdentity,excludedActiveSeconds:0,schedulerGeneration:this.schedulerGeneration,
         turnKey:this.options.goals.currentTurnKey(key)??''};
       entry.flight = flight; entry.lastStart = now; entry.starts.push(now); entry.consumed = entry.version;
+      if(entry.contextState==='estimate_timeout'){delete entry.contextState;delete entry.contextStateTurnKey;}
       entry.consumedEventSequence=entry.eventSequence;
       entry.lastRequestActiveSeconds=request.input.activeSeconds;
       if(entry.contentIdentity===undefined)delete entry.consumedContentIdentity;else entry.consumedContentIdentity=entry.contentIdentity;
@@ -503,7 +630,8 @@ export class ObserverScheduler {
       }
       if(entry.retryVersion===entry.version)entry.retryUsedVersion=entry.version;
       delete entry.retryVersion;
-      if (overdueReady&&state.predictionIdentity!==null)entry.overdueReservedPrediction=state.predictionIdentity;
+      if ((overdueReady||expiredResultReady)&&state.predictionIdentity!==null)entry.overdueReservedPrediction=state.predictionIdentity;
+      delete entry.expiredResultPending;
       if (nearExpiryReady&&state.predictionIdentity!==null)entry.nearExpiryReservedPrediction=state.predictionIdentity;
       entry.statusEvidence = false; this.flights.set(key, flight);
       // Rotate for fairness; reserve both local slot and hourly start before provider code.
@@ -511,10 +639,25 @@ export class ObserverScheduler {
       this.record('request',key,entry,{requestId:flight.requestId,triggerReason:flight.triggerReason,
         lastRequestActiveSeconds:flight.lastRequestActiveSeconds,eligibleActiveSeconds:flight.eligibleActiveSeconds});
       this.notify();
-      flight.done = this.dispatch(entry,flight,request.input);
+      flight.deadlineAt=performance.now()+30000;
+      const deadline=setTimeout(()=>this.expire(flight),30000);
+      deadline.unref?.();
+      flight.done = this.dispatch(entry,flight,request.input).finally(()=>clearTimeout(deadline));
     }
   }
+  private expire(flight:Flight):void {
+    if(flight.timedOut||this.flights.get(flight.key)!==flight||flight.controller.signal.aborted)return;
+    flight.timedOut=true;
+    flight.controller.abort(Error('ESTIMATE_DEADLINE'));
+    // Keep the owned flight until the worker finishes cleanup and durable usage
+    // settlement. Deadline publication does not mean the process is closed.
+    this.contextState(flight,'estimate_timeout');
+  }
+  private checkDeadline(flight:Flight):void {
+    if(flight.deadlineAt!==undefined&&performance.now()>=flight.deadlineAt)this.expire(flight);
+  }
   private settle(entry: Entry, flight: Flight, result: ObserverResult|null): void {
+    this.checkDeadline(flight);
     const before=this.options.goals.scheduling(flight.key,this.time());
     if(before&&before.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity)
       this.syncSourceClock(entry,before);
@@ -523,7 +666,7 @@ export class ObserverScheduler {
       this.options.goals.settle(flight.ticket, null, this.time());
       this.recordResult(entry,flight,result,false,this.time(),null,this.schedulerRejectionReason(flight,state));
       this.flights.delete(flight.key); if (entry.flight === flight) delete entry.flight;
-      void this.workerSource.release(flight.key).catch(() => undefined);
+      this.releaseRetention(entry,flight,false,null);
       this.notify(); return;
     }
     this.flights.delete(flight.key);
@@ -581,7 +724,16 @@ export class ObserverScheduler {
       if(classification.rejectionReason)entry.lastRejectionReason=classification.rejectionReason;
       else delete entry.lastRejectionReason;
     }
-    if(accepted&&result?.interpretation?.estimate&&live){
+    if(sameGoal&&eligible&&hostRejection==='estimate_expired_on_arrival'&&live){
+      // A rejected number must not manufacture a prediction/99% floor merely
+      // to obtain a timer. Own recovery separately, with a one-shot reservation.
+      entry.expiredTimerResults=Math.min(8,entry.expiredTimerResults+1);
+      entry.expiredResultPending=true;
+      entry.overdueEligibleActiveSeconds=entry.expiredTimerResults===1
+        ?Math.max((entry.lastRequestActiveSeconds??live.view.activeSeconds)+60,live.view.activeSeconds+15)
+        :live.view.activeSeconds+this.expiredBackoffSeconds(entry.expiredTimerResults-1);
+    } else if(accepted&&result?.interpretation?.estimate&&live){
+      delete entry.expiredResultPending;
       entry.timerFailures=0;
       entry.sourceActiveSeconds=live.view.activeSeconds;entry.sourceClockAvailable=live.sourceAvailable;
       entry.predictionExcludedSeconds=flight.excludedActiveSeconds;
@@ -589,18 +741,13 @@ export class ObserverScheduler {
       entry.unknown=0;
       if(live.goalIdentity!==flight.goalIdentity)entry.lastRequestActiveSeconds=live.view.activeSeconds;
       entry.goalIdentity=live.goalIdentity;entry.predictionIdentity=live.predictionIdentity;
-      if(result.interpretation.estimate.remainingSeconds===0&&
-        (flight.triggerReason==='overdue'||flight.triggerReason==='periodic')){
-        entry.expiredTimerResults=Math.min(8,entry.expiredTimerResults+1);
-        entry.overdueEligibleActiveSeconds=live.view.activeSeconds+this.expiredBackoffSeconds(entry.expiredTimerResults);
-      }else{
-        entry.expiredTimerResults=0;
-        if(live.view.prediction)entry.overdueEligibleActiveSeconds=
-          live.view.prediction.observedActiveSeconds+live.view.prediction.remainingSeconds+flight.excludedActiveSeconds+15;
-        else delete entry.overdueEligibleActiveSeconds;
-      }
+      entry.expiredTimerResults=0;
+      if(live.view.prediction)entry.overdueEligibleActiveSeconds=
+        live.view.prediction.observedActiveSeconds+live.view.prediction.remainingSeconds+flight.excludedActiveSeconds+15;
+      else delete entry.overdueEligibleActiveSeconds;
       delete entry.overdueReservedPrediction;
     } else if(accepted&&result?.interpretation?.estimate===null&&live){
+      delete entry.expiredResultPending;
       const predictionRetained=sameGoal&&live.predictionIdentity!==null&&live.predictionIdentity===entry.predictionIdentity;
       entry.timerFailures=0;
       entry.sourceActiveSeconds=live.view.activeSeconds;entry.sourceClockAvailable=live.sourceAvailable;
@@ -611,11 +758,11 @@ export class ObserverScheduler {
       if(!predictionRetained){entry.expiredTimerResults=0;
         delete entry.overdueEligibleActiveSeconds;delete entry.overdueReservedPrediction;}
     }
-    if(localResultAllowed&&live?.view.prediction===null&&entry.bootstrapRecoveryUsed!==true&&entry.bootstrapRecoveryEligible!==true&&
+    if(localResultAllowed&&hostRejection!=='estimate_expired_on_arrival'&&live?.view.prediction===null&&entry.bootstrapRecoveryUsed!==true&&entry.bootstrapRecoveryEligible!==true&&
       (classification.diagnostic==='unknown_response'||(classification.diagnostic==='rejected_result'&&result?.status==='interpreted')))
       entry.bootstrapRecoveryEligible=true;
     this.recordResult(entry,flight,result,accepted,settledAt,live,rejectionReason);
-    void this.workerSource.release(flight.key).catch(() => undefined);
+    this.releaseRetention(entry,flight,accepted,live);
     this.notify();
   }
   private classifyResult(result:ObserverResult|null,accepted:boolean,rejectionReason?:ResultRejectionReason):{diagnostic?:ResultDiagnostic;rejectionReason?:ResultRejectionReason} {
@@ -723,7 +870,7 @@ export class ObserverScheduler {
       ...(contextState?{contextState}:{}),...quality,
       estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
     const at=this.stopReason ? this.lastClock : this.time(),view=this.options.goals.view(key,at);
-    const state:ObserverDiagnostics['state']=this.disabled?'disabled':entry?.flight?'estimating':
+    const state:ObserverDiagnostics['state']=this.disabled?'disabled':contextState==='estimate_timeout'?'call_failed':entry?.flight?'estimating':
       this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
       entry?.lastResultStatus==='admission_denied'?'admission_blocked':
       ['hourly_limit','global_concurrency_limit'].includes(entry?.lastSkip??'')?'rate_limited':
@@ -738,6 +885,7 @@ export class ObserverScheduler {
       retryPending:entry?.retryVersion!==undefined&&entry.retryVersion===entry.version};
   }
   end(key: string): void {
+    this.workerSource.updateRetentionState?.(key,null);
     const entry = this.entries.get(key);
     if (!entry) return;
     entry.consumed = entry.version; entry.statusEvidence = false; entry.flight?.controller.abort();

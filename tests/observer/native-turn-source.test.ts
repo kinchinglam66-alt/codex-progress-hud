@@ -1,0 +1,253 @@
+import {afterEach,expect,it} from 'vitest';
+import {mkdtemp,mkdir,writeFile,appendFile,readFile,rm} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {createLocalSessionReader} from '../../src/observer/local-session-reader.js';
+import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
+import {createContextOwner} from '../../src/observer/context-owner.js';
+import {createConversationSource} from '../../src/observer/conversation-source.js';
+
+const id='11111111-1111-4111-8111-111111111111',signal=new AbortController().signal;
+const roots:string[]=[];
+const line=(type:string,payload:unknown)=>JSON.stringify({timestamp:'2026-09-15T00:00:00Z',type,payload})+'\n';
+const start=(turn:string)=>line('event_msg',{type:'task_started',turn_id:turn});
+const end=(turn:string)=>line('event_msg',{type:'task_complete',turn_id:turn});
+const user=(text:string)=>line('response_item',{type:'message',role:'user',content:[{type:'input_text',text}]});
+const meta=line('session_meta',{id,cli_version:'0.153.4'});
+afterEach(async()=>{for(const root of roots.splice(0)){
+  if(!root.startsWith(join(tmpdir(),'hud-turn-source-')))throw Error('UNSAFE_FIXTURE_CLEANUP');
+  await rm(root,{recursive:true,force:true});
+}});
+async function fixture(first=false){
+  const root=await mkdtemp(join(tmpdir(),'hud-turn-source-'));roots.push(root);
+  const sourceRoot=join(root,'sessions'),directory=join(sourceRoot,'2026','09','15'),destination=join(root,'protected');
+  await mkdir(directory,{recursive:true});await mkdir(destination);
+  const path=join(directory,`rollout-2026-09-15-${id}.jsonl`);
+  const base=meta+(first?'':start('six')+user('old fact '+'.'.repeat(6000))+end('six'));
+  const prelude=line('event_msg',{type:'thread_settings_applied',thread_id:id,thread_settings:{model:'synthetic-model'}});
+  const data=base+prelude+start('seven')+user('current task');
+  await writeFile(path,data);
+  const reader=createLocalSessionReader({root:sourceRoot});await reader.read(id,signal);
+  const target={destinationDirectory:destination,maxSourceBytes:8*1024*1024,verifyDestination:async()=>{}};
+  return {reader,path,sourceRoot,base,data,target};
+}
+async function records(snapshot:HistorySnapshot){
+  const result=[];for await(const item of snapshot.records(signal))result.push(item.record);return result;
+}
+
+it('rejects a task_failed native prefix before allocating a base but leaves verified parsed history available',async()=>{
+ const f=await fixture();
+ const attributed=(turn:string,text:string)=>line('response_item',{type:'message',role:'user',turn_id:turn,content:[{type:'input_text',text}]});
+ await writeFile(f.path,meta+start('six')+attributed('six','old fact')+line('event_msg',{type:'task_failed',turn_id:'six'})+start('seven')+attributed('seven','current task'));
+ await f.reader.read(id,signal);await f.reader.read(id,signal);
+ try{
+  await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:'source_terminal_unsupported'});
+  const history=await f.reader.snapshot(id,signal);const rows=await records(history);
+  expect(history.coverage).toEqual({complete:true,gaps:[]});expect(JSON.stringify(rows)).toContain('current task');await history.close();
+ }finally{await f.reader.close();}
+});
+
+it('inherits an older failed turn when the selected latest cutoff completed normally',async()=>{
+ const f=await fixture();let source,base;
+ const history=meta+start('five')+user('FAILED-HISTORY')+line('event_msg',{type:'task_failed',turn_id:'five'})+start('six')+user('RECOVERED-HISTORY')+end('six');
+ await writeFile(f.path,history+start('seven')+user('CURRENT'));
+ await f.reader.read(id,signal);await f.reader.read(id,signal);
+ try{
+  source=await f.reader.openNativeTurn(id,signal);
+  expect(source.boundary.completed?.turnId).toBe('six');
+  base=await source.openBase(f.target,signal);
+  expect(await readFile(base!.path,'utf8')).toBe(history);
+  expect(JSON.stringify(await records(source.supplement))).toContain('CURRENT');
+ }finally{await base?.close();await source?.close();await f.reader.close();}
+});
+
+it('preserves native user/agent message events, including images and extra fields, in the first current turn',async()=>{
+ const f=await fixture(true),picture='data:image/png;base64,iVBORw0KGgo=';
+ const data=meta+start('seven')+line('event_msg',{type:'user_message',message:'FIRST-EVENT-REQUEST',images:[picture],local_images:[],text_elements:[],extra:{fact:'keep me'}})+
+  line('event_msg',{type:'agent_message',message:'FIRST-EVENT-PROGRESS',phase:'commentary'});
+ await writeFile(f.path,data);await f.reader.read(id,signal);await f.reader.read(id,signal);
+ try{
+  const source=await f.reader.openNativeTurn(id,signal),rows=await records(source.supplement);
+  expect(source.supplement.coverage).toEqual({complete:true,gaps:[]});
+  expect(JSON.stringify(rows)).toContain('FIRST-EVENT-REQUEST');expect(JSON.stringify(rows)).toContain('keep me');
+  expect(rows.find(x=>x.kind==='user')?.contentParts).toContainEqual({type:'input_image',imageUrl:picture});
+  expect(rows.find(x=>x.kind==='assistant')?.assistantPhase).toBe('commentary');await source.close();
+ }finally{await f.reader.close();}
+});
+
+it('pairs the previous terminal base with all current content and intervening configuration',async()=>{
+  const f=await fixture();let view,base;
+  try{
+    view=await f.reader.openNativeTurn(id,signal);
+    await appendFile(f.path,line('response_item',{type:'function_call_output',call_id:'future',output:'FUTURE_RESULT'}));
+    base=await view.openBase(f.target,signal);
+    expect(base).not.toBeNull();expect(await readFile(base!.path,'utf8')).toBe(f.base);
+    expect(view.boundary.completed?.turnId).toBe('six');
+    expect(view.boundary.watermark).toBe(Buffer.byteLength(f.data));
+    const items=await records(view.supplement);
+    expect(items.map(item=>item.kind)).toEqual(['tool_result','runtime','user']);
+    expect(items[0]?.sourceScope).toBe('conversation');
+    expect(items[0]?.text).toContain('synthetic-model');
+    expect(items[2]?.text).toBe('current task');
+    expect(items[2]?.turnId).toBe('seven');
+    expect(view.supplement.coverage).toEqual({complete:true,gaps:[]});
+  }finally{await base?.close();await view?.close();await f.reader.close();}
+});
+it('reuses base identity while each acquisition includes the whole growing current turn',async()=>{
+  const f=await fixture();let first,second;
+  try{
+    first=await f.reader.openNativeTurn(id,signal);
+    await appendFile(f.path,user('another requirement'));await f.reader.read(id,signal);
+    second=await f.reader.openNativeTurn(id,signal);
+    expect(second.baseKey).toBe(first.baseKey);expect(second.sourceEpoch).toBe(first.sourceEpoch);
+    expect(second.revision).toBeGreaterThan(first.revision);
+    expect((await records(first.supplement)).filter(r=>r.kind==='user').map(r=>r.text)).toEqual(['current task']);
+    expect((await records(second.supplement)).filter(r=>r.kind==='user').map(r=>r.text)).toEqual(['current task','another requirement']);
+  }finally{await first?.close();await second?.close();await f.reader.close();}
+});
+it('first turn has no native base but preserves its prelude and full user input',async()=>{
+  const f=await fixture(true);let view;
+  try{
+    view=await f.reader.openNativeTurn(id,signal);
+    expect(view.boundary.completed).toBeNull();expect(await view.openBase(f.target,signal)).toBeNull();
+    expect((await records(view.supplement)).filter(r=>r.kind==='user').map(r=>r.text)).toEqual(['current task']);
+    expect(view.supplement.coverage.complete).toBe(true);
+  }finally{await view?.close();await f.reader.close();}
+});
+it('rejects earlier same-size overwrite outside the existing small cursor hash window',async()=>{
+  const f=await fixture();let view;
+  try{
+    view=await f.reader.openNativeTurn(id,signal);
+    await writeFile(f.path,f.data.replace('old fact','bad fact'));
+    await expect(view.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+    await expect(records(view.supplement)).rejects.toMatchObject({code:'source_identity_mismatch'});
+  }finally{await view?.close();await f.reader.close();}
+});
+it('does not attest source modified between observation and the first acquisition',async()=>{
+  const f=await fixture();
+  try{
+    await writeFile(f.path,f.data.replace('old fact','bad fact'));
+    await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+  }finally{await f.reader.close();}
+});
+it('old turn capture becomes invalid when a new turn is observed',async()=>{
+  const f=await fixture();let old,next;
+  try{
+    old=await f.reader.openNativeTurn(id,signal);
+    await appendFile(f.path,end('seven')+start('eight')+user('new task'));await f.reader.read(id,signal);
+    await expect(old.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+    next=await f.reader.openNativeTurn(id,signal);
+    expect(next.baseKey).not.toBe(old.baseKey);expect(next.boundary.completed?.turnId).toBe('seven');
+  }finally{await old?.close();await next?.close();await f.reader.close();}
+});
+it('never includes half of a newly written record',async()=>{
+  const f=await fixture();let view;
+  try{
+    await appendFile(f.path,'{"type":"response_item"');await f.reader.read(id,signal);
+    view=await f.reader.openNativeTurn(id,signal);
+    expect(view.boundary.watermark).toBe(Buffer.byteLength(f.data));
+    expect((await records(view.supplement)).filter(r=>r.kind==='user').map(r=>r.text)).toEqual(['current task']);
+  }finally{await view?.close();await f.reader.close();}
+});
+it('preserves tool association and full text beyond the UI projection cap',async()=>{
+  const f=await fixture();let view;
+  try{
+    const text='large-input-'+'.'.repeat(70000);
+    await appendFile(f.path,user(text)+line('response_item',{type:'function_call',name:'exec',call_id:'call-7',arguments:'{"cmd":"test"}'})+
+      line('response_item',{type:'function_call_output',call_id:'call-7',output:'result-7'}));
+    await f.reader.read(id,signal);view=await f.reader.openNativeTurn(id,signal);
+    const items=await records(view.supplement);
+    expect(items.filter(r=>r.kind==='user').at(-1)?.text).toBe(text);
+    expect(items.filter(r=>r.kind==='tool_start'||r.kind==='tool_result').filter(r=>r.sourceScope!=='conversation').map(r=>r.actionId)).toEqual(['call-7','call-7']);
+  }finally{await view?.close();await f.reader.close();}
+});
+it('does not reopen a closed capture or source',async()=>{
+  const f=await fixture();const view=await f.reader.openNativeTurn(id,signal);
+  await view.close();await expect(view.validate(signal)).rejects.toMatchObject({code:'source_closed'});
+  await f.reader.close();await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:'source_closed'});
+});
+it('preserves repeated user requirements and image parts without text-based deduplication',async()=>{
+  const f=await fixture();let view;
+  try{
+    const image='data:image/png;base64,iVBORw0KGgo=';
+    await appendFile(f.path,user('current task')+line('response_item',{type:'message',role:'user',content:[{type:'input_image',image_url:image}]}));
+    await f.reader.read(id,signal);view=await f.reader.openNativeTurn(id,signal);
+    const items=await records(view.supplement);
+    expect(items.filter(r=>r.kind==='user'&&r.text==='current task')).toHaveLength(2);
+    expect(items.at(-1)?.contentParts).toEqual([{type:'input_image',imageUrl:image}]);
+  }finally{await view?.close();await f.reader.close();}
+});
+it('rebuilds a stable new epoch after a detected early rewrite and a fresh source read',async()=>{
+  const f=await fixture();let old,next;
+  try{
+    old=await f.reader.openNativeTurn(id,signal);await writeFile(f.path,f.data.replace('old fact','bad fact'));
+    await expect(old.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+    expect((await f.reader.read(id,signal)).reset).toBe(true);
+    next=await f.reader.openNativeTurn(id,signal);
+    expect(next.sourceEpoch).toBeGreaterThan(old.sourceEpoch);expect(next.baseKey).not.toBe(old.baseKey);
+    await next.validate(signal);
+  }finally{await old?.close();await next?.close();await f.reader.close();}
+});
+it('closes an unhanded base when cancellation arrives during its protected copy',async()=>{
+  const f=await fixture(),controller=new AbortController();let view;
+  try{
+    view=await f.reader.openNativeTurn(id,signal);
+    await expect(view.openBase({...f.target,beforeCopy:async()=>{controller.abort();}},controller.signal)).rejects.toMatchObject({code:'source_cancelled'});
+    await expect(view.openBase(f.target,signal)).rejects.toMatchObject({code:'source_unobserved'});
+  }finally{await view?.close();await f.reader.close();}
+});
+it('does not certify a current-turn compaction marker as a complete readable supplement',async()=>{
+  const f=await fixture();let view;
+  try{
+    await appendFile(f.path,line('compacted',{message:'history compacted'}));await f.reader.read(id,signal);
+    view=await f.reader.openNativeTurn(id,signal);await records(view.supplement);
+    expect(view.supplement.coverage.complete).toBe(false);expect(view.supplement.coverage.gaps).toContain('upstream_truncated');
+  }finally{await view?.close();await f.reader.close();}
+});
+it('context owner refuses a paired capture when task binding changes during acquisition',async()=>{
+  const f=await fixture();let now=0,finish!:()=>void,entered!:()=>void;
+  const hold=new Promise<void>(resolve=>{finish=resolve;}),started=new Promise<void>(resolve=>{entered=resolve;});
+  // The owner needs its own initial read; the fixture reader has already consumed
+  // the source, so use a fresh reader rather than manufacturing projected rows.
+  const reader=createLocalSessionReader({root:f.sourceRoot});
+  const owner=createContextOwner({source:{...reader,openNativeTurn:async(threadId,requestSignal)=>{
+    const view=await reader.openNativeTurn(threadId,requestSignal);entered();await hold;return view;
+  }},now:()=>now});
+  try{
+    owner.attach('task',id,'seven');now=500;owner.tick();
+    for(let i=0;i<100&&owner.health('task')!=='ready';i++)await new Promise(resolve=>setTimeout(resolve,5));
+    expect(owner.health('task')).toBe('ready');
+    const pending=owner.openNativeTurn('task','seven',signal);await started;
+    owner.attach('task',id,'eight');finish();
+    await expect(pending).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
+  }finally{finish();await owner.close();await f.reader.close();}
+});
+it('context owner exposes complete paired content only for its matching live binding',async()=>{
+  const f=await fixture();let now=0,view;
+  const reader=createLocalSessionReader({root:f.sourceRoot}),owner=createContextOwner({source:reader,now:()=>now});
+  try{
+    owner.attach('task',id,'seven');now=500;owner.tick();
+    for(let i=0;i<100&&owner.health('task')!=='ready';i++)await new Promise(resolve=>setTimeout(resolve,5));
+    expect(owner.health('task')).toBe('ready');
+    expect(await owner.openNativeTurn('task','different',signal)).toBeNull();
+    view=await owner.openNativeTurn('task','seven',signal);
+    expect(view?.currentTurnId).toBe('seven');expect((await records(view!.supplement)).at(-1)?.text).toBe('current task');
+    owner.attach('task',id,'eight');await expect(view!.validate(signal)).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
+  }finally{await view?.close();await owner.close();await f.reader.close();}
+});
+it('conversation source forwards paired history for the selected conversation and fences replacement',async()=>{
+  const f=await fixture();let now=0,view;
+  const source=createConversationSource({source:createLocalSessionReader({root:f.sourceRoot}),now:()=>now,
+    wallNow:()=>Date.parse('2026-09-15T00:00:01Z'),turnKeyFor:(_host,turn)=>turn});
+  try{
+    source.attach('selected',id,'seven');now=500;source.tick();
+    for(let i=0;i<100&&source.snapshot('selected')?.health!=='ready';i++)await new Promise(resolve=>setTimeout(resolve,5));
+    expect(source.snapshot('selected')?.health).toBe('ready');
+    expect(await source.goals.openNativeTurn!('other','seven',signal)).toBeNull();
+    view=await source.goals.openNativeTurn!('selected','seven',signal);
+    expect(view?.boundary.completed?.turnId).toBe('six');
+    expect((await records(view!.supplement)).at(-1)?.text).toBe('current task');
+    source.attach('selected',id,'eight');
+    await expect(view!.validate(signal)).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
+  }finally{await view?.close();await source.close();await f.reader.close();}
+});

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$ParentDirectory, [switch]$VerifyOnly)
+param([Parameter(Mandatory=$true)][string]$ParentDirectory, [switch]$VerifyOnly, [switch]$Persistent)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -14,6 +14,7 @@ function Assert-PlainDirectory([string]$Directory) {
     }
 }
 
+function Invoke-HomeCheck([string]$ParentDirectory, [bool]$VerifyOnly) {
 try {
     if ($ParentDirectory -notmatch '^[a-zA-Z]:[\\/]' -or $ParentDirectory -match '[\x00-\x1f\x7f]') { throw 'invalid path' }
     $parentPath = [System.IO.Path]::GetFullPath($ParentDirectory).TrimEnd('\', '/')
@@ -74,9 +75,48 @@ try {
             }
         }
     }
-    @{ok=$true; path=$targetPath} | ConvertTo-Json -Compress
-    exit 0
+    return @{ok=$true; path=$targetPath}
 } catch {
-    Write-Output '{"ok":false,"code":"OBSERVER_HOME_UNAVAILABLE"}'
+    return @{ok=$false; code='OBSERVER_HOME_UNAVAILABLE'}
+}
+}
+
+if (-not $Persistent) {
+    $result = Invoke-HomeCheck $ParentDirectory ([bool]$VerifyOnly)
+    $result | ConvertTo-Json -Compress
+    if ($result.ok) { exit 0 } else { exit 1 }
+}
+
+# The launch binds the directory. Requests have no paths or executable input.
+# ASCII-only request framing makes the 256-byte bound independent of encoding.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$lastId = 0L
+try {
+    while ($true) {
+        $line = ''
+        while ($true) {
+            $ch = [Console]::In.Read()
+            if ($ch -eq -1) { if ($line.Length -ne 0) { throw 'incomplete frame' }; exit 0 }
+            if ($ch -eq 10) { break }
+            if ($ch -lt 32 -or $ch -gt 126 -or $line.Length -ge 255) { throw 'invalid frame' }
+            $line += [char]$ch
+        }
+        $request = $line | ConvertFrom-Json
+        if ($null -eq $request -or ($request.PSObject.Properties.Name | Sort-Object) -join ',' -cne 'id,op,v' -or
+            $request.v -ne 1 -or ($request.v -isnot [int] -and $request.v -isnot [long]) -or
+            ($request.id -isnot [int] -and $request.id -isnot [long]) -or
+            $request.id -le $lastId -or $request.id -gt 9007199254740991 -or
+            ($request.op -cne 'prepare' -and $request.op -cne 'verify')) { throw 'invalid request' }
+        $lastId = $request.id
+        $result = Invoke-HomeCheck $ParentDirectory ($request.op -ceq 'verify')
+        $result.v = 1
+        $result.id = $lastId
+        $serialized = $result | ConvertTo-Json -Compress
+        if ([Text.Encoding]::UTF8.GetByteCount($serialized) -ge 4096) { throw 'oversized response' }
+        [Console]::Out.WriteLine($serialized)
+        [Console]::Out.Flush()
+        if (-not $result.ok) { exit 1 }
+    }
+} catch {
     exit 1
 }

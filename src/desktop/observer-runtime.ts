@@ -16,6 +16,8 @@ import type {ObserverScheduler, ObserverWorkerSource} from '../estimation/observ
 import {inspectRecoveryBootBoundary, type RecoveryBootBoundaryProof} from '../estimation/recovery-boot-boundary.js';
 import {withContextPreparation, type PreparationConfiguration, type PreparationScope} from '../estimation/context-worker.js';
 import type {CompressionRequest} from '../estimation/context-compression.js';
+import type {SessionAccountReuse,SessionAccountProof} from '../estimation/session-account-reuse.js';
+import type {SessionPreparationPolicy} from '../estimation/account-attestation-cache.js';
 
 const REFRESH_MS = 120000;
 const RECOVERY_INPUT: ObserverInput = Object.freeze({
@@ -28,7 +30,8 @@ const RECOVERY_INPUT: ObserverInput = Object.freeze({
 
 export interface DesktopObserverIdentity {
   inspect(signal: AbortSignal): Promise<{accountLabel: string; evidence: ObserverAttestation}>;
-  prepareSession?(signal:AbortSignal):Promise<{accountLabel:string;evidence:ObserverAttestation;invocation:Invocation}>;
+  prepareSession?(signal:AbortSignal,policy?:SessionPreparationPolicy):Promise<{accountLabel:string;evidence:ObserverAttestation;invocation:Invocation;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
+  invalidateSessionReuse?():void;
   prepareEstimate(input: ObserverInput, signal: AbortSignal): Promise<{
     accountLabel: string;
     evidence: ObserverAttestation;
@@ -71,7 +74,8 @@ export interface DesktopObserverRuntimeOptions {
   inspectRecoveryBootBoundary?: () => Promise<RecoveryBootBoundaryProof>;
   contextPreparation?: DesktopObserverContextPreparation;
   /** Host-selected implementation; never selected by source conversation text. */
-  persistentWorkerFactory?:(options:{accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding}>;
+  persistentWorkerFactory?:(options:{accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal,policy?:SessionPreparationPolicy)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
+    invalidateSessionReuse?:()=>void;
     receiptDirectory:string;
     authorize:()=>boolean;now:()=>number})=>ObserverWorker;
   persistentReceiptDirectory?:string;
@@ -175,7 +179,14 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
     recoveryController?.disable();
   }
 
-  const gate = createObserverConsentGate({now, onInvalidate: () => { ready = false; }});
+  function revokeRetention():void {
+    for(const delegate of delegates.values())try{delegate.updateRetentionState?.(null);}catch{/* Preserve the delegate for verified close/recovery. */}
+  }
+  const gate = createObserverConsentGate({now, onInvalidate: () => {
+    ready = false;
+    identity.invalidateSessionReuse?.();
+    revokeRetention();
+  }});
 
   function slot(key: string): ObserverWorker {
     return {
@@ -219,12 +230,14 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
         const state=existing.status();
         if(state.active)throw new Error('OBSERVER_WORKER_CLOSING');
         if(!state.disabled&&!state.poisoned)return existing;
+        if(state.cleanupPending)throw new Error('OBSERVER_WORKER_CLEANUP_PENDING');
         delegates.delete(conversationKey);
       }
       const owner = accounting;
       if (!owner) throw new Error('OBSERVER_NOT_READY');
       if (persistentWorkerFactory && !persistentReceiptDirectory) throw new Error('PERSISTENT_RECEIPT_REQUIRED');
       const delegate = persistentWorkerFactory ? persistentWorkerFactory({accounting:owner,prepareSession,
+        invalidateSessionReuse:()=>identity.invalidateSessionReuse?.(),
         receiptDirectory:persistentReceiptDirectory!,
         authorize:()=>!disabled&&ready&&gate.authorized(),now}) : createAccountedObserverWorker({
         accounting: owner,
@@ -238,14 +251,15 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
       delegates.set(conversationKey, worker);
       return worker;
     },
-    async release(conversationKey: string): Promise<void> {
+    updateRetentionState(conversationKey,state){delegates.get(conversationKey)?.updateRetentionState?.(state);},
+    async release(conversationKey,permit): Promise<void> {
       const delegate = delegates.get(conversationKey);
       if (!delegate) return;
       if(releasingDelegates.has(conversationKey))return;
       releasingDelegates.add(conversationKey);
       try {
         if(delegate.release){
-          await delegate.release();
+          await delegate.release(permit);
           const state=delegate.status();
           if(!state.active&&!state.disabled&&!state.poisoned)return;
         }
@@ -294,17 +308,65 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
     return queued.result;
   }
 
-  function prepareSession(signal:AbortSignal):Promise<{invocation:Invocation;binding:PersistentReceiptBinding}> {
+  function guardedReuse(raw:SessionAccountReuse,original:ObserverAttestation):SessionAccountReuse {
+    const evidence=Object.freeze({...original});let consumed=false,invalid=false;
+    const invalidate=()=>{invalid=true;raw.invalidate();};
+    const valid=()=>{
+      try{return !invalid&&!disabled&&ready&&gate.authorized()&&authorizedBinding!==undefined&&
+        binding(evidence)===authorizedBinding&&now()>=evidence.observedAt&&now()<evidence.expiresAt;}
+      catch{return false;}
+    };
+    function guarded<T>(signal:AbortSignal,run:()=>Promise<T>,failed:T):Promise<T>{
+      const queued=serial(metadataTail,async()=>{
+        try{
+          if(!valid()||signal.aborted){invalidate();return failed;}
+          check(signal);
+          const result=await run();
+          if(!valid()||signal.aborted){invalidate();return failed;}
+          check(signal);gate.update(evidence);
+          if(!valid()){invalidate();return failed;}
+          return result;
+        }catch{invalidate();return failed;}
+      });
+      metadataTail=queued.next;return queued.result;
+    }
+    return Object.freeze({invalidate,
+      claim(signal:AbortSignal):Promise<SessionAccountProof|null>{
+        if(consumed)return Promise.resolve(null);
+        consumed=true; // Atomic even while another metadata operation holds the queue.
+        return guarded<SessionAccountProof|null>(signal,async()=>{
+          const proof=await raw.claim(signal);
+          if(!proof){invalidate();return null;}
+          return Object.freeze({
+            valid:()=>valid()&&proof.valid(),
+            validate:(current:AbortSignal)=>guarded(current,async()=>{
+              if(!await proof.validate(current)||!proof.valid()){invalidate();return false;}
+              return true;
+            },false),
+          });
+        },null);
+      },
+    });
+  }
+
+  function prepareSession(signal:AbortSignal,policy?:SessionPreparationPolicy):Promise<{invocation:Invocation;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}> {
     const queued=serial(metadataTail,async()=>{
       check(signal);
       if(!identity.prepareSession)throw Error('OBSERVER_SESSION_UNAVAILABLE');
-      const prepared=await identity.prepareSession(signal);
+      const prepared=await identity.prepareSession(signal,policy);
       check(signal);gate.update(prepared.evidence);
       if(!gate.authorized()||authorizedBinding===undefined||binding(prepared.evidence)!==authorizedBinding){
         disable();throw Error('OBSERVER_IDENTITY_CHANGED');
       }
-      return {invocation:prepared.invocation,binding:{accountFingerprint:prepared.evidence.accountFingerprint,
-        routeFingerprint:prepared.evidence.routeFingerprint,assetsFingerprint:prepared.evidence.assetsFingerprint}};
+      const capturedBinding=binding(prepared.evidence);
+      const acceptanceAuthorized=()=>!disabled&&ready&&gate.authorized()&&authorizedBinding===capturedBinding;
+      return {invocation:prepared.invocation,validateAcceptance:async (acceptanceSignal:AbortSignal)=>{
+        if(acceptanceSignal.aborted||!acceptanceAuthorized()||!prepared.validateAcceptance)return false;
+        const valid=await prepared.validateAcceptance(acceptanceSignal).catch(()=>false);
+        return valid&&!acceptanceSignal.aborted&&acceptanceAuthorized();
+      },binding:{accountFingerprint:prepared.evidence.accountFingerprint,
+        routeFingerprint:prepared.evidence.routeFingerprint,assetsFingerprint:prepared.evidence.assetsFingerprint},
+        ...(prepared.reuse?{reuse:guardedReuse(prepared.reuse,prepared.evidence)}:{})};
     });
     metadataTail=queued.next;return queued.result;
   }
@@ -468,6 +530,9 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
         if (!disabled && gate.authorized()) ready = true;
       } catch {
         ready = false;
+        // A network failure does not renew old evidence. Expire its gate even
+        // without a new dispatch, and reclaim idle native resources promptly.
+        if(!gate.authorized())revokeRetention();
       } finally {
         if (refreshController === controller) refreshController = undefined;
       }

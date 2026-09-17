@@ -32,6 +32,14 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it('rejects a numeric estimate that expired during preparation or inference without moving its anchor',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0),request=f.request(1000);
+    const estimate={...answer(),estimate:{remainingSeconds:60,errorPercent:30}};
+    expect(f.goals.settle(request.ticket,estimate,71000)).toBe(false);
+    expect(f.goals.rejectionReason(request.ticket)).toBe('estimate_expired_on_arrival');
+    expect(f.goals.view(session,71000)!.prediction).toBeNull();
+    expect(f.goals.view(session,71000)!.progressFloor??0).toBeLessThan(99);
+  });
   it('does not count revision or action-only bookkeeping as new recovery content',()=>{
     let revision=1,currentActionId:string|null='action',contentFingerprint='content-one';
     const source:GoalContextSource={health:()=> 'ready',epoch:()=>0,
@@ -320,8 +328,8 @@ describe('passive goal interpretation owner', () => {
 
   it('does not infer completion from Stop or estimated zero', () => {
     const f = fixture(); const session = f.hook('UserPromptSubmit', 0);
-    expect(f.goals.settle(f.request(1000).ticket, {...answer(), estimate: {remainingSeconds: 0, errorPercent: 50}}, 1000)).toBe(true);
-    expect(f.goals.view(session, 2000)?.status).toBe('running');
+    expect(f.goals.settle(f.request(1000).ticket, {...answer(), estimate: {remainingSeconds: 0, errorPercent: 50}}, 1000)).toBe(false);
+    expect(f.goals.view(session, 2000)).toMatchObject({runtime:'running',prediction:null});
     f.hook('Stop', 3000);
     expect(f.goals.view(session, 4000)).toMatchObject({status: 'unknown', runtime: 'waiting', activeSeconds: 3});
     expect(f.goals.settle(f.request(4000).ticket, {...answer('continue'), status: 'completed', estimate: null}, 5000)).toBe(true);

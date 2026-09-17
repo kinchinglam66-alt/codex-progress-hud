@@ -19,6 +19,8 @@ extraResources:
     to: observer-assets/context-summary.schema.json
   - from: scripts/windows/observer-home.ps1
     to: observer-home.ps1
+  - from: scripts/windows/native-guard.ps1
+    to: native-guard.ps1
   - from: build/stop-companion.ps1
     to: stop-companion.ps1
 win:

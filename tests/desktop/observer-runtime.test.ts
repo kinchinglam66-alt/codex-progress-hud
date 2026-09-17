@@ -22,6 +22,64 @@ const input: ObserverInput = {
   messages: [{kind: 'user', text: 'Build the report', truncated: false}],
   truncated: false,
 };
+it('carries one-use session proof through serialized desktop checks and revokes it with consent',async()=>{
+ const events:string[]=[],signal=new AbortController().signal;let options:any,claimed=0;
+ const policies:unknown[]=[];
+ const rawProof={validate:async()=>true,valid:()=>true};
+ const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),
+  identity:{...identityFor(()=>0,events),invalidateSessionReuse:()=>{events.push('identity-reuse-invalidated');},prepareSession:async(_signal,policy)=>{policies.push(policy);return {accountLabel:'synthetic',evidence:evidence(0),invocation:invocation(),
+   validateAcceptance:async()=>true,reuse:{claim:async()=>{claimed++;return rawProof;},invalidate:()=>{events.push('reuse-invalidated');}}};}},
+  persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:configuration=>{options=configuration;return {
+   observe:async()=>({status:'interpreted',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),disable(){},close:async()=>{}};}});
+ try{
+  await runtime.start(signal);runtime.workerSource.acquire('source');
+  const prepared=await options.prepareSession(signal,{accountCache:'allow'});
+  expect(policies).toEqual([{accountCache:'allow'}]);
+  expect(prepared.reuse).toBeDefined();
+  const [proof,second]=await Promise.all([prepared.reuse.claim(signal),prepared.reuse.claim(signal)]);
+  expect(proof.valid()).toBe(true);expect(second).toBeNull();expect(claimed).toBe(1);
+  expect(await proof.validate(signal)).toBe(true);
+  expect(prepared.validateAcceptance).toBeTypeOf('function');
+  expect(await prepared.validateAcceptance(signal)).toBe(true);
+  await runtime.revokeConsent();
+  expect(events).toContain('identity-reuse-invalidated');
+  expect(proof.valid()).toBe(false);expect(await proof.validate(signal)).toBe(false);
+  expect(await prepared.validateAcceptance(signal)).toBe(false);
+ }finally{await runtime.close();}
+});
+it('does not refresh the original evidence expiry when checking a reused desktop proof',async()=>{
+ const events:string[]=[],signal=new AbortController().signal;let now=0,options:any;
+ const runtime=createDesktopObserverRuntime({now:()=>now,dialog:dialogFor(events),openAccounting:async()=>owner(events),
+  identity:{...identityFor(()=>now,events),prepareSession:async()=>({accountLabel:'synthetic',evidence:{...evidence(0),expiresAt:50},invocation:invocation(),
+   reuse:{claim:async()=>({validate:async()=>true,valid:()=>true}),invalidate(){}}})},
+  persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:configuration=>{options=configuration;return {
+   observe:async()=>({status:'interpreted',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),disable(){},close:async()=>{}};}});
+ try{
+  await runtime.start(signal);runtime.workerSource.acquire('source');
+  const prepared=await options.prepareSession(signal);
+  expect(prepared.reuse).toBeDefined();const proof=await prepared.reuse.claim(signal);
+  now=50;expect(await proof.validate(signal)).toBe(false);expect(proof.valid()).toBe(false);
+ }finally{await runtime.close();}
+});
+it('serializes account preparations and rejects a queued cancellation without touching shared identity',async()=>{
+ const events:string[]=[],signal=new AbortController().signal;
+ const held=deferred<void>();let options:any,reads=0,invalidations=0;
+ const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),
+  identity:{...identityFor(()=>0,events),invalidateSessionReuse:()=>{invalidations++;},prepareSession:async()=>{
+   reads++;await held.promise;return {accountLabel:'synthetic',evidence:evidence(0),invocation:invocation()};}},
+  persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:value=>{options=value;return {
+   observe:async()=>({status:'disabled',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),disable(){},close:async()=>{}};}});
+ try{
+  await runtime.start(signal);runtime.workerSource.acquire('source');
+  const first=options.prepareSession(signal,{accountCache:'allow'});
+  await vi.waitFor(()=>expect(reads).toBe(1));
+  const cancelled=new AbortController();
+  const second=options.prepareSession(cancelled.signal,{accountCache:'allow'});
+  const rejected=expect(second).rejects.toThrow();cancelled.abort();held.resolve();
+  await first;await rejected;
+  expect(reads).toBe(1);expect(invalidations).toBe(0);
+ }finally{held.resolve();await runtime.close();}
+});
 it('retains a healthy persistent worker between scheduler operations and closes it on shutdown',async()=>{
   const events:string[]=[];let created=0,released=0,closed=0;
   const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events),
@@ -37,6 +95,19 @@ it('retains a healthy persistent worker between scheduler operations and closes 
     expect(created).toBe(1);expect(released).toBe(1);expect(closed).toBe(0);
   }finally{await runtime.close();}
   expect(closed).toBeGreaterThan(0);
+});
+it('does not replace a poisoned native owner whose cleanup is still unconfirmed',async()=>{
+ const events:string[]=[];let created=0,poisoned=false;
+ const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events),
+  persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:()=>{created++;return {
+   observe:async()=>({status:'disabled',interpretation:null,usage:null}),
+   status:()=>({active:false,disabled:false,poisoned,cleanupPending:true}),disable(){},close:async()=>{poisoned=false;}};}});
+ try{
+  await runtime.start(new AbortController().signal);const first=runtime.workerSource.acquire('native');
+  poisoned=true;
+  expect(()=>runtime.workerSource.acquire('native')).toThrow('OBSERVER_WORKER_CLEANUP_PENDING');
+  expect(created).toBe(1);expect(runtime.workerSource.all()).toContain(first);
+ }finally{await runtime.close();}
 });
 it.each(['dynamic','compatibility'])('forwards stage diagnostics through the %s runtime worker',async mode=>{
   const events:string[]=[],stages:string[]=[];
@@ -402,6 +473,21 @@ describe('desktop observer runtime composition', () => {
     await runtime.close();
   });
 
+  it('revokes idle retention when failed refreshes outlast account evidence without permanently disabling the worker',async()=>{
+    vi.useFakeTimers();let clock=0,fail=false,disabledCalls=0;const events:string[]=[],states:unknown[]=[];
+    const runtime=createDesktopObserverRuntime({now:()=>clock,dialog:dialogFor(events),openAccounting:async()=>owner(events),
+      identity:identityFor(()=>clock,events,{inspect:()=>{if(fail)throw Error('NETWORK_UNAVAILABLE');return evidence(clock);}}),
+      persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:()=>({
+        observe:async()=>({status:'disabled',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),
+        updateRetentionState:state=>states.push(state),disable:()=>{disabledCalls++;},close:async()=>{},release:async()=>{}})});
+    try{
+      await runtime.start(new AbortController().signal);runtime.workerSource.acquire('retained');fail=true;
+      clock=120000;await vi.advanceTimersByTimeAsync(120000);expect(states).not.toContain(null);
+      clock=240000;await vi.advanceTimersByTimeAsync(120000);expect(states).not.toContain(null);
+      clock=360000;await vi.advanceTimersByTimeAsync(120000);expect(states).toContain(null);
+      expect(disabledCalls).toBe(0);
+    }finally{await runtime.close();}
+  });
   it('revokes both slots when a refresh observes an identity change', async () => {
     vi.useFakeTimers();
     let clock = 0;

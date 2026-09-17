@@ -1,4 +1,4 @@
-import {expect, it} from "vitest";
+import {expect, it, vi} from "vitest";
 import {normalizeHookInput} from "../../src/hooks/schema.js";
 import {PassiveContextStore} from "../../src/server/passive-context-store.js";
 import {PassiveGoals} from "../../src/server/passive-goals.js";
@@ -33,7 +33,7 @@ function history(records: ReadBatch["records"], closed: {value: number}): Histor
   };
 }
 
-function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime;advancingClock?:boolean} = {}) {
+function fixture(options: {owned?:boolean;native?:boolean;paired?:boolean;pairError?:string;deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime;advancingClock?:boolean} = {}) {
   let now = 0;
   let resolveHistory!: (value: HistorySnapshot) => void;
   let resolvePreparation!: (value: PreparedContext) => void;
@@ -51,9 +51,15 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;re
     source: {
       read: async () => { const reset = resetNext; resetNext = false; return {records, caughtUp: true, partialLine: false, reset}; },
       snapshot: async () => {
+        if(options.native)throw Error('PARSED_HISTORY_FORBIDDEN');
         if (options.deferHistory) return new Promise<HistorySnapshot>(resolve => { resolveHistory = resolve; });
         return history(records, closed);
       },
+      ...(options.native?{nativeSnapshot:async(id:string)=>({kind:'native' as const,sourceThreadId:id,sourceTurnId:'first',sourceEpoch:1,revision:1,
+        byteLength:1024,path:'C:/owned/native-snapshot',close:async()=>{closed.value++;}})}:{}),
+      ...(options.paired?{openNativeTurn:async()=>{if(options.pairError)throw Object.assign(Error(options.pairError),{code:options.pairError});return ({identity:'paired',sourceEpoch:1,revision:1,currentTurnId:'first',baseKey:'paired-base',
+        boundary:{currentTurnId:'first',currentStartOffset:0,watermark:100,completed:null},supplement:history(records,{value:0}),
+        validate:async(s:AbortSignal)=>{s.throwIfAborted();},openBase:async()=>null,close:async()=>{closed.value++;}});}}:{}),
       remove: () => {},
       close: async () => {}
     },
@@ -89,6 +95,7 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;re
     close: async () => { disabled = true; }
   };
   const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => options.advancingClock?now++:now,
+    ...(options.owned?{workerSource:{acquire:()=>worker,all:()=>[worker],release:async()=>{await worker.release?.();}}}:{}),
     onObservation: record => observations.push(record),...(options.research?{research:options.research}:{})});
   const envelope = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "first"}, now, token).envelope;
   goals.observe(envelope, true, now);
@@ -121,6 +128,142 @@ function fixture(options: {deferHistory?: boolean; deferPreparation?: boolean;re
     start, flush, counts: () => ({prepared, observed, observedAt, disabled})
   };
 }
+
+it('includes preparation in the deadline and never dispatches an ETA after late preparation',async()=>{
+ vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});const f=fixture({deferPreparation:true});
+ try{
+  await f.start();expect(f.counts().prepared).toBe(1);
+  f.time(46000);await vi.advanceTimersByTimeAsync(30000);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey)).toMatchObject({state:'call_failed',contextState:'estimate_timeout'});
+  expect(f.scheduler.stats().inFlight).toBe(1);
+  f.resolvePreparation();await f.flush();expect(f.counts().observed).toBe(0);
+  expect(f.scheduler.stats().inFlight).toBe(0);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('estimate_timeout');
+ }finally{f.scheduler.disable();await f.source.close();vi.useRealTimers();}
+});
+
+it('retains flight and release ownership until the paired source finishes closing after timeout',async()=>{
+ vi.useFakeTimers({toFake:['setTimeout','clearTimeout']});const f=fixture({owned:true,native:true,paired:true});
+ let finish!:()=>void,released=0;
+ f.worker.release=async()=>{released++;};
+ f.worker.prepareNativeTurnContext=async(input,source,_signal,_key,_generation,_at,sample)=>{
+  const close=source.close;source.close=async()=>{await new Promise<void>(resolve=>{finish=resolve;});await close();};
+  sample!();return {...f.preparedContext(),input};
+ };
+ try{
+  await f.start();expect(f.counts().observed).toBe(1);
+  f.time(46000);await vi.advanceTimersByTimeAsync(30000);
+  expect(f.scheduler.stats().inFlight).toBe(1);expect(released).toBe(0);
+  finish();await f.flush();expect(f.scheduler.stats().inFlight).toBe(0);expect(released).toBe(1);
+  expect(f.goals.view(f.envelope.sessionKey,46000)?.prediction).toBeNull();expect(f.closed.value).toBe(1);
+ }finally{finish?.();await f.flush();f.scheduler.disable();await f.source.close();vi.useRealTimers();}
+});
+
+it('uses the completed-turn pair without allocating a legacy full snapshot, retaining source through observe',async()=>{
+ const f=fixture({native:true,paired:true});let prepares=0;
+ f.worker.nativeSourceDestination=async()=>{throw Error('LEGACY_COPY_FORBIDDEN');};
+ f.worker.prepareNativeTurnContext=async(input,source,signal,_key,_generation,_at,sample)=>{
+  prepares++;await source.validate(signal);for await(const _record of source.supplement.records(signal)){}
+  const fresh=sample!();return {...f.preparedContext(),input:{...input,...fresh}};
+ };
+ const observe=f.worker.observe;f.worker.observe=async(...args)=>{expect(f.closed.value).toBe(0);return observe(...args);};
+ try{await f.start();expect(prepares).toBe(1);expect(f.counts().observed).toBe(1);expect(f.counts().prepared).toBe(0);expect(f.closed.value).toBe(1);}
+ finally{f.scheduler.disable();await f.source.close();}
+});
+
+it.each(['completed','paused'] as const)('does not dispatch a paired preparation after source runtime becomes %s',async runtime=>{
+ const f=fixture({native:true,paired:true});let finish!:()=>void,started=0;
+ f.worker.prepareNativeTurnContext=async(input,_source,_signal,_key,_generation,_at,sample)=>{
+  started++;await new Promise<void>(resolve=>{finish=resolve;});sample!();return {...f.preparedContext(),input};
+ };
+ try{
+  await f.start();expect(started).toBe(1);
+  if(runtime==='completed'){
+   f.time(17000);f.setRecords([{id:'terminal',turnId:'first',sourceTurnId:'first',atMs:17000,kind:'runtime',runtime:'waiting',outcome:'completed'}]);
+   f.source.tick();await f.flush();f.goals.reconcileSource(f.envelope.sessionKey,17000);
+   expect(f.goals.view(f.envelope.sessionKey,17000)?.status).toBe('completed');
+  }else f.goals.runtime(f.envelope.sessionKey,f.envelope.turnKey!,runtime,17000);
+  finish();await f.flush();expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);
+ }finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('reports unavailable native pairs without importing legacy history',async()=>{
+ const f=fixture();let fallback=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('NATIVE_WORKER_MUST_NOT_START');};
+ f.worker.prepareNativeHistoryFallback=async(input,history,signal,_key,_generation,_at,sample)=>{
+  fallback++;await history.validate(signal);const fresh=sample!();return {...f.preparedContext(),input:{...input,...fresh}};
+ };
+ try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(0);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('native_context_failed');
+ }finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('never falls back after entering a native worker even when its failure resembles a source error',async()=>{
+ const f=fixture({paired:true});let fallback=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('history_incomplete');};
+ f.worker.prepareNativeHistoryFallback=async()=>{fallback++;return f.preparedContext();};
+ try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);}
+ finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('reports unsupported native terminals without invoking a legacy fallback',async()=>{
+ const f=fixture({paired:true,pairError:'source_terminal_unsupported'});let fallback=0,native=0;
+ f.worker.prepareNativeTurnContext=async()=>{native++;throw Error('UNREACHABLE');};
+ f.worker.prepareNativeHistoryFallback=async(input,history,signal,_key,_generation,_at,sample)=>{
+  fallback++;await history.validate(signal);sample!();return {...f.preparedContext(),input};
+ };
+ try{await f.start();expect(native).toBe(0);expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('native_context_failed');
+ }finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('does not prepare a fallback model when the alternative history is incomplete',async()=>{
+ const f=fixture({deferHistory:true});let prepared=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('UNREACHABLE');};
+ f.worker.prepareNativeHistoryFallback=async()=>{prepared++;return f.preparedContext();};
+ try{
+  await f.start();expect(prepared).toBe(0);expect(f.counts().observed).toBe(0);
+ }finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('native scheduling bypasses parsed history and sends a prepared native input',async()=>{
+ const f=fixture({native:true});let nativePrepares=0;
+ f.worker.nativeSourceDestination=async()=>({destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}});
+ f.worker.prepareNativeContext=async(input,source,_signal,_key,_generation,_at,sample)=>{
+  sample!();
+  nativePrepares++;expect(source.currentTurnId).toBe('first');await source.snapshot.close();
+  return {input,sourceBytes:source.snapshot.byteLength,sourceRevision:source.snapshot.revision};
+ };
+ try{
+  await f.start();expect(nativePrepares).toBe(1);expect(f.counts().prepared).toBe(0);expect(f.counts().observed).toBe(1);
+  expect(f.closed.value).toBe(1);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('context_native');
+ }finally{await f.scheduler.close();await f.source.close();}
+});
+it('samples native state after preparation while preserving the original request latency',async()=>{
+ const f=fixture({native:true});let finish!:()=>void;let samples=0;
+ f.worker.nativeSourceDestination=async()=>({destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}});
+ f.worker.prepareNativeContext=async(input,source,_signal,_key,_generation,_at,sample)=>{
+  await new Promise<void>(resolve=>{finish=resolve;});const fresh=sample!();samples++;
+  await source.snapshot.close();return {input:{...input,activeSeconds:fresh.activeSeconds},sourceBytes:1024,sourceRevision:1};
+ };
+ let modelInput:ObserverInput|undefined;
+ f.worker.observe=async input=>{modelInput=input;f.time(96000);return {status:'interpreted',interpretation:answer,usage:null};};
+ try{
+  await f.start();f.time(86000);finish();await f.flush();
+  expect(samples).toBe(1);expect(modelInput?.activeSeconds).toBe(86);
+  expect(f.goals.view(f.envelope.sessionKey,96000)?.prediction?.observedActiveSeconds).toBe(86);
+  expect(f.observations.find(row=>row.kind==='result')).toMatchObject({requestedAt:16000,observedActiveSeconds:86});
+ }finally{await f.scheduler.close();await f.source.close();}
+});
+it('a native preparation failure never falls back to history or a second model path',async()=>{
+ const f=fixture({native:true});let nativePrepares=0;
+ f.worker.nativeSourceDestination=async()=>({destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}});
+ f.worker.prepareNativeContext=async(_input,source)=>{nativePrepares++;await source.snapshot.close();throw Error('NATIVE_FORK_GOAL_UNVERIFIED');};
+ try{
+  await f.start();expect(nativePrepares).toBe(1);expect(f.counts().prepared).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);
+ }finally{await f.scheduler.close();await f.source.close();}
+});
 
 it('never dispatches an image projection to a worker without native preparation',async()=>{
  const f=fixture();delete f.worker.prepareContext;

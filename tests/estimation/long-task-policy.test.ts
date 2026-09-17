@@ -31,8 +31,8 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...retry,state:'terminal'})).toBe(false);
     expect(canRequest({...retry,contentReady:false})).toBe(false);
   });
-  it('waits for first observation and fifteen seconds',()=>{
-    expect(canRequest({...base,elapsedSeconds:14})).toBe(false);
+  it('requires first observation but does not spend fifteen seconds waiting',()=>{
+    expect(canRequest({...base,elapsedSeconds:0,eventAtSeconds:0})).toBe(true);
     expect(canRequest({...base,contentReady:false})).toBe(false);
     expect(canRequest(base)).toBe(true);
   });

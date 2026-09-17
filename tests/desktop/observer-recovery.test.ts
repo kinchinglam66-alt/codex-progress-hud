@@ -13,6 +13,8 @@ function accounting(): ReleaseAccountingRecoveryOwner {
   let state: 'blocked' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' = 'blocked';
   const confirmation = {attemptId: 'd6d3a4d7-43f9-4b8d-8ff2-0cb8e5d7c5c9', revision: 1, binding: 'account:route:assets'};
   return {
+    recordUnexpectedOperation:async()=>{throw Error('UNEXPECTED_TEST_OPERATION');},
+    confirmUnexpectedExit:async()=>{throw Error('UNEXPECTED_TEST_OPERATION');},
     forConversation: vi.fn(),
     snapshot: vi.fn(() => ({starts: 1, activeStarts: 0, inFlight: 0, unresolved: 0, knownTokens: 0, unknown: 1, poisoned: false})),
     recoveryStatus: vi.fn(() => ({state, revision: 1, knownTokens: 0, unknown: 1, recoveryAllowed: state === 'blocked' || state === 'failed'})),

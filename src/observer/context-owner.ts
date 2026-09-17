@@ -1,10 +1,14 @@
 import type {ConversationRecord,ReadBatch} from './conversation-record.js';
 import type {HistorySnapshot} from './history-snapshot.js';
+import type {NativeSourceSnapshot} from './native-source-snapshot.js';
+import type {NativeSourceDestination,NativeTurnSource} from './native-source-request.js';
 import {createHash} from 'node:crypto';
 
 interface Source {
   read(id:string,signal:AbortSignal):Promise<ReadBatch>;
   snapshot?(id:string,signal:AbortSignal):Promise<HistorySnapshot>;
+  nativeSnapshot?(id:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<NativeSourceSnapshot>;
+  openNativeTurn?(id:string,signal:AbortSignal):Promise<NativeTurnSource>;
   remove(id:string):void;close():Promise<void>;
 }
 export interface ContextSnapshot {
@@ -195,6 +199,29 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
     });
     e.operation=operation;operations.add(operation);
   };
+  async function acquireSnapshot<T extends {close():Promise<void>}>(key:string,turnKey:string,signal:AbortSignal,
+    snapshotReader:((id:string,signal:AbortSignal)=>Promise<T>)|undefined):Promise<{snapshot:T;currentTurnId:string}|null>{
+    const e=entries.get(key);
+    if(!e||e.turnKey!==turnKey||snapshotReader===undefined)return null;
+    const currentRecord=[...e.records].reverse().find(record=>record.turnId!==null&&
+      (options.turnKeyFor?options.turnKeyFor(e.hostId,record.turnId):record.turnId)===turnKey);
+    if(!currentRecord?.turnId)return null;
+    const boundHostId=e.hostId,boundSourceEpoch=e.sourceEpoch,boundCurrentTurnId=currentRecord.turnId;
+    const controller=new AbortController();
+    const relay=()=>controller.abort();
+    signal.addEventListener('abort',relay,{once:true});e.historyFlights.add(controller);
+    let history:T|undefined;
+    try{
+      signal.throwIfAborted();
+      history=await snapshotReader(boundHostId,controller.signal);
+      const current=entries.get(key),stillCurrent=current?.records.some(record=>record.turnId===boundCurrentTurnId&&
+        (options.turnKeyFor?options.turnKeyFor(boundHostId,record.turnId):record.turnId)===turnKey);
+      if(closed||controller.signal.aborted||current!==e||current.hostId!==boundHostId||current.turnKey!==turnKey||
+        current.sourceEpoch!==boundSourceEpoch||!stillCurrent)throw historyBindingError();
+      return {snapshot:history,currentTurnId:boundCurrentTurnId};
+    }catch(error){if(history!==undefined)await history.close();throw error;}
+    finally{signal.removeEventListener('abort',relay);e.historyFlights.delete(controller);}
+  }
   return {
     attach(key:string,hostId:string,turnKey:string):void {
       if(closed)return;
@@ -211,29 +238,35 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
     setActive(key:string,active:boolean):void {const e=entries.get(key);if(!e||closed)return;e.active=active;if(active)e.due=clock()+500;},
     snapshot,remove,
     async openHistory(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null> {
-      const e=entries.get(key),snapshotReader=options.source.snapshot;
-      if(!e||e.turnKey!==turnKey||snapshotReader===undefined)return null;
-      const currentRecord=[...e.records].reverse().find(record=>record.turnId!==null&&
-        (options.turnKeyFor?options.turnKeyFor(e.hostId,record.turnId):record.turnId)===turnKey);
-      if(!currentRecord?.turnId)return null;
-      const boundHostId=e.hostId,boundSourceEpoch=e.sourceEpoch,boundCurrentTurnId=currentRecord.turnId;
-      const controller=new AbortController();
-      const relay=()=>controller.abort();
-      signal.addEventListener('abort',relay,{once:true});e.historyFlights.add(controller);
-      let history:HistorySnapshot|undefined;
-      try{
-        history=await snapshotReader(boundHostId,controller.signal);
-        const current=entries.get(key),stillCurrent=current?.records.some(record=>record.turnId===boundCurrentTurnId&&
-          (options.turnKeyFor?options.turnKeyFor(boundHostId,record.turnId):record.turnId)===turnKey);
-        if(closed||controller.signal.aborted||current!==e||current.hostId!==boundHostId||current.turnKey!==turnKey||
-          current.sourceEpoch!==boundSourceEpoch||!stillCurrent)throw historyBindingError();
-        return {snapshot:history,currentTurnId:boundCurrentTurnId};
-      }catch(error){
-        if(history!==undefined){try{await history.close();}catch{/* stale history must not leak */}}
-        throw error;
-      }finally{
-        signal.removeEventListener('abort',relay);e.historyFlights.delete(controller);
+      return acquireSnapshot(key,turnKey,signal,options.source.snapshot);
+    },
+    async openNativeSource(key:string,turnKey:string,signal:AbortSignal,destination:NativeSourceDestination){
+      const reader=options.source.nativeSnapshot;
+      const result=await acquireSnapshot(key,turnKey,signal,reader===undefined?undefined:(id,ownedSignal)=>reader(id,ownedSignal,destination));
+      if(result&&result.snapshot.sourceTurnId!==result.currentTurnId){
+        await result.snapshot.close();
+        throw Object.assign(new Error('source history binding changed'),{code:'SOURCE_HISTORY_BINDING_CHANGED'});
       }
+      return result;
+    },
+    async openNativeTurn(key:string,turnKey:string,signal:AbortSignal):Promise<NativeTurnSource|null>{
+      const bound=entries.get(key),reader=options.source.openNativeTurn;
+      const acquired=await acquireSnapshot(key,turnKey,signal,reader);
+      if(acquired===null)return null;
+      const source=acquired.snapshot;
+      const checkBinding=()=>{
+        if(closed||entries.get(key)!==bound||bound?.turnKey!==turnKey||source.currentTurnId!==acquired.currentTurnId){
+          throw historyBindingError();
+        }
+      };
+      try{checkBinding();}catch(error){await source.close();throw error;}
+      return {...source,
+        validate:async checkSignal=>{checkBinding();await source.validate(checkSignal);checkBinding();},
+        openBase:async(destination,baseSignal)=>{
+          checkBinding();const base=await source.openBase(destination,baseSignal);
+          try{checkBinding();return base;}catch(error){await base?.close();throw error;}
+        }
+      };
     },
     health(key:string):ContextSnapshot['health']|'missing' {return entries.get(key)?.health??'missing';},
     sourceEpoch(key:string):number|null {return entries.get(key)?.sourceEpoch??null;},

@@ -9,6 +9,23 @@ const directories: string[] = [];
 const owners: ReleaseAccountingOwner[] = [];
 const DB_NAME = 'release-observer-accounting.sqlite';
 const usage = {inputTokens: 10, outputTokens: 2, cachedInputTokens: 5};
+it('keeps unadmitted unknown work across restart and resumes only after matching process exit',async()=>{
+ const path=await directory();let exited=false;
+ const incident={ownerUuid:randomUUID(),conversationKey:'source',generation:0,at:1000,pid:123,creationIdentity:'birth',reason:'turn/started' as const};
+ let owner=await openReleaseAccounting(path,()=>1000,undefined,undefined,undefined,async()=>exited);owners.push(owner);
+ await owner.recordUnexpectedOperation(incident);await owner.recordUnexpectedOperation(incident);
+ expect(owner.snapshot()).toMatchObject({starts:0,unknown:1,unresolved:1});
+ expect(owner.recoveryStatus()).toMatchObject({state:'warning',unknown:1,recoveryAllowed:false});
+ expect(await owner.recoveryAdmission(1000,true,'other')).toMatchObject({allowed:false,reason:'unresolved_previous_call'});
+ expect(await owner.forConversation('other').reserve()).toBeNull();
+ await owner.close();
+ owner=await openReleaseAccounting(path,()=>1000,undefined,undefined,undefined,async()=>exited);owners.push(owner);
+ expect(owner.snapshot()).toMatchObject({starts:0,unknown:1,unresolved:1});
+ await expect(owner.confirmUnexpectedExit(incident)).rejects.toThrow();
+ exited=true;await owner.reconcileAutomatic!();
+ expect(owner.snapshot()).toMatchObject({starts:0,unknown:1,unresolved:0});
+ const view=owner.forConversation('other'),id=await view.reserve();expect(id).not.toBeNull();await view.cancelBeforeDispatch(id!);
+});
 it('reserves the granted half-open compression when that conversation also has an expired retry',async()=>{
  let now=0;const owner=await open(await directory(),()=>now);
  for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}

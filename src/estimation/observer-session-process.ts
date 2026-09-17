@@ -7,7 +7,7 @@ import {createObserverAppServerRpc} from './observer-app-server-rpc.js';
 /** One direct child for a source conversation, independent of individual
  * operations. Caller persists its captured identity against active admissions.
  * No tools are permitted by the trusted invocation profile. */
-export function createObserverSessionProcess(options:{captureIdentity?:typeof captureInvocationProcessIdentity;cleanupMs?:number}={}) {
+export function createObserverSessionProcess(options:{captureIdentity?:typeof captureInvocationProcessIdentity;cleanupMs?:number;onRemoteError?:(error:{code:number;message:string})=>void}={}) {
  let child:ChildProcessWithoutNullStreams|undefined,rpc:ReturnType<typeof createObserverAppServerRpc>|undefined;
  let disabled=false,closed=true,poisoned=false,started=false,closing:Promise<void>|undefined;
  let exit:Promise<void>|undefined;
@@ -45,7 +45,7 @@ export function createObserverSessionProcess(options:{captureIdentity?:typeof ca
      owned.stderr.on('error',()=>{rpc?.close();kill();});
      // Drain diagnostics without retaining private stderr. Bound abnormal floods.
      let stderrBytes=0;owned.stderr.on('data',(chunk:Buffer)=>{stderrBytes+=chunk.length;if(stderrBytes>65536){rpc?.close();kill();}});
-     rpc=createObserverAppServerRpc({input:owned.stdin,output:owned.stdout});
+     rpc=createObserverAppServerRpc({input:owned.stdin,output:owned.stdout,...(options.onRemoteError?{onRemoteError:options.onRemoteError}:{})});
      try{
        const pid=owned.pid;if(!pid)throw Error('SESSION_PROCESS_SPAWN');
        const creationIdentity=await (options.captureIdentity??captureInvocationProcessIdentity)(pid);

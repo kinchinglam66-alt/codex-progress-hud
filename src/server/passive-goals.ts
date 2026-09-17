@@ -9,6 +9,7 @@ import {createHash} from 'node:crypto';
 import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
 import type {GoalCheckpointRecord} from './goal-checkpoint.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,NativeTurnSource} from '../observer/native-source-request.js';
 import type {ResearchBoundary,ResearchOwner} from '../estimation/residual/telemetry.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
@@ -70,6 +71,8 @@ export interface GoalContextQuery {
   paceScope?:object;
 }
 export interface GoalContextSource {
+  openNativeTurn?(key:string,turnKey:string,signal:AbortSignal):Promise<NativeTurnSource|null>;
+  openNativeSource?(key:string,turnKey:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<OpenNativeSourceResult|null>;
   openHistory?(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>;
   health?(key:string):'loading'|'ready'|'error'|'missing';
   execution?(key:string,turnKey:string):{
@@ -480,6 +483,58 @@ export class PassiveGoals {
     return result;
   }
 
+  async openNativeSource(ticket:object,signal:AbortSignal,destination:NativeSourceDestination):Promise<OpenNativeSourceResult|null> {
+    const captured=this.ticketIdentityIsCurrent(ticket);
+    if(!captured)throw Object.assign(new Error('goal ticket is stale'),{code:'GOAL_TICKET_STALE'});
+    if(!this.source?.openNativeSource)return null;
+    signal.throwIfAborted();
+    const result=await this.source.openNativeSource(captured.sessionKey,captured.goal.turnKey,signal,destination);
+    if(!this.ticketIdentityIsCurrent(ticket)||signal.aborted){
+      if(result!==null)await result.snapshot.close();
+      throw Object.assign(new Error('goal ticket is stale'),{code:'GOAL_TICKET_STALE'});
+    }
+    if(result)this.nativeTickets.set(ticket,false);
+    return result;
+  }
+
+  async openNativeTurn(ticket:object,signal:AbortSignal):Promise<NativeTurnSource|null>{
+    const stale=()=>Object.assign(new Error('goal ticket is stale'),{code:'GOAL_TICKET_STALE'});
+    const captured=this.ticketIdentityIsCurrent(ticket);if(!captured)throw stale();
+    if(!this.source?.openNativeTurn)return null;
+    signal.throwIfAborted();
+    const result=await this.source.openNativeTurn(captured.sessionKey,captured.goal.turnKey,signal);
+    if(!this.ticketIdentityIsCurrent(ticket)||signal.aborted){if(result)await result.close();throw stale();}
+    if(!result)return null;
+    this.nativeTickets.set(ticket,false);
+    return {...result,validate:async checkSignal=>{
+      if(!this.ticketIdentityIsCurrent(ticket))throw stale();checkSignal.throwIfAborted();
+      await result.validate(checkSignal);
+      if(!this.ticketIdentityIsCurrent(ticket))throw stale();checkSignal.throwIfAborted();
+    }};
+  }
+
+  async openNativeHistoryFallback(ticket:object,signal:AbortSignal):Promise<OpenHistoryResult|null>{
+    const result=await this.openHistory(ticket,signal);
+    if(result)this.nativeTickets.set(ticket,false);
+    return result;
+  }
+
+  private nativeTickets=new WeakMap<object,boolean>();
+  /** One bounded local supplement. Never called from settlement/arrival. */
+  refreshNativeObservation(ticket:object,nowMs:number):import('../observer/native-source-request.js').NativeObservationSample|null {
+    const captured=this.ticketIsCurrent(ticket,nowMs);
+    if(!captured||this.nativeTickets.get(ticket)!==false||captured.goal.runtime!=='running')return null;
+    const current=this.sourceContext(captured.sessionKey,captured.goal,nowMs,true);
+    if(!current?.ready||!this.ticketIsCurrent(ticket,nowMs)||
+      (current.revision!==captured.sourceRevision&&(captured.userFingerprint===undefined||current.userFingerprint!==captured.userFingerprint)))return null;
+    const requestActiveSeconds=captured.activeSeconds;
+    const activeSeconds=this.active(captured.goal,nowMs);
+    if(activeSeconds<requestActiveSeconds)return null;
+    this.nativeTickets.set(ticket,true);
+    captured.activeSeconds=activeSeconds;
+    return {activeSeconds,runtime:'running',requestActiveSeconds};
+  }
+
   request(sessionKey: string, nowMs: number): {ticket: object; input: ObserverInput}|null {
     const goal = this.goals.get(sessionKey);
     if (!goal || goal.recoveryPending || !this.clock(nowMs, goal) || goal.pending || goal.runtime === 'interrupted' || goal.runtime === 'failed' || goal.runtime === 'stopped' ||
@@ -568,6 +623,10 @@ export class PassiveGoals {
     const parsed = observerResponseSchema.safeParse(response);
     if (!parsed.success) return this.reject(ticket,'schema_invalid');
     const result = parsed.data;
+    // Age against the actual sampled active clock, excluding pauses/waits.
+    // Never re-anchor an already expired number to its arrival time.
+    if(result.estimate!==null&&result.estimate.remainingSeconds<=Math.max(0,this.active(goal,nowMs)-captured.activeSeconds))
+      return this.reject(ticket,'estimate_expired_on_arrival');
     this.progress(goal,nowMs);
     if(aged){
       // A same-instruction numeric snapshot can age without becoming a new goal.

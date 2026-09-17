@@ -4,7 +4,7 @@ import {createObserverAppServerRpc, type AppServerNotification} from '../../src/
 
 type JsonRecord = Record<string, unknown>;
 
-function fixture(options: {timeoutMs?: number; maxFrameBytes?: number} = {}) {
+function fixture(options: {timeoutMs?: number; maxFrameBytes?: number; onRemoteError?:(error:{code:number;message:string})=>void} = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const sent: JsonRecord[] = [];
@@ -31,6 +31,15 @@ function fixture(options: {timeoutMs?: number; maxFrameBytes?: number} = {}) {
   const rpc = createObserverAppServerRpc({input, output, ...options});
   return {input, output, rpc, nextSent};
 }
+
+it('optional local error observer cannot replace transport failure or leak raw messages into exceptions',async()=>{
+ const observed:any[]=[];
+ const f=fixture({onRemoteError:error=>{observed.push(error);throw Error('callback failure');}});
+ const request=f.rpc.call('thread/fork',{});const frame=await f.nextSent();
+ f.output.write(line({id:frame.id,error:{code:-32602,message:'synthetic turn not found'}}));
+ await expect(request).rejects.toThrow('APP_SERVER_RPC_ERROR');
+ expect(observed).toEqual([{code:-32602,message:'synthetic turn not found'}]);f.rpc.close();
+});
 
 function line(value: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(value)}\n`, 'utf8');

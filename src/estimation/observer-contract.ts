@@ -26,6 +26,10 @@ const representationSchema=z.object({
   importedThroughOrdinal:ordinal.nullable().optional(),
   importedRecords:ordinal.optional(),
   importedEncodedBytes:ordinal.optional(),
+  stagedRecords:ordinal.optional(),
+  stagedEncodedBytes:ordinal.optional(),
+  stagedThroughOrdinal:ordinal.nullable().optional(),
+  acceptedThroughOrdinal:ordinal.nullable().optional(),
   confirmedCompactions:ordinal.optional(),
   confirmedCompactionThroughOrdinal:ordinal.nullable().optional(),
   compressionState:z.enum(['none','confirmed']).optional(),
@@ -79,6 +83,7 @@ export const observerInputSchema = z.object({
   imageContextPending:z.boolean().optional(),
   goalSummary: z.string().min(1).max(2048).nullable(),
   activeSeconds: seconds,
+  nativeTiming:z.object({requestActiveSeconds:seconds}).strict().optional(),
   runtime: z.enum(['running', 'waiting', 'paused']),
   messages: z.array(z.object({kind: z.enum(['user', 'assistant', 'tool']),
     text: z.string().min(1), truncated: z.boolean(), scope:z.enum(['current','background']).optional(), event:eventSchema.optional()}).strict()
@@ -99,6 +104,7 @@ export const observerInputSchema = z.object({
   representation:representationSchema.optional(),
   historySummary:historySummarySchema.optional(),
 }).strict()
+  .refine(value=>!value.nativeTiming||value.nativeTiming.requestActiveSeconds<=value.activeSeconds)
   .refine(value => !value.packingLoss || (value.packingLoss.retainedMessages === value.messages.length &&
     value.packingLoss.clippedMessages === value.messages.filter(m=>m.truncated).length &&
     value.packingLoss.suppliedMessages === value.packingLoss.retainedMessages +

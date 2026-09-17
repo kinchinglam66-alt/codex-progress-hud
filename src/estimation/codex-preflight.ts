@@ -32,7 +32,9 @@ async function regularFile(path:string,pin:string,maxBytes:number):Promise<void>
   try {
     const before=await file.stat();
     if(!before.isFile() || before.size>maxBytes) throw Error();
-    const hash=createHash("sha256"),buffer=Buffer.alloc(65536);
+    // Bound memory per file while reducing read round trips for the runtime binary.
+    // Every byte is still hashed on both verification passes; no integrity cache.
+    const hash=createHash("sha256"),buffer=Buffer.alloc(Math.min(1024*1024,maxBytes));
     let total=0;
     for(;;) {
       const {bytesRead}=await file.read(buffer,0,buffer.length,null);

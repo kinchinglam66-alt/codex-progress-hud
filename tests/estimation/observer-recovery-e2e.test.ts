@@ -117,6 +117,9 @@ it('serializes half-open admission across two real workers and carries cooldown 
   const second = makeScheduler(owner, [framedUnknown], () => now);
   goal(second.scheduler, second.goals, second.contexts, 'after-half-open-restart', now);
   second.scheduler.tick();
+  // First observation is immediate now. Drain its denied admission before
+  // advancing the synthetic wall clock and issuing the recovery tick.
+  await eventually(() => second.scheduler.stats().inFlight === 0);
   expect(owner.snapshot().starts).toBe(4);
   now = 1_200_000;
   second.scheduler.tick();

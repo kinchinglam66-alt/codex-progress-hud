@@ -1,10 +1,13 @@
-import {createHash} from "node:crypto";
+import {createHash,type Hash} from "node:crypto";
 import {lstat, open, opendir, realpath, type FileHandle} from "node:fs/promises";
 import type {Dirent, Stats} from "node:fs";
 import {isAbsolute, relative, resolve} from "node:path";
 import type {ConversationRecord, ReadBatch, RuntimeOutcome, RuntimeState} from "./conversation-record.js";
 import {parseCodexCheckpoint, type NativeCodexCheckpoint} from "./codex-checkpoint.js";
 import {createHistorySnapshot, type HistoryGap, type HistorySnapshot, type HistorySnapshotPage} from "./history-snapshot.js";
+import {createNativeSourceSnapshot,type NativeSourceSnapshot} from './native-source-snapshot.js';
+import type {NativeSourceDestination,NativeTurnSource} from './native-source-request.js';
+import {createNativeTurnIndex,type NativeTurnIndex} from './native-turn-boundary.js';
 
 const PASS_BYTES = 4 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -22,6 +25,7 @@ export type LocalSessionSourceErrorCode =
   | "source_cancelled"
   | "source_closed"
   | "source_invalid_thread"
+  | "source_unobserved"
   | "source_not_found"
   | "source_unavailable"
   | "source_unsafe_path"
@@ -30,6 +34,7 @@ export type LocalSessionSourceErrorCode =
   | "source_limit"
   | "source_oversize"
   | "source_malformed"
+  | "source_terminal_unsupported"
   | "source_checkpoint_unsupported";
 
 export class LocalSessionSourceError extends Error {
@@ -49,6 +54,7 @@ interface FileIdentity {
 }
 
 interface Cursor {
+  native?:NativeCursorState;
   path: string;
   identity: FileIdentity;
   size: number;
@@ -63,12 +69,18 @@ interface Cursor {
   skippingOversized: boolean;
 }
 
+interface NativeCursorState {
+  index:NativeTurnIndex;hash:Hash;epoch:number;digest:string;
+  baseDigest:string|null;sawCheckpoint:boolean;unsupportedCutoff:boolean;invalid:boolean;
+}
+
 interface Candidate {
   path: string;
   identity: FileIdentity;
 }
 
 interface ParseContext {
+  onEnvelope?:(raw:unknown,bytes:Buffer,offset:number)=>void;
   threadId: string;
   offset: number;
   seen: Set<string>;
@@ -98,6 +110,7 @@ const SNAPSHOT_PARSE_OPTIONS: ParseOptions = {
 };
 
 interface PassResult {
+  native:NativeCursorState;
   records: ConversationRecord[];
   offset: number;
   validation: string;
@@ -113,6 +126,7 @@ interface PassResult {
 }
 
 interface SnapshotState {
+  currentTurnId?:string;
   path: string;
   identity: FileIdentity;
   watermark: number;
@@ -558,6 +572,20 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     return [];
   }
   const eventType = payload.type;
+  if(eventType==='user_message'||eventType==='agent_message'){
+    if(typeof payload.message!=='string'||
+      ['images','local_images'].some(key=>payload[key]!==undefined&&(!Array.isArray(payload[key])||(payload[key] as unknown[]).some(value=>typeof value!=='string')))){
+      context.gaps.add('unsupported_payload');return [];
+    }
+    const role=eventType==='user_message'?'user':'assistant';
+    // Event mirrors can also be the only surviving representation. Preserve
+    // all event fields as quoted source data; never blindly discard them as
+    // telemetry or conflate text-equal messages without a shared identity.
+    const content:Record<string,unknown>[]=[{type:role==='user'?'input_text':'output_text',text:JSON.stringify(payload)}];
+    for(const image of payload.images as string[]??[])content.push({type:'input_image',image_url:image});
+    for(const path of payload.local_images as string[]??[])content.push({type:'local_image',path});
+    return normalizeMessage(context,{...payload,role,content},atMs,context.offset);
+  }
   if (context.options.preserveText) {
     if (eventType === 'token_count' && Object.keys(payload).every(key => ['type','info','rate_limits'].includes(key)) &&
       'info' in payload && 'rate_limits' in payload &&
@@ -713,6 +741,7 @@ function parseLine(context: ParseContext, bytes: Buffer): ConversationRecord[] {
   const object = payloadObject(raw);
   if (typeof object.type !== "string") throw new LocalSessionSourceError("source_malformed");
   if (object.timestamp === undefined) throw new LocalSessionSourceError("source_malformed");
+  context.onEnvelope?.(raw,bytes,context.offset);
   return normalizeEnvelope(context, object as unknown as Envelope);
 }
 
@@ -810,6 +839,20 @@ async function prefixValidation(file: FileHandle, length: number, signal: AbortS
   const buffer = Buffer.allocUnsafe(length);
   const read = await file.read(buffer, 0, length, 0);
   return createHash("sha256").update(buffer.subarray(0, read.bytesRead)).digest("hex");
+}
+
+/** Hash the entire attested range with bounded allocation, not only the small
+ * UI-reader cursor window. Short reads and rewrites cannot attest a base. */
+async function completePrefixValidation(file:FileHandle,length:number,signal:AbortSignal):Promise<string>{
+  const hash=createHash('sha256'),buffer=Buffer.allocUnsafe(64*1024);
+  let offset=0;
+  while(offset<length){
+    checkCancelled(signal);
+    const read=await file.read(buffer,0,Math.min(buffer.length,length-offset),offset);
+    if(read.bytesRead===0)throw new LocalSessionSourceError('source_identity_mismatch');
+    hash.update(buffer.subarray(0,read.bytesRead));offset+=read.bytesRead;
+  }
+  return hash.digest('hex');
 }
 
 function checkpointObject(value: unknown): Record<string, unknown> | null {
@@ -927,6 +970,23 @@ async function runPass(
   threadId: string,
   signal: AbortSignal
 ): Promise<PassResult> {
+  if(!cursor.native)throw new LocalSessionSourceError('source_unobserved');
+  const native:NativeCursorState={...cursor.native,index:cursor.native.index.copy(),hash:cursor.native.hash.copy()};
+  const onEnvelope=(raw:unknown,bytes:Buffer,start:number)=>{
+    native.index.observe(raw,start,start+bytes.length+1);
+    native.hash.update(bytes).update('\n');
+    const row=raw as {type?:unknown;payload?:{type?:unknown}};
+    if(row.type==='compacted')native.sawCheckpoint=true;
+    // Pinned 0.153.4 rejects task_failed as a fork cutoff (real synthetic
+    // preflight r08). Parsed history can still preserve it; decide fallback
+    // before creating a native worker, not after a failed provider operation.
+    if(row.type==='event_msg'&&['task_complete','task_failed','turn_aborted'].includes(String(row.payload?.type))){
+      // An older failure remains inherited history, not a permanent ban on
+      // later supported cutoffs. Keep this bound to the same terminal digest.
+      native.unsupportedCutoff=row.payload?.type==='task_failed';
+      native.baseDigest=native.hash.copy().digest('hex');
+    }
+  };
   const seen = new Set(cursor.seen);
   const seenOrder = [...cursor.seenOrder];
   let activeTurnId = cursor.activeTurnId;
@@ -983,6 +1043,7 @@ async function runPass(
         }
         const bytes = Buffer.concat([pending, remaining.subarray(0, newline)]);
         const context: ParseContext = {
+          onEnvelope,
           threadId,
           offset: pendingStart,
           seen,
@@ -1015,6 +1076,7 @@ async function runPass(
         return;
       }
       const context: ParseContext = {
+        onEnvelope,
         threadId,
         offset: remainingStart,
         seen,
@@ -1051,7 +1113,10 @@ async function runPass(
 
   const partialLine = pending.byteLength > 0 || skippingOversized;
   if (!skippingOversized) scanOffset = offset;
+  native.digest=native.hash.copy().digest('hex');
+  if(historyTruncated||skippingOversized)native.invalid=true;
   return {
+    native,
     records,
     offset,
     validation: await cursorValidation(file, offset, signal),
@@ -1100,12 +1165,15 @@ async function readSnapshotPage(
         seenOrder: state.seenOrder,
         activeTurnId: state.activeTurnId,
         historyTruncated: false,
-        options: SNAPSHOT_PARSE_OPTIONS,
+        options: state.currentTurnId===undefined?SNAPSHOT_PARSE_OPTIONS:{...SNAPSHOT_PARSE_OPTIONS,inferTurnId:true},
         gaps: state.gaps
       };
       const parsed = parseLine(context, bytes);
       state.activeTurnId = context.activeTurnId;
       records.push(...parsed);
+      if(state.currentTurnId!==undefined&&parsed.some(record=>record.sourceScope!=='conversation'&&record.turnId!==state.currentTurnId)){
+        state.gaps.add('unattributed_record');
+      }
       if (parsed.some(record => record.turnId === null && record.sourceTurnId == null && record.sourceScope !== 'conversation')) state.gaps.add("unattributed_record");
     } catch {
       // Snapshot parsing is best-effort per record; malformed records remain visible
@@ -1214,6 +1282,8 @@ function snapshotIdentity(threadId: string, path: string, identity: FileIdentity
 export function createLocalSessionReader({root}: {root: string}): {
   read(threadId: string, signal: AbortSignal): Promise<ReadBatch>;
   snapshot(threadId: string, signal: AbortSignal): Promise<HistorySnapshot>;
+  openNativeTurn(threadId:string,signal:AbortSignal):Promise<NativeTurnSource>;
+  nativeSnapshot(threadId:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<NativeSourceSnapshot>;
   remove(threadId: string): void;
   close(): Promise<void>;
 } {
@@ -1221,6 +1291,9 @@ export function createLocalSessionReader({root}: {root: string}): {
   const cursors = new Map<string, Cursor>();
   const locks = new Map<string, Promise<ReadBatch>>();
   const pendingReads = new Set<Promise<ReadBatch>>();
+  const nativeFlights=new Map<AbortController,string>();
+  const nativeOperations=new Set<Promise<unknown>>();
+  const turnCaptures=new Map<string,Set<NativeTurnSource>>();
   const snapshotEpochs = new Map<string, {
     path: string;
     identity: FileIdentity;
@@ -1232,6 +1305,7 @@ export function createLocalSessionReader({root}: {root: string}): {
     startOffset: number;
   }>();
   let snapshotRevision = 0;
+  let nativeEpoch=0;
   let closed = false;
 
   async function canonicalRoot(signal: AbortSignal): Promise<string> {
@@ -1331,6 +1405,104 @@ export function createLocalSessionReader({root}: {root: string}): {
       throw new LocalSessionSourceError(errorCode(error));
     }
     return {path, identity: identityOf(stats)};
+  }
+
+  async function openNativeTurn(threadId:string,signal:AbortSignal):Promise<NativeTurnSource>{
+    if(closed)throw new LocalSessionSourceError('source_closed');
+    checkCancelled(signal);
+    if(!UUID.test(threadId))throw new LocalSessionSourceError('source_invalid_thread');
+    const observed=cursors.get(threadId),native=observed?.native,boundary=native?.index.snapshot();
+    if(!observed||!native||!boundary||native.invalid||observed.skippingOversized||boundary.watermark!==observed.offset||
+      boundary.currentTurnId!==observed.activeTurnId)throw new LocalSessionSourceError('source_unobserved');
+    if(boundary.watermark>8*1024*1024)throw new LocalSessionSourceError('source_limit');
+    if(native.sawCheckpoint&&boundary.completed===null)throw new LocalSessionSourceError('source_checkpoint_unsupported');
+    if(native.unsupportedCutoff)throw new LocalSessionSourceError('source_terminal_unsupported');
+    const candidate={path:observed.path,identity:{...observed.identity}},epoch=native.epoch,digest=native.digest;
+    const baseDigest=native.baseDigest,revision=++snapshotRevision;
+    const identity=snapshotIdentity(threadId,candidate.path,candidate.identity);
+    const startOffset=boundary.completed?.endOffset??0;
+    let sourceClosed=false,baseOpened=false,baseFlight:Promise<NativeSourceSnapshot|null>|undefined;
+    const states=new Set<SnapshotState>();
+    const assertBound=()=>{
+      if(closed||sourceClosed)throw new LocalSessionSourceError('source_closed');
+      const current=cursors.get(threadId);
+      if(current!==observed||current.native?.epoch!==epoch||current.native.invalid||
+        current.activeTurnId!==boundary.currentTurnId||current.offset<boundary.watermark){
+        throw new LocalSessionSourceError('source_identity_mismatch');
+      }
+    };
+    const validate=async(checkSignal:AbortSignal)=>{
+      const combined=AbortSignal.any([signal,checkSignal]);checkCancelled(combined);assertBound();
+      const located=await discover(threadId,combined);
+      if(!samePath(candidate.path,located.path)||!sameIdentity(candidate.identity,located.identity))throw new LocalSessionSourceError('source_identity_mismatch');
+      const file=await open(candidate.path,'r');
+      try{
+        const before=await file.stat();
+        if(!sameIdentity(candidate.identity,identityOf(before))||before.size<boundary.watermark)throw new LocalSessionSourceError('source_identity_mismatch');
+        assertSessionIdentity(await firstLine(file,combined),threadId);
+        if(await completePrefixValidation(file,boundary.watermark,combined)!==digest){
+          // Ensure the next UI read resets/rebuilds, even when only an early
+          // byte outside its rolling validation window changed.
+          if(cursors.get(threadId)===observed){observed.native!.invalid=true;observed.validation='native-content-changed';}
+          throw new LocalSessionSourceError('source_identity_mismatch');
+        }
+        const after=await file.stat();
+        if(!sameIdentity(candidate.identity,identityOf(after))||after.size<boundary.watermark)throw new LocalSessionSourceError('source_identity_mismatch');
+        checkCancelled(combined);assertBound();
+      }finally{await file.close();}
+    };
+    await validate(signal);
+    const file=await open(candidate.path,'r');
+    let startValidation:string,prefixDigest:string;
+    const prefixLength=Math.min(4096,boundary.watermark);
+    try{startValidation=await cursorValidation(file,startOffset,signal);prefixDigest=await prefixValidation(file,prefixLength,signal);}
+    finally{await file.close();}
+    await validate(signal);
+    const supplement=createHistorySnapshot({identity,sourceEpoch:epoch,revision,startOffset,
+      open:()=>{
+        assertBound();
+        const state:SnapshotState={path:candidate.path,identity:candidate.identity,watermark:boundary.watermark,
+          nextOffset:startOffset,validation:startValidation,prefixValidation:prefixDigest,prefixLength,
+          currentTurnId:boundary.currentTurnId,activeTurnId:null,seen:new Set(),seenOrder:[],gaps:new Set(),closed:false};
+        states.add(state);
+        return {readPage:async(offset,pageSignal)=>{
+          if(offset!==state.nextOffset)throw new LocalSessionSourceError('source_identity_mismatch');
+          await validate(pageSignal);
+          const page=await readSnapshotPage(state,threadId,AbortSignal.any([signal,pageSignal]));
+          await validate(pageSignal);return page;
+        },close:async()=>{state.closed=true;states.delete(state);}};
+      },close:async()=>{for(const state of states)state.closed=true;states.clear();}
+    });
+    const view:NativeTurnSource={identity,sourceEpoch:epoch,revision,currentTurnId:boundary.currentTurnId,
+      boundary:{...boundary,completed:boundary.completed===null?null:{...boundary.completed}},
+      baseKey:createHash('sha256').update(JSON.stringify([identity,epoch,boundary.currentTurnId,boundary.completed,baseDigest])).digest('hex'),
+      supplement,validate,
+      openBase(destination,baseSignal){
+        if(baseOpened)return Promise.reject(new LocalSessionSourceError('source_unobserved'));
+        baseOpened=true;
+        baseFlight=(async()=>{
+          await validate(baseSignal);
+          if(boundary.completed===null)return null;
+          if(!baseDigest)throw new LocalSessionSourceError('source_unobserved');
+          const snapshot=await createNativeSourceSnapshot({...destination,sourcePath:candidate.path,sourceRoot:requestedRoot,
+            sourceThreadId:threadId,sourceEpoch:epoch,revision,byteWatermark:boundary.completed.endOffset,signal:AbortSignal.any([signal,baseSignal])});
+          try{
+            const copy=await open(snapshot.path,'r');
+            try{if(await completePrefixValidation(copy,snapshot.byteLength,baseSignal)!==baseDigest)throw new LocalSessionSourceError('source_identity_mismatch');}
+            finally{await copy.close();}
+            await validate(baseSignal);return {...snapshot,sourceTurnId:boundary.completed.turnId};
+          }catch(error){await snapshot.close();throw error;}
+        })();
+        return baseFlight;
+      },
+      async close(){
+        sourceClosed=true;await supplement.close();await baseFlight?.catch(()=>undefined);
+        const owned=turnCaptures.get(threadId);owned?.delete(view);if(owned?.size===0)turnCaptures.delete(threadId);
+      }
+    };
+    assertBound();
+    const owned=turnCaptures.get(threadId)??new Set<NativeTurnSource>();owned.add(view);turnCaptures.set(threadId,owned);
+    return view;
   }
 
   async function snapshotOne(threadId: string, signal: AbortSignal): Promise<HistorySnapshot> {
@@ -1491,6 +1663,8 @@ export function createLocalSessionReader({root}: {root: string}): {
           scanValidation: "", skippingOversized: false};
         cursors.set(threadId, cursor);
       }
+      if(!cursor.native)cursor.native={index:createNativeTurnIndex(),hash:createHash('sha256'),epoch:++nativeEpoch,
+        digest:createHash('sha256').digest('hex'),baseDigest:null,sawCheckpoint:false,unsupportedCutoff:false,invalid:false};
       const result = await runPass(file, cursor, threadId, signal);
       assertSessionIdentity(await firstLine(file,signal),threadId);
       const endStats = await file.stat();
@@ -1502,6 +1676,7 @@ export function createLocalSessionReader({root}: {root: string}): {
         return {records: [], caughtUp: false, reset: true, partialLine: false};
       }
       cursor.offset = result.offset;
+      cursor.native = result.native;
       cursor.validation = result.validation;
       cursor.seen = result.seen;
       cursor.seenOrder = result.seenOrder;
@@ -1552,12 +1727,51 @@ export function createLocalSessionReader({root}: {root: string}): {
   return {
     read,
     snapshot: snapshotOne,
+    openNativeTurn(threadId,signal){
+      const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
+      const operation=openNativeTurn(threadId,combined);
+      nativeFlights.set(controller,threadId);nativeOperations.add(operation);
+      void operation.finally(()=>{nativeFlights.delete(controller);nativeOperations.delete(operation);}).catch(()=>undefined);
+      return operation;
+    },
+    nativeSnapshot(threadId,signal,destination){
+      const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
+      const operation=(async()=>{
+        if(closed)throw new LocalSessionSourceError('source_closed');
+        checkCancelled(combined);
+        if(!UUID.test(threadId))throw new LocalSessionSourceError('source_invalid_thread');
+        const observed=cursors.get(threadId);
+        if(!observed||observed.activeTurnId===null||observed.offset<1||observed.skippingOversized)throw new LocalSessionSourceError('source_unobserved');
+        const boundary={offset:observed.offset,turnId:observed.activeTurnId,identity:observed.identity,path:observed.path};
+        const candidate=await discover(threadId,combined);
+        if(!samePath(boundary.path,candidate.path)||!sameIdentity(boundary.identity,candidate.identity))throw new LocalSessionSourceError('source_identity_mismatch');
+        const revision=++snapshotRevision;
+        const snapshot=await createNativeSourceSnapshot({...destination,sourcePath:candidate.path,sourceRoot:requestedRoot,
+          sourceThreadId:threadId,sourceEpoch:revision,revision,signal:combined,byteWatermark:boundary.offset});
+        try{
+          checkCancelled(combined);
+          if(closed)throw new LocalSessionSourceError('source_closed');
+          if(!sameIdentity(candidate.identity,identityOf(await lstat(candidate.path))))throw new LocalSessionSourceError('source_identity_mismatch');
+          const current=cursors.get(threadId);
+          if(!current||current.activeTurnId!==boundary.turnId||current.offset<boundary.offset||!sameIdentity(current.identity,boundary.identity))throw new LocalSessionSourceError('source_identity_mismatch');
+          return {...snapshot,sourceTurnId:boundary.turnId};
+        }catch(error){await snapshot.close();throw error;}
+      })();
+      nativeFlights.set(controller,threadId);nativeOperations.add(operation);
+      void operation.finally(()=>{nativeFlights.delete(controller);nativeOperations.delete(operation);}).catch(()=>undefined);
+      return operation;
+    },
     remove(threadId: string): void {
+      for(const [controller,id] of nativeFlights)if(id===threadId)controller.abort();
+      for(const view of turnCaptures.get(threadId)??[])void view.close().catch(()=>undefined);
       cursors.delete(threadId);
     },
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
+      for(const controller of nativeFlights.keys())controller.abort();
+      await Promise.allSettled([...nativeOperations]);
+      await Promise.allSettled([...turnCaptures.values()].flatMap(views=>[...views].map(view=>view.close())));
       await Promise.allSettled([...pendingReads]);
       locks.clear();
       cursors.clear();

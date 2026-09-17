@@ -6,6 +6,8 @@ import type {AccountedUsage, AccountingPurpose, AdmissionKind, SettlementClassif
 import {copyInvocationPatch, copyInvocationRecord, type InvocationRecord, type InvocationRecordPatch, invocationRecordSchema} from './invocation-ownership.js';
 import {inspectInvocationProcess} from './invocation-process.js';
 import {parseRecoveryBootBoundaryProof, RECOVERY_BOOT_BOUNDARY_MARGIN_MS, RECOVERY_BOOT_PROOF_MAX_AGE_MS, type RecoveryBootBoundaryProof} from './recovery-boot-boundary.js';
+import {createUnexpectedModelWorkStore,type UnexpectedModelWork,type UnexpectedModelOwner} from './unexpected-model-work.js';
+import {isInvocationProcessIdentityExited} from './invocation-process.js';
 
 const HOUR_MS = 3_600_000;
 const MAX_RECOVERY_TRIALS_PER_HOUR = 12;
@@ -64,6 +66,8 @@ export interface ReleaseAccountingSnapshot {
   poisoned: boolean;
 }
 export interface ReleaseAccountingOwner {
+  recordUnexpectedOperation?(incident:UnexpectedModelWork):Promise<void>;
+  confirmUnexpectedExit?(owner:UnexpectedModelOwner):Promise<void>;
   forConversation(key: string): SubscriptionAccounting;
   snapshot(): ReleaseAccountingSnapshot;
   recoveryStatus?(): ReleaseRecoveryStatus;
@@ -82,6 +86,8 @@ export interface ReleaseAccountingOwner {
   close(): Promise<void>;
 }
 export interface ReleaseAccountingRecoveryOwner extends ReleaseAccountingOwner {
+  recordUnexpectedOperation(incident:UnexpectedModelWork):Promise<void>;
+  confirmUnexpectedExit(owner:UnexpectedModelOwner):Promise<void>;
   recoveryStatus(): ReleaseRecoveryStatus;
   preflightRecovery(binding: string): Promise<ReleaseRecoveryPreflight>;
   confirmRecovery(input: {revision: number; binding: string}): Promise<ReleaseRecoveryConfirmation>;
@@ -607,7 +613,7 @@ function recoverInterruptedHalfOpen(db: Database): void {
   db.prepare('UPDATE recovery_policy SET half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL, next_eligible = NULL, cooldown_until = NULL WHERE id = 1').run();
 }
 
-export async function openReleaseAccounting(directory: string, now: () => number, inspectProcess = inspectInvocationProcess, monotonicNow = () => performance.now(), automaticNow = now): Promise<ReleaseAccountingRecoveryOwner> {
+export async function openReleaseAccounting(directory: string, now: () => number, inspectProcess = inspectInvocationProcess, monotonicNow = () => performance.now(), automaticNow = now,inspectUnexpected=isInvocationProcessIdentityExited): Promise<ReleaseAccountingRecoveryOwner> {
   if (typeof now !== 'function') fail('RELEASE_INVALID_CLOCK');
   validateRuntimeVersion();
   const initialNow = validateClock(now());
@@ -625,6 +631,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
   }
   let db: Database | undefined;
   let recoveredPendingIds: string[] = [];
+  let unexpected!:ReturnType<typeof createUnexpectedModelWorkStore>;
   try {
     for (const legacy of LEGACY_FILES) if (!await isMissing(join(directory, legacy))) fail('RELEASE_LEGACY_STATE');
     db = new DatabaseSync(databasePath, {timeout: 0});
@@ -640,6 +647,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
       validateStoredDatabase(db!, initialNow);
     }); }
     recoveredPendingIds = validateStoredDatabase(db, initialNow).map(row => row.id);
+    unexpected=transaction(db,()=>createUnexpectedModelWorkStore(db!));
   } catch (error) {
     try { db?.close(); } catch { /* Preserve failed database evidence. */ }
     throw errorCode(error, 'RELEASE_DATABASE_UNAVAILABLE');
@@ -667,6 +675,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     return database.prepare('SELECT id, revision, binding, status, trial_reservation_id, usage_state FROM recovery_attempts ORDER BY rowid DESC LIMIT 1').get() as Row | undefined;
   }
   function recoveryStatusFromDatabase(): ReleaseRecoveryStatus {
+    const unexpectedPending=unexpected.pending().length,unexpectedCount=unexpected.count();
     const stored = metadata();
     const policy = database.prepare('SELECT failure_count, next_eligible, cooldown_until, cooldown_level, half_open FROM recovery_policy WHERE id = 1').get() as Row | undefined;
     if (!policy) fail('RELEASE_SCHEMA_INVALID');
@@ -687,20 +696,20 @@ export async function openReleaseAccounting(directory: string, now: () => number
       ? (latest?.status === 'confirmed' ? 'awaiting_confirmation' : 'probing')
       : failed ? 'failed'
         : inCooldown ? 'cooldown'
-          : recentUnknown > 0 ? 'warning'
+          : recentUnknown > 0 || unexpectedCount>0 ? 'warning'
         : needsRecovery ? 'warning'
           : latest?.status === 'succeeded' && latest.revision === revision ? 'recovered' : 'normal';
     return {
       state,
       revision,
       knownTokens: safeInteger(stored.known_tokens),
-      unknown: safeInteger(stored.unknown_count),
+      unknown: safeInteger(stored.unknown_count)+unexpectedCount,
       // Manual recovery is only an eligibility signal. The settings challenge,
       // explicit confirmation and single durable trial reservation still apply.
       recoveryAllowed: (state === 'warning' || state === 'cooldown') && covered < revision &&
         !(latest?.status === 'failed' && latest.usage_state !== 'known' && Number(latest.revision) + 1 === revision) &&
-        recoveredPending.size === 0 && pendingCount() === 0 && safeInteger(policy.half_open) === 0,
-      ...(recoveredPending.size > 0 ? {reason: 'unresolved_previous_call' as const} : unsafeUnknown ? {reason: 'unsafe_unknown' as const} : {}),
+        unexpectedPending===0&&recoveredPending.size === 0 && pendingCount() === 0 && safeInteger(policy.half_open) === 0,
+      ...(unexpectedPending>0||recoveredPending.size > 0 ? {reason: 'unresolved_previous_call' as const} : unsafeUnknown ? {reason: 'unsafe_unknown' as const} : {}),
       nextEligibleAt: inCooldown ? cooldownUntil : nextEligibleAt,
       cooldownUntil,
     };
@@ -714,6 +723,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
   }
   function activeStartCount(): number { return safeInteger((database.prepare('SELECT COUNT(*) AS count FROM admissions WHERE admitted_at > ?').get(lastClock - HOUR_MS) as Row).count); }
   function reserveInTransaction(key: string, current: number, admissionKind: AdmissionKind, purpose: AccountingPurpose): string | null {
+    if(unexpected.pending().length>0)return null;
     database.prepare("DELETE FROM admissions WHERE state IN ('settled','not_dispatched') AND admitted_at <= ? AND id NOT IN (SELECT trial_reservation_id FROM recovery_attempts WHERE trial_reservation_id IS NOT NULL)").run(current - HOUR_MS);
     const stored = metadata(), starts = safeInteger(stored.cumulative_starts), known = safeInteger(stored.known_tokens);
     const policy = database.prepare('SELECT next_eligible, cooldown_until, half_open, half_open_conversation FROM recovery_policy WHERE id = 1').get() as Row;
@@ -1127,6 +1137,12 @@ export async function openReleaseAccounting(directory: string, now: () => number
     return serial(async () => {
       if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
       try {
+        let unexpectedReleased=0;
+        for(const incident of unexpected.pending()){
+          if(await inspectUnexpected(incident).catch(()=>false)){
+            transaction(database,()=>unexpected.confirmExit(incident));unexpectedReleased++;
+          }
+        }
         const candidate = validateClock(fromTimer ? automaticNow() : now());
         if(candidate < lastClock) for(const id of recoveredPending)rollbackGrace.add(id);
         const current = Math.max(candidate, lastClock);
@@ -1194,6 +1210,8 @@ export async function openReleaseAccounting(directory: string, now: () => number
           }
           return {released, nextCheckAt};
         });
+        result.released+=unexpectedReleased;
+        if(unexpected.pending().length>0)result.nextCheckAt=Math.min(result.nextCheckAt??Number.MAX_SAFE_INTEGER,current+30000);
         scheduleAutomatic(result.nextCheckAt);
         return result;
       } catch (error) { return markPersistenceFailure(error); }
@@ -1205,6 +1223,7 @@ export async function openReleaseAccounting(directory: string, now: () => number
     return serial(async () => {
       if (!eligibleTask) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'no_eligible_task'};
       if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
+      if(unexpected.pending().length>0)return {allowed:false,kind:'ordinary',nextEligibleAt:null,reason:'unresolved_previous_call'};
       try {
         return transaction(database, () => {
           if (conversation === undefined) return {allowed: false, kind: 'ordinary', nextEligibleAt: null, reason: 'no_eligible_task' as const};
@@ -1312,8 +1331,23 @@ export async function openReleaseAccounting(directory: string, now: () => number
     });
   }
   const owner = {
+    recordUnexpectedOperation(incident:UnexpectedModelWork):Promise<void>{
+      return serial(async()=>{
+        if(closed||poisoned)throw Error('RELEASE_DATABASE_UNAVAILABLE');
+        try{transaction(database,()=>unexpected.record(incident));scheduleAutomatic(time()+30000);}catch(error){return markPersistenceFailure(error);}
+      });
+    },
+    confirmUnexpectedExit(identity:UnexpectedModelOwner):Promise<void>{
+      return serial(async()=>{
+        if(closed||poisoned)throw Error('RELEASE_DATABASE_UNAVAILABLE');
+        const pending=unexpected.pending().find(item=>item.ownerUuid===identity.ownerUuid);
+        if(!pending)return;
+        if(pending.pid!==identity.pid||pending.creationIdentity!==identity.creationIdentity||!await inspectUnexpected(identity).catch(()=>false))throw Error('UNEXPECTED_WORK_EXIT_UNCONFIRMED');
+        try{transaction(database,()=>unexpected.confirmExit(identity));}catch(error){return markPersistenceFailure(error);}
+      });
+    },
     forConversation(key: string): SubscriptionAccounting { const parsed = conversationKey.safeParse(key); if (!parsed.success || parsed.data === '__recovery_trial__') fail('RELEASE_CONVERSATION_KEY_INVALID'); return createView(parsed.data); },
-    snapshot(): ReleaseAccountingSnapshot { const stored = metadata(); return {starts: safeInteger(stored.cumulative_starts), activeStarts: activeStartCount(), inFlight: pendingCount(), unresolved: pendingCount(), knownTokens: safeInteger(stored.known_tokens), unknown: safeInteger(stored.unknown_count), poisoned}; },
+    snapshot(): ReleaseAccountingSnapshot { const stored = metadata(),unresolved=unexpected.pending().length; return {starts: safeInteger(stored.cumulative_starts), activeStarts: activeStartCount(), inFlight: pendingCount()+unresolved, unresolved: pendingCount()+unresolved, knownTokens: safeInteger(stored.known_tokens), unknown: safeInteger(stored.unknown_count)+unexpected.count(), poisoned}; },
     recoveryStatus(): ReleaseRecoveryStatus { return recoveryStatusFromDatabase(); },
     preflightRecovery,
     confirmRecovery,

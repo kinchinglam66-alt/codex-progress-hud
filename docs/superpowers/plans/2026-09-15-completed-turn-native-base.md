@@ -50,6 +50,7 @@ export interface NativeTurnBoundary {
 export interface NativeTurnIndex {
   observe(envelope: unknown, startOffset: number, endOffset: number): void;
   snapshot(): NativeTurnBoundary | null;
+  copy(): NativeTurnIndex; // stage a read before committing its cursor
 }
 export function createNativeTurnIndex(): NativeTurnIndex;
 ```
@@ -96,7 +97,7 @@ All identities are local-only. `baseKey` binds stable source epoch, terminal bou
 
 - [ ] Write an integration test with a real temporary JSONL containing terminal round6 and running round7. After `read`, acquire `openNativeTurn`, append a future tool result, then iterate `supplement.records`: only round7 start and pre-acquisition input appear; `boundary.completed.turnId` is six. The base snapshot excludes round7, has the same inherited terminal boundary and is read with existing protected copy checks.
 - [ ] Run `D:/npm.ps1 test -- --run tests/observer/native-turn-source.test.ts`; capture RED. Integrate the reducer at complete-envelope parsing, not at truncated `ConversationRecord` projection. Track a stable source epoch independently from snapshotRevision; reset index/epoch on file replacement, validated prefix change, truncation, discarded oversized source or incompatible checkpoint.
-- [ ] Extend the fixed-watermark reader to open at `currentStartOffset` with the same captured source identity and byte watermark. Use full-text parsing and validated lifecycle-based attribution within that fixed slice, not unrestricted timestamp inference. Preserve conversation-scoped records in the interval. Do not call full-history snapshot scanning on each warm acquisition.
+- [ ] Extend the fixed-watermark reader to open at `completed.endOffset` (zero for verified first turn) with the same captured source identity and byte watermark. This preserves conversation-scoped configuration between previous terminal and currentStartOffset. Use full-text parsing and validated lifecycle-based attribution within that fixed slice, not unrestricted timestamp inference. Do not call full-history snapshot scanning on each warm acquisition.
 - [ ] Capture full prefix identity when establishing a base; on reuse require the source append-consistency evidence promised by the reader. Never treat a matching mtime/size alone as proof. If the existing reader's rolling validation cannot prove a same-size earlier rewrite, use complete prefix verification and measure that cost rather than weakening the invariant.
 - [ ] First turn returns null from openBase and a complete supplement. Missing terminal boundary in a truncated/noninitial source is NOT first turn. Unsupported checkpoint boundary, ambiguous attribution, partial/oversized records, changed source while copying or reading: reject with a bounded diagnostic. Do not quietly omit source records.
 - [ ] Test 2 same-turn captures preserve baseKey but increase revision and supplement coverage; next turn changes baseKey; source rewrite invalidates prior validate(); images and tool call/result IDs preserved; cancellation closes opened resources; observer binding recheck rejects turn switching during preparation. Run source-history/context-owner/local-native suites. Commit only owned changes after checking preexisting hunks; if safe split staging is not possible, leave touched mixed files uncommitted and report that explicitly.
@@ -109,10 +110,11 @@ All identities are local-only. `baseKey` binds stable source epoch, terminal bou
 
 ```ts
 type NativeForkOrigin =
-  | {kind:'snapshot'; sourceThreadId:string; path:string; lastTurnId?:string}
-  | {kind:'owned-base'; sourceThreadId:string; lastTurnId:string};
+  | {kind?:'snapshot'; sourceThreadId:string; path:string; lastTurnId?:string}
+  | {kind:'owned-base'; sourceThreadId:string; rootSourceThreadId:string; lastTurnId:string};
 // Shared cwd/baseInstructions/developerInstructions/custodyTag remain mandatory.
-// snapshot without lastTurnId is legacy trial only; new route requires completed boundary.
+// Unspecified kind without lastTurnId is legacy trial only; explicit kinds require cutoff.
+// Owned-base replies must differ from BOTH the immediate base and the root source.
 export interface NativeTurnBase {
   key: string;
   threadId: string | null; // null only for a verified first turn
@@ -163,6 +165,25 @@ git diff --check
 - [ ] One final gpt-5.6-sol / medium review of the new architecture diff, source integrity, auth, ledger and release readiness; at most one fix review. A negative performance gate means continue diagnosis with evidence, not mark goal complete or install. A passing gate plus full verification produces a candidate and an installation handoff; merge/push/install require the user's appropriate request. Keep source/account data and previous failures intact.
 
 ## Self-review / Completion Audit
+
+### 已批准的后续切片：本轮补充随 ETA 请求提交（2026-09-16）
+
+用户已确认上一条发送/记账边界调整。直接在当前隔离工作树实施，不改安装版，不降低原性能门槛。
+
+- [ ] Session TDD：完整短文本暂存不触发注入、不推进 imported cursor；按源顺序随 turn/start.input 提交。暂存、已导入、请求已接受状态分开；输入冻结、取消、重复调用、错误确认不虚报覆盖。
+- [ ] Worker TDD：仅新原生当前轮路线尝试暂存；图片、长记录、容量/请求超限完整冲刷回既有注入/压缩路径。最终完整请求在 ETA 准入前校验；不把确定性本地错误计为未知模型用量。保留最终来源、账户、附件、取消与晚到结果检查。
+- [ ] 诊断适配：暂存记录不伪称已落盘；真实调用后核对来源内容，测试中区分注入确认与随请求提交。合成上下文、独立账本、新批次；不重用失败批次。
+- [ ] 聚焦回归、类型检查、构建及集成里程碑完整回归；再运行原两层匹配性能验证，保留所有失败及耗时。仍不达标就保留候选关闭，不合并/推送/安装。
+
+### 已批准的后续切片：跨轮保留运行时
+
+按规格第 5 节新增修订执行，不重新询问已确认方向，当前任务直接实现。所有步骤保持候选关闭，真实试验另用新批次，不重写 series03。
+
+- [x] 保留策略 TDD：新增进程级许可验证，与旧轮次级许可分开；只接受同对话、单调代次、健康/授权检查之外的有效时间边界。显式区分正常轮间空闲与来源不可用/暂停/失败；不能延长截止时间或授权等待中推理。
+- [ ] Worker 外部进程集成 RED/GREEN：首轮估时→结算保留→正常轮末→下一轮；同一个 PID/创建身份和 owner UUID，两个新基底、两个独立 ETA 子分支；旧凭证/旧源改写/账户变化拒绝。资源计数按进程累计，最终退出后清理全部资源。
+- [ ] 调度/worker 工厂/比较器接线：正常轮末不误删除保留进程；不复用给其他对话。不能用无参数 release 绕过正在发生的失败清理；准备/估时活动中换轮仍取消并安全退出。历史和旧原生路线不受候选策略影响。
+- [x] 聚焦回归、类型检查、构建；检查相邻生命周期、账户、账本及资源上限用例。完整套件在集成里程碑运行。23:31:11 完整回归 243 文件 / 2,976 项通过，类型检查与构建成功；不替代性能门槛。
+- [ ] 新无模型实际 worker 预检后，用新合成审计比较同轮/跨轮耗时及全部用量。未达原门槛继续报告失败，不安装。
 
 - Spec 1–3: Tasks 1–4 preserve current-turn ETA and native completed-history plus whole-current-turn supplementation, including first-turn and native-unavailable cases.
 - Spec 4: Tasks 1–2 fixed byte boundary, epoch, complete records and stale-source rejection; Tasks 3–4 serialize complete records and fence late output.

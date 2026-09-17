@@ -8,6 +8,7 @@ export interface NativeTurnBoundary {
 export interface NativeTurnIndex {
   observe(envelope:unknown,startOffset:number,endOffset:number):void;
   snapshot():NativeTurnBoundary|null;
+  copy():NativeTurnIndex;
 }
 
 const object=(value:unknown):Record<string,unknown>|null=>
@@ -19,9 +20,18 @@ const lifecycle=new Set(['task_started',...terminals,'turn_started','turn_comple
  * envelopes and recreates the index after source identity/checkpoint resets.
  * No history text, source paths or executable source instructions are retained. */
 export function createNativeTurnIndex():NativeTurnIndex {
-  let invalid=false,watermark=0;
-  let current:{turnId:string;startOffset:number}|null=null;
-  let completed:NativeTurnBoundary['completed']=null;
+  return fromState({invalid:false,watermark:0,current:null,completed:null});
+}
+
+interface IndexState {
+  invalid:boolean;watermark:number;
+  current:{turnId:string;startOffset:number}|null;
+  completed:NativeTurnBoundary['completed'];
+}
+function fromState(state:IndexState):NativeTurnIndex {
+  let {invalid,watermark}=state;
+  let current=state.current===null?null:{...state.current};
+  let completed=state.completed===null?null:{...state.completed};
   return {
     observe(envelope,startOffset,endOffset){
       if(invalid)return;
@@ -48,6 +58,7 @@ export function createNativeTurnIndex():NativeTurnIndex {
         }else invalid=true;
       }else if(turnId!==undefined&&turnId!==current?.turnId){invalid=true;}
     },
+    copy(){return fromState({invalid,watermark,current,completed});},
     snapshot(){
       if(invalid||!current)return null;
       return {currentTurnId:current.turnId,currentStartOffset:current.startOffset,watermark,

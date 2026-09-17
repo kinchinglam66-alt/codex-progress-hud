@@ -10,6 +10,20 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('fences native snapshot handoff when a bound source changes during copy',async()=>{
+ let finish!:(value:any)=>void,closed=0,now=0;
+ const calls:string[]=[];
+ const owner=createContextOwner({source:{read:async()=>batch as any,snapshot:async()=>{throw Error('NO_PARSED_SCAN');},
+  nativeSnapshot:(id:string)=>{calls.push(id);return new Promise<any>(resolve=>{finish=resolve;});},remove:()=>{},close:async()=>{}},now:()=>now});
+ try{
+  owner.attach('local','host1','t1');now=500;owner.tick();await new Promise(resolve=>setImmediate(resolve));
+  const pending=owner.openNativeSource('local','t1',new AbortController().signal,{destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}});
+  const rejected=expect(pending).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
+  owner.attach('local','host2','t1');
+  finish({kind:'native',path:'C:/owned/copy',close:async()=>{closed++;}});
+  await rejected;expect(closed).toBe(1);expect(calls).toEqual(['host1']);
+ }finally{await owner.close();}
+});
 it('retains image delivery requirements after projection eviction until source reset',async()=>{
   const f=setup();
   try{
