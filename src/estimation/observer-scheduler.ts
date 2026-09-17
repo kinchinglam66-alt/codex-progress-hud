@@ -16,7 +16,10 @@ import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
 import type {ResidualRuntime} from './residual/runtime.js';
 import {captureHistoryFeatures} from './residual/capture.js';
+import {createRequestProfile,type RequestProfile,type RequestProfilePhase} from './request-profile.js';
 export interface ObserverWorker {
+  /** Passive per-flight timing; the returned function detaches only this listener. */
+  subscribeContextPhase?(listener:(phase:RequestProfilePhase)=>void):()=>void;
   prepareNativeHistoryFallback?(input:ObserverInput,history:VerifiedHistoryFallback,signal:AbortSignal,
     conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
   prepareNativeTurnContext?(input:ObserverInput,source:NativeTurnSource,signal:AbortSignal,
@@ -62,6 +65,7 @@ export interface ObserverObservation {
   forecastDiagnostic?:'provenance_unavailable'|'invalid_provenance';
   usage?:ObserverResult['usage'];
   timings?:ObserverResult['timings'];
+  requestProfile?:RequestProfile;
   stage?:ObserverCallStage;
   contextState?:ObserverContextState;
   contextMetrics?:ContextPreparationMetrics;
@@ -95,6 +99,7 @@ interface Flight {researchFailure?:import('./residual/contract.js').PrefixFailur
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
   deadlineAt?:number; timedOut?:boolean;
+  profile:ReturnType<typeof createRequestProfile>;
   turnKey:string; contextState?:ObserverContextState; contextMetrics?:ContextPreparationMetrics; done?: Promise<void>}
 
 /** Admission timing is local; durable spend admission belongs to each owned worker.
@@ -246,6 +251,8 @@ export class ObserverScheduler {
     this.notify();
   }
   private async dispatch(entry:Entry,flight:Flight,input:ObserverInput):Promise<void> {
+    let unsubscribe:(()=>void)|undefined;
+    try{unsubscribe=flight.worker.subscribeContextPhase?.(phase=>flight.profile.phase(phase));}catch{/* Passive diagnostics. */}
     let paired:NativeTurnSource|null=null;
     const closePaired=async()=>{
       const owned=paired;paired=null;
@@ -380,6 +387,7 @@ export class ObserverScheduler {
     }catch{if(paired)await closePaired();this.settle(entry,flight,null);}
     }finally{
       if(paired)await closePaired();
+      try{unsubscribe?.();}catch{/* Passive diagnostics. */}
     }
   }
   private markEvent(entry:Entry,now:number,reason:TriggerReason):void {
@@ -615,6 +623,7 @@ export class ObserverScheduler {
       worker.updateRetentionState?.(this.retentionState(key,state));
       delete entry.lastSkip;
       const flight: Flight = {key, ticket: request.ticket, controller: new AbortController(), worker,
+        profile:createRequestProfile(this.options.monotonicNow,worker.subscribeContextPhase?'sourceMs':'unattributedMs'),
         requestId:++this.requestSequence,requestedAt:now,observedActiveSeconds:request.input.activeSeconds,
         generation:view.generation,runtime:view.runtime,version:entry.version,triggerReason:decision.reason!,
         lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,eligibleActiveSeconds:decision.eligibleActiveSeconds,
@@ -652,6 +661,8 @@ export class ObserverScheduler {
     // Keep the owned flight until the worker finishes cleanup and durable usage
     // settlement. Deadline publication does not mean the process is closed.
     this.contextState(flight,'estimate_timeout');
+    const entry=this.entries.get(flight.key);
+    if(entry)this.record('stage',flight.key,entry,{requestId:flight.requestId,contextState:'estimate_timeout',requestProfile:flight.profile.snapshot()},flight);
   }
   private checkDeadline(flight:Flight):void {
     if(flight.deadlineAt!==undefined&&performance.now()>=flight.deadlineAt)this.expire(flight);
@@ -811,6 +822,7 @@ export class ObserverScheduler {
       }catch{/* Research failure cannot reject a production estimate. */}
     }
     this.record('result',flight.key,entry,{requestId:flight.requestId,requestedAt:flight.requestedAt,
+      requestProfile:flight.profile.snapshot(),
       ...(!accepted?{generation:flight.generation}:{}),
       ...(snapshotAnchor===undefined?{}:{observedActiveSeconds:snapshotAnchor}),
       triggerReason:flight.triggerReason,lastRequestActiveSeconds:flight.lastRequestActiveSeconds,

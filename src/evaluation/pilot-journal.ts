@@ -1,4 +1,5 @@
 import type {ObserverObservation} from '../estimation/observer-scheduler.js';
+import {projectRequestProfile} from '../estimation/request-profile.js';
 import {observerCallStages} from '../estimation/observer-provider.js';
 import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
@@ -50,6 +51,7 @@ export function createPilotJournal(directory:string){
         stage:value.kind==='stage'&&value.stage!==undefined&&stageCodes.has(value.stage)?value.stage:undefined,
         contextState:value.contextState!==undefined&&contextStateCodes.has(value.contextState)?value.contextState:undefined,
         contextMetrics:contextMetrics(value.contextMetrics),
+        requestProfile:projectRequestProfile(value.requestProfile),
         triggerReason:typeof value.triggerReason==='string'&&triggerCodes.has(value.triggerReason)?value.triggerReason:undefined,
         lastRequestActiveSeconds:activeAnchor(value.lastRequestActiveSeconds),
         eligibleActiveSeconds:activeAnchor(value.eligibleActiveSeconds),

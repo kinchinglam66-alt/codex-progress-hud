@@ -7,6 +7,34 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('journals subscribed native phases and detaches the listener after settlement',async()=>{
+ const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));
+ let listener:((phase:import('../../src/estimation/request-profile.js').RequestProfilePhase)=>void)|undefined;
+ f.workers[0]!.subscribeContextPhase=value=>{listener=value;return ()=>{listener=undefined;};};
+ try{
+  f.hook('UserPromptSubmit');f.scheduler.tick();
+  f.time(10);listener?.('accountProcessMs');f.time(30);listener?.('forkImportMs');
+  f.time(45);listener?.('inferenceMs');f.time(80);listener?.('deliveryMs');
+  f.time(85);f.calls[0]!.finish(result());await f.flush();
+  expect(records.find(row=>row.kind==='result')?.requestProfile).toEqual({sourceMs:10,accountProcessMs:20,
+    forkImportMs:15,compactionMs:null,inferenceMs:35,deliveryMs:5,unattributedMs:null,totalMs:85,clockValid:true});
+  expect(listener).toBeUndefined();
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
+it('records independent request wall clocks across concurrent results without inventing provider phases',async()=>{
+ const records:ObserverObservation[]=[];const f=fixture(2,6000,row=>records.push(row));
+ try{
+  f.hook('UserPromptSubmit','one');f.scheduler.tick();
+  f.time(100);f.hook('UserPromptSubmit','two');f.scheduler.tick();
+  f.time(300);f.calls[0]!.finish(result());await f.flush();
+  f.time(500);f.calls[1]!.finish(result());await f.flush();
+  const profiles=records.filter(row=>row.kind==='result').map(row=>(row as unknown as {requestProfile:unknown}).requestProfile);
+  expect(profiles).toEqual([
+    {sourceMs:null,unattributedMs:300,accountProcessMs:null,forkImportMs:null,compactionMs:null,inferenceMs:null,deliveryMs:null,totalMs:300,clockValid:true},
+    {sourceMs:null,unattributedMs:400,accountProcessMs:null,forkImportMs:null,compactionMs:null,inferenceMs:null,deliveryMs:null,totalMs:400,clockValid:true}
+  ]);
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
 it('starts a ready first observation on the next tick without a fixed fifteen-second delay',async()=>{
  const f=fixture(1);f.hook('UserPromptSubmit');
  try{f.scheduler.tick();expect(f.calls).toHaveLength(1);}
@@ -422,7 +450,7 @@ function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:
   };
   const time = (value: number) => {now = value;};
   const flush = async () => {await Promise.resolve(); await Promise.resolve();};
-  return {scheduler, goals, contexts, calls, hook, time, flush, releases,retentionStates,failMonotonic:()=>{monotonicFails=true;},dynamicMismatches: () => dynamicMismatches};
+  return {scheduler, goals, contexts, calls, hook, time, flush, releases,retentionStates,workers,failMonotonic:()=>{monotonicFails=true;},dynamicMismatches: () => dynamicMismatches};
 }
 
 function paceFixture(onObservation?:(record:ObserverObservation)=>void) {

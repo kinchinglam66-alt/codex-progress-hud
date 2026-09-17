@@ -71,8 +71,10 @@ const empty=(status:ObserverResult['status']):ObserverResult=>({status,interpret
 export function createPersistentObserverWorker(options:PersistentWorkerOptions):ObserverWorker {
  if(options.reuseNativeTurnSession&&(!options.completedTurnContext||!options.nativeContext))throw Error('NATIVE_TURN_REUSE_OPTIONS_INVALID');
  const timing=createNativeTurnTiming(()=>performance.now(),options.onNativeTurnTiming);
+ const phaseListeners=new Set<Parameters<NonNullable<ObserverWorker['subscribeContextPhase']>>[0]>();
  const phase=(value:Parameters<NonNullable<PersistentWorkerOptions['onContextPhase']>>[0])=>{
   try{options.onContextPhase?.(value);}catch{/* Diagnostics cannot cancel or authorize a call. */}
+  for(const listener of phaseListeners)try{listener(value);}catch{/* Passive diagnostics. */}
  };
  let disabled=false,poisoned=false,pending:Promise<unknown>|undefined,controller:AbortController|undefined;
  let owner:ReturnType<typeof createObserverSessionProcess>|undefined;
@@ -546,6 +548,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    retained:retentionPermit!==null,idleRemainingMs,retirementReason};
  };
  const worker:ObserverWorker={
+   subscribeContextPhase(listener){phaseListeners.add(listener);return ()=>{phaseListeners.delete(listener);};},
    status:()=>({active:pending!==undefined||releasing!==undefined,disabled,poisoned:poisoned||owner?.status().poisoned===true,
     ...(options.nativeContext?{cleanupPending:nativeResourcesOpen||owner!==undefined,nativeLifecycle:nativeDiagnostic()}:{})}),
    disable(){disabled=true;revokeIdle();invalidateReuse();unsubscribeAccount?.();unsubscribeAccount=undefined;controller?.abort();owner?.disable();

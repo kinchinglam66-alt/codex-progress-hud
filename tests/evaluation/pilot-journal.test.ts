@@ -4,6 +4,21 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
 
+it('persists request phase measurements without leaking injected context',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-profile-'));
+  try{
+    const journal=createPilotJournal(directory);
+    journal.record({kind:'result',at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1,
+      requestProfile:{sourceMs:5,totalMs:15,inferenceMs:10,clockValid:true,accountProcessMs:null,
+        forkImportMs:null,compactionMs:null,deliveryMs:null,unattributedMs:null,...{secret:'PRIVATE_CONTEXT'}}});
+    await journal.close();
+    const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+    expect(JSON.parse(raw.split('\n')[0]!).requestProfile).toMatchObject({sourceMs:5,totalMs:15,inferenceMs:10,
+      accountProcessMs:null,clockValid:true});
+    expect(raw).not.toContain('PRIVATE_CONTEXT');
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
 it('records context representation state but never raw context',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-context-'));
   try{

@@ -21,6 +21,20 @@ import {createNativeRetentionPermit} from '../../src/estimation/native-owner-ret
 import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
 import type {ConversationRecord} from '../../src/observer/conversation-record.js';
 const input:ObserverInput={goalSummary:'current',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'current',truncated:false}],truncated:false};
+it('reports live preparation and inference phases to a request subscriber and detaches it safely',async()=>{
+ const f=await fixture(false),signal=new AbortController().signal,phases:string[]=[];
+ try{
+  const worker=f.worker as typeof f.worker & {subscribeContextPhase?:(listener:(phase:string)=>void)=>()=>void};
+  expect(typeof worker.subscribeContextPhase).toBe('function');
+  const off=worker.subscribeContextPhase!(phase=>phases.push(phase));
+  const prepared=await worker.prepareContext!(input,{snapshot:history([]),currentTurnId:'t'},signal,'source',0,0);
+  expect((await worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+  expect(phases).toContain('accountProcessMs');expect(phases).toContain('inferenceMs');expect(phases).toContain('deliveryMs');
+  off();const count=phases.length;
+  expect((await worker.observe(input,signal,'source',0)).status).toBe('interpreted');
+  expect(phases).toHaveLength(count);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
 type TestReuse={claim(signal:AbortSignal):Promise<{validate(signal:AbortSignal):Promise<boolean>;valid():boolean}|null>;invalidate():void};
 function reusable(localValid=()=>true):TestReuse{
  let consumed=false,invalid=false;
