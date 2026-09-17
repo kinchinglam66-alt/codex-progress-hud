@@ -31,6 +31,32 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it.each((['nativeSourceDestination','prepareNativeContext','prepareNativeTurnContext','prepareNativeHistoryFallback'] as const)
+    .flatMap(method=>(['disable','switch','cancel'] as const).map(change=>({method,change}))))(
+    'fences native preparation before and during $method on $change',async({method,change})=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-native-generation-'));
+    const pending=deferred<any>();let received:AbortSignal|undefined,calls=0,sourceCloses=0;
+    const delegate=worker('native-context');
+    const operation=async(...args:any[])=>{calls++;received=args[method==='nativeSourceDestination'?0:2];return pending.promise;};
+    Object.assign(delegate,{[method]:operation});
+    const owned:ProviderWorkerOwner={workers:[delegate],workerSource:{acquire:()=>delegate,release:async()=>{},all:()=>[delegate]},close:async()=>{},inspect:async()=>({label:'fixture',fingerprint:'fixture'})};
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owned,autoStartSubscription:true});
+    try{
+      await host.start(new AbortController().signal);const lease=host.workerSource!.acquire('key');
+      const source={snapshot:{close:async()=>{sourceCloses++;}}},controller=new AbortController();
+      const invoke=()=>method==='nativeSourceDestination'?lease.nativeSourceDestination!(controller.signal):
+        (lease[method] as (...args:any[])=>Promise<unknown>)({},source,controller.signal,'key',1,1);
+      const request=invoke(),rejected=expect(request).rejects.toThrow('CONTEXT_PROVIDER_CHANGED');
+      if(change==='disable')host.disable();
+      else if(change==='cancel')controller.abort();
+      else await host.activateProvider({...host.status(),selected:'subscription'});
+      const aborted=received?.aborted;pending.resolve({});
+      await rejected;expect(aborted).toBe(true);
+      await expect(invoke()).rejects.toThrow('CONTEXT_PROVIDER_CHANGED');expect(calls).toBe(1);
+      // Only legacy native snapshots transfer ownership before dispatch.
+      expect(sourceCloses).toBe(method==='prepareNativeContext'?1:0);
+    }finally{pending.resolve({});await host.close();}
+  });
   it('propagates host cancellation into post-login account inspection',async()=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-post-login-cancel-'));
     let inspectionSignal:AbortSignal|undefined;

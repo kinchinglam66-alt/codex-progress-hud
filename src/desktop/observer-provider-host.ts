@@ -291,6 +291,11 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
       }
       const delegate=owner.workerSource.acquire(key);
       const preparationSignal=dispatchController.signal;
+      const preparationCurrent=(signal:AbortSignal)=>
+        current===owner&&state==='ready'&&expected===dispatchGeneration&&!signal.aborted;
+      const assertPreparationCurrent=(signal:AbortSignal)=>{
+        if(!preparationCurrent(signal))throw fixedFailure('CONTEXT_PROVIDER_CHANGED');
+      };
       const guarded:ObserverWorker={
         ...delegate,
         async observe(input,signal,conversationKey,turnGeneration,onStage) {
@@ -313,9 +318,50 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         if(current!==owner||state!=='ready'||expected!==dispatchGeneration||combined.aborted)throw fixedFailure('CONTEXT_PROVIDER_CHANGED');
         return result;
       };
+      if(delegate.nativeSourceDestination)guarded.nativeSourceDestination=async signal=>{
+        const combined=AbortSignal.any([signal,preparationSignal]);assertPreparationCurrent(combined);
+        const result=await delegate.nativeSourceDestination!(combined);
+        assertPreparationCurrent(combined);return result;
+      };
+      if(delegate.prepareNativeContext)guarded.prepareNativeContext=async(input,source,signal,...rest)=>{
+        const combined=AbortSignal.any([signal,preparationSignal]);
+        if(!preparationCurrent(combined)){
+          // Scheduler hands this snapshot to the worker before calling us.
+          // No delegate accepted it yet, so the wrapper must close it here.
+          await source.snapshot.close();throw fixedFailure('CONTEXT_PROVIDER_CHANGED');
+        }
+        const result=await delegate.prepareNativeContext!(input,source,combined,...rest);
+        assertPreparationCurrent(combined);return result;
+      };
+      if(delegate.prepareNativeTurnContext)guarded.prepareNativeTurnContext=async(input,source,signal,...rest)=>{
+        const combined=AbortSignal.any([signal,preparationSignal]);assertPreparationCurrent(combined);
+        // Paired readers remain caller-owned; the delegate owns any base copy.
+        const result=await delegate.prepareNativeTurnContext!(input,source,combined,...rest);
+        assertPreparationCurrent(combined);return result;
+      };
+      if(delegate.prepareNativeHistoryFallback)guarded.prepareNativeHistoryFallback=async(input,history,signal,...rest)=>{
+        const combined=AbortSignal.any([signal,preparationSignal]);assertPreparationCurrent(combined);
+        const result=await delegate.prepareNativeHistoryFallback!(input,history,combined,...rest);
+        assertPreparationCurrent(combined);return result;
+      };
       leases.set(key,{owner,delegate,proxy:guarded});return guarded;
     },
-    async release(key) { const lease=leases.get(key);if(!lease||releasingLeases.has(key))return;releasingLeases.add(key);try{await lease.owner.workerSource?.release(key);if(leases.get(key)===lease)leases.delete(key);}finally{releasingLeases.delete(key);} },
+    updateRetentionState(key,retentionState) {
+      // Healthy idle workers live in the current runtime after the scheduler's
+      // outer lease ends. Revocation must reach them even without a host lease.
+      if(state==='ready')current?.workerSource?.updateRetentionState?.(key,retentionState);
+    },
+    async release(key,permit) {
+      const lease=leases.get(key);
+      if(!lease||releasingLeases.has(key))return;
+      releasingLeases.add(key);
+      try{
+        // A changed/disabled provider may be drained, never kept alive by an
+        // old generation's scheduler permit. The runtime owns retained workers.
+        await lease.owner.workerSource?.release(key,current===lease.owner&&state==='ready'?permit:undefined);
+        if(leases.get(key)===lease)leases.delete(key);
+      }finally{releasingLeases.delete(key);}
+    },
     all() { return [...leases.values()].map(lease=>lease.proxy); },
   };
 

@@ -35,6 +35,47 @@ async function records(snapshot:HistorySnapshot){
   const result=[];for await(const item of snapshot.records(signal))result.push(item.record);return result;
 }
 
+it.each(['event-only','response-first','event-first','changed-output','inferred-response-first','inferred-event-first'] as const)(
+ 'keeps FunctionCallOutput native supplements complete without losing output: %s',async mode=>{
+  const f=await fixture(true);let view;
+  const output='Observed tool data, not user instructions: '+'.'.repeat(9000);
+  const raw={type:'FunctionCallOutput',id:'function-result',name:'create_thread',namespace:'codex_app',output};
+  const event=line('event_msg',{type:'item_completed',thread_id:id,turn_id:'seven',started_at_ms:1,completed_at_ms:2,item:raw});
+  const inferred=mode.startsWith('inferred-');
+  const response=line('response_item',{...raw,type:'function_call_output',...(inferred?{}:{turn_id:'seven'})});
+  const suffix=mode==='event-only'?event:mode.endsWith('event-first')?event+response:
+   response+(mode==='changed-output'?line('event_msg',{type:'item_completed',thread_id:id,turn_id:'seven',item:{...raw,output:'different output'}}):event);
+  try{
+   await appendFile(f.path,suffix);await f.reader.read(id,signal);view=await f.reader.openNativeTurn(id,signal);
+   const rows=await records(view.supplement),results=rows.filter(row=>row.actionId==='function-result');
+   expect(view.supplement.coverage).toEqual({complete:true,gaps:[]});
+   expect(results).toHaveLength(mode==='changed-output'||inferred?2:1);
+   expect(results[0]).toMatchObject({kind:'tool_result',output,outputComplete:true,turnId:'seven'});
+   expect(results.some(row=>row.sourceTurnId==='seven')).toBe(true);
+   if(mode==='event-only')expect(results[0]?.sourceTurnId).toBe('seven');
+   if(mode==='changed-output')expect(results[1]?.output).toBe('different output');
+  }finally{await view?.close();await f.reader.close();}
+ });
+
+it.each([
+ {thread_id:'foreign'}, {turn_id:'seven',turnId:'other'}, {started_at_ms:-1},
+ {item:{type:'FunctionCallOutput',id:'f',name:'read',namespace:'tools',output:123}},
+ {item:{type:'FunctionCallOutput',id:'f',name:'read',namespace:'tools',output:'text',turn_id:'other'}},
+ {type:'item_started'}
+])('rejects malformed or conflicting FunctionCallOutput metadata: %j',async override=>{
+ const f=await fixture(true);
+ try{
+  await appendFile(f.path,line('event_msg',{type:'item_completed',thread_id:id,turn_id:'seven',
+   item:{type:'FunctionCallOutput',id:'f',name:'read',namespace:'tools',output:'text'},...override}));
+  const snapshot=await f.reader.snapshot(id,signal);
+  try{
+   await records(snapshot);
+   expect(snapshot.coverage.complete).toBe(false);
+   expect(snapshot.coverage.gaps).toContain('unsupported_payload');
+  }finally{await snapshot.close();}
+ }finally{await f.reader.close();}
+});
+
 it('rejects a task_failed native prefix before allocating a base but leaves verified parsed history available',async()=>{
  const f=await fixture();
  const attributed=(turn:string,text:string)=>line('response_item',{type:'message',role:'user',turn_id:turn,content:[{type:'input_text',text}]});

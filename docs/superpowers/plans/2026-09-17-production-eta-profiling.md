@@ -60,3 +60,29 @@ No source text, task ID, path or account identity is added by these fields.
 Instrumentation alone is not completion. Deliver a tested installed build and
 the four-task pilot report, or clearly identify the remaining external blocker.
 Private task context and experimental raw files must not be published.
+
+## Pilot-discovered prerequisites
+
+The first installed pilot produced no accepted ETA. Do not score its interrupted
+reviews as completed accuracy samples. Preserve its private observations as a
+separate failed-connectivity round, not twelve valid timing points.
+
+Before resuming the pilot:
+
+- Parse validated `item_completed/FunctionCallOutput` mirrors as tool data.
+  Preserve complete output and explicit turn attribution. Collapse only equivalent
+  attributed results; retain changed output and inferred/explicit variants.
+- Forward native retention permits and state through the provider host. The
+  runtime remains the owner after an outer scheduler lease is released. Idle
+  revocation must still reach that owner; disabled/replaced providers receive no
+  new keepalive permit.
+- Fence every native preparation entry against caller cancellation and provider
+  generation changes, before and after awaiting. Preserve existing snapshot
+  ownership: paired readers/fallbacks stay caller-owned; legacy transferred native
+  snapshots rejected before delegation must be closed by the wrapper.
+- Verify with local synthetic regressions and read-only parser replay, then full
+  regression/review and a disabled-plugin installation. No algorithm/cadence,
+  accounting policy, authentication or thirty-second deadline changes.
+- Resume a single approved test conversation first. Expand to the existing four
+  only after a valid installed ETA; keep the repaired round separate from the
+  failed original round. Do not create extra tasks or fabricate missing samples.

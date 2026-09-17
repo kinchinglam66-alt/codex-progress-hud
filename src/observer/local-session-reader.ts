@@ -451,7 +451,11 @@ function normalizeTool(
       record.outputComplete = bounded.complete;
     }
   }
-  return addRecord(context, record, `${record.kind}:${actionId}`);
+  // Full-history tool results with explicit attribution are not interchangeable
+  // with inferred ones. Keep both when needed; a prior unassigned response must
+  // not erase the mirror's source turn (or a result from another explicit turn).
+  const attribution = context.options.preserveText && result ? `:${record.sourceTurnId ?? 'unassigned'}` : '';
+  return addRecord(context, record, `${record.kind}:${actionId}${attribution}`);
 }
 
 function delegatedTaskText(
@@ -675,6 +679,29 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     const sourceTurnId=innerTurn!==null&&outerTurn!==null&&innerTurn!==outerTurn?null:innerTurn??outerTurn;
     return {...record,sourceTurnId};
   });
+  if (context.options.preserveText && itemType === 'FunctionCallOutput') {
+    const raw = item as unknown as Record<string, unknown>;
+    const identityFields = [payload, raw];
+    const explicitTurns = identityFields.flatMap(fields =>
+      ['turn_id','turnId'].filter(key => Object.hasOwn(fields,key)).map(key => fields[key]));
+    const valid = eventType === 'item_completed' &&
+      [raw.id,raw.name,raw.namespace].every(value => stringValue(value) !== undefined) &&
+      typeof raw.output === 'string' &&
+      Object.keys(payload).every(key => ['type','item','thread_id','threadId','turn_id','turnId','started_at_ms','completed_at_ms'].includes(key)) &&
+      Object.keys(raw).every(key => ['type','id','name','namespace','output','thread_id','threadId','turn_id','turnId'].includes(key)) &&
+      identityFields.every(fields => ['thread_id','threadId'].every(key =>
+        !Object.hasOwn(fields,key) || fields[key] === context.threadId)) &&
+      ['started_at_ms','completed_at_ms'].every(key => !Object.hasOwn(payload,key) ||
+        (typeof payload[key] === 'number' && Number.isFinite(payload[key]) && payload[key] >= 0)) &&
+      explicitTurns.every(turn => stringValue(turn) !== undefined && turn === explicitTurns[0]);
+    if (!valid) {context.gaps.add('unsupported_payload');return [];}
+    // Same output semantics as response_item/function_call_output. Normalize
+    // before deduplication so mirrors collapse, while changed output survives.
+    // A tool-result envelope is never promoted to a user/delegation instruction.
+    return withSourceTurn(normalizeTool(context, {
+      ...raw, ...(outerTurn !== null ? {turn_id:outerTurn} : {})
+    }, atMs, context.offset, true));
+  }
   if (itemType === "UserMessage" || itemType === "AgentMessage") {
     return withSourceTurn(normalizeMessage(context, item as unknown as Record<string, unknown>, atMs, context.offset, itemType));
   }

@@ -18,9 +18,34 @@ import {createNativeComparisonFixtures,createCompletedTurnComparisonFixtures} fr
 import {persistentHistoryPolicy} from '../../src/estimation/persistent-history-policy.js';
 import {createSessionAccountReuseIssuer} from '../../src/estimation/session-account-reuse.js';
 import {createNativeRetentionPermit} from '../../src/estimation/native-owner-retention.js';
+import {createObserverProviderHost} from '../../src/desktop/observer-provider-host.js';
 import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
 import type {ConversationRecord} from '../../src/observer/conversation-record.js';
 const input:ObserverInput={goalSummary:'current',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'current',truncated:false}],truncated:false};
+it('provider host retains the native process and revokes it after releasing the outer lease',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ const directory=await mkdtemp(join(tmpdir(),'hud-native-provider-retention-'));
+ const host=await createObserverProviderHost({dataDirectory:directory,autoStartSubscription:true,
+  consentProtection:{protect:value=>value,unprotect:value=>value},
+  openSubscription:async()=>({workers:[],inspect:async()=>({label:'synthetic',fingerprint:'synthetic'}),close:()=>f.worker.close(),
+   workerSource:{acquire:()=>f.worker,all:()=>[f.worker],release:async(_key,permit)=>{await f.worker.release!(permit);},
+    updateRetentionState:(_key,state)=>f.worker.updateRetentionState!(state)}})});
+ try{
+  await host.start(signal);host.workerSource!.acquire('source');
+  await f.prepareAndObserve(1,signal);
+  await host.workerSource!.release('source',createNativeRetentionPermit({...f.state,idleStartedAtMs:0,nextOrdinaryAtMs:300000}));
+  expect(f.lastProcess()!.status().closed).toBe(false);
+  host.workerSource!.acquire('source');await f.prepareAndObserve(2,signal);
+  expect(f.processes()).toBe(1);
+  await host.workerSource!.release('source',createNativeRetentionPermit({...f.state,idleStartedAtMs:0,nextOrdinaryAtMs:300000}));
+  host.workerSource!.updateRetentionState?.('source',null);
+  // Join asynchronous retirement without granting another keepalive permit.
+  await f.worker.release!();
+  expect(f.lastProcess()!.status().closed).toBe(true);
+  expect(f.worker.status()).toMatchObject({nativeLifecycle:{retirementReason:'state_revoked'}});
+  expect(f.accounting.snapshot()).toMatchObject({starts:2,unresolved:0});
+ }finally{await host.close();await f.worker.close();await f.accounting.close();await rm(directory,{recursive:true,force:true});}
+});
 it('reports live preparation and inference phases to a request subscriber and detaches it safely',async()=>{
  const f=await fixture(false),signal=new AbortController().signal,phases:string[]=[];
  try{

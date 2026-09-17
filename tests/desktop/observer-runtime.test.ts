@@ -6,6 +6,8 @@ import type {ReleaseAccountingOwner} from '../../src/estimation/release-accounti
 import type {SubscriptionAccounting} from '../../src/estimation/subscription-accounting.js';
 import type {Invocation} from '../../src/estimation/owned-process.js';
 import {createDesktopObserverRuntime} from '../../src/desktop/observer-runtime.js';
+import {createObserverProviderHost} from '../../src/desktop/observer-provider-host.js';
+import {createNativeRetentionPermit, type NativeRetentionPermit, type NativeRetentionState} from '../../src/estimation/native-owner-retention.js';
 import {ObserverScheduler, type ObserverObservation} from '../../src/estimation/observer-scheduler.js';
 import {PassiveGoals} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
@@ -95,6 +97,32 @@ it('retains a healthy persistent worker between scheduler operations and closes 
     expect(created).toBe(1);expect(released).toBe(1);expect(closed).toBe(0);
   }finally{await runtime.close();}
   expect(closed).toBeGreaterThan(0);
+});
+it('carries retention through provider host and runtime, including revocation with no outer lease',async()=>{
+ const events:string[]=[],directory=await mkdtemp(join(tmpdir(),'hud-runtime-host-retention-'));
+ const state={conversationKey:'source',turnKey:'turn',generation:0,running:true};
+ const permit=createNativeRetentionPermit({...state,idleStartedAtMs:0,nextOrdinaryAtMs:300000});
+ const receivedPermits:Array<NativeRetentionPermit|null|undefined>=[],receivedStates:Array<NativeRetentionState|null>=[];
+ let created=0,closed=0;
+ const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events),
+  persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:()=>{created++;return {
+   observe:async()=>({status:'disabled',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),
+   disable(){},close:async()=>{closed++;},release:async value=>{receivedPermits.push(value);},
+   updateRetentionState:value=>{receivedStates.push(value);}};}});
+ const host=await createObserverProviderHost({dataDirectory:directory,autoStartSubscription:true,
+  consentProtection:{protect:value=>value,unprotect:value=>value},openSubscription:async()=>{
+   await runtime.start(new AbortController().signal);
+   return {...runtime,inspect:async()=>({label:'synthetic',fingerprint:'synthetic'})};}});
+ try{
+  await host.start(new AbortController().signal);
+  host.workerSource!.acquire('source');host.workerSource!.updateRetentionState!('source',state);
+  await host.workerSource!.release('source',permit);
+  expect(receivedPermits).toEqual([permit]);expect(closed).toBe(0);
+  host.workerSource!.updateRetentionState!('source',null);
+  expect(receivedStates).toEqual([state,null]);
+  host.workerSource!.acquire('source');expect(created).toBe(1);
+ }finally{await host.close();await runtime.close();await rm(directory,{recursive:true,force:true});}
+ expect(closed).toBeGreaterThan(0);
 });
 it('does not replace a poisoned native owner whose cleanup is still unconfirmed',async()=>{
  const events:string[]=[];let created=0,poisoned=false;
