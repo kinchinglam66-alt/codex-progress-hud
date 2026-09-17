@@ -1,7 +1,7 @@
 import type {ConversationRecord,ReadBatch} from './conversation-record.js';
 import type {HistorySnapshot} from './history-snapshot.js';
 import type {NativeSourceSnapshot} from './native-source-snapshot.js';
-import type {NativeSourceDestination,NativeTurnSource} from './native-source-request.js';
+import type {NativeSourceDestination,NativeTurnSource,BoundNativeTurnSource} from './native-source-request.js';
 import {createHash} from 'node:crypto';
 
 interface Source {
@@ -249,7 +249,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
       }
       return result;
     },
-    async openNativeTurn(key:string,turnKey:string,signal:AbortSignal):Promise<NativeTurnSource|null>{
+    async openNativeTurn(key:string,turnKey:string,signal:AbortSignal):Promise<BoundNativeTurnSource|null>{
       const bound=entries.get(key),reader=options.source.openNativeTurn;
       const acquired=await acquireSnapshot(key,turnKey,signal,reader);
       if(acquired===null)return null;
@@ -260,7 +260,7 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
         }
       };
       try{checkBinding();}catch(error){await source.close();throw error;}
-      return {...source,
+      return {...source,turnKey,
         validate:async checkSignal=>{checkBinding();await source.validate(checkSignal);checkBinding();},
         openBase:async(destination,baseSignal)=>{
           checkBinding();const base=await source.openBase(destination,baseSignal);

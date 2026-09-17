@@ -339,15 +339,15 @@ it('context owner refuses a paired capture when task binding changes during acqu
 });
 it('context owner exposes complete paired content only for its matching live binding',async()=>{
   const f=await fixture();let now=0,view;
-  const reader=createLocalSessionReader({root:f.sourceRoot}),owner=createContextOwner({source:reader,now:()=>now});
+  const reader=createLocalSessionReader({root:f.sourceRoot}),owner=createContextOwner({source:reader,now:()=>now,turnKeyFor:(_host,turn)=>`route-${turn}`});
   try{
-    owner.attach('task',id,'seven');now=500;owner.tick();
+    owner.attach('task',id,'route-seven');now=500;owner.tick();
     for(let i=0;i<100&&owner.health('task')!=='ready';i++)await new Promise(resolve=>setTimeout(resolve,5));
     expect(owner.health('task')).toBe('ready');
     expect(await owner.openNativeTurn('task','different',signal)).toBeNull();
-    view=await owner.openNativeTurn('task','seven',signal);
-    expect(view?.currentTurnId).toBe('seven');expect((await records(view!.supplement)).at(-1)?.text).toBe('current task');
-    owner.attach('task',id,'eight');await expect(view!.validate(signal)).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
+    view=await owner.openNativeTurn('task','route-seven',signal);
+    expect(view?.currentTurnId).toBe('seven');expect(view?.turnKey).toBe('route-seven');expect((await records(view!.supplement)).at(-1)?.text).toBe('current task');
+    owner.attach('task',id,'route-eight');await expect(view!.validate(signal)).rejects.toMatchObject({code:'SOURCE_HISTORY_BINDING_CHANGED'});
   }finally{await view?.close();await owner.close();await f.reader.close();}
 });
 it('conversation source forwards paired history for the selected conversation and fences replacement',async()=>{

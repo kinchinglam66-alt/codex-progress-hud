@@ -21,6 +21,7 @@ import {createNativeRetentionPermit} from '../../src/estimation/native-owner-ret
 import {createObserverProviderHost} from '../../src/desktop/observer-provider-host.js';
 import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
 import type {ConversationRecord} from '../../src/observer/conversation-record.js';
+import type {BoundNativeTurnSource} from '../../src/observer/native-source-request.js';
 const input:ObserverInput={goalSummary:'current',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'current',truncated:false}],truncated:false};
 it('provider host retains the native process and revokes it after releasing the outer lease',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
@@ -538,11 +539,52 @@ async function retainedNativeFixture(onNativeTurnTiming?:(event:import('../../sr
    expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');}};
 }
 
-function pairedSource(revision:number,onCopy:()=>void=()=>{},first=false){return {identity:'original-file',sourceEpoch:1,revision,currentTurnId:'current',baseKey:'original-previous-current',
+function pairedSource(revision:number,onCopy:()=>void=()=>{},first=false){return {identity:'original-file',sourceEpoch:1,revision,currentTurnId:'current',turnKey:'current',baseKey:'original-previous-current',
   boundary:{currentTurnId:'current',currentStartOffset:first?0:100,watermark:100+revision*100,completed:first?null:{turnId:'previous',endOffset:100}},
   supplement:history(Array.from({length:revision},(_,i)=>({id:`record-${i}`,kind:'user' as const,text:`CURRENT-${i}`,turnId:'current',atMs:i}))),
   validate:async(s:AbortSignal)=>{s.throwIfAborted();},close:async()=>{},
   openBase:async()=>{onCopy();return {kind:'native' as const,sourceThreadId:'original',sourceTurnId:'previous',sourceEpoch:1,revision,byteLength:100,path:'C:/protected/base',close:async()=>{}};}};}
+
+it('accepts an opaque route key when it differs from the native turn id',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const source=pairedSource(1);source.turnKey='turn_hmac_route_key';
+  f.state.turnKey='turn_hmac_route_key';f.worker.updateRetentionState!({...f.state});
+  const prepared=await f.worker.prepareNativeTurnContext!(input,source,signal,'source',0,0);
+  expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it('rejects a paired source bound to a different opaque route key',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const source=pairedSource(1);source.turnKey='turn_other_route';
+  await expect(f.worker.prepareNativeTurnContext!(input,source,signal,'source',0,0)).rejects.toThrow('SOURCE_PREPARATION_STALE');
+  expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it('fails closed when a paired source has no opaque route binding',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const {turnKey:_turnKey,...source}=pairedSource(1);
+  await expect(f.worker.prepareNativeTurnContext!(input,source as unknown as BoundNativeTurnSource,signal,'source',0,0)).rejects.toThrow('SOURCE_PREPARATION_STALE');
+  expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it.each(['missing retention state','wrong conversation binding'] as const)('fails closed with %s',async scenario=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  if(scenario==='missing retention state'){
+   f.worker.updateRetentionState!(null);
+   await new Promise<void>(resolve=>setImmediate(resolve));
+  }
+  else {f.state.conversationKey='other';f.worker.updateRetentionState!({...f.state});}
+  await expect(f.worker.prepareNativeTurnContext!(input,pairedSource(1),signal,'source',0,0)).rejects.toThrow('SOURCE_PREPARATION_STALE');
+  expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
 
 it.each(['thread/fork','thread/inject_items'])('captures unadmitted model work during %s and never enters ETA',async(method)=>{
  const f=await retainedNativeFixture(undefined,{transformScript:text=>text.replace("if(!m.id)continue;",`if(!m.id)continue;if(m.method===${JSON.stringify(method)})emit({method:'turn/started',params:{threadId:'unexpected',turn:{id:'unadmitted'}}});`)}),signal=new AbortController().signal;
@@ -746,7 +788,7 @@ it.each([false,true])('starts a new candidate child for a new source turn withou
   const p=await f.worker.prepareNativeTurnContext!(input,pairedSource(1),signal,'source',0,0);
   await f.worker.observe(p.input,signal,'source',0);await f.release();
   f.state.turnKey='next';f.state.generation=1;f.worker.updateRetentionState!({...f.state});
-  const next=pairedSource(1);next.currentTurnId='next';next.baseKey='next-base';
+  const next=pairedSource(1);next.currentTurnId='next';next.turnKey='next';next.baseKey='next-base';
   next.boundary={currentTurnId:'next',currentStartOffset:300,watermark:400,completed:{turnId:'current',endOffset:300}};
   next.supplement=history([{id:'next',kind:'user',text:'NEXT-ONLY',turnId:'next',atMs:10}]);
   const open=next.openBase;next.openBase=async()=>({...await open(),sourceTurnId:'current'});
@@ -780,7 +822,7 @@ it('retains the healthy runtime across normal turn-end idle but creates a new ba
   f.worker.updateRetentionState!({...f.state,running:false,idleEligible:true});
   expect(previousProcess!.status().alive).toBe(true);
   f.state.turnKey='next';f.state.generation=1;f.worker.updateRetentionState!({...f.state});
-  const next=pairedSource(1,()=>copies++);next.currentTurnId='next';next.baseKey='original-current-next';
+  const next=pairedSource(1,()=>copies++);next.currentTurnId='next';next.turnKey='next';next.baseKey='original-current-next';
   next.boundary={currentTurnId:'next',currentStartOffset:300,watermark:400,completed:{turnId:'current',endOffset:300}};
   next.supplement=history([{id:'next-u',kind:'user',turnId:'next',atMs:10,text:'NEXT-ONLY'}]);
   const base=next.openBase;next.openBase=async()=>({...await base(),sourceTurnId:'current'});
@@ -822,7 +864,7 @@ it.each(['account','source-epoch'] as const)('rejects a changed %s before a cros
   expect((await f.worker.observe(p.input,signal,'source',0)).status).toBe('interpreted');await f.release();
   const process=f.lastProcess();
   f.state.turnKey='next';f.state.generation=1;f.worker.updateRetentionState!({...f.state});
-  const next=pairedSource(1);next.currentTurnId='next';next.baseKey='next-base';
+  const next=pairedSource(1);next.currentTurnId='next';next.turnKey='next';next.baseKey='next-base';
   next.boundary={currentTurnId:'next',currentStartOffset:300,watermark:400,completed:{turnId:'current',endOffset:300}};
   if(change==='account')f.changeBinding();else next.sourceEpoch=2;
   await expect(f.worker.prepareNativeTurnContext!(input,next,signal,'source',1,0)).rejects.toThrow(change==='account'?'SESSION_BINDING_CHANGED':'NATIVE_SOURCE_GENERATION_CHANGED');
@@ -945,7 +987,7 @@ it.each([false,true])('joins real snapshot custody and worker lifecycle through 
     return {...snapshot,sourceTurnId:lastTurnId};
    }};
    if(crossTurn&&revision===3){
-    source.currentTurnId='next';source.baseKey='next-base';
+    source.currentTurnId='next';source.turnKey='next';source.baseKey='next-base';
     source.boundary={currentTurnId:'next',currentStartOffset:Buffer.byteLength(expectedSource),watermark:Buffer.byteLength(expectedSource)+100,completed:{turnId:'current',endOffset:Buffer.byteLength(expectedSource)}};
     source.supplement=history([{id:'new',kind:'user',turnId:'next',atMs:3,text:'NEW-TURN-ONLY'}]);
    }

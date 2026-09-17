@@ -6,7 +6,7 @@ import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import type {VerifiedHistoryFallback} from '../observer/verified-history-fallback.js';
-import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSample,NativeTurnSource} from '../observer/native-source-request.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSample,BoundNativeTurnSource} from '../observer/native-source-request.js';
 import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
 import {decideTrigger, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
 import {createNativeRetentionPermit,type NativeRetentionPermit,type NativeRetentionState,type NativeLifecycleDiagnostic} from './native-owner-retention.js';
@@ -22,7 +22,7 @@ export interface ObserverWorker {
   subscribeContextPhase?(listener:(phase:RequestProfilePhase)=>void):()=>void;
   prepareNativeHistoryFallback?(input:ObserverInput,history:VerifiedHistoryFallback,signal:AbortSignal,
     conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
-  prepareNativeTurnContext?(input:ObserverInput,source:NativeTurnSource,signal:AbortSignal,
+  prepareNativeTurnContext?(input:ObserverInput,source:BoundNativeTurnSource,signal:AbortSignal,
     conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
   nativeSourceDestination?(signal:AbortSignal):Promise<NativeSourceDestination>;
   prepareNativeContext?(input:ObserverInput,source:OpenNativeSourceResult,signal:AbortSignal,
@@ -253,7 +253,7 @@ export class ObserverScheduler {
   private async dispatch(entry:Entry,flight:Flight,input:ObserverInput):Promise<void> {
     let unsubscribe:(()=>void)|undefined;
     try{unsubscribe=flight.worker.subscribeContextPhase?.(phase=>flight.profile.phase(phase));}catch{/* Passive diagnostics. */}
-    let paired:NativeTurnSource|null=null;
+    let paired:BoundNativeTurnSource|null=null;
     const closePaired=async()=>{
       const owned=paired;paired=null;
       if(owned)try{await owned.close();}catch{/* Source owner retains unconfirmed custody evidence. */}

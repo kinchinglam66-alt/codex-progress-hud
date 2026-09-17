@@ -13,7 +13,7 @@ import {createPersistentObserverSession, type PersistentCompactionResult, type P
 import {resolveImageAttachment} from '../observer/image-attachment.js';
 import {createPersistentReceiptJournal,preparationErrorCode,type PersistentPreparationStage,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
 import {normalizeAdmissionReason} from '../core/observer-diagnostics.js';
-import type {NativeSourceDestination,OpenNativeSourceResult,NativeTurnSource} from '../observer/native-source-request.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,BoundNativeTurnSource} from '../observer/native-source-request.js';
 import {createNativeTurnBaseOwner} from './native-turn-base.js';
 import {createNativeTurnTiming,type NativeTurnTiming} from './native-turn-timing.js';
 import type {SessionAccountReuse,SessionAccountProof} from './session-account-reuse.js';
@@ -178,7 +178,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    processOwnerUuid=randomUUID();
    admittedModelWindow=false;unexpectedRecorded=false;unexpectedWrite=undefined;
  }
- async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:NativeTurnSource,historyFallback=false){
+ async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:BoundNativeTurnSource,historyFallback=false){
    check(signal);
    phase('accountProcessMs');
    invalidateReuse();
@@ -622,7 +622,9 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     },
     prepareNativeTurnContext(input,source,signal,key,g,_at,sample){
      if(pending||releasing||!authorized())return Promise.reject(Error('CONTEXT_UNAVAILABLE'));
-     if(retentionState&&(!retentionState.running||retentionState.turnKey!==source.currentTurnId||retentionState.generation!==g))return Promise.reject(Error('SOURCE_PREPARATION_STALE'));
+     if(!retentionState||!retentionState.running||retentionState.conversationKey!==key||
+       typeof source.turnKey!=='string'||source.turnKey.length===0||retentionState.turnKey!==source.turnKey||retentionState.generation!==g)
+      return Promise.reject(Error('SOURCE_PREPARATION_STALE'));
      return operation(signal,combined=>timing.measure('preparation_total',async()=>{
       let preparationStage:PersistentPreparationStage='session_setup';
       try{

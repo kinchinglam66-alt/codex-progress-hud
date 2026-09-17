@@ -101,3 +101,12 @@ history snapshot alone does not test that production path. A checkpoint inside
 the current supplement remains an explicit unsupported/incomplete condition,
 not permission to restore the retired multi-minute full-import fallback. Record
 that separate limitation and do not count such requests as valid predictions.
+
+### Native route identity boundary
+
+The provider's native `currentTurnId` and HUD's opaque conversation `turnKey`
+are different identifiers and must remain separate. The raw reader preserves
+`currentTurnId`; the context owner attaches the already-validated route key to
+the worker-facing source. Native preparation requires a live retention state
+whose conversation key, generation, and route key all match the request. A
+missing or unbound route key fails closed before account or model admission.

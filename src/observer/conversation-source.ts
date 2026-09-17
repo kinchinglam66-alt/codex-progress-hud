@@ -4,7 +4,7 @@ import {assembleContext} from './context-assembler.js';
 import type {GoalContextSource,GoalContextQuery} from '../server/passive-goals.js';
 import {parsePaceEvidence, type PaceContinuity, type PaceWindow} from '../estimation/pace-measurements.js';
 import type {HistorySnapshot} from './history-snapshot.js';
-import type {NativeSourceDestination,OpenNativeSourceResult,NativeTurnSource} from './native-source-request.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,BoundNativeTurnSource} from './native-source-request.js';
 import {createPrefixFingerprint} from '../estimation/residual/fingerprint.js';
 
 type OwnerOptions=Parameters<typeof createContextOwner>[0];
@@ -156,7 +156,7 @@ export function createConversationSource(options:OwnerOptions & {
     }
     return result;
   };
-  const openNativeTurn=async(key:string,turnKey:string,signal:AbortSignal):Promise<NativeTurnSource|null>=>{
+  const openNativeTurn=async(key:string,turnKey:string,signal:AbortSignal):Promise<BoundNativeTurnSource|null>=>{
     const binding=bindings.get(key);
     if(!binding||binding.turnKey!==turnKey)return null;
     const result=await owner.openNativeTurn(key,turnKey,signal);

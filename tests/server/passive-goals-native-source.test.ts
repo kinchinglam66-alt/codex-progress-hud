@@ -2,7 +2,7 @@ import {expect,it} from 'vitest';
 import {PassiveGoals,type GoalContextSource} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
-import type {OpenNativeSourceResult,NativeTurnSource} from '../../src/observer/native-source-request.js';
+import type {OpenNativeSourceResult,BoundNativeTurnSource} from '../../src/observer/native-source-request.js';
 
 const destination={destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}};
 function fixture(){
@@ -36,7 +36,7 @@ it('opens native input only for a current opaque goal ticket',async()=>{
 
 it.each(['waiting','paused'] as const)('paired validation rejects %s after acquisition',async runtime=>{
  const f=fixture(),signal=new AbortController().signal;
- const source:NativeTurnSource={identity:'source',sourceEpoch:1,revision:1,currentTurnId:'one',baseKey:'base',
+ const source:BoundNativeTurnSource={identity:'source',sourceEpoch:1,revision:1,currentTurnId:'one',turnKey:'one',baseKey:'base',
   boundary:{currentTurnId:'one',currentStartOffset:0,watermark:100,completed:null},
   supplement:{identity:'source',sourceEpoch:1,revision:1,coverage:{complete:true,gaps:[]},async *records(){},close:async()=>{}},
   validate:async()=>{},openBase:async()=>null,close:async()=>{}};

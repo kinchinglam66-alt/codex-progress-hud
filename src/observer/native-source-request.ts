@@ -22,6 +22,11 @@ export interface NativeTurnSource {
  validate(signal:AbortSignal):Promise<void>;
  close():Promise<void>;
 }
+/** Worker-facing source after the context owner binds the opaque conversation
+ * route. This is deliberately distinct from the raw reader capture above. */
+export interface BoundNativeTurnSource extends NativeTurnSource {
+ turnKey:string;
+}
 
 /** Local scalar state sampled after preparation; no history or source paths. */
 export interface NativeObservationSample {activeSeconds:number;runtime:'running';requestActiveSeconds:number}

@@ -9,7 +9,7 @@ import {createHash} from 'node:crypto';
 import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
 import type {GoalCheckpointRecord} from './goal-checkpoint.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
-import type {NativeSourceDestination,OpenNativeSourceResult,NativeTurnSource} from '../observer/native-source-request.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,BoundNativeTurnSource} from '../observer/native-source-request.js';
 import type {ResearchBoundary,ResearchOwner} from '../estimation/residual/telemetry.js';
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
@@ -71,7 +71,7 @@ export interface GoalContextQuery {
   paceScope?:object;
 }
 export interface GoalContextSource {
-  openNativeTurn?(key:string,turnKey:string,signal:AbortSignal):Promise<NativeTurnSource|null>;
+  openNativeTurn?(key:string,turnKey:string,signal:AbortSignal):Promise<BoundNativeTurnSource|null>;
   openNativeSource?(key:string,turnKey:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<OpenNativeSourceResult|null>;
   openHistory?(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>;
   health?(key:string):'loading'|'ready'|'error'|'missing';
@@ -497,7 +497,7 @@ export class PassiveGoals {
     return result;
   }
 
-  async openNativeTurn(ticket:object,signal:AbortSignal):Promise<NativeTurnSource|null>{
+  async openNativeTurn(ticket:object,signal:AbortSignal):Promise<BoundNativeTurnSource|null>{
     const stale=()=>Object.assign(new Error('goal ticket is stale'),{code:'GOAL_TICKET_STALE'});
     const captured=this.ticketIdentityIsCurrent(ticket);if(!captured)throw stale();
     if(!this.source?.openNativeTurn)return null;
