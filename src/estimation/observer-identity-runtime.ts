@@ -276,10 +276,16 @@ export function createObserverIdentityRuntime(options:Options) {
             if(config.mainAccountSource){
               const source=config.mainAccountSource,expected=mainFingerprint;
               const guard=identityFilesBefore!==null&&identityFilesBefore===identityFilesAfter?acceptanceGuard({authHome,identityFiles:identityFilesBefore}):undefined;
-              return {...snapshot,invocation:sessionInvocation,validateAcceptance:async(acceptanceSignal:AbortSignal)=>{
+              const validateAcceptance=async(acceptanceSignal:AbortSignal)=>{
                 try{return !!guard&&await guard(acceptanceSignal)&&(await source.inspect(acceptanceSignal)).accountFingerprint===expected&&!acceptanceSignal.aborted;}
                 catch{return false;}
-              }};
+              };
+              // Same-request proof only: never publish main-account evidence to
+              // the cross-request cache. Each claim/dispatch still checks the
+              // current source identity and the isolated runtime custody.
+              const reuse=guard?reuseIssuer.issue({observedAt,observedMonotonic,expiresAt:snapshot.evidence.expiresAt,
+                validateLocal:validateAcceptance}):undefined;
+              return {...snapshot,invocation:sessionInvocation,validateAcceptance,...(reuse?{reuse}:{})};
             }
             let reuse:SessionAccountReuse|undefined;
             if(identityFilesBefore!==null&&identityFilesBefore===identityFilesAfter) {

@@ -36,6 +36,35 @@ it('uses the main source for both inspection and prepared identity and forbids i
 });
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.routeFingerprint='b'.repeat(64);state.failure='';state.active=false;state.compressionInputs=[];state.identityCaptureCount=0;state.identityGateCall=null;state.identityGate=null;identityFiles.value='stable-identity-files';});
 afterEach(()=>vi.useRealTimers());
+it('provides one-use main-account preparation proof and rejects a subsequent account switch',async()=>{
+ let current='e'.repeat(64);
+ const source={inspect:async()=>({accountFingerprint:current,expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
+ const runtime=createObserverIdentityRuntime({...config(),mainAccountSource:source});
+ try{
+  const prepared=await runtime.prepareSession(new AbortController().signal);
+  expect(prepared.reuse).toBeDefined();
+  const proof=await prepared.reuse!.claim(new AbortController().signal);
+  expect(proof?.valid()).toBe(true);
+  expect(await prepared.reuse!.claim(new AbortController().signal)).toBeNull();
+  current='f'.repeat(64);
+  expect(await proof!.validate(new AbortController().signal)).toBe(false);
+  expect(proof!.valid()).toBe(false);
+ }finally{await runtime.close();}
+});
+it.each(['switch','identity','cancel','invalidate'] as const)('rejects main-account reuse before claim after %s',async(change)=>{
+ let current='e'.repeat(64);
+ const source={inspect:async()=>({accountFingerprint:current,expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
+ const runtime=createObserverIdentityRuntime({...config(),mainAccountSource:source});
+ try{
+  const prepared=await runtime.prepareSession(new AbortController().signal),controller=new AbortController();
+  expect(prepared.reuse).toBeDefined();
+  if(change==='switch')current='f'.repeat(64);
+  if(change==='identity')identityFiles.value='replaced';
+  if(change==='cancel')controller.abort();
+  if(change==='invalidate')runtime.invalidateSessionReuse();
+  expect(await prepared.reuse!.claim(controller.signal)).toBeNull();
+ }finally{await runtime.close();}
+});
 it('retains only the bounded reader failure category and phase for account inspection',async()=>{
   state.failure='PRIVATE';const runtime=createObserverIdentityRuntime(config());
   try{
