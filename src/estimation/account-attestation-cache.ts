@@ -1,5 +1,8 @@
 /** Trusted-only opt-in for the identity runtime's short-lived cache. */
-export interface SessionPreparationPolicy { accountCache?: 'allow' | 'bypass' }
+export interface SessionPreparationPolicy {
+ accountCache?: 'allow' | 'bypass';
+ openMainAccountSession?:import('./main-account-session-transport.js').OpenMainAccountSession;
+}
 
 export type AccountAttestationCacheMissReason =
   | 'empty'

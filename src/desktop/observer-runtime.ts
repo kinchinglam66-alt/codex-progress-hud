@@ -18,6 +18,7 @@ import {withContextPreparation, type PreparationConfiguration, type PreparationS
 import type {CompressionRequest} from '../estimation/context-compression.js';
 import type {SessionAccountReuse,SessionAccountProof} from '../estimation/session-account-reuse.js';
 import type {SessionPreparationPolicy} from '../estimation/account-attestation-cache.js';
+import type {MainAccountSessionTransport} from '../estimation/main-account-session-transport.js';
 
 const REFRESH_MS = 120000;
 const RECOVERY_INPUT: ObserverInput = Object.freeze({
@@ -30,7 +31,7 @@ const RECOVERY_INPUT: ObserverInput = Object.freeze({
 
 export interface DesktopObserverIdentity {
   inspect(signal: AbortSignal): Promise<{accountLabel: string; evidence: ObserverAttestation}>;
-  prepareSession?(signal:AbortSignal,policy?:SessionPreparationPolicy):Promise<{accountLabel:string;evidence:ObserverAttestation;invocation:Invocation;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
+  prepareSession?(signal:AbortSignal,policy?:SessionPreparationPolicy):Promise<{accountLabel:string;evidence:ObserverAttestation;invocation:Invocation;mainAccountSession?:MainAccountSessionTransport;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
   invalidateSessionReuse?():void;
   prepareEstimate(input: ObserverInput, signal: AbortSignal): Promise<{
     accountLabel: string;
@@ -75,7 +76,7 @@ export interface DesktopObserverRuntimeOptions {
   inspectRecoveryBootBoundary?: () => Promise<RecoveryBootBoundaryProof>;
   contextPreparation?: DesktopObserverContextPreparation;
   /** Host-selected implementation; never selected by source conversation text. */
-  persistentWorkerFactory?:(options:{accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal,policy?:SessionPreparationPolicy)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
+  persistentWorkerFactory?:(options:{accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal,policy?:SessionPreparationPolicy)=>Promise<{invocation:Invocation;mainAccountSession?:MainAccountSessionTransport;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
     invalidateSessionReuse?:()=>void;
     receiptDirectory:string;
     authorize:()=>boolean;now:()=>number})=>ObserverWorker;
@@ -350,7 +351,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
     });
   }
 
-  function prepareSession(signal:AbortSignal,policy?:SessionPreparationPolicy):Promise<{invocation:Invocation;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}> {
+  function prepareSession(signal:AbortSignal,policy?:SessionPreparationPolicy):Promise<{invocation:Invocation;mainAccountSession?:MainAccountSessionTransport;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}> {
     const queued=serial(metadataTail,async()=>{
       check(signal);
       if(!identity.prepareSession)throw Error('OBSERVER_SESSION_UNAVAILABLE');
@@ -361,7 +362,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
       }
       const capturedBinding=binding(prepared.evidence);
       const acceptanceAuthorized=()=>!disabled&&ready&&gate.authorized()&&authorizedBinding===capturedBinding;
-      return {invocation:prepared.invocation,validateAcceptance:async (acceptanceSignal:AbortSignal)=>{
+      return {invocation:prepared.invocation,...(prepared.mainAccountSession?{mainAccountSession:prepared.mainAccountSession}:{}),validateAcceptance:async (acceptanceSignal:AbortSignal)=>{
         if(acceptanceSignal.aborted||!acceptanceAuthorized()||!prepared.validateAcceptance)return false;
         const valid=await prepared.validateAcceptance(acceptanceSignal).catch(()=>false);
         return valid&&!acceptanceSignal.aborted&&acceptanceAuthorized();

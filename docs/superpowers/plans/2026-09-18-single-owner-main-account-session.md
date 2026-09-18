@@ -62,4 +62,24 @@ Interfaces: add optional `openMainAccountSession?: OpenMainAccountSession` to pr
 
 ## Self-review
 
+### Implementation verification checkpoint
+
+Shared transport is implemented through the real metadata reader, identity runtime,
+desktop consent wrapper and persistent worker. Local child-process integration covers
+initial adoption, healthy retention, a subsequent cold owner, post-attestation consent
+revocation, mismatched attestation, account/route drift, cancellation, receipt failure,
+unexpected-work accounting and failed process closure. The latter uncovered and fixed
+missing `cleanupPending` for non-native main-account owners; no false exit confirmation
+is permitted. Standalone metadata and independent-provider paths remain unchanged.
+
+The focused cross-layer matrix has 12 passing cases. An initial full regression passed
+3,400 tests before the final cleanup-status correction. Independent fix review approved
+the revised implementation subject to fresh full regression. Release packaging and
+installed latency measurements are separate gates; local tests do not establish that
+real end-to-end ETA latency is below 30 seconds.
+
+Final regression after the correction: 276 files / 3,403 tests passed. Fresh TypeScript,
+build and protocol/event/shutdown smoke passed; the independent fix review found no
+remaining actionable issues. Installed timing remains to be measured.
+
 The plan separates metadata from model work and does not remove a remote identity check from the process that runs inference. Transport lifetime is worker-owned before callback use, eliminating an unclaimed-owner gap. Cancellation/cleanup and retained-owner paths require tests before installation. This plan does not assert that saving one handshake is sufficient for every network/model response to finish under30s.

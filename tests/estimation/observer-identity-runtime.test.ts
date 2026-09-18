@@ -13,7 +13,8 @@ vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverExternalIn
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:(_launch:unknown,_timeout:unknown,onDiagnostic?:(value:unknown)=>void)=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure){onDiagnostic?.({reason:'rpc_error',phase:2,elapsedMs:42,privateText:'DO_NOT_EXPOSE'});throw Error(state.failure);}return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:state.routeFingerprint};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
 vi.mock('../../src/estimation/main-account-metadata.js',()=>({createMainAccountMetadataReader:(options:any)=>({
- read:async(signal:AbortSignal)=>({accountFingerprint:(await options.source.inspect(signal)).accountFingerprint,accountLabel:'followed@example.invalid',routeFingerprint:state.routeFingerprint}),
+ read:async(signal:AbortSignal)=>({accountFingerprint:(await options.source.inspect(signal)).accountFingerprint,accountLabel:'followed@example.invalid',routeFingerprint:state.routeFingerprint,
+  ...(options.openMainAccountSession?{mainAccountSession:await options.openMainAccountSession(options.invocation,signal)}:{})}),
  disable(){},ownership:()=> 'idle',
 })}));
 it('uses the main source for both inspection and prepared identity and forbids independent login',async()=>{
@@ -36,6 +37,20 @@ it('uses the main source for both inspection and prepared identity and forbids i
 });
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.routeFingerprint='b'.repeat(64);state.failure='';state.active=false;state.compressionInputs=[];state.identityCaptureCount=0;state.identityGateCall=null;state.identityGate=null;identityFiles.value='stable-identity-files';});
 afterEach(()=>vi.useRealTimers());
+it('returns the attested worker transport and its exact invocation after main-account preparation',async()=>{
+ const source={inspect:async()=>({accountFingerprint:'e'.repeat(64),expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
+ const runtime=createObserverIdentityRuntime({...config(),mainAccountSource:source});
+ let transport:any;
+ try{
+  const prepared=await runtime.prepareSession(new AbortController().signal,{openMainAccountSession:async(invocation)=>{
+   transport={invocation,pid:123,creationIdentity:'test',rpc:{},lease:{}};return transport;
+  }});
+  expect(transport).toBeDefined();
+  expect(prepared.mainAccountSession).toBe(transport);
+  expect(prepared.invocation).toBe(transport.invocation);
+  expect(prepared.reuse).toBeDefined();
+ }finally{await runtime.close();}
+});
 it('provides one-use main-account preparation proof and rejects a subsequent account switch',async()=>{
  let current='e'.repeat(64);
  const source={inspect:async()=>({accountFingerprint:current,expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};

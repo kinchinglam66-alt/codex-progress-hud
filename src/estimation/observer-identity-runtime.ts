@@ -10,6 +10,7 @@ import {createRuntimePreflightCache} from './codex-preflight.js';
 import {buildObserverSetupInvocation,buildObserverExternalInvocation,buildObserverCodexInvocation,buildObserverCompressionInvocation} from './codex-invocation.js';
 import {createMainAccountMetadataReader} from './main-account-metadata.js';
 import type {MainAccountSource} from './main-account-lease.js';
+import type {MainAccountSessionTransport} from './main-account-session-transport.js';
 import type {ObserverInput} from './observer-contract.js';
 import {validateCompressionRequest, type CompressionRequest} from './context-compression.js';
 import {createObserverAccountReader,type AccountReadDiagnostic} from './observer-account-reader.js';
@@ -33,7 +34,7 @@ interface Options {
   onDiagnostic?:(value:PreparationDiagnostic)=>void;
 }
 interface Snapshot {accountLabel:string;evidence:ObserverAttestation}
-interface PreparedEstimate extends Snapshot {invocation:Invocation;provenance?:ForecastVersions;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}
+interface PreparedEstimate extends Snapshot {invocation:Invocation;mainAccountSession?:MainAccountSessionTransport;provenance?:ForecastVersions;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}
 interface CachedSession extends AccountAttestationCacheValue {
   snapshot:Snapshot;
   invocation:Invocation;
@@ -203,6 +204,7 @@ export function createObserverIdentityRuntime(options:Options) {
           emit('passed');stage=mode==='cleanup'?'home-recheck':'account-read';
           let account;
           let mainFingerprint:string|undefined;
+          let mainAccountSession:MainAccountSessionTransport|undefined;
           let identityFilesBefore:string|null=null;
           let identityFilesAfter:string|null=null;
           if(mode!=='logout'&&mode!=='cleanup') {
@@ -210,8 +212,10 @@ export function createObserverIdentityRuntime(options:Options) {
             if(mode==='session'){identityFilesBefore=await captureObserverIdentityFiles(authHome);checkPreparationEpoch();}
             if(config.mainAccountSource){
               accountAttempts++;
-              mainReader=createMainAccountMetadataReader({invocation:buildObserverExternalInvocation(profile,env,authHome),source:config.mainAccountSource});
+              mainReader=createMainAccountMetadataReader({invocation:buildObserverExternalInvocation(profile,env,authHome),source:config.mainAccountSource,
+                ...(mode==='session'&&policy?.openMainAccountSession?{openMainAccountSession:policy.openMainAccountSession}:{})});
               const metadata=await mainReader.read(combined);checkPreparationEpoch();
+              mainAccountSession=metadata.mainAccountSession;
               mainFingerprint=metadata.accountFingerprint;
               account={accountId:metadata.accountFingerprint,email:metadata.accountLabel,planType:'unknown',routeFingerprint:metadata.routeFingerprint};
             }else{
@@ -272,7 +276,7 @@ export function createObserverIdentityRuntime(options:Options) {
           lastIdentity={accountFingerprint:snapshot.evidence.accountFingerprint,
             routeFingerprint:snapshot.evidence.routeFingerprint,assetsFingerprint:snapshot.evidence.assetsFingerprint};
           if(mode==='session') {
-            const sessionInvocation=config.mainAccountSource?buildObserverExternalInvocation(profile,env,authHome):buildObserverSetupInvocation(profile,'metadata',env,authHome);
+            const sessionInvocation=mainAccountSession?.invocation??(config.mainAccountSource?buildObserverExternalInvocation(profile,env,authHome):buildObserverSetupInvocation(profile,'metadata',env,authHome));
             if(config.mainAccountSource){
               const source=config.mainAccountSource,expected=mainFingerprint;
               const guard=identityFilesBefore!==null&&identityFilesBefore===identityFilesAfter?acceptanceGuard({authHome,identityFiles:identityFilesBefore}):undefined;
@@ -285,7 +289,7 @@ export function createObserverIdentityRuntime(options:Options) {
               // current source identity and the isolated runtime custody.
               const reuse=guard?reuseIssuer.issue({observedAt,observedMonotonic,expiresAt:snapshot.evidence.expiresAt,
                 validateLocal:validateAcceptance}):undefined;
-              return {...snapshot,invocation:sessionInvocation,validateAcceptance,...(reuse?{reuse}:{})};
+              return {...snapshot,invocation:sessionInvocation,validateAcceptance,...(reuse?{reuse}:{}),...(mainAccountSession?{mainAccountSession}:{})};
             }
             let reuse:SessionAccountReuse|undefined;
             if(identityFilesBefore!==null&&identityFilesBefore===identityFilesAfter) {

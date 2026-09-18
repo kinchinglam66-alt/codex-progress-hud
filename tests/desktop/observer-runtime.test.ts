@@ -28,9 +28,10 @@ it('carries one-use session proof through serialized desktop checks and revokes 
  const events:string[]=[],signal=new AbortController().signal;let options:any,claimed=0;
  const policies:unknown[]=[];
  const rawProof={validate:async()=>true,valid:()=>true};
+ const mainAccountSession={} as import('../../src/estimation/main-account-session-transport.js').MainAccountSessionTransport;
  const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),
   identity:{...identityFor(()=>0,events),invalidateSessionReuse:()=>{events.push('identity-reuse-invalidated');},prepareSession:async(_signal,policy)=>{policies.push(policy);return {accountLabel:'synthetic',evidence:evidence(0),invocation:invocation(),
-   validateAcceptance:async()=>true,reuse:{claim:async()=>{claimed++;return rawProof;},invalidate:()=>{events.push('reuse-invalidated');}}};}},
+   mainAccountSession,validateAcceptance:async()=>true,reuse:{claim:async()=>{claimed++;return rawProof;},invalidate:()=>{events.push('reuse-invalidated');}}};}},
   persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:configuration=>{options=configuration;return {
    observe:async()=>({status:'interpreted',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),disable(){},close:async()=>{}};}});
  try{
@@ -38,6 +39,7 @@ it('carries one-use session proof through serialized desktop checks and revokes 
   const prepared=await options.prepareSession(signal,{accountCache:'allow'});
   expect(policies).toEqual([{accountCache:'allow'}]);
   expect(prepared.reuse).toBeDefined();
+  expect(prepared.mainAccountSession).toBe(mainAccountSession);
   const [proof,second]=await Promise.all([prepared.reuse.claim(signal),prepared.reuse.claim(signal)]);
   expect(proof.valid()).toBe(true);expect(second).toBeNull();expect(claimed).toBe(1);
   expect(await proof.validate(signal)).toBe(true);

@@ -21,6 +21,7 @@ import {createNativeTurnBaseOwner} from './native-turn-base.js';
 import {createNativeTurnTiming,type NativeTurnTiming} from './native-turn-timing.js';
 import type {SessionAccountReuse,SessionAccountProof} from './session-account-reuse.js';
 import type {SessionPreparationPolicy} from './account-attestation-cache.js';
+import type {MainAccountSessionTransport} from './main-account-session-transport.js';
 import {nativeRetentionValid,nativeProcessRetentionValid,type NativeRetentionPermit,type NativeRetentionState,type NativeLifecycleDiagnostic,type NativeRetirementReason} from './native-owner-retention.js';
 
 export interface NativeWorkerResources {
@@ -52,7 +53,7 @@ export interface PersistentWorkerOptions {
  nativeRequestByteLimit?:number;
  monotonicNow?:()=>number;
  scheduleIdle?:(callback:()=>void,delayMs:number)=>()=>void;
- accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal,policy?:SessionPreparationPolicy)=>Promise<{invocation:Invocation;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
+ accounting:ReleaseAccountingOwner;prepareSession:(signal:AbortSignal,policy?:SessionPreparationPolicy)=>Promise<{invocation:Invocation;mainAccountSession?:MainAccountSessionTransport;binding:PersistentReceiptBinding;reuse?:SessionAccountReuse;validateAcceptance?:(signal:AbortSignal)=>Promise<boolean>}>;
  invalidateSessionReuse?:()=>void;
  authorize:()=>boolean;now:()=>number;outputSchema:unknown;
  receiptDirectory:string;
@@ -186,15 +187,66 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    processOwnerUuid=randomUUID();
    admittedModelWindow=false;unexpectedRecorded=false;unexpectedWrite=undefined;
  }
+ async function openProcess(invocation:Invocation,signal:AbortSignal){
+   check(signal);if(owner)throw Error('SESSION_PROCESS_ALREADY_OWNED');
+   if(options.mainAccount){
+    mainAccountLease=createMainAccountLease({...options.mainAccount,onInvalidated:()=>{
+     invalidateReuse();options.invalidateSessionReuse?.();controller?.abort();owner?.disable();retentionState=null;
+    }});
+   }
+   owner=(options.processFactory??createObserverSessionProcess)(mainAccountLease?{onChatgptAuthTokensRefresh:mainAccountLease.refresh}:{});
+   const opened=await owner.start(invocation);processIdentity={pid:opened.pid,creationIdentity:opened.creationIdentity};processRpc=opened.rpc;check(signal);
+   if(options.nativeContext)nativeStarts++;
+   unsubscribeAccount=opened.rpc.subscribe(notification=>{
+    if(notification.method==='account/updated'){
+     if(mainAccountLease){if(!authenticatingMainAccount)void mainAccountLease.validate();return;}
+     invalidateReuse();options.invalidateSessionReuse?.();
+     if(options.nativeContext){retentionState=null;retireNative('account_changed');}
+    }
+    if((options.nativeContext||options.mainAccount)&&!admittedModelWindow&&
+      ['turn/started','turn/completed','item/started','item/completed','thread/tokenUsage/updated'].includes(notification.method)&&!unexpectedRecorded){
+      unexpectedRecorded=true;poisoned=true;controller?.abort();owner?.disable();
+      const incident={ownerUuid:processOwnerUuid,conversationKey:sourceKey??'unknown',generation,
+       pid:opened.pid,creationIdentity:opened.creationIdentity,at:options.now(),
+       reason:notification.method as import('./unexpected-model-work.js').UnexpectedModelWork['reason']};
+      unexpectedWrite=Promise.resolve().then(async()=>{
+       if(!options.accounting.recordUnexpectedOperation)throw Error('UNEXPECTED_WORK_ACCOUNTING_UNAVAILABLE');
+       await options.accounting.recordUnexpectedOperation(incident);
+      });
+      void unexpectedWrite.catch(()=>undefined);
+    }
+   });
+   await opened.rpc.call('initialize',{clientInfo:{name:'codex_progress_hud',version:'0.2.1'},capabilities:{experimentalApi:true,requestAttestation:false}});
+   opened.rpc.notify('initialized',{});check(signal);
+   return opened;
+ }
  async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:BoundNativeTurnSource,historyFallback=false,checkpointOnly=false){
    check(signal);
    phase('accountProcessMs');
    invalidateReuse();
+   if(owner&&(owner.status().closed||session?.status().uncertain))await reset('process_unhealthy');
+   let openedMainTransport:MainAccountSessionTransport|undefined;
+   let openingMain=false;
+   const policy:SessionPreparationPolicy={accountCache:captureReuse?'allow':'bypass'};
+   if(options.mainAccount&&!owner)policy.openMainAccountSession=async(invocation,metadataSignal)=>{
+    if(openingMain||owner)throw Error('SESSION_PROCESS_ALREADY_OWNED');
+    openingMain=true;authenticatingMainAccount=true;
+    const opened=await openProcess(invocation,AbortSignal.any([signal,metadataSignal]));
+    if(!mainAccountLease)throw Error('MAIN_ACCOUNT_LEASE_MISSING');
+    openedMainTransport=Object.freeze({...opened,invocation,lease:mainAccountLease});
+    return openedMainTransport;
+   };
    // Only normal context preparation opts into short-lived account evidence.
    // Observe fallback always performs a full check; request authority is separate.
-   const prepare=()=>options.prepareSession(signal,{accountCache:captureReuse?'allow':'bypass'});
-   const prepared=await (nativeTurn?timing.measure('session_preparation',prepare):prepare());check(signal);
-   if(owner&&(owner.status().closed||session?.status().uncertain))await reset('process_unhealthy');
+   const prepare=()=>options.prepareSession(signal,policy);
+   const prepared=await (nativeTurn?timing.measure('session_preparation',prepare):prepare()).finally(()=>{authenticatingMainAccount=false;});check(signal);
+   if(openingMain||prepared.mainAccountSession){
+    if(!openedMainTransport||prepared.mainAccountSession!==openedMainTransport||prepared.invocation!==openedMainTransport.invocation||
+      processRpc!==openedMainTransport.rpc||processIdentity?.pid!==openedMainTransport.pid||processIdentity.creationIdentity!==openedMainTransport.creationIdentity||
+      !owner?.status().alive||owner.status().disabled||owner.status().poisoned||mainAccountLease!==openedMainTransport.lease||
+      !await mainAccountLease.validate(signal))throw Error('MAIN_ACCOUNT_TRANSPORT_UNATTESTED');
+    check(signal);
+   }
    if(processBinding&&JSON.stringify(processBinding)!==JSON.stringify(prepared.binding)){
     if(nativeSource||nativeTurn)throw Error('SESSION_BINDING_CHANGED');
     await reset('binding_changed');
@@ -239,42 +291,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     sourceEpoch=JSON.stringify([nativeSource.snapshot.sourceEpoch,nativeSource.snapshot.revision]);
    }
    if(!owner){
-    if(options.mainAccount){
-     mainAccountLease=createMainAccountLease({...options.mainAccount,onInvalidated:()=>{
-      invalidateReuse();options.invalidateSessionReuse?.();controller?.abort();owner?.disable();retentionState=null;
-     }});
-    }
-    owner=(options.processFactory??createObserverSessionProcess)(mainAccountLease?{onChatgptAuthTokensRefresh:mainAccountLease.refresh}:{});
-    const opened=await owner.start(prepared.invocation);processIdentity={pid:opened.pid,creationIdentity:opened.creationIdentity};processBinding=prepared.binding;processRpc=opened.rpc;check(signal);
-    if(options.nativeContext)nativeStarts++;
-    unsubscribeAccount=opened.rpc.subscribe(notification=>{
-     if(notification.method==='account/updated'){
-      if(mainAccountLease){
-       // Initial external login is verified by the handshake below. Later
-       // refreshes must preserve the host's fixed account binding.
-       if(!authenticatingMainAccount)void mainAccountLease.validate();
-       return;
-      }
-      invalidateReuse();options.invalidateSessionReuse?.();
-      if(options.nativeContext){retentionState=null;retireNative('account_changed');}
-     }
-     if(options.nativeContext&&!admittedModelWindow&&
-       ['turn/started','turn/completed','item/started','item/completed','thread/tokenUsage/updated'].includes(notification.method)&&!unexpectedRecorded){
-       unexpectedRecorded=true;poisoned=true;controller?.abort();owner?.disable();
-       const incident={ownerUuid:processOwnerUuid,conversationKey:sourceKey??'unknown',generation,
-         pid:opened.pid,creationIdentity:opened.creationIdentity,at:options.now(),
-         reason:notification.method as import('./unexpected-model-work.js').UnexpectedModelWork['reason']};
-       unexpectedWrite=Promise.resolve().then(async()=>{
-         if(!options.accounting.recordUnexpectedOperation)throw Error('UNEXPECTED_WORK_ACCOUNTING_UNAVAILABLE');
-         await options.accounting.recordUnexpectedOperation(incident);
-       });
-       // Keep the original rejected promise for reset to join and fail closed.
-       void unexpectedWrite.catch(()=>undefined);
-     }
-    });
-    await journal!.ownerStarted({ownerUuid:processOwnerUuid,sourceKey:sourceKey??'unknown',sourceEpoch:sourceEpoch??null,pid:opened.pid,creationIdentity:opened.creationIdentity,binding:prepared.binding});
-    await opened.rpc.call('initialize',{clientInfo:{name:'codex_progress_hud',version:'0.2.1'},capabilities:{experimentalApi:true,requestAttestation:false}});
-    opened.rpc.notify('initialized',{});
+    const opened=await openProcess(prepared.invocation,signal);
     if(mainAccountLease){
      authenticatingMainAccount=true;
      try{await authenticateMainAccountSession(opened.rpc,mainAccountLease,signal);check(signal);}
@@ -282,6 +299,11 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     }
    }
    if(!processRpc||!processIdentity)throw Error('SESSION_PROCESS_IDENTITY');
+   if(!processBinding){
+    processBinding=prepared.binding;
+    await journal!.ownerStarted({ownerUuid:processOwnerUuid,sourceKey:sourceKey??'unknown',sourceEpoch:sourceEpoch??null,...processIdentity,binding:prepared.binding});
+    check(signal);
+   }
    if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();
     const newSession=()=>createPersistentObserverSession(processRpc!,{cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now,
       runtimeManagedContext:nativeTurn!==undefined||checkpointOnly,
@@ -579,7 +601,8 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  const worker:ObserverWorker={
    subscribeContextPhase(listener){phaseListeners.add(listener);return ()=>{phaseListeners.delete(listener);};},
    status:()=>({active:pending!==undefined||releasing!==undefined,disabled,poisoned:poisoned||owner?.status().poisoned===true,
-    ...(options.nativeContext?{cleanupPending:nativeResourcesOpen||owner!==undefined,nativeLifecycle:nativeDiagnostic()}:{})}),
+    ...((options.nativeContext||options.mainAccount)?{cleanupPending:nativeResourcesOpen||owner!==undefined}:{}),
+    ...(options.nativeContext?{nativeLifecycle:nativeDiagnostic()}:{})}),
    disable(){disabled=true;revokeIdle();invalidateReuse();unsubscribeAccount?.();unsubscribeAccount=undefined;controller?.abort();owner?.disable();
     if(options.nativeContext)void retireNative('disabled');},
    close(){if(closing)return closing;worker.disable();closing=(async()=>{await pending?.catch(()=>undefined);await releasing?.catch(()=>undefined);await reset();})();return closing;},
