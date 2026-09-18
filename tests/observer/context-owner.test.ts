@@ -10,6 +10,38 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('discards an in-flight startup projection when the attached turn changes',async()=>{
+ const f=setup();
+ try{
+  f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();
+  f.owner.attach('one','host1','t2');
+  f.calls[0]!.finish(batch);await f.flush();
+  expect(f.owner.snapshot('one')?.records).toEqual([]);
+  expect(f.owner.snapshot('one')?.health).toBe('loading');
+  f.time(1000);f.owner.tick();
+  f.calls[1]!.finish({...batch,records:[{id:'u2',turnId:'t2',atMs:1,kind:'user',text:'new turn'}]});
+  await f.flush();
+  expect(f.owner.snapshot('one')?.records.map(r=>r.turnId)).toEqual(['t2']);
+ }finally{await f.owner.close();}
+});
+it('discards an in-flight ready refresh when the attached turn changes',async()=>{
+ const f=setup();
+ try{
+  f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();
+  f.calls[0]!.finish(batch);await f.flush();
+  expect(f.owner.snapshot('one')?.health).toBe('ready');
+  f.time(5500);f.owner.tick();
+  f.owner.attach('one','host1','t2');
+  f.calls[1]!.finish({...batch,records:[{id:'late',turnId:'t1',atMs:2,kind:'user',text:'stale refresh'}]});
+  await f.flush();
+  expect(f.owner.snapshot('one')?.records).toEqual([]);
+  expect(f.owner.snapshot('one')?.health).toBe('loading');
+  f.time(6000);f.owner.tick();
+  f.calls[2]!.finish({...batch,records:[{id:'new',turnId:'t2',atMs:3,kind:'user',text:'new turn'}]});
+  await f.flush();
+  expect(f.owner.snapshot('one')?.records.map(r=>r.turnId)).toEqual(['t2']);
+ }finally{await f.owner.close();}
+});
 it('fences native snapshot handoff when a bound source changes during copy',async()=>{
  let finish!:(value:any)=>void,closed=0,now=0;
  const calls:string[]=[];

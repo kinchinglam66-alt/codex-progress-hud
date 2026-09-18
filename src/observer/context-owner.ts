@@ -5,7 +5,7 @@ import type {NativeSourceDestination,NativeTurnSource,BoundNativeTurnSource} fro
 import {createHash} from 'node:crypto';
 
 interface Source {
-  read(id:string,signal:AbortSignal):Promise<ReadBatch>;
+  read(id:string,signal:AbortSignal,matchesTurn?:(turnId:string)=>boolean):Promise<ReadBatch>;
   snapshot?(id:string,signal:AbortSignal):Promise<HistorySnapshot>;
   nativeSnapshot?(id:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<NativeSourceSnapshot>;
   openNativeTurn?(id:string,signal:AbortSignal):Promise<NativeTurnSource>;
@@ -77,7 +77,9 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
   const start=(key:string,e:Entry)=>{
     const controller=new AbortController();e.flight=controller;inFlight++;
     entries.delete(key);entries.set(key,e);
-    const current=()=>!closed&&entries.get(key)===e&&!controller.signal.aborted;
+    const boundHost=e.hostId,boundTurn=e.turnKey;
+    const current=()=>!closed&&entries.get(key)===e&&!controller.signal.aborted&&
+      e.hostId===boundHost&&e.turnKey===boundTurn;
     let released=false,deadline:ReturnType<typeof setTimeout>|undefined;
     const releaseFlight=()=>{
       if(released)return;released=true;inFlight--;
@@ -93,7 +95,8 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
     },15000);
     deadline.unref?.();
     let read:Promise<ReadBatch>;
-    try{read=options.source.read(e.hostId,controller.signal);}catch(error){read=Promise.reject(error);}
+    try{read=options.source.read(boundHost,controller.signal,turnId=>
+      (options.turnKeyFor?options.turnKeyFor(boundHost,turnId):turnId)===boundTurn);}catch(error){read=Promise.reject(error);}
     const operation=read.then(batch=>{
       if(!current())return;
       if(batch.reset)e.goalRetentionFailed=false;
@@ -226,7 +229,8 @@ export function createContextOwner(options:{source:Source;now:()=>number;onChang
     attach(key:string,hostId:string,turnKey:string):void {
       if(closed)return;
       const existing=entries.get(key);
-      if(existing&&(existing.hostId!==hostId||existing.goalRetentionFailed)){remove(key);}
+      if(existing&&(existing.hostId!==hostId||existing.goalRetentionFailed||
+        ((existing.health==='loading'||existing.flight!==undefined)&&existing.turnKey!==turnKey))){remove(key);}
       else if(existing){existing.turnKey=turnKey;existing.active=true;existing.due=Math.min(existing.due,clock()+500);return;}
       if(entries.size>=32)throw Error('SOURCE_CAPACITY');
       entries.set(key,{hostId,turnKey,records:[],revision:0,sourceEpoch:0,health:'loading',

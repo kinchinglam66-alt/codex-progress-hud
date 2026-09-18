@@ -24,6 +24,25 @@ It does not generate a summary or copy the entire lifetime rollout.
   pinned provider's capacity checks; the existing 30-second scheduler deadline
   includes preparation and prevents late model dispatch or ETA delivery.
 
+## Local startup projection
+
+For rollouts larger than the existing 8 MiB native-file limit, the local status
+reader can start at the authenticated attachment's exact `task_started` record.
+It searches backwards, including across a checkpoint created inside that turn,
+and reads the turn's lifecycle and subsequent records. It does not choose an
+unrelated newer turn. Histories within the native-file limit retain the original
+full-file acquisition path.
+
+This optimization affects the bounded local projection only. A skipped prefix
+is marked as truncated for historical timing provenance, never as a valid
+full-file native digest. Model inputs still require the separately verified
+checkpoint and complete suffix described above. Missing boundaries, changed
+sources, or interrupted reads must not publish a partially initialized cursor.
+
+Startup-to-first-ETA measurements include projection acquisition before the
+scheduler begins its request. The scheduler's request duration alone does not
+measure the user's full initial wait.
+
 ## Verification scope
 
 Local preparation timings do not include account setup, RPC import, inference

@@ -54,6 +54,7 @@ interface FileIdentity {
 }
 
 interface Cursor {
+  projectionStart?:number;
   native?:NativeCursorState;
   path: string;
   identity: FileIdentity;
@@ -912,11 +913,12 @@ function inspectCheckpointLine(bytes: Buffer): NativeCodexCheckpoint | null {
   }
 }
 
-async function scanLatestCheckpoint(
+async function scanReverseLines<T>(
   file: FileHandle,
   watermark: number,
-  signal: AbortSignal
-): Promise<CheckpointScanResult> {
+  signal: AbortSignal,
+  inspectLine:(bytes:Buffer,start:number,end:number)=>T|null
+): Promise<T|null> {
   // A replacement checkpoint supersedes the prefix. Search backwards so a
   // long-lived rollout costs only its latest effective window, not its lifetime.
   // Reject malformed complete suffix rows and the newest unsupported checkpoint;
@@ -928,12 +930,10 @@ async function scanLatestCheckpoint(
     if(pendingBytes>SNAPSHOT_MAX_LINE_BYTES)throw new LocalSessionSourceError('source_checkpoint_unsupported');
     if(part.length)chunks.push(part);
   };
-  const inspect=():CheckpointScanResult|null=>{
+  const inspect=():T|null=>{
     const bytes=Buffer.concat(chunks.reverse(),pendingBytes);
     chunks=[];pendingBytes=0;
-    const checkpoint=inspectCheckpointLine(bytes);
-    return checkpoint===null?null:{checkpoint,startOffset:lineEnd+1,
-      checkpointRange:{start:lineEnd-bytes.length,end:lineEnd+1,digest:createHash('sha256').update(bytes).update('\n').digest('hex')}};
+    return inspectLine(bytes,lineEnd-bytes.length,lineEnd+1);
   };
   while(position>0){
     checkCancelled(signal);
@@ -961,7 +961,34 @@ async function scanLatestCheckpoint(
     }
   }
   if(!discardPartialTail&&pendingBytes){const result=inspect();if(result)return result;}
-  return {startOffset:0};
+  return null;
+}
+
+async function scanLatestCheckpoint(file:FileHandle,watermark:number,signal:AbortSignal):Promise<CheckpointScanResult>{
+  return await scanReverseLines(file,watermark,signal,(bytes,start,end)=>{
+    const checkpoint=inspectCheckpointLine(bytes);
+    return checkpoint===null?null:{checkpoint,startOffset:end,
+      checkpointRange:{start,end,digest:createHash('sha256').update(bytes).update('\n').digest('hex')}};
+  })??{startOffset:0};
+}
+
+/** Local projection only. The native model snapshot is independently attested. */
+async function scanTurnStart(file:FileHandle,watermark:number,signal:AbortSignal,matchesTurn:(id:string)=>boolean):Promise<number>{
+  const boundary=await scanReverseLines(file,watermark,signal,(bytes,start)=>{
+    let raw:unknown;
+    try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+    catch{throw new LocalSessionSourceError('source_malformed');}
+    const row=checkpointObject(raw);
+    if(!row||typeof row.type!=='string')throw new LocalSessionSourceError('source_malformed');
+    timestampMs(row.timestamp);
+    const payload=checkpointObject(row.payload);
+    if(row.type!=='event_msg'||payload?.type!=='task_started')return null;
+    const turn=turnIdFrom(payload,null);
+    if(turn===null)throw new LocalSessionSourceError('source_malformed');
+    return matchesTurn(turn)?{offset:start}:null;
+  });
+  if(boundary===null)throw new LocalSessionSourceError('source_unobserved');
+  return boundary.offset;
 }
 
 async function runPass(
@@ -1323,7 +1350,7 @@ function snapshotIdentity(threadId: string, path: string, identity: FileIdentity
 }
 
 export function createLocalSessionReader({root}: {root: string}): {
-  read(threadId: string, signal: AbortSignal): Promise<ReadBatch>;
+  read(threadId: string, signal: AbortSignal, matchesTurn?:(turnId:string)=>boolean): Promise<ReadBatch>;
   snapshot(threadId: string, signal: AbortSignal): Promise<HistorySnapshot>;
   openNativeTurn(threadId:string,signal:AbortSignal):Promise<NativeTurnSource>;
   nativeSnapshot(threadId:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<NativeSourceSnapshot>;
@@ -1643,7 +1670,7 @@ export function createLocalSessionReader({root}: {root: string}): {
     }
   }
 
-  async function readOne(threadId: string, signal: AbortSignal): Promise<ReadBatch> {
+  async function readOne(threadId: string, signal: AbortSignal, matchesTurn?:(turnId:string)=>boolean): Promise<ReadBatch> {
     if (closed) throw new LocalSessionSourceError("source_closed");
     checkCancelled(signal);
     if (!UUID.test(threadId)) throw new LocalSessionSourceError("source_invalid_thread");
@@ -1709,10 +1736,27 @@ export function createLocalSessionReader({root}: {root: string}): {
       }
       if(!cursor.native)cursor.native={index:createNativeTurnIndex(),hash:createHash('sha256'),epoch:++nativeEpoch,
         digest:createHash('sha256').digest('hex'),baseDigest:null,sawCheckpoint:false,unsupportedCutoff:false,invalid:false};
+      const registeredCursor=cursor;
+      let bootstrapDigest:string|undefined;
+      // Keep the existing full-file native path whenever its byte bound permits it.
+      if(cursor.offset===0&&cursor.scanOffset===0&&matchesTurn&&stats.size>8*1024*1024){
+        const start=await scanTurnStart(file,stats.size,signal,matchesTurn);
+        if(start>0){
+          bootstrapDigest=await completePrefixValidation(file,stats.size,signal,start);
+          const validation=await cursorValidation(file,start,signal);
+          // A skipped raw prefix must never produce a valid full-file fork hash.
+          // Publish this cursor only after the complete first pass validates.
+          cursor={...cursor,offset:start,scanOffset:start,projectionStart:start,validation,scanValidation:validation,
+            native:{...cursor.native,invalid:true}};
+        }
+      }
       const result = await runPass(file, cursor, threadId, signal);
+      if(bootstrapDigest!==undefined&&await completePrefixValidation(file,stats.size,signal,cursor.projectionStart)!==bootstrapDigest)
+        throw new LocalSessionSourceError('source_identity_mismatch');
       assertSessionIdentity(await firstLine(file,signal),threadId);
       const endStats = await file.stat();
       checkCancelled(signal);
+      if(cursors.get(threadId)!==registeredCursor)throw new LocalSessionSourceError('source_cancelled');
       if (!sameIdentity(cursor.identity, identityOf(endStats)) || endStats.size < result.scanOffset) {
         cursors.set(threadId, {path: candidate.path, identity: identityOf(endStats), size: 0, offset: 0,
           validation: "", seen: new Set(), seenOrder: [], activeTurnId: null, forceResetOnGrowth: true,
@@ -1731,13 +1775,14 @@ export function createLocalSessionReader({root}: {root: string}): {
       cursor.scanValidation = result.scanValidation;
       cursor.skippingOversized = result.skippingOversized;
       cursor.forceResetOnGrowth = cursor.forceResetOnGrowth && endStats.size <= cursor.offset;
+      cursors.set(threadId,cursor);
       const batch: ReadBatch = {
         records: result.records,
         caughtUp: result.caughtUp,
         reset,
         partialLine: result.partialLine
       };
-      if (result.historyTruncated) batch.historyTruncated = true;
+      if (result.historyTruncated || cursor.projectionStart!==undefined) batch.historyTruncated = true;
       return batch;
     } catch (error) {
       if (error instanceof LocalSessionSourceError) throw error;
@@ -1747,13 +1792,13 @@ export function createLocalSessionReader({root}: {root: string}): {
     }
   }
 
-  function read(threadId: string, signal: AbortSignal): Promise<ReadBatch> {
+  function read(threadId: string, signal: AbortSignal,matchesTurn?:(turnId:string)=>boolean): Promise<ReadBatch> {
     if(closed)return Promise.reject(new LocalSessionSourceError('source_closed'));
     if(signal.aborted)return Promise.reject(new LocalSessionSourceError('source_cancelled'));
     if(pendingReads.size>=4)return Promise.reject(new LocalSessionSourceError('source_limit'));
     const previous = locks.get(threadId);
     const current = (previous?.catch(() => undefined) ?? Promise.resolve()).then(async () => {
-      const batch=await readOne(threadId,signal);checkCancelled(signal);return batch;
+      const batch=await readOne(threadId,signal,matchesTurn);checkCancelled(signal);return batch;
     });
     locks.set(threadId, current);
     pendingReads.add(current);
