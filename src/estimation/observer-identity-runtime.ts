@@ -7,7 +7,9 @@ import {createReusableHomeCheck} from './reusable-home-check.js';
 import {createOwnedProcessRunner,type Invocation} from './owned-process.js';
 import {createObserverRuntimeProbe} from './codex-probe.js';
 import {createRuntimePreflightCache} from './codex-preflight.js';
-import {buildObserverSetupInvocation,buildObserverCodexInvocation,buildObserverCompressionInvocation} from './codex-invocation.js';
+import {buildObserverSetupInvocation,buildObserverExternalInvocation,buildObserverCodexInvocation,buildObserverCompressionInvocation} from './codex-invocation.js';
+import {createMainAccountMetadataReader} from './main-account-metadata.js';
+import type {MainAccountSource} from './main-account-lease.js';
 import type {ObserverInput} from './observer-contract.js';
 import {validateCompressionRequest, type CompressionRequest} from './context-compression.js';
 import {createObserverAccountReader,type AccountReadDiagnostic} from './observer-account-reader.js';
@@ -24,6 +26,7 @@ type SetupAction='login'|'device-auth'|'logout';
 type PreparationStage='home-prepare'|'runtime-preflight'|'account-read'|'home-recheck'|'binding'|'ready';
 export interface PreparationDiagnostic {stage:PreparationStage;outcome:'passed'|'failed'|'reader';elapsedMs:number;reader?:AccountReadDiagnostic;accountCache?:AccountAttestationCacheDiagnostics}
 interface Options {
+  mainAccountSource?:MainAccountSource;
   reuseHomeCheckProcess?:boolean;
   resourcesDirectory:string;parentDirectory:string;powershell:string;
   executable:string;cwd:string;version:string;executableSha256?:string|undefined;environment?:NodeJS.ProcessEnv;now?:()=>number;monotonicNow?:()=>number;
@@ -138,18 +141,20 @@ export function createObserverIdentityRuntime(options:Options) {
   };
     function perform(signal:AbortSignal,mode:'inspect'|'session'|'cleanup'|SetupAction|ObserverInput|CompressionRequest,policy?:SessionPreparationPolicy):Promise<Snapshot|Invocation|PreparedEstimate> {
       const setupMode=mode==='login'||mode==='device-auth'||mode==='logout';
+      if(config.mainAccountSource&&(setupMode||typeof mode==='object'))return Promise.reject(Error(setupMode?'MAIN_ACCOUNT_MANAGED_BY_CODEX':'MAIN_ACCOUNT_REQUIRES_PERSISTENT_SESSION'));
       const loginMode=mode==='login'||mode==='device-auth';
-      const allowAccountCache=mode==='session'&&policy?.accountCache==='allow';
+      const allowAccountCache=!config.mainAccountSource&&mode==='session'&&policy?.accountCache==='allow';
       if(disabled || poisoned || pending || localValidationPending || signal.aborted) return Promise.reject(fail());
       const preparationEpochAtStart=preparationEpoch;
       const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
       const home=homeLease();
       const runner=createOwnedProcessRunner({timeoutMs:5000});
       let reader:ReturnType<typeof createObserverAccountReader>|undefined;
-      const cancelOwners=(retireShared=true)=>{controller.abort();home.disable();runner.disable();reader?.disable();if(retireShared)void retireHome();};
-      const ownersBusy=()=>home.status().active || home.status().poisoned || runner.status().active || runner.status().poisoned || (reader!==undefined && reader.ownership()!=='idle');
+      let mainReader:ReturnType<typeof createMainAccountMetadataReader>|undefined;
+      const cancelOwners=(retireShared=true)=>{controller.abort();home.disable();runner.disable();reader?.disable();mainReader?.disable();if(retireShared)void retireHome();};
+      const ownersBusy=()=>home.status().active || home.status().poisoned || runner.status().active || runner.status().poisoned || (reader!==undefined && reader.ownership()!=='idle') || (mainReader!==undefined&&mainReader.ownership()!=='idle');
       cancel=cancelOwners;owned=ownersBusy;
-      const abort=()=>{home.disable();runner.disable();reader?.disable();void retireHome();};
+      const abort=()=>{home.disable();runner.disable();reader?.disable();mainReader?.disable();void retireHome();};
       combined.addEventListener('abort',abort,{once:true});
       const check=()=>{if(disabled || poisoned || combined.aborted)throw fail();};
       if(setupMode)invalidateAttestation('explicit');
@@ -197,11 +202,19 @@ export function createObserverIdentityRuntime(options:Options) {
           if(profile.version!==config.version)throw fail();
           emit('passed');stage=mode==='cleanup'?'home-recheck':'account-read';
           let account;
+          let mainFingerprint:string|undefined;
           let identityFilesBefore:string|null=null;
           let identityFilesAfter:string|null=null;
           if(mode!=='logout'&&mode!=='cleanup') {
             identityWorkStarted=true;
             if(mode==='session'){identityFilesBefore=await captureObserverIdentityFiles(authHome);checkPreparationEpoch();}
+            if(config.mainAccountSource){
+              accountAttempts++;
+              mainReader=createMainAccountMetadataReader({invocation:buildObserverExternalInvocation(profile,env,authHome),source:config.mainAccountSource});
+              const metadata=await mainReader.read(combined);checkPreparationEpoch();
+              mainFingerprint=metadata.accountFingerprint;
+              account={accountId:metadata.accountFingerprint,email:metadata.accountLabel,planType:'unknown',routeFingerprint:metadata.routeFingerprint};
+            }else{
             const setupInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
             for (;;) {
               check();accountAttempts++;readerDiagnostic=undefined;
@@ -227,6 +240,7 @@ export function createObserverIdentityRuntime(options:Options) {
                 checkPreparationEpoch();
               }
             }
+            }
             if(mode==='session'&&account){identityFilesAfter=await captureObserverIdentityFiles(authHome);checkPreparationEpoch();}
           }
           checkPreparationEpoch();
@@ -248,7 +262,7 @@ export function createObserverIdentityRuntime(options:Options) {
           }
           if(!account)throw fail();
           const snapshot:Snapshot={accountLabel:account.email && account.email.length<=256?account.email:`ChatGPT (${account.planType})`,
-            evidence:{accountFingerprint:digest(['observer-account-v1',account.accountId]),routeFingerprint:account.routeFingerprint,
+            evidence:{accountFingerprint:mainFingerprint??digest(['observer-account-v1',account.accountId]),routeFingerprint:account.routeFingerprint,
               assetsFingerprint,observedAt,expiresAt:observedAt+300000}};
           const identityChanged=lastIdentity!==undefined &&
             (lastIdentity.accountFingerprint!==snapshot.evidence.accountFingerprint||
@@ -258,7 +272,15 @@ export function createObserverIdentityRuntime(options:Options) {
           lastIdentity={accountFingerprint:snapshot.evidence.accountFingerprint,
             routeFingerprint:snapshot.evidence.routeFingerprint,assetsFingerprint:snapshot.evidence.assetsFingerprint};
           if(mode==='session') {
-            const sessionInvocation=buildObserverSetupInvocation(profile,'metadata',env,authHome);
+            const sessionInvocation=config.mainAccountSource?buildObserverExternalInvocation(profile,env,authHome):buildObserverSetupInvocation(profile,'metadata',env,authHome);
+            if(config.mainAccountSource){
+              const source=config.mainAccountSource,expected=mainFingerprint;
+              const guard=identityFilesBefore!==null&&identityFilesBefore===identityFilesAfter?acceptanceGuard({authHome,identityFiles:identityFilesBefore}):undefined;
+              return {...snapshot,invocation:sessionInvocation,validateAcceptance:async(acceptanceSignal:AbortSignal)=>{
+                try{return !!guard&&await guard(acceptanceSignal)&&(await source.inspect(acceptanceSignal)).accountFingerprint===expected&&!acceptanceSignal.aborted;}
+                catch{return false;}
+              }};
+            }
             let reuse:SessionAccountReuse|undefined;
             if(identityFilesBefore!==null&&identityFilesBefore===identityFilesAfter) {
               const expectedIdentityFiles=identityFilesAfter;

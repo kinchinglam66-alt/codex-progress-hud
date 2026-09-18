@@ -6,6 +6,11 @@ import {parseObserverPilotConfig,observerPilotEnvironment,readObserverPilotConfi
 
 const config={executable:resolve('codex.exe'),parentDirectory:resolve('private-pilot'),cwd:resolve('private-pilot/empty'),version:'0.153.4',proxyUrl:'http://127.0.0.1:7890'};
 describe('local observer pilot configuration',()=>{
+  it('preserves explicit main-account and independent subscription choices',()=>{
+    expect(parseObserverPilotConfig({...config,subscriptionAccountSource:'main'})).toMatchObject({subscriptionAccountSource:'main'});
+    expect(parseObserverPilotConfig({...config,subscriptionAccountSource:'independent'})).toMatchObject({subscriptionAccountSource:'independent'});
+    expect(()=>parseObserverPilotConfig({...config,subscriptionAccountSource:'api'})).toThrow('OBSERVER_PILOT_CONFIG_INVALID');
+  });
   it('accepts only an explicit boolean persistent-session opt-in',()=>{
     expect(parseObserverPilotConfig({...config,persistentObserver:true})).toMatchObject({persistentObserver:true});
     expect(parseObserverPilotConfig({...config,persistentObserver:false})).toMatchObject({persistentObserver:false});

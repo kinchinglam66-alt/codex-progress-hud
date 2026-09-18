@@ -35,6 +35,7 @@ export interface ProviderWorkerOwner extends ProviderOwner {
 
 export interface ProviderAccountMetadata {label: string; observedAt: number; expiresAt: number}
 export interface ProviderSettingsPublic {
+  subscriptionAccountSource?:'main'|'independent';
   generation: number;
   revision: number;
   state: 'inactive' | 'switching' | 'ready' | 'failed';
@@ -64,11 +65,15 @@ export interface ProviderSettingsHost {
   startProvider(input: ProviderMutation & {selected: ProviderConfig['selected']; consent: true; draft?: unknown; secret?: string}): Promise<ProviderSettingsPublic>;
   replaceSubscriptionAccount(input: ProviderMutation & {action: 'login' | 'device-auth' | 'logout'}, signal?: AbortSignal): Promise<{outcome: string; account: ProviderAccountMetadata | null}>;
   start(signal: AbortSignal): Promise<void>;
+  /** Desktop-only account follower; never exposed as an unauthenticated UI action. */
+  followSubscriptionAccount(signal:AbortSignal):Promise<boolean>;
+  canFollowSubscriptionAccount():boolean;
   disable(): void;
   close(): Promise<void>;
 }
 
 export interface ObserverProviderHostOptions {
+  followMainAccount?:boolean;
   dataDirectory: string;
   consentProtection: ConsentProtection;
   openSubscription(signal: AbortSignal, consent?: ProviderInlineConsent, contextCapacity?:ProviderConfig['contextCapacity']): Promise<ProviderWorkerOwner>;
@@ -149,6 +154,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   const retained = new Set<ProviderWorkerOwner>();
   let current: ProviderWorkerOwner | null = null;
   let inlineSubscriptionConsent: ProviderInlineConsent | undefined;
+  let followingResume=false;
   let dispatchGeneration = generation;
   let dispatchController=new AbortController();
   function setDispatchGeneration(value:number):void {
@@ -202,6 +208,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     const disclosure = draft.selected === 'api' && draft.api ? (() => { try { const url=new URL(draft.api!.baseUrl); return `${url.origin}${url.pathname} · ${draft.api!.model}`; } catch { return 'API 提供方'; } })() : (options.recipient ?? 'Codex Progress HUD observer');
     return {
       generation, revision, state, selected: active.selected,
+      ...(options.followMainAccount===undefined?{}:{subscriptionAccountSource:options.followMainAccount?'main' as const:'independent' as const}),
       active: toPublicProviderConfig(active, await keyConfigured(active)),
       draft: toPublicProviderConfig(draft, await keyConfigured(draft)),
       keyConfigured: await keyConfigured(active), account, accountStatus,
@@ -419,6 +426,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
 
   async function activateProvider(input: ProviderMutation & {selected?: ProviderConfig['selected']}, internalComposedStart = false): Promise<ProviderSettingsPublic> {
     checkMutation(input, internalComposedStart);
+    followingResume=false;
     const next = input.selected === 'subscription' && draft.selected !== 'subscription' ? initialConfig : draft;
     const {controller,token}=acquireAction();
     const nextGeneration = ++generation;
@@ -573,9 +581,36 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     finally { releaseAction(token); }
   }
 
+  const canFollowSubscriptionAccount=()=>options.followMainAccount===true&&!closed&&active.selected==='subscription'&&
+    actionToken===undefined&&!composedStartBusy&&retained.size===0&&(followingResume||(state==='ready'&&current!==null));
+  async function followSubscriptionAccount(signal:AbortSignal):Promise<boolean>{
+    if(signal.aborted||!canFollowSubscriptionAccount())return false;
+    const {controller,token}=acquireAction();const combined=AbortSignal.any([signal,controller.signal]);
+    followingResume=true;
+    const previous=current;setDispatchGeneration(++generation);state='switching';current=null;
+    for(const worker of ownerWorkers(previous))worker.disable();
+    try{
+      await writeState({version:1,generation,revision,state:'switching',selected:'subscription'});
+      // Do not open or attest the new account until old processes have closed.
+      await drainSelection();combined.throwIfAborted();
+      await readAccount(combined);combined.throwIfAborted();
+      inlineSubscriptionConsent={kind:'inline',generation,revision};
+      await selection.select(active,combined);combined.throwIfAborted();
+      const owner=selection.currentOwner();if(!owner)throw fixedFailure();
+      await writeState({version:1,generation,revision,state:'ready',selected:'subscription'});
+      combined.throwIfAborted();current=owner as ProviderWorkerOwner;state='ready';followingResume=false;
+      return true;
+    }catch{
+      current=null;state='inactive';setDispatchGeneration(++generation);
+      await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(()=>undefined);
+      await drainSelection();return false;
+    }finally{inlineSubscriptionConsent=undefined;releaseAction(token);}
+  }
+
   async function close(): Promise<void> {
     if (closing) return closing;
     closed = true;
+    followingResume=false;
     const previous=current;
     setDispatchGeneration(++generation); state='inactive';
     for(const worker of ownerWorkers(previous))worker.disable();
@@ -584,9 +619,10 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     return closing;
   }
   return {workers, workerSource, status: () => ({
+    ...(options.followMainAccount===undefined?{}:{subscriptionAccountSource:options.followMainAccount?'main' as const:'independent' as const}),
     generation, revision, state, selected: active.selected, active: toPublicProviderConfig(active, false), draft: toPublicProviderConfig(draft, false), keyConfigured: false, account, accountStatus,
     ...(accountDiagnostic?{accountDiagnostic}:{}),
     recipient: draft.selected==='api'&&draft.api?`${new URL(draft.api.baseUrl).origin}${new URL(draft.api.baseUrl).pathname} · ${draft.api.model}`:(options.recipient ?? 'Codex Progress HUD observer'), ...(options.proxyUrl === undefined ? {} : {proxyUrl: options.proxyUrl}),
-  }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,
-    disable: () => {setDispatchGeneration(++generation); state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of ownerWorkers(current)) worker.disable();}, close};
+  }), readProviderSettings: publicStatus, saveProviderSettings, checkProvider, trialProvider, activateProvider, startProvider, cancelProviderAction, providerConsentRequired, replaceSubscriptionAccount, start,followSubscriptionAccount,canFollowSubscriptionAccount,
+    disable: () => {followingResume=false;setDispatchGeneration(++generation); state = 'inactive'; composedStartController?.abort(); actionController?.abort(); for(const worker of ownerWorkers(current)) worker.disable();}, close};
 }

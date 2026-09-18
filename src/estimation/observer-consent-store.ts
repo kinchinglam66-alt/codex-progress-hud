@@ -5,6 +5,7 @@ import {z} from 'zod';
 
 export const OBSERVER_CONSENT_VERSION = 1 as const;
 export interface ObserverSubscriptionConsentScope {
+  accountPolicy?: 'main-follow-v1' | undefined;
   accountFingerprint: string;
   providerFingerprint: string;
   recipientFingerprint: string;
@@ -33,6 +34,7 @@ export interface ObserverConsentGrant {
 
 const fingerprint = z.string().regex(/^[a-f0-9]{64}$/);
 const subscriptionScopeSchema = z.object({
+  accountPolicy: z.literal('main-follow-v1').optional(),
   accountFingerprint: fingerprint,
   providerFingerprint: fingerprint,
   recipientFingerprint: fingerprint,

@@ -9,6 +9,8 @@ import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {SubscriptionAccounting} from './subscription-accounting.js';
 import type {Invocation} from './owned-process.js';
 import {createObserverSessionProcess} from './observer-session-process.js';
+import {createMainAccountLease,type MainAccountSource} from './main-account-lease.js';
+import {authenticateMainAccountSession} from './main-account-session-auth.js';
 import {createPersistentObserverSession, type PersistentCompactionResult, type PersistentSessionError, type PersistentContextCapacityPolicy,type PersistentSourcePart,type PersistentSourceRecord} from './observer-persistent-session.js';
 import {resolveImageAttachment} from '../observer/image-attachment.js';
 import {createPersistentReceiptJournal,preparationErrorCode,type PersistentPreparationStage,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
@@ -33,6 +35,8 @@ export interface NativeWorkerResources {
 export interface NativeWorkerClaim {tag:string;recordFork(threadId:string):Promise<void>;afterProcessClosed():Promise<void>}
 
 export interface PersistentWorkerOptions {
+ /** Host-selected account, fixed for this worker and its accounting owner. */
+ mainAccount?:{source:MainAccountSource;accountFingerprint:string};
  /** Trusted host assets, not user/source-provided instructions. */
  nativeInstructions?:string;
  /** Optional monotonic evaluation instrumentation; never an authority gate. */
@@ -54,7 +58,7 @@ export interface PersistentWorkerOptions {
   sessionTimeoutMs?:number;bootstrapBatchByteCapacity?:number;retainedSummaryByteReserve?:number;receiptJournalFactory?:(directory:string)=>PersistentReceiptJournal;
   /** Finite, explicitly trusted policy for one history preparation. */
   historyBudget?:PersistentHistoryBudget;
- processFactory?:()=>ReturnType<typeof createObserverSessionProcess>;
+ processFactory?:(options?:Parameters<typeof createObserverSessionProcess>[0])=>ReturnType<typeof createObserverSessionProcess>;
 }
 export interface PersistentHistoryBudget {
   trusted:true;
@@ -78,6 +82,8 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  };
  let disabled=false,poisoned=false,pending:Promise<unknown>|undefined,controller:AbortController|undefined;
  let owner:ReturnType<typeof createObserverSessionProcess>|undefined;
+ let mainAccountLease:ReturnType<typeof createMainAccountLease>|undefined;
+ let authenticatingMainAccount=false;
  let processIdentity:{pid:number;creationIdentity:string}|undefined;
  let processBinding:PersistentReceiptBinding|undefined;
  let admittedModelWindow=false,unexpectedRecorded=false,unexpectedWrite:Promise<void>|undefined;
@@ -146,7 +152,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  let closing:Promise<void>|undefined,releasing:Promise<void>|undefined;
  const turns=new Map<string,number>();
  const authorized=()=>{try{return !disabled&&!poisoned&&options.authorize()===true;}catch{return false;}};
- const check=(signal:AbortSignal)=>{signal.throwIfAborted();if(!authorized())throw Error('OBSERVER_NOT_AUTHORIZED');};
+ const check=(signal:AbortSignal)=>{signal.throwIfAborted();if(mainAccountLease?.signal.aborted)throw Error('MAIN_ACCOUNT_CHANGED');if(!authorized())throw Error('OBSERVER_NOT_AUTHORIZED');};
  const bind=(key:string,g:number)=>{
    if(sourceKey!==undefined&&sourceKey!==key)throw Error('SOURCE_MISMATCH');
    if(!Number.isSafeInteger(g)||g<0||g<generation)throw Error('SOURCE_GENERATION');
@@ -156,6 +162,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    if(options.nativeContext&&(nativeResourcesOpen||owner))retirementReason=reason;
    revokeIdle();nativeRequestAcquired=false;nativeTerminal=false;
    invalidateReuse();unsubscribeAccount?.();unsubscribeAccount=undefined;validateAcceptance=undefined;
+   mainAccountLease?.close();mainAccountLease=undefined;authenticatingMainAccount=false;
    if(owner){try{await owner.close();}catch{poisoned=true;options.invalidateSessionReuse?.();throw Error('SESSION_PROCESS_CLOSE_UNCONFIRMED');}
      await unexpectedWrite;
      if(unexpectedRecorded&&processIdentity){
@@ -191,7 +198,12 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     if(nativeSource||nativeTurn)throw Error('SESSION_BINDING_CHANGED');
     await reset('binding_changed');
    }
-   validateAcceptance=prepared.validateAcceptance;
+   if(options.mainAccount&&prepared.binding.accountFingerprint!==options.mainAccount.accountFingerprint)throw Error('MAIN_ACCOUNT_BINDING_MISMATCH');
+   validateAcceptance=options.mainAccount?async acceptanceSignal=>{
+    const lease=mainAccountLease;
+    if(!lease||!await lease.validate(acceptanceSignal)||!prepared.validateAcceptance)return false;
+    return await prepared.validateAcceptance(acceptanceSignal)&&!lease.signal.aborted&&!acceptanceSignal.aborted;
+   }:prepared.validateAcceptance;
    if(session&&!nativeSource&&!nativeTurn&&!historyFallback){if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();phase('forkImportMs');return session;}
    if(options.nativeContext&&!nativeSource&&!nativeTurn&&!historyFallback)throw Error('NATIVE_CONTEXT_NOT_PREPARED');
    if(nativeTurn){
@@ -226,11 +238,22 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     sourceEpoch=JSON.stringify([nativeSource.snapshot.sourceEpoch,nativeSource.snapshot.revision]);
    }
    if(!owner){
-    owner=(options.processFactory??createObserverSessionProcess)();
+    if(options.mainAccount){
+     mainAccountLease=createMainAccountLease({...options.mainAccount,onInvalidated:()=>{
+      invalidateReuse();options.invalidateSessionReuse?.();controller?.abort();owner?.disable();retentionState=null;
+     }});
+    }
+    owner=(options.processFactory??createObserverSessionProcess)(mainAccountLease?{onChatgptAuthTokensRefresh:mainAccountLease.refresh}:{});
     const opened=await owner.start(prepared.invocation);processIdentity={pid:opened.pid,creationIdentity:opened.creationIdentity};processBinding=prepared.binding;processRpc=opened.rpc;check(signal);
     if(options.nativeContext)nativeStarts++;
     unsubscribeAccount=opened.rpc.subscribe(notification=>{
      if(notification.method==='account/updated'){
+      if(mainAccountLease){
+       // Initial external login is verified by the handshake below. Later
+       // refreshes must preserve the host's fixed account binding.
+       if(!authenticatingMainAccount)void mainAccountLease.validate();
+       return;
+      }
       invalidateReuse();options.invalidateSessionReuse?.();
       if(options.nativeContext){retentionState=null;retireNative('account_changed');}
      }
@@ -251,6 +274,11 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     await journal!.ownerStarted({ownerUuid:processOwnerUuid,sourceKey:sourceKey??'unknown',sourceEpoch:sourceEpoch??null,pid:opened.pid,creationIdentity:opened.creationIdentity,binding:prepared.binding});
     await opened.rpc.call('initialize',{clientInfo:{name:'codex_progress_hud',version:'0.2.1'},capabilities:{experimentalApi:true,requestAttestation:false}});
     opened.rpc.notify('initialized',{});
+    if(mainAccountLease){
+     authenticatingMainAccount=true;
+     try{await authenticateMainAccountSession(opened.rpc,mainAccountLease,signal);check(signal);}
+     finally{authenticatingMainAccount=false;}
+    }
    }
    if(!processRpc||!processIdentity)throw Error('SESSION_PROCESS_IDENTITY');
    if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();
@@ -535,10 +563,10 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       phase('forkImportMs');
     }
   }
- function operation<T>(signal:AbortSignal,work:(combined:AbortSignal)=>Promise<T>):Promise<T>{
+ function operation<T>(signal:AbortSignal,work:(combined:AbortSignal)=>Promise<T>,deliver?:(result:T,combined:AbortSignal)=>Promise<T>):Promise<T>{
    const owned=new AbortController();controller=owned;
    const combined=AbortSignal.any([signal,owned.signal]);
-   const p=work(combined).finally(()=>{if(pending===p)pending=undefined;if(controller===owned)controller=undefined;});pending=p;return p;
+   const p=work(combined).then(result=>deliver?deliver(result,combined):result).finally(()=>{if(pending===p)pending=undefined;if(controller===owned)controller=undefined;});pending=p;return p;
  }
  const nativeDiagnostic=():NativeLifecycleDiagnostic=>{
   let idleRemainingMs:number|null=null;
@@ -754,6 +782,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
           live.prepareEstimate(parsed.data,combined);
          }
          reportObserverStage(onStage,'admission');
+          if(mainAccountLease&&!await mainAccountLease.validate(combined))throw Error('MAIN_ACCOUNT_CHANGED');
           if(options.nativeContext?.usage&&!await resourcesReusable(3))throw Error('NATIVE_RESOURCE_LIMIT');
           check(combined);
           const admission=await beginModelOperation(key,g,combined,'eta');
@@ -767,6 +796,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          // Recheck trusted authorization at the irreversible request boundary.
          check(combined);await view.updateInvocation!(id,{phase:'dispatching'});check(combined);
          if(proof&&(!await proof.validate(combined)||!proof.valid()))throw Error('ACCOUNT_REUSE_INVALID_BEFORE_DISPATCH');
+         if(mainAccountLease&&!await mainAccountLease.validate(combined))throw Error('MAIN_ACCOUNT_CHANGED');
          await preparedOwner?.validateSource?.(combined);
          check(combined);
          if(preparedOwner&&!matchesOwner(preparedOwner))throw Error('SOURCE_PREPARATION_STALE');
@@ -779,6 +809,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          };
          // Stage listeners are synchronous but can cancel/invalidate. Nothing
          // asynchronous may run between this final fence and the model method.
+         if(mainAccountLease&&!await mainAccountLease.validate(combined))throw Error('MAIN_ACCOUNT_CHANGED');
          check(combined);
          if(proof&&!proof.valid())throw Error('ACCOUNT_REUSE_INVALID_BEFORE_DISPATCH');
          if(preparedOwner&&!matchesOwner(preparedOwner))throw Error('SOURCE_PREPARATION_STALE');
@@ -848,6 +879,17 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          await view?.close().catch(()=>{poisoned=true;});
          reportObserverStage(onStage,'finished');
        }
+     },async(result,combined)=>{
+       // Terminal bookkeeping and finally cleanup can await disk I/O. Keep
+       // ownership until the final account fence, not merely provider return.
+       if(result.interpretation!==null&&options.mainAccount){
+         const valid=!combined.aborted&&await mainAccountLease?.validate(combined).catch(()=>false);
+         if(!valid||!authorized()||combined.aborted){
+           try{await reset();}catch{poisoned=true;}
+           return {...result,status:'process_error' as const,interpretation:null};
+         }
+       }
+       return result;
      });
    },
  };

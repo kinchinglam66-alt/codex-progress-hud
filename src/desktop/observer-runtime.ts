@@ -64,6 +64,7 @@ type TrustedCompressionPreparation = (request: CompressionRequest, signal: Abort
 }>;
 
 export interface DesktopObserverRuntimeOptions {
+  subscriptionAccountSource?:'main'|'independent';
   identity: DesktopObserverIdentity;
   /** Account selected by the host for this runtime's ledger and receipt directory. */
   accountingAccountFingerprint?: string;
@@ -131,7 +132,7 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * exposes two stable, initially unavailable slots so the scheduler can be
  * wired before first-use setup without creating an admission path early.
  */
-export function createDesktopObserverRuntime({identity, openAccounting, accountingAccountFingerprint, dialog, now = Date.now, consentStore,
+export function createDesktopObserverRuntime({identity, openAccounting, accountingAccountFingerprint, dialog, now = Date.now, consentStore,subscriptionAccountSource,
   inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation,persistentWorkerFactory,persistentReceiptDirectory}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
@@ -565,13 +566,24 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
         gate.update(snapshot.evidence);
         authorizedBinding = binding(snapshot.evidence);
         const stored = await readConsent();
-        const restored = stored !== null && gate.restore(stored);
+        // Only a grant explicitly covering future main-account switches can
+        // cross identities. Independent/legacy grants remain account-bound;
+        // every other scope field is still checked by the gate.
+        const followScope=subscriptionAccountSource==='main'&&stored?.scope.billingMode==='subscription'&&stored.scope.accountPolicy==='main-follow-v1'
+          ?stored.scope:undefined;
+        const restored = subscriptionAccountSource==='main'
+          ? followScope!==undefined&&stored!==null&&gate.restore({...stored,scope:(()=>{
+              const {accountPolicy:_policy,...scope}=followScope;
+              return {...scope,accountFingerprint:snapshot.evidence.accountFingerprint};
+            })()})
+          : stored !== null && gate.restore(stored);
         const inline = inlineConsent !== undefined && inlineConsent.accountFingerprint === snapshot.evidence.accountFingerprint
           ? (() => { const offer = gate.offer(); return offer !== null && gate.accept(offer); })()
           : false;
-        const consent = restored ? true : inlineConsent !== undefined ? inline : await waitForSignal(requestObserverConsent(gate, dialog, snapshot.accountLabel), combined);
-        if (!consent || !gate.authorized()) throw new Error('OBSERVER_CONSENT_REQUIRED');
-        if (!restored) await consentStore?.grant(observerConsentScope(snapshot.evidence), now());
+        const consent = restored ? true : inlineConsent !== undefined ? inline : await waitForSignal(requestObserverConsent(gate, dialog, snapshot.accountLabel,subscriptionAccountSource), combined);
+        if (!consent || !gate.authorized() || combined.aborted || disabled) throw new Error('OBSERVER_CONSENT_REQUIRED');
+        if (!restored) await consentStore?.grant({...observerConsentScope(snapshot.evidence),
+          ...(subscriptionAccountSource==='main'?{accountPolicy:'main-follow-v1' as const}:{})}, now());
 
         ledgerOpening = true;
         openingCancelled = false;

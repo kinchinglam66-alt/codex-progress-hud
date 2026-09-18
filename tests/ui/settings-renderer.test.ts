@@ -4,6 +4,19 @@ import {resolve} from 'node:path';
 
 afterEach(()=>{vi.unstubAllGlobals();vi.resetModules();});
 
+it('discloses automatic account following and hides independent login controls',async()=>{
+ const elements=new Map<string,any>();
+ for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke','#provider-account','#provider-start','#provider-usage-notice','#subscription-login','#subscription-device-login','#subscription-logout'])elements.set(id,{textContent:'',disabled:false,hidden:false,addEventListener(){}});
+ vi.stubGlobal('document',{querySelector:(id:string)=>elements.get(id)});
+ vi.stubGlobal('window',{codexProgressHudSettings:{getStatus:async()=>({state:'normal',revision:0,knownTokens:0,unknown:0,recoveryAllowed:false}),readProviderSettings:async()=>({generation:0,revision:0,state:'ready',selected:'subscription',subscriptionAccountSource:'main',active:{selected:'subscription',api:null},draft:{selected:'subscription',api:null},account:{label:'synthetic'},accountStatus:'ready'})}});
+ await import('../../src/ui/settings-renderer.js');
+ await vi.waitFor(()=>expect(elements.get('#provider-account').textContent).toContain('synthetic'));
+ expect(elements.get('#provider-usage-notice').textContent).toContain('自动跟随');
+ expect(elements.get('#provider-usage-notice').textContent).toContain('访问令牌');
+ expect(elements.get('#subscription-login').hidden).toBe(true);
+ expect(elements.get('#subscription-logout').hidden).toBe(true);
+});
+
 it('edits subscription capacity without requiring login or a new secret',async()=>{
   const listeners=new Map<string,()=>void>(),elements=new Map<string,any>();
   for(const id of ['#state','#known-tokens','#unknown-count','#message','#check','#recover','#revoke',

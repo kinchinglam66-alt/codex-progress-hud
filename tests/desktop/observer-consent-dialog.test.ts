@@ -5,6 +5,13 @@ import {requestObserverConsent} from '../../src/desktop/observer-consent-dialog.
 const proof = {accountFingerprint: 'a'.repeat(64), routeFingerprint: 'b'.repeat(64),
   assetsFingerprint: 'c'.repeat(64), observedAt: 0, expiresAt: 1000};
 const gate = () => createObserverConsentGate({now: () => 0, onInvalidate() {}});
+it('shows following-account authorization rather than independent-login instructions',async()=>{
+ const value=gate();value.update(proof);let shown='';
+ expect(await requestObserverConsent(value,{showMessageBox:async options=>{shown=options.detail;return {response:0};}},'synthetic','main')).toBe(true);
+ expect(shown).toContain('自动跟随');expect(shown).toContain('访问令牌');
+ expect(shown).not.toContain('首次需要单独登录');
+ expect(shown).toContain('不脱敏');
+});
 
 it('never opens native consent without current verified host metadata', async () => {
   const value = gate(); let opened = false;

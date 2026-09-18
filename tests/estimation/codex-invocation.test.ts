@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
-import { buildCodexInvocation, buildObserverCodexInvocation, buildObserverCompressionInvocation, buildObserverSetupInvocation } from "../../src/estimation/codex-invocation.js";
+import { buildCodexInvocation, buildObserverCodexInvocation, buildObserverCompressionInvocation, buildObserverSetupInvocation, buildObserverExternalInvocation } from "../../src/estimation/codex-invocation.js";
 
 const features = ["plugins", "hooks", "apps", "remote_plugin", "multi_agent", "shell_tool", "unified_exec",
   "shell_snapshot", "browser_use", "browser_use_external", "browser_use_full_cdp_access",
@@ -9,6 +9,18 @@ const features = ["plugins", "hooks", "apps", "remote_plugin", "multi_agent", "s
 const profile = { executable:process.execPath, cwd:resolve("empty"), schemaPath:resolve("estimate.schema.json"),
   instructionsPath:resolve("instructions.md"), version:"0.153.3", features };
 const metrics = {activeSeconds:120,progress:0.5,toolCount:8,validationFailures:0};
+
+it('external account sessions keep isolated tools and proxy without file credential storage',()=>{
+ const env={CODEX_HOME:resolve('main-home'),OPENAI_API_KEY:'must-not-inherit',HTTPS_PROXY:'http://proxy.invalid'};
+ const invocation=buildObserverExternalInvocation(profile,env,resolve('observer-home'));
+ expect(invocation.args.slice(0,3)).toEqual(['app-server','--stdio','--strict-config']);
+ expect(invocation.args).toContain('cli_auth_credentials_store="ephemeral"');
+ expect(invocation.args).not.toContain('cli_auth_credentials_store="file"');
+ expect(invocation.args.flatMap((v,i)=>v==='--disable'?[invocation.args[i+1]]:[])).toEqual(features.slice(0,-2));
+ expect(invocation.env).toEqual({CODEX_HOME:resolve('observer-home'),HTTPS_PROXY:'http://proxy.invalid'});
+ expect(invocation.input).toBe('');
+ expect(()=>buildObserverExternalInvocation(profile,env,env.CODEX_HOME)).toThrow('OBSERVER_AUTH_HOME_REQUIRED');
+});
 
 it.each(['login', 'status', 'metadata'] as const)('isolates %s setup from main authentication', action => {
   const env = {CODEX_HOME:resolve('main-home'), codex_home:resolve('other-main'), HTTPS_PROXY:'http://proxy.invalid', OPENAI_API_KEY:'private'};

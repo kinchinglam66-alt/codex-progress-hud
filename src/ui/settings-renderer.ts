@@ -1,7 +1,7 @@
 type SettingsState = 'normal' | 'warning' | 'cooldown' | 'blocked' | 'checking' | 'awaiting_confirmation' | 'probing' | 'recovered' | 'failed' | 'unconfigured' | 'unauthorized' | 'repair_environment';
 interface SettingsStatus {state: SettingsState; reason?:string; revision: number; knownTokens: number; unknown: number; recoveryAllowed: boolean;nextEligibleAt?:number|null;cooldownUntil?:number|null;lastDiagnostic?: {stage:string;outcome:string;usagePresent:boolean;closureConfirmed:boolean;callReason?:string;processReason?:string;exitCode?:number|null;parserError?:string|null;elapsedMs?:number;errorCategories?:string[]}}
 interface ProviderDraft {selected: 'subscription'|'api'; contextCapacity?:{model:string;contextTokens:number;outputReserveTokens:number;requestBytes:number|null}; api: {profileId:string;name:string;baseUrl:string;protocol:string;model:string;reasoningEffort?:string;maxOutputTokens:number;dailyCallLimit:number;keyConfigured?:boolean}|null}
-interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';accountDiagnostic?:{stage:string;reason:string;attempts:number;reader?:{reason:string;phase:number}};recipient?:string}
+interface ProviderSettings {generation:number;revision:number;selected:'subscription'|'api';state:string;active:ProviderDraft;draft:ProviderDraft;keyConfigured:boolean;subscriptionAccountSource?:'main'|'independent';account?:{label:string;observedAt:number;expiresAt:number}|null;accountStatus?:'unknown'|'checking'|'ready'|'signed_out'|'unavailable';accountDiagnostic?:{stage:string;reason:string;attempts:number;reader?:{reason:string;phase:number}};recipient?:string}
 interface SettingsApi {
   getStatus(): Promise<SettingsStatus>; preflight(): Promise<SettingsStatus & {allowed: boolean; challenge?: string}>; confirm(revision: number, challenge: string): Promise<SettingsStatus>; revokeConsent(): Promise<SettingsStatus & {consentRevoked:boolean}>;
   readProviderSettings?(): Promise<ProviderSettings>; saveProviderSettings?(payload: unknown): Promise<ProviderSettings>; replaceSubscriptionAccount?(payload: unknown): Promise<{outcome:string}>;
@@ -176,12 +176,15 @@ function liveApiRecipient(): string {
 }
 function renderProviderView(): void {
   const source=providerSource?.value === 'api' ? 'api' : 'subscription';
+  const followsMain=providerSnapshot?.subscriptionAccountSource==='main';
+  for(const control of [login,deviceLogin,logout])if(control)control.hidden=followsMain;
   if (providerApiFields) providerApiFields.hidden = source !== 'api';
   if (recipient) recipient.textContent = source === 'api' ? liveApiRecipient() : SUBSCRIPTION_RECIPIENT;
   if (providerUsageNotice) providerUsageNotice.textContent = source === 'api'
     ? `API 估时会向 ${recipient?.textContent ?? '所示提供方'} 发送完整可读对话；任务文本不脱敏，估时和必要的历史压缩均可能产生费用。`
+    : followsMain?'自动跟随主 Codex 账户，换号后使用新账户的订阅额度。只读访问令牌用于向 OpenAI 认证，隔离进程内存使用，不复制刷新令牌或改写主登录。发送完整可读对话，任务文本不脱敏；估时会消耗订阅额度。请在主 Codex 中登录或更换账户。'
     : '订阅估时会消耗所示账户的订阅额度；发送完整可读对话，任务文本不脱敏，必要的历史压缩也消耗额度；不会复制主 Codex 凭据。';
-  if (providerStart) providerStart.textContent = source === 'api' ? '保存并开始' : providerSnapshot?.account ? '开始估时' : providerSnapshot?.accountStatus==='signed_out' ? '登录并开始' : '检查账户并开始';
+  if (providerStart) providerStart.textContent = source === 'api' ? '保存并开始' : providerSnapshot?.account ? '开始估时' : providerSnapshot?.accountStatus==='signed_out'&&!followsMain ? '登录并开始' : '检查账户并开始';
 }
 function renderProvider(value: ProviderSettings): void {
   providerSnapshot = value;

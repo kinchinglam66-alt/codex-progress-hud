@@ -1,4 +1,5 @@
 import type {Readable, Writable} from 'node:stream';
+import {createAuthRefreshRpc, type ChatgptAuthRefreshHandler} from './observer-auth-refresh-rpc.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
@@ -11,6 +12,8 @@ export type AppServerNotification = {
 };
 
 export interface ObserverAppServerRpcOptions {
+  /** Opt-in experimental external auth; absent preserves the existing deny-all policy. */
+  onChatgptAuthTokensRefresh?: ChatgptAuthRefreshHandler;
   input: Writable;
   output: Readable;
   timeoutMs?: number;
@@ -76,6 +79,14 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
   let nextId = 1;
   let writing = false;
   let isClosed = false;
+  const authRefresh = createAuthRefreshRpc({
+    ...(options.onChatgptAuthTokensRefresh ? {handler: options.onChatgptAuthTokensRefresh} : {}),
+    send: frame => {
+      try {enqueue(encodeFrame(frame,maxFrameBytes));}
+      catch {close('APP_SERVER_RPC_WRITE_FAILED');}
+    },
+    close: reason => close(reason),
+  });
 
   const cleanupPending = (request: PendingRequest): void => {
     clearTimeout(request.timer);
@@ -92,6 +103,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
   const close = (reason = 'APP_SERVER_RPC_CLOSED'): void => {
     if (isClosed) return;
     isClosed = true;
+    authRefresh.close();
     const error = transportError(reason);
     rejectPending(error);
     outgoing.length = 0;
@@ -220,6 +232,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
     }
 
     if (typeof message.method === 'string') {
+      if (authRefresh.handle(message)) return;
       if (!isSafeNumber(message.id)) {
         close('APP_SERVER_RPC_INVALID_RESPONSE');
         return;

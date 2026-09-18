@@ -9,9 +9,31 @@ vi.mock('../../src/estimation/observer-identity-files.js',()=>({captureObserverI
 vi.mock('../../src/estimation/codex-preflight.js',()=>({createRuntimePreflightCache:()=>({
   check:async()=>{state.events.push('preflight');return {version:'0.153.4'};},invalidate(){state.events.push('cache-invalidated');}
 })}));
-vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:action==='device-auth'?['login','--device-auth']:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'}),buildObserverCompressionInvocation:(_p:unknown,input:string)=>{state.compressionInputs.push(input);return {executable:'unused',args:['exec','--compression-schema','pinned-summary-schema','-c','model_instructions_file="pinned-summary-instructions"'],env:{},cwd:resolve('.'),input};}}));
+vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverExternalInvocation:()=>({executable:'unused',args:['external-metadata'],env:{},cwd:resolve('.'),input:''}),buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:action==='device-auth'?['login','--device-auth']:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'}),buildObserverCompressionInvocation:(_p:unknown,input:string)=>{state.compressionInputs.push(input);return {executable:'unused',args:['exec','--compression-schema','pinned-summary-schema','-c','model_instructions_file="pinned-summary-instructions"'],env:{},cwd:resolve('.'),input};}}));
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:(_launch:unknown,_timeout:unknown,onDiagnostic?:(value:unknown)=>void)=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure){onDiagnostic?.({reason:'rpc_error',phase:2,elapsedMs:42,privateText:'DO_NOT_EXPOSE'});throw Error(state.failure);}return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:state.routeFingerprint};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
+vi.mock('../../src/estimation/main-account-metadata.js',()=>({createMainAccountMetadataReader:(options:any)=>({
+ read:async(signal:AbortSignal)=>({accountFingerprint:(await options.source.inspect(signal)).accountFingerprint,accountLabel:'followed@example.invalid',routeFingerprint:state.routeFingerprint}),
+ disable(){},ownership:()=> 'idle',
+})}));
+it('uses the main source for both inspection and prepared identity and forbids independent login',async()=>{
+ let current='e'.repeat(64);
+ const source={inspect:async()=>({accountFingerprint:current,expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
+ const runtime=createObserverIdentityRuntime({...config(),mainAccountSource:source});
+ try{
+  const account=await runtime.inspect(new AbortController().signal);
+  expect(account.accountLabel).toBe('followed@example.invalid');
+  expect(account.evidence.accountFingerprint).toBe(current);
+  const prepared=await runtime.prepareSession(new AbortController().signal);
+  expect(prepared.invocation.args).toEqual(['external-metadata']);
+  expect(prepared.evidence.accountFingerprint).toBe(current);
+  expect(await prepared.validateAcceptance!(new AbortController().signal)).toBe(true);
+  current='f'.repeat(64);
+  expect(await prepared.validateAcceptance!(new AbortController().signal)).toBe(false);
+  await expect(runtime.prepareLogin(new AbortController().signal)).rejects.toThrow('MAIN_ACCOUNT_MANAGED_BY_CODEX');
+  expect(state.events).not.toContain('account');
+ }finally{await runtime.close();}
+});
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.routeFingerprint='b'.repeat(64);state.failure='';state.active=false;state.compressionInputs=[];state.identityCaptureCount=0;state.identityGateCall=null;state.identityGate=null;identityFiles.value='stable-identity-files';});
 afterEach(()=>vi.useRealTimers());
 it('retains only the bounded reader failure category and phase for account inspection',async()=>{

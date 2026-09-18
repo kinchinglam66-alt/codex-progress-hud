@@ -132,3 +132,8 @@ export function buildObserverSetupInvocation(profile: CodexProfile, action: Obse
   if (!['login', 'status', 'metadata', 'logout', 'device-auth'].includes(action)) throw new Error('INVALID_OBSERVER_SETUP_ACTION');
   return buildInvocation(profile, '', observerEnvironment(env, observerHome), action);
 }
+
+export function buildObserverExternalInvocation(profile:CodexProfile,env:NodeJS.ProcessEnv,observerHome:string):Invocation {
+  const invocation=buildObserverSetupInvocation(profile,'metadata',env,observerHome);
+  return {...invocation,args:invocation.args.map(arg=>arg==='cli_auth_credentials_store="file"'?'cli_auth_credentials_store="ephemeral"':arg)};
+}

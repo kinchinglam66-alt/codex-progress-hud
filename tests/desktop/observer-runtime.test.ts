@@ -706,6 +706,19 @@ describe('desktop observer runtime composition', () => {
     } finally { await rm(directory, {recursive: true, force: true}); }
   });
 
+  it.each(['main','independent'] as const)('restores offline account-follow only for a main grant (%s)',async(mode)=>{
+    const directory=await mkdtemp(join(tmpdir(),'hud-runtime-follow-'));
+    try{
+      const path=join(directory,'consent.json'),protection={protect:(v:string)=>v,unprotect:(v:string)=>v};
+      const firstEvents:string[]=[],store=createObserverConsentStore(path,protection);
+      const first=createDesktopObserverRuntime({identity:identityFor(()=>0,firstEvents),dialog:dialogFor(firstEvents),openAccounting:async()=>owner(firstEvents),consentStore:store,now:()=>0,subscriptionAccountSource:mode});
+      await first.start(new AbortController().signal);await first.close();
+      const events:string[]=[],changed=identityFor(()=>0,events,{inspect:()=>evidence(0,'d'.repeat(64))});
+      const next=createDesktopObserverRuntime({identity:changed,dialog:dialogFor(events,1),openAccounting:async()=>owner(events),consentStore:createObserverConsentStore(path,protection),now:()=>0,subscriptionAccountSource:'main'});
+      try{await next.start(new AbortController().signal);expect(events.includes('dialog')).toBe(mode!=='main');expect(next.workers.every(w=>!w.status().disabled)).toBe(mode==='main');}
+      finally{await next.close();}
+    }finally{await rm(directory,{recursive:true,force:true});}
+  });
   it('does not restore remembered consent when the verified account scope changes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'hud-runtime-consent-scope-'));
     try {

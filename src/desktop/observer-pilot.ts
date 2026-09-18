@@ -1,4 +1,7 @@
 import {resolve} from 'node:path';
+import {homedir} from 'node:os';
+import {createMainCodexAccountSource} from '../estimation/main-codex-account-source.js';
+import {createMainAccountFollower} from './main-account-follower.js';
 import {createHash} from 'node:crypto';
 import {mkdir, open as openFile, readFile} from 'node:fs/promises';
 import {z} from 'zod';
@@ -118,7 +121,10 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     config=null;
   }
   const systemRoot=options.environment.SystemRoot??options.environment.SYSTEMROOT;
+  const mainAccountSource=config&&config.subscriptionAccountSource!=='independent'
+    ?createMainCodexAccountSource({home:options.environment.CODEX_HOME??resolve(options.environment.USERPROFILE??options.environment.HOME??homedir(),'.codex')}):undefined;
   const identityOptions=config&&systemRoot?{...config,resourcesDirectory:options.resourcesDirectory,
+    ...(mainAccountSource?{mainAccountSource}:{}),
     powershell:resolve(systemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),
     environment:observerPilotEnvironment(config,options.environment)}:undefined;
   const accountSettings=identityOptions===undefined?undefined:createObserverAccountSettings({identity:createObserverIdentityRuntime(identityOptions),onDeviceAuth:event=>{
@@ -130,8 +136,10 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
   const runtimes=new Set<ReturnType<typeof createDesktopObserverRuntime>>();
   let attachedScheduler: Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>|undefined;
   let currentRuntime: ReturnType<typeof createDesktopObserverRuntime>|undefined;
+  let currentAccountFingerprint:string|null=null;
   const openSubscription=async(signal:AbortSignal, inlineConsent?:ProviderInlineConsent, contextCapacity?:ProviderConfig['contextCapacity']):Promise<ProviderWorkerOwner>=>{
     if(identityOptions===undefined||accountSettings===undefined)throw Error('OBSERVER_SUBSCRIPTION_UNAVAILABLE');
+    if(mainAccountSource&&!shouldEnablePersistentObserver(options,config))throw Error('MAIN_ACCOUNT_REQUIRES_PERSISTENT_SESSION');
     if(shouldEnablePersistentObserver(options,config))assertNativeObserverRuntime(identityOptions);
     const [assets,compressionAssets]=await Promise.all([
       loadObserverApiAssets(options.resourcesDirectory), loadObserverCompressionAssets(options.resourcesDirectory),
@@ -146,14 +154,16 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime({...identityOptions,
       reuseHomeCheckProcess:shouldEnablePersistentObserver(options,config)}),dialog:options.dialog,
+      subscriptionAccountSource:mainAccountSource?'main':'independent',
       accountingAccountFingerprint:account.evidence.accountFingerprint,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
       ...(shouldEnablePersistentObserver(options,config)?{persistentReceiptDirectory:accountingDirectory,
         persistentWorkerFactory:workerOptions=>{
+          const accountOptions=mainAccountSource?{mainAccount:{source:mainAccountSource,accountFingerprint:account.evidence.accountFingerprint}}:{};
           if(options.nativeContextTrial===undefined)return createDesktopPersistentWorker(identityOptions,
-            {...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema},assets.instructions);
+            {...workerOptions,...accountOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema},assets.instructions);
           const nativeContext=createNativeObserverTrial(identityOptions,options.nativeContextTrial);
-          return createPersistentObserverWorker({...workerOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema,
+          return createPersistentObserverWorker({...workerOptions,...accountOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema,
             ...(nativeContext===undefined?{}:{nativeContext,nativeInstructions:assets.instructions,completedTurnContext:options.nativeContextTrial?.mode==='completed-turn'})});
         }}:{}),
       contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
@@ -181,7 +191,8 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       } satisfies ObserverInlineConsent);
       if(attachedScheduler)runtime.schedulerRecovery.attachScheduler(attachedScheduler);
       currentRuntime=runtime;
-      return {workers:runtime.workers, workerSource:runtime.workerSource, close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime)currentRuntime=undefined;},
+      currentAccountFingerprint=account.evidence.accountFingerprint;
+      return {workers:runtime.workers, workerSource:runtime.workerSource, close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime){currentRuntime=undefined;currentAccountFingerprint=null;}},
         inspect:async inspectSignal=>{const snapshot=await accountSettings.inspect(inspectSignal);return {label:snapshot.accountLabel,fingerprint:snapshot.evidence.accountFingerprint};}};
     }catch(error){runtimes.delete(runtime);await runtime.close().catch(()=>undefined);throw error;}
   };
@@ -229,14 +240,25 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       close:async()=>{ownedWorkers.forEach(worker=>worker.disable());await Promise.all([...ownedWorkers].map(worker=>worker.close()));await transport.close();}};
   };
   const host=await createObserverProviderHost({dataDirectory:options.dataDirectory,consentProtection:options.consentProtection,
+    followMainAccount:mainAccountSource!==undefined,
     openSubscription,openApi,autoStartSubscription:config!==null, ...(config?.proxyUrl===undefined?{}:{proxyUrl:config.proxyUrl}),
     ...(accountSettings===undefined?{}:{subscriptionAccount:accountSettings,readSubscriptionAccount:async signal=>{const snapshot=await accountSettings.inspect(signal);return {label:snapshot.accountLabel,observedAt:snapshot.evidence.observedAt,expiresAt:snapshot.evidence.expiresAt};}})});
+  const follower=mainAccountSource?createMainAccountFollower({enabled:()=>host.canFollowSubscriptionAccount(),
+    currentFingerprint:()=>currentAccountFingerprint,readFingerprint:async signal=>(await mainAccountSource.inspect(signal)).accountFingerprint,
+    refresh:signal=>host.followSubscriptionAccount(signal)}):undefined;
   const residualResearch=await openResearchBounded(()=>createResidualRuntime(resolve(options.dataDirectory,'residual-research')));
   return {workers:host.workers,workerSource:host.workerSource,onObservation:journal.record,
     ...(residualResearch?{residualResearch}:{}),
     schedulerRecovery:{attachScheduler(scheduler:Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>){attachedScheduler=scheduler;currentRuntime?.schedulerRecovery.attachScheduler(scheduler);}},
     recovery:{status:()=>currentRuntime?.recovery.status()??{state:'unauthorized' as const,revision:0,knownTokens:0,unknown:0,recoveryAllowed:false},preflight:()=>currentRuntime?.recovery.preflight()??Promise.resolve({state:'unauthorized' as const,revision:0,knownTokens:0,unknown:0,recoveryAllowed:false,allowed:false}),confirm:(revision:number)=>currentRuntime?.recovery.confirm(revision)??Promise.reject(new Error('OBSERVER_RECOVERY_UNAVAILABLE')),binding:()=>currentRuntime?.recovery.binding()},
-    start:host.start,disable:()=>{host.disable();currentRuntime?.disable();},revokeConsent:async()=>{await currentRuntime?.revokeConsent();},
+    start:async(signal:AbortSignal)=>{await host.start(signal);follower?.start();},disable:()=>{host.disable();currentRuntime?.disable();},revokeConsent:async()=>{
+      host.disable();
+      const retained=[...runtimes];retained.forEach(runtime=>runtime.disable());
+      // Drain any pending grant before deleting durable consent. Revocation
+      // must work even between old-owner closure and replacement publication.
+      try{await Promise.all(retained.map(runtime=>runtime.close()));}
+      finally{await consentStore.revoke();}
+    },
     providerSettings:host,accountSettings,
-    async close(){try{await host.close();await Promise.all([...runtimes].map(runtime=>runtime.close().catch(()=>undefined)));await accountSettings?.close();await apiAccounting?.close();}finally{try{await journal.close();}finally{await closeResearchBounded(residualResearch);}}}};
+    async close(){try{await follower?.close();await host.close();await Promise.all([...runtimes].map(runtime=>runtime.close().catch(()=>undefined)));await accountSettings?.close();await apiAccounting?.close();}finally{try{await journal.close();}finally{await closeResearchBounded(residualResearch);}}}};
 }
