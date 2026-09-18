@@ -6,6 +6,7 @@ import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import type {VerifiedHistoryFallback} from '../observer/verified-history-fallback.js';
+import {assertCheckpointWindow,verifyHistoryFallback} from '../observer/verified-history-fallback.js';
 import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSample,BoundNativeTurnSource} from '../observer/native-source-request.js';
 import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
 import {decideTrigger, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
@@ -21,7 +22,7 @@ export interface ObserverWorker {
   /** Passive per-flight timing; the returned function detaches only this listener. */
   subscribeContextPhase?(listener:(phase:RequestProfilePhase)=>void):()=>void;
   prepareNativeHistoryFallback?(input:ObserverInput,history:VerifiedHistoryFallback,signal:AbortSignal,
-    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
+    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample,policy?:{checkpointOnly:true}):Promise<PreparedContext>;
   prepareNativeTurnContext?(input:ObserverInput,source:BoundNativeTurnSource,signal:AbortSignal,
     conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
   nativeSourceDestination?(signal:AbortSignal):Promise<NativeSourceDestination>;
@@ -254,9 +255,12 @@ export class ObserverScheduler {
     let unsubscribe:(()=>void)|undefined;
     try{unsubscribe=flight.worker.subscribeContextPhase?.(phase=>flight.profile.phase(phase));}catch{/* Passive diagnostics. */}
     let paired:BoundNativeTurnSource|null=null;
+    let checkpointHistory:HistorySnapshot|undefined;
     const closePaired=async()=>{
       const owned=paired;paired=null;
       if(owned)try{await owned.close();}catch{/* Source owner retains unconfirmed custody evidence. */}
+      const checkpoint=checkpointHistory;checkpointHistory=undefined;
+      if(checkpoint)try{await checkpoint.close();}catch{/* Local source owner retains cleanup evidence. */}
     };
     try{
     let prepared=input;
@@ -281,9 +285,38 @@ export class ObserverScheduler {
         prepared=value.input;flight.researchFailure='incomplete_scan';
         this.contextState(flight,'context_native');
       }catch(error){
-        // Never turn an unavailable native pair into a multi-minute full import.
+        // Recovery is only for source acquisition, never a retry after a worker
+        // or provider failure. Require an already-existing complete checkpoint.
+        const code=error!==null&&typeof error==='object'?Reflect.get(error,'code'):undefined;
+        const recover=paired===null&&flight.worker.prepareNativeHistoryFallback&&
+          ['source_unobserved','source_limit','source_checkpoint_unsupported'].includes(String(code));
         if(paired)await closePaired();
-        this.contextState(flight,this.preparationFailureState(flight,error));this.failPreparation(entry,flight);return;
+        if(!recover){this.contextState(flight,this.preparationFailureState(flight,error));this.failPreparation(entry,flight);return;}
+        try{
+          const signal=flight.controller.signal;
+          const checkTicket=async(s:AbortSignal)=>{
+            s.throwIfAborted();
+            if(this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('NATIVE_CONTEXT_STALE');
+          };
+          await checkTicket(signal);
+          const opened=await this.options.goals.openNativeHistoryFallback(flight.ticket,signal);
+          if(!opened)throw Error('CHECKPOINT_REQUIRED');
+          checkpointHistory=opened.snapshot;
+          await assertCheckpointWindow(opened.snapshot,signal);
+          const verified=await verifyHistoryFallback(opened,signal,checkTicket);
+          this.contextState(flight,'context_preparing');let sampled=false;
+          const value=await flight.worker.prepareNativeHistoryFallback!(input,verified,signal,flight.key,flight.generation,flight.requestedAt,()=>{
+            if(sampled||signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
+            const fresh=this.options.goals.refreshNativeObservation(flight.ticket,this.time());if(!fresh)throw Error('NATIVE_CONTEXT_STALE');
+            sampled=true;flight.observedActiveSeconds=fresh.activeSeconds;flight.excludedActiveSeconds=0;return fresh;
+          },{checkpointOnly:true});
+          if(!value||!sampled||!isInferenceEligible(value.representation))throw Error('history_incomplete');
+          prepared=value.input;flight.researchFailure='incomplete_scan';
+          this.contextState(flight,'context_full');
+        }catch(failure){
+          await closePaired();
+          this.contextState(flight,this.preparationFailureState(flight,failure));this.failPreparation(entry,flight);return;
+        }
       }
     }else if(flight.worker.prepareNativeContext||flight.worker.nativeSourceDestination){
       this.contextState(flight,'history_loading');
@@ -368,25 +401,25 @@ export class ObserverScheduler {
       }
     }
     if(prepared.imageContextPending){
-      if(paired)await closePaired();
+      if(paired||checkpointHistory)await closePaired();
       this.contextState(flight,'image_context_unsupported');this.failPreparation(entry,flight);return;
     }
     const state=this.workerState(flight.worker);
     this.checkDeadline(flight);
     if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time())||
       state.disabled||state.active||state.poisoned){
-      if(paired)await closePaired();
+      if(paired||checkpointHistory)await closePaired();
       this.failPreparation(entry,flight);
       return;
     }
     try {
       const result=await flight.worker.observe(prepared,flight.controller.signal,flight.key,flight.generation,
         stage=>this.record('stage',flight.key,entry,{requestId:flight.requestId,stage},flight));
-      if(paired)await closePaired();
+      if(paired||checkpointHistory)await closePaired();
       this.settle(entry,flight,result);
-    }catch{if(paired)await closePaired();this.settle(entry,flight,null);}
+    }catch{if(paired||checkpointHistory)await closePaired();this.settle(entry,flight,null);}
     }finally{
-      if(paired)await closePaired();
+      if(paired||checkpointHistory)await closePaired();
       try{unsubscribe?.();}catch{/* Passive diagnostics. */}
     }
   }

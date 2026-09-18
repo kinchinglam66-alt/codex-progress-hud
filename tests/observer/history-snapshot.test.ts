@@ -70,6 +70,29 @@ afterEach(async () => {
 });
 
 describe("source-backed history snapshots", () => {
+  it.each([false,true])('rejects a same-length interior checkpoint rewrite on every replay (empty suffix=%s)',async emptySuffix=>{
+    const original=meta()+checkpoint('x'.repeat(2*1024*1024))+(emptySuffix?'':message('user','current','u'));
+    const f=await fixture(original),reader=createLocalSessionReader({root:f.root});let snapshot;
+    try{
+      snapshot=await reader.snapshot(THREAD,signal());
+      for await(const _ of snapshot.records(signal())){}
+      const middle=1024*1024;
+      await writeFile(f.file,original.slice(0,middle)+'y'+original.slice(middle+1));
+      await expect((async()=>{for await(const _ of snapshot!.records(signal())){}})()).rejects.toMatchObject({code:'source_identity_mismatch'});
+    }finally{await snapshot?.close();await reader.close();}
+  });
+
+  it('does not revive an older checkpoint past a newer legacy compaction marker',async()=>{
+    const f=await fixture(meta()+checkpoint('old')+line('compacted',{message:'legacy truncated'})+message('user','current','u'));
+    const reader=createLocalSessionReader({root:f.root});let snapshot;
+    try{
+      snapshot=await reader.snapshot(THREAD,signal());
+      for await(const _ of snapshot.records(signal())){}
+      expect(snapshot.coverage.complete).toBe(false);
+      expect(snapshot.coverage.gaps).toContain('upstream_truncated');
+    }finally{await snapshot?.close();await reader.close();}
+  });
+
   it.each(['item_started','item_completed'] as const)('preserves MCP tool records as data: %s',async eventType=>{
     const raw={type:'McpToolCall',id:'mcp-1',server:'fixture',tool:'read',status:'completed',
       arguments:{query:'retain arguments'},result:{content:[{type:'text',text:'retain result'}]},

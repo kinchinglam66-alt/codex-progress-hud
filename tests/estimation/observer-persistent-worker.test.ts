@@ -13,6 +13,7 @@ import {createPersistentReceiptJournal,preparationErrorCode} from '../../src/est
 import {openReleaseAccounting} from '../../src/estimation/release-accounting.js';
 import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
+import {verifyHistoryFallback} from '../../src/observer/verified-history-fallback.js';
 import {createLocalSessionReader} from '../../src/observer/local-session-reader.js';
 import {createNativeComparisonFixtures,createCompletedTurnComparisonFixtures} from '../../src/evaluation/native-comparison-fixture.js';
 import {persistentHistoryPolicy} from '../../src/estimation/persistent-history-policy.js';
@@ -929,6 +930,66 @@ it('never runs a second ETA on the same prepared child, even before release',asy
   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('invalid_input');
   expect(f.accounting.snapshot().knownTokens).toBe(110);
  }finally{await f.worker.close();}
+});
+
+it('rejects raw history before starting a checkpoint-only recovery session',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const snapshot=history([{id:'all',kind:'user',atMs:0,turnId:'current',text:'RAW-HISTORY'}]);
+  await expect(f.worker.prepareNativeHistoryFallback!(input,{snapshot,currentTurnId:'current',validate:async()=>{}},
+   signal,'source',0,0,undefined,{checkpointOnly:true})).rejects.toThrow('CHECKPOINT_REQUIRED');
+  expect(f.processes()).toBe(0);expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it.each(['before-prepare','before-observe'] as const)('denies checkpoint recovery after an interior file rewrite: %s',async phase=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ const root=join(f.receipts,'source'),directory=join(root,'2026','09','18');await mkdir(directory,{recursive:true});
+ const id='22222222-2222-4222-8222-222222222222',path=join(directory,`rollout-2026-09-18-${id}.jsonl`);
+ const original=[{type:'session_meta',payload:{id}},
+  {type:'compacted',payload:{replacement_history:[{type:'compaction',encrypted_content:'opaque'},
+   {type:'message',role:'user',content:[{type:'input_text',text:'x'.repeat(2*1024*1024)}]}]}},
+  {type:'response_item',payload:{type:'message',role:'user',turn_id:'current',content:[{type:'input_text',text:'current request'}]}}
+ ].map(row=>JSON.stringify({timestamp:'2026-09-18T00:00:00Z',...row})).join('\n')+'\n';
+ await writeFile(path,original);const reader=createLocalSessionReader({root});let snapshot;
+ const mutate=()=>writeFile(path,original.slice(0,1024*1024)+'y'+original.slice(1024*1024+1));
+ try{
+  snapshot=await reader.snapshot(id,signal);
+  const verified=await verifyHistoryFallback({snapshot,currentTurnId:'current'},signal,async s=>s.throwIfAborted());
+  if(phase==='before-prepare'){
+   await mutate();
+   await expect(f.worker.prepareNativeHistoryFallback!(input,verified,signal,'source',0,0,undefined,{checkpointOnly:true})).rejects.toMatchObject({code:'source_identity_mismatch'});
+   expect(f.processes()).toBe(0);
+  }else{
+   const prepared=await f.worker.prepareNativeHistoryFallback!(input,verified,signal,'source',0,0,undefined,{checkpointOnly:true});
+   await mutate();expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('process_error');
+  }
+  expect(f.modelInputs).toHaveLength(0);expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await snapshot?.close();await reader.close();await f.worker.close();await f.accounting.close();}
+});
+
+it('imports a checkpoint and a large complete suffix without running compression',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const text='CURRENT-DELTA-'.repeat(16000);
+  const snapshot=history([{id:'all',kind:'user',atMs:0,turnId:'current',text}]);
+  snapshot.checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[
+   {type:'compaction',encrypted_content:'opaque-checkpoint'},
+   {type:'message',role:'user',content:[{type:'input_text',text:'HISTORICAL-FACT'}]}]}})!;
+  const prepared=await f.worker.prepareNativeHistoryFallback!(input,{snapshot,currentTurnId:'current',validate:async()=>{}},
+   signal,'source',0,0,undefined,{checkpointOnly:true});
+  expect(prepared.representation).toMatchObject({checkpointBootstrapped:true,confirmedCompactions:0,sourceComplete:true});
+  const imported=(f.imports as Array<{items:Array<{type:string;encrypted_content?:string;content?:Array<{text?:string}>}>}>).flatMap(call=>call.items);
+  expect(imported.some(item=>item.type==='compaction'&&item.encrypted_content==='opaque-checkpoint')).toBe(true);
+  expect(JSON.stringify(imported)).toContain('HISTORICAL-FACT');
+  const fragments=imported.flatMap(item=>item.content??[]).flatMap(part=>{
+   try{const data=JSON.parse(part.text??'');return data.observedRecord?[data.observedRecord.text]:[];}catch{return [];}
+  }).join('');
+  expect(JSON.parse(fragments).text).toBe(text);
+  expect(f.accounting.snapshot().starts).toBe(0);
+  expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+  expect(f.accounting.snapshot()).toMatchObject({starts:1,knownTokens:110,unknown:0});
+ }finally{await f.worker.close();await f.accounting.close();}
 });
 
 it('prepares verified fallback history in a clean accounted session, never a failed native child',async()=>{

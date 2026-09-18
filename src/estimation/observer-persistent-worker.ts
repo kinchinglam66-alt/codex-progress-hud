@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {observerInputSchema,isInferenceEligible} from './observer-contract.js';
 import type {ObserverInput} from './observer-contract.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
+import {assertCheckpointWindow} from '../observer/verified-history-fallback.js';
 import type {ObserverWorker} from './observer-scheduler.js';
 import type {ObserverResult} from './observer-provider.js';
 import {reportObserverStage} from './observer-provider.js';
@@ -185,7 +186,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    processOwnerUuid=randomUUID();
    admittedModelWindow=false;unexpectedRecorded=false;unexpectedWrite=undefined;
  }
- async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:BoundNativeTurnSource,historyFallback=false){
+ async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:BoundNativeTurnSource,historyFallback=false,checkpointOnly=false){
    check(signal);
    phase('accountProcessMs');
    invalidateReuse();
@@ -283,7 +284,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    if(!processRpc||!processIdentity)throw Error('SESSION_PROCESS_IDENTITY');
    if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();
     const newSession=()=>createPersistentObserverSession(processRpc!,{cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now,
-      runtimeManagedContext:nativeTurn!==undefined,
+      runtimeManagedContext:nativeTurn!==undefined||checkpointOnly,
       retainSubmittedSupplement:!!(nativeTurn&&options.reuseNativeTurnSession&&options.inlineCurrentTurnSupplement),
       ...(options.nativeInstructions===undefined?{}:{nativeInstructions:options.nativeInstructions}),
       ...(options.nativeRequestByteLimit===undefined?{}:{nativeRequestByteLimit:options.nativeRequestByteLimit}),
@@ -335,12 +336,12 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     }else {await session.start();if(historyFallback)ephemeralRequests++;}
     check(signal);return session;
   }
-  async function importHistory(input:ObserverInput,history:{snapshot:HistorySnapshot},live:ReturnType<typeof createPersistentObserverSession>,combined:AbortSignal,key:string,g:number,stage:(value:PersistentPreparationStage)=>void,batchCompleteRecords=false){
+  async function importHistory(input:ObserverInput,history:{snapshot:HistorySnapshot},live:ReturnType<typeof createPersistentObserverSession>,combined:AbortSignal,key:string,g:number,stage:(value:PersistentPreparationStage)=>void,batchCompleteRecords=false,allowCompaction=true){
          if(history.snapshot.checkpoint){stage('checkpoint_import');await live.bootstrapCheckpoint(history.snapshot.checkpoint,combined);}
          stage('history_import');
           let count=0,sourceBytes=0,compactionCount=0,missingImages=0;
           const manifest:typeof attachments=[];let manifestBytes=0;
-          const compact=budget===undefined?undefined:async(compactSignal:AbortSignal,onDispatch?:()=>void)=>{
+          const compact=budget===undefined||!allowCompaction?undefined:async(compactSignal:AbortSignal,onDispatch?:()=>void)=>{
            if(compactionCount>=budget.maxCompactionOperations)throw Error('context_too_large:compaction_budget_exhausted');
            stage('context_compression');
            await nativeTurnValidation?.(compactSignal);
@@ -625,18 +626,19 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    },
    ...(options.nativeContext?{
     ...(options.completedTurnContext?{
-    prepareNativeHistoryFallback(input,history,signal,key,g,_at,sample){
+    prepareNativeHistoryFallback(input,history,signal,key,g,_at,sample,policy){
      if(pending||releasing||!authorized())return Promise.reject(Error('CONTEXT_UNAVAILABLE'));
      return operation(signal,combined=>timing.measure('preparation_total',async()=>{
       let preparationStage:PersistentPreparationStage='session_setup';
       try{
        check(combined);if(nativeTurnPrepared)throw Error('NATIVE_REQUEST_NOT_RELEASED');
+       if(policy?.checkpointOnly)await assertCheckpointWindow(history.snapshot,combined);
        await timing.measure('source_validation',()=>history.validate(combined),'fallback');check(combined);
        await reset();requestRevision++;bind(key,g);nativeRequestAcquired=true;nativeResourcesOpen=true;nativeOwnerState=retentionState;
        sourceEpoch=JSON.stringify([history.snapshot.identity,history.snapshot.sourceEpoch,history.snapshot.revision]);
-       const live=await ensure(combined,undefined,true,undefined,true);
+       const live=await ensure(combined,undefined,true,undefined,true,policy?.checkpointOnly===true);
        nativeTurnPrepared=true;nativeTurnValidation=s=>timing.measure('source_validation',()=>history.validate(s),'fallback');
-       const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;}),'fallback');
+       const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;},policy?.checkpointOnly===true,policy?.checkpointOnly!==true),'fallback');
        ephemeralImportedBytes+=live.status().importedEncodedBytes;
        await nativeTurnValidation(combined);check(combined);
        const fresh=sample?.(),preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};

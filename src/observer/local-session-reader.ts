@@ -126,6 +126,7 @@ interface PassResult {
 }
 
 interface SnapshotState {
+  checkpointRange?: {start:number;end:number;digest:string};
   currentTurnId?:string;
   path: string;
   identity: FileIdentity;
@@ -143,6 +144,7 @@ interface SnapshotState {
 
 interface CheckpointScanResult {
   checkpoint?: NativeCodexCheckpoint;
+  checkpointRange?: {start:number;end:number;digest:string};
   startOffset: number;
 }
 
@@ -871,9 +873,9 @@ async function prefixValidation(file: FileHandle, length: number, signal: AbortS
 
 /** Hash the entire attested range with bounded allocation, not only the small
  * UI-reader cursor window. Short reads and rewrites cannot attest a base. */
-async function completePrefixValidation(file:FileHandle,length:number,signal:AbortSignal):Promise<string>{
+async function completePrefixValidation(file:FileHandle,length:number,signal:AbortSignal,start=0):Promise<string>{
   const hash=createHash('sha256'),buffer=Buffer.allocUnsafe(64*1024);
-  let offset=0;
+  let offset=start;
   while(offset<length){
     checkCancelled(signal);
     const read=await file.read(buffer,0,Math.min(buffer.length,length-offset),offset);
@@ -915,81 +917,51 @@ async function scanLatestCheckpoint(
   watermark: number,
   signal: AbortSignal
 ): Promise<CheckpointScanResult> {
-  let latest: NativeCodexCheckpoint | undefined;
-  let latestStartOffset = 0;
-  let latestError = false;
-  let readPosition = 0;
-  let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-  let pendingStart = 0;
-  let skippingOversized = false;
-
-  const inspect = (bytes: Buffer, offset: number): void => {
-    const checkpoint = inspectCheckpointLine(bytes);
-    if (checkpoint === null) return;
-    latest = checkpoint;
-    latestStartOffset = offset + bytes.byteLength + 1;
-    latestError = false;
+  // A replacement checkpoint supersedes the prefix. Search backwards so a
+  // long-lived rollout costs only its latest effective window, not its lifetime.
+  // Reject malformed complete suffix rows and the newest unsupported checkpoint;
+  // never skip them to revive an older, apparently usable context.
+  let position=watermark,discardPartialTail=true,lineEnd=0;
+  let chunks:Buffer[]=[],pendingBytes=0;
+  const add=(part:Buffer)=>{
+    pendingBytes+=part.length;
+    if(pendingBytes>SNAPSHOT_MAX_LINE_BYTES)throw new LocalSessionSourceError('source_checkpoint_unsupported');
+    if(part.length)chunks.push(part);
   };
-
-  const consume = (input: Buffer, inputStart: number): void => {
-    let remaining = input;
-    let remainingStart = inputStart;
-    while (remaining.byteLength > 0) {
-      if (skippingOversized) {
-        const newline = remaining.indexOf(0x0a);
-        if (newline < 0) return;
-        latestError = true;
-        skippingOversized = false;
-        pending = Buffer.alloc(0);
-        remaining = remaining.subarray(newline + 1);
-        remainingStart += newline + 1;
-        continue;
-      }
-
-      const newline = remaining.indexOf(0x0a);
-      if (newline < 0) {
-        if (pending.byteLength === 0) pendingStart = remainingStart;
-        if (pending.byteLength + remaining.byteLength > SNAPSHOT_MAX_LINE_BYTES) {
-          pending = Buffer.alloc(0);
-          skippingOversized = true;
-        } else {
-          pending = Buffer.concat([pending, remaining]);
-        }
-        return;
-      }
-
-      const line = Buffer.concat([pending, remaining.subarray(0, newline)]);
-      const lineStart = pending.byteLength === 0 ? remainingStart : pendingStart;
-      pending = Buffer.alloc(0);
-      if (line.byteLength <= SNAPSHOT_MAX_LINE_BYTES) {
-        try {
-          inspect(line, lineStart);
-        } catch {
-          latest = undefined;
-          latestStartOffset = 0;
-          latestError = true;
-        }
-      } else {
-        latestError = true;
-      }
-      remaining = remaining.subarray(newline + 1);
-      remainingStart = lineStart + line.byteLength + 1;
-    }
+  const inspect=():CheckpointScanResult|null=>{
+    const bytes=Buffer.concat(chunks.reverse(),pendingBytes);
+    chunks=[];pendingBytes=0;
+    const checkpoint=inspectCheckpointLine(bytes);
+    return checkpoint===null?null:{checkpoint,startOffset:lineEnd+1,
+      checkpointRange:{start:lineEnd-bytes.length,end:lineEnd+1,digest:createHash('sha256').update(bytes).update('\n').digest('hex')}};
   };
-
-  while (readPosition < watermark) {
+  while(position>0){
     checkCancelled(signal);
-    const size = Math.min(64 * 1024, watermark - readPosition);
-    const chunk = Buffer.allocUnsafe(size);
-    const read = await file.read(chunk, 0, size, readPosition);
-    if (read.bytesRead === 0) throw new LocalSessionSourceError("source_identity_mismatch");
-    const chunkStart = readPosition;
-    readPosition += read.bytesRead;
-    consume(chunk.subarray(0, read.bytesRead), chunkStart);
+    const size=Math.min(64*1024,position),start=position-size,chunk=Buffer.allocUnsafe(size);
+    let filled=0;
+    while(filled<size){
+      checkCancelled(signal);
+      const read=await file.read(chunk,filled,size-filled,start+filled);
+      if(read.bytesRead===0)throw new LocalSessionSourceError('source_identity_mismatch');
+      filled+=read.bytesRead;
+    }
+    position=start;
+    let end=size;
+    if(discardPartialTail){
+      const newline=chunk.lastIndexOf(0x0a);
+      if(newline<0)continue;
+      discardPartialTail=false;end=newline;lineEnd=start+newline;
+    }
+    while(end>0){
+      const newline=chunk.lastIndexOf(0x0a,end-1);
+      if(newline<0){add(chunk.subarray(0,end));break;}
+      add(chunk.subarray(newline+1,end));
+      const result=inspect();if(result)return result;
+      lineEnd=start+newline;end=newline;
+    }
   }
-
-  if (latestError) throw new LocalSessionSourceError("source_checkpoint_unsupported");
-  return latest === undefined ? {startOffset: 0} : {checkpoint: latest, startOffset: latestStartOffset};
+  if(!discardPartialTail&&pendingBytes){const result=inspect();if(result)return result;}
+  return {startOffset:0};
 }
 
 async function runPass(
@@ -1202,7 +1174,7 @@ async function readSnapshotPage(
 ): Promise<HistorySnapshotPage> {
   if (state.closed) throw new LocalSessionSourceError("source_closed");
   checkCancelled(signal);
-  if (state.nextOffset >= state.watermark) {
+  if (state.nextOffset >= state.watermark && !state.checkpointRange) {
     return {
       records: [],
       nextOffset: state.watermark,
@@ -1297,6 +1269,13 @@ async function readSnapshotPage(
     if (state.nextOffset > 0 && actualValidation !== state.validation) {
       throw new LocalSessionSourceError("source_identity_mismatch");
     }
+    const validateCheckpoint=async()=>{
+      const range=state.checkpointRange;
+      if(range&&await completePrefixValidation(file!,range.end,signal,range.start)!==range.digest){
+        throw new LocalSessionSourceError('source_identity_mismatch');
+      }
+    };
+    await validateCheckpoint();
 
     while (readPosition < state.watermark) {
       checkCancelled(signal);
@@ -1317,6 +1296,7 @@ async function readSnapshotPage(
       skippingOversized = false;
     }
 
+    await validateCheckpoint();
     const endStats = await file.stat();
     if (!sameIdentity(state.identity, identityOf(endStats)) || endStats.size < state.watermark) {
       throw new LocalSessionSourceError("source_identity_mismatch");
@@ -1623,6 +1603,7 @@ export function createLocalSessionReader({root}: {root: string}): {
           const state: SnapshotState = {
             path: candidate.path,
             identity,
+            ...(checkpointScan.checkpointRange?{checkpointRange:checkpointScan.checkpointRange}:{}),
             watermark: stats.size,
             nextOffset: startOffset,
             validation: startValidation,

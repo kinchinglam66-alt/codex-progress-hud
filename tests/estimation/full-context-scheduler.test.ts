@@ -16,6 +16,7 @@ import {buildDataset} from '../../src/evaluation/residual/dataset.js';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
 
 const token = "protected-full-context-scheduler-test-token-123456789";
 const answer = {relation: "replace" as const, status: "running" as const, summary: "task", estimate: {remainingSeconds: 100, errorPercent: 20}};
@@ -33,7 +34,7 @@ function history(records: ReadBatch["records"], closed: {value: number}): Histor
   };
 }
 
-function fixture(options: {owned?:boolean;native?:boolean;paired?:boolean;pairError?:string;deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime;advancingClock?:boolean} = {}) {
+function fixture(options: {checkpoint?:boolean;owned?:boolean;native?:boolean;paired?:boolean;pairError?:string;deferHistory?: boolean; deferPreparation?: boolean;research?:ResidualRuntime;advancingClock?:boolean} = {}) {
   let now = 0;
   let resolveHistory!: (value: HistorySnapshot) => void;
   let resolvePreparation!: (value: PreparedContext) => void;
@@ -53,7 +54,11 @@ function fixture(options: {owned?:boolean;native?:boolean;paired?:boolean;pairEr
       snapshot: async () => {
         if(options.native)throw Error('PARSED_HISTORY_FORBIDDEN');
         if (options.deferHistory) return new Promise<HistorySnapshot>(resolve => { resolveHistory = resolve; });
-        return history(records, closed);
+        const snapshot=history(records, closed);
+        if(options.checkpoint)snapshot.checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[
+          {type:'compaction',encrypted_content:'checkpoint-fixture'},
+          {type:'message',role:'user',content:[{type:'input_text',text:'retained historical fact'}]}]}})!;
+        return snapshot;
       },
       ...(options.native?{nativeSnapshot:async(id:string)=>({kind:'native' as const,sourceThreadId:id,sourceTurnId:'first',sourceEpoch:1,revision:1,
         byteLength:1024,path:'C:/owned/native-snapshot',close:async()=>{closed.value++;}})}:{}),
@@ -203,6 +208,40 @@ it('never falls back after entering a native worker even when its failure resemb
  f.worker.prepareNativeTurnContext=async()=>{throw Error('history_incomplete');};
  f.worker.prepareNativeHistoryFallback=async()=>{fallback++;return f.preparedContext();};
  try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);}
+ finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('uses a verified checkpoint window when a large native rollout cannot be acquired',async()=>{
+ const f=fixture({paired:true,pairError:'source_unobserved',checkpoint:true});let prepared=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('NATIVE_WORKER_MUST_NOT_START');};
+ f.worker.prepareNativeHistoryFallback=async(input,history,signal,_key,_generation,_at,sample,policy)=>{
+  prepared++;expect(policy).toEqual({checkpointOnly:true});
+  expect(history.snapshot.checkpoint?.items[1]).toMatchObject({content:[{text:'retained historical fact'}]});
+  await history.validate(signal);const fresh=sample!();return {...f.preparedContext(),input:{...input,...fresh}};
+ };
+ try{await f.start();expect(prepared).toBe(1);expect(f.counts().observed).toBe(1);expect(f.closed.value).toBe(1);}
+ finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('does not replay raw history after source acquisition fails',async()=>{
+ const f=fixture({paired:true,pairError:'source_unobserved'});let prepared=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('UNREACHABLE');};
+ f.worker.prepareNativeHistoryFallback=async()=>{prepared++;return f.preparedContext();};
+ try{await f.start();expect(prepared).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);}
+ finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('rejects an incomplete checkpoint suffix before preparing a session',async()=>{
+ const f=fixture({paired:true,pairError:'source_unobserved',checkpoint:true});let prepared=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('UNREACHABLE');};
+ f.worker.prepareNativeHistoryFallback=async()=>{prepared++;return f.preparedContext();};
+ f.setRecords([{id:'u',turnId:'first',kind:'user',text:'changed',atMs:1}]);
+ // Mutate during validation: verified source records must remain immutable.
+ const original=f.goals.openNativeHistoryFallback.bind(f.goals);
+ f.goals.openNativeHistoryFallback=async(...args)=>{
+  const value=await original(...args);if(value)value.snapshot.coverage={complete:false,gaps:['unreadable_record']};return value;
+ };
+ try{await f.start();expect(prepared).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);}
  finally{f.scheduler.disable();await f.source.close();}
 });
 
