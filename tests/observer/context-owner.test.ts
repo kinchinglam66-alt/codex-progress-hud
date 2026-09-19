@@ -10,6 +10,21 @@ function setup(){
   return {owner,calls,changes,time:(n:number)=>{now=n;},flush};
 }
 const batch={records:[{id:'u1',turnId:'t1',atMs:0,kind:'user',text:'sleep 100'}],caughtUp:true,reset:false,partialLine:false};
+it('keeps instruction identity stable through assistant/tool output and user replay, but fences a real amendment',async()=>{
+ const f=setup();
+ try{
+  f.owner.attach('one','host1','t1');f.time(500);f.owner.tick();f.calls[0]!.finish(batch);await f.flush();
+  const initial=f.owner.snapshot('one')!;
+  f.time(5500);f.owner.tick();f.calls[1]!.finish({...batch,records:[...batch.records,
+   {id:'a1',turnId:'t1',kind:'assistant',atMs:1,text:'working'},
+   {id:'tool1',turnId:'t1',kind:'tool_result',atMs:2,text:'result'}]});await f.flush();
+  const output=f.owner.snapshot('one')!;
+  expect(output.revision).toBeGreaterThan(initial.revision);
+  expect(output.instructionFingerprint).toBe(initial.instructionFingerprint);
+  f.time(10500);f.owner.tick();f.calls[2]!.finish({...batch,records:[{...batch.records[0]!,text:'sleep 200'}]});await f.flush();
+  expect(f.owner.snapshot('one')!.instructionFingerprint).not.toBe(initial.instructionFingerprint);
+ }finally{await f.owner.close();}
+});
 it('discards an in-flight startup projection when the attached turn changes',async()=>{
  const f=setup();
  try{

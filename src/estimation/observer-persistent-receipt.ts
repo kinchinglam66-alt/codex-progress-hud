@@ -10,7 +10,7 @@ const sourceKey=z.string().min(1).max(512), sourceEpoch=z.string().max(4096).nul
 const ownerUuid=z.string().uuid(), operationId=z.string().uuid();
 export interface PersistentReceiptBinding {accountFingerprint:string;routeFingerprint:string;assetsFingerprint:string}
 export type PersistentOperationKind='eta'|'context_compression';
-const preparationStages=['session_setup','checkpoint_import','history_import','context_compression'] as const;
+const preparationStages=['session_setup','checkpoint_import','history_import','source_revalidation','input_validation','context_compression'] as const;
 export type PersistentPreparationStage=typeof preparationStages[number];
 const preparationCodes=['PREPARATION_UNKNOWN','CHECKPOINT_INVALID','CHECKPOINT_REBUILD_REQUIRED','CHECKPOINT_ACK_INVALID',
  'IMAGE_PATH_REJECTED','IMAGE_READ_FAILED','IMAGE_FORMAT_UNSUPPORTED','IMAGE_CAPACITY_EXCEEDED','NATIVE_REQUEST_TOO_LARGE',
@@ -30,7 +30,13 @@ const preparationCodes=['PREPARATION_UNKNOWN','CHECKPOINT_INVALID','CHECKPOINT_R
  'NATIVE_SNAPSHOT_CUSTODY_PROCESS_NOT_EXITED','NATIVE_SNAPSHOT_CUSTODY_REPARSE','NATIVE_SNAPSHOT_CUSTODY_REPLACED',
  'NATIVE_SOURCE_GENERATION_CHANGED','NATIVE_SOURCE_LIMIT_INVALID','NATIVE_SOURCE_REVISION_REGRESSED',
  'NATIVE_SOURCE_TURN_MISMATCH','NATIVE_STORAGE_UNAVAILABLE',
- 'SOURCE_REWRITE','SOURCE_GAP','SOURCE_INVALID','capacity_unknown','context_too_large','ABORTED'] as const;
+ 'SOURCE_REWRITE','SOURCE_GAP','SOURCE_INVALID','SOURCE_SNAPSHOT_INCOMPLETE','SOURCE_TRUNCATED','SOURCE_ACK_INVALID',
+ 'SOURCE_HISTORY_BINDING_CHANGED','GOAL_TICKET_STALE','INVALID_OBSERVER_INPUT',
+ 'SESSION_UNAVAILABLE','SESSION_SUPPLEMENT_PENDING_OR_SUBMITTED','SESSION_BATCH_CAPACITY_TOO_SMALL',
+ 'source_cancelled','source_closed','source_invalid_thread','source_unobserved','source_not_found','source_unavailable',
+ 'source_unsafe_path','source_ambiguous','source_identity_mismatch','source_limit','source_oversize','source_malformed',
+ 'source_terminal_unsupported','source_checkpoint_unsupported',
+ 'capacity_unknown','context_too_large','ABORTED'] as const;
 export function preparationErrorCode(error:unknown):typeof preparationCodes[number]{
  if(error instanceof Error){
    if(error.name==='AbortError')return 'ABORTED';

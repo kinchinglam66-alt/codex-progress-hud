@@ -546,6 +546,24 @@ function pairedSource(revision:number,onCopy:()=>void=()=>{},first=false){return
   validate:async(s:AbortSignal)=>{s.throwIfAborted();},close:async()=>{},
   openBase:async()=>{onCopy();return {kind:'native' as const,sourceThreadId:'original',sourceTurnId:'previous',sourceEpoch:1,revision,byteLength:100,path:'C:/protected/base',close:async()=>{}};}};}
 
+it.each(['source_revalidation','input_validation'] as const)('attributes post-import rejection to %s without admitting inference',async stage=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const source=pairedSource(1);let imported=false;
+  const records=source.supplement.records.bind(source.supplement);
+  source.supplement.records=async function*(s){yield* records(s);imported=true;};
+  if(stage==='source_revalidation')source.validate=async()=>{if(imported)throw Object.assign(Error('PRIVATE_SOURCE_TEXT'),{code:'GOAL_TICKET_STALE'});};
+  await expect(f.worker.prepareNativeTurnContext!(input,source,signal,'source',0,0,
+   stage==='input_validation'?()=>({activeSeconds:-1,runtime:'running',requestActiveSeconds:0}):undefined)).rejects.toThrow();
+  const raw=await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8');
+  const rows=raw.trim().split('\n').map(line=>JSON.parse(line));
+  expect(rows.find(row=>row.kind==='preparation_failure')).toMatchObject({stage,code:stage==='source_revalidation'?'GOAL_TICKET_STALE':'INVALID_OBSERVER_INPUT'});
+  expect(rows.some(row=>row.kind==='operation')).toBe(false);
+  expect(raw).not.toContain('PRIVATE_SOURCE_TEXT');
+  expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
 it('accepts an opaque route key when it differs from the native turn id',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
  try{

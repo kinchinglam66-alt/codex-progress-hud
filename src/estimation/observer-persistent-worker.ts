@@ -663,9 +663,9 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        nativeTurnPrepared=true;nativeTurnValidation=s=>timing.measure('source_validation',()=>history.validate(s),'fallback');
        const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;},policy?.checkpointOnly===true,policy?.checkpointOnly!==true),'fallback');
        ephemeralImportedBytes+=live.status().importedEncodedBytes;
-       await nativeTurnValidation(combined);check(combined);
+       preparationStage='source_revalidation';await nativeTurnValidation(combined);check(combined);
        const fresh=sample?.(),preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};
-       if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
+       preparationStage='input_validation';if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
        rememberPrepared(preparedInput,key,g);return {...imported,input:preparedInput};
       }catch(error){
        try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(error)});}catch{}
@@ -689,11 +689,11 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        const previousBytes=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes;
        const imported=await timing.measure('supplement_import',()=>importHistory(input,{snapshot:source.supplement},live,combined,key,g,value=>{preparationStage=value;},true));
        if(source.boundary.completed===null)ephemeralImportedBytes+=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes-previousBytes;
-       await nativeTurnValidation(combined);check(combined);
+       preparationStage='source_revalidation';await nativeTurnValidation(combined);check(combined);
        if(options.reuseNativeTurnSession)nativeSessionRevision=source.revision;
        const fresh=sample?.();
        const preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};
-       if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
+       preparationStage='input_validation';if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
        rememberPrepared(preparedInput,key,g);return {...imported,input:preparedInput};
       }catch(error){
        try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(error)});}catch{}
