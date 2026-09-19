@@ -7,6 +7,24 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('reports missing worker admission instead of hiding it behind pending',async()=>{
+ const f=fixture(1);f.workers[0]!.disable();const key=f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();
+  expect(f.scheduler.diagnostics(key)).toMatchObject({state:'pending',schedulingReason:'worker_unavailable',callsLastHour:0});
+  expect(f.calls).toHaveLength(0);
+ }finally{await f.scheduler.close();}
+});
+it('clears a scheduling block once the next eligible request starts',async()=>{
+ const f=fixture(1);const key=f.hook('UserPromptSubmit');
+ try{
+  f.hook('Interrupt');f.scheduler.tick();
+  expect(f.scheduler.diagnostics(key)).toMatchObject({schedulingReason:'runtime_ineligible'});
+  f.hook('UserPromptSubmit','one','second');f.scheduler.tick();
+  expect(f.scheduler.diagnostics(key).state).toBe('estimating');
+  expect(f.scheduler.diagnostics(key)).not.toHaveProperty('schedulingReason');
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
 it('journals subscribed native phases and detaches the listener after settlement',async()=>{
  const records:ObserverObservation[]=[];const f=fixture(1,6000,row=>records.push(row));
  let listener:((phase:import('../../src/estimation/request-profile.js').RequestProfilePhase)=>void)|undefined;

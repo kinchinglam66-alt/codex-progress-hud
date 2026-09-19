@@ -24,6 +24,10 @@ const admissionLabels:Record<AdmissionReason,string>={
   unsafe_unknown:'上次估时未安全结算，请在设置中恢复',local_policy:'本地估时暂受限，请查看设置中的恢复状态',
 };
 function observerLabel(observer:ObserverDiagnostics):string{
+  if(observer.state==='pending'&&observer.schedulingReason==='worker_unavailable')
+    return '估时提供方暂不可用，请查看设置中的账户与启用状态';
+  if(observer.state==='pending'&&observer.schedulingReason==='recovery_cooldown')
+    return '估时正在恢复冷却，稍后重试';
   if(observer.state==='disabled'&&observer.stopReason){
     const reasons={invalid_clock:'调度时钟异常',scheduler_exception:'调度检查异常',accounting_error:'本次记账异常'};
     return `估时已停用：${reasons[observer.stopReason]}（不等同于历史未知用量）`;

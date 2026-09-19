@@ -631,8 +631,12 @@ export class PassiveGoals {
     if(aged){
       // A same-instruction numeric snapshot can age without becoming a new goal.
       // Do not apply its relation, summary, semantic state or summary watermark.
-      if(result.estimate===null||result.relation==='unknown'||result.status==='completed'||
-        goal.runtime!=='running')return this.reject(ticket,'aged_response_invalid');
+      // Preserve the same rejection boundary, but distinguish why no snapshot
+      // can be applied. Semantic states take precedence over their null estimate.
+      if(result.relation==='unknown')return this.reject(ticket,'aged_response_unknown_relation');
+      if(result.status==='completed')return this.reject(ticket,'aged_response_completed');
+      if(result.estimate===null)return this.reject(ticket,'aged_response_no_estimate');
+      if(goal.runtime!=='running')return this.reject(ticket,'aged_response_not_running');
       goal.prediction={...result.estimate,observedActiveSeconds:captured.activeSeconds};
       delete goal.changeReason;
       goal.predictionIdentity={};

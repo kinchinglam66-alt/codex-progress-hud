@@ -11,7 +11,7 @@ import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSam
 import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
 import {decideTrigger, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
 import {createNativeRetentionPermit,type NativeRetentionPermit,type NativeRetentionState,type NativeLifecycleDiagnostic} from './native-owner-retention.js';
-import {normalizeAdmissionReason, type AdmissionReason, type ObserverContextState, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
+import {normalizeAdmissionReason, schedulingReasons, type SchedulingReason, type AdmissionReason, type ObserverContextState, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
 export type {ObserverContextState} from '../core/observer-diagnostics.js';
 import {correctPace} from './pace-correction.js';
 import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './forecast-record.js';
@@ -906,7 +906,8 @@ export class ObserverScheduler {
     const health=this.options.goals.contextHealth(key);
     const sourceHealth:NonNullable<ObserverDiagnostics['sourceHealth']>=health===undefined?'unavailable':
       health==='loading'||health==='ready'||health==='missing'?health:'error';
-    const routing={schedulerRegistered:entry!==undefined,sourceHealth};
+    const schedulingReason=schedulingReasons.includes(entry?.lastSkip as SchedulingReason)?entry!.lastSkip as SchedulingReason:undefined;
+    const routing={schedulerRegistered:entry!==undefined,sourceHealth,...(schedulingReason?{schedulingReason}:{})};
     const contextState=entry?.contextState&&entry.contextStateTurnKey===this.options.goals.currentTurnKey(key)
       ?entry.contextState:undefined;
     const quality=entry?.qualityTurnKey===this.options.goals.currentTurnKey(key)&&entry?.missingImages!==undefined?

@@ -8,6 +8,16 @@ import { CompanionHttpClient, HudClientError } from "../../src/mcp/report-client
 import {TaskStore} from '../../src/server/task-store.js';
 
 const cleanups: Array<() => Promise<void>> = [];
+it.each(['worker_unavailable','runtime_ineligible','private-error-message'])('bounds scheduling reason metadata (%s)',async schedulingReason=>{
+ const store=new TaskStore();store.apply({taskId:'task',event:{type:'turn_started'}},0,
+  {conversationKey:'chat',turnKey:'turn',isCurrentTurn:true});
+ const snapshot=store.snapshot(0);
+ const observer={state:'pending',schedulingReason,estimateAgeSeconds:null,callsLastHour:0,retryPending:false};
+ const {baseUrl,tokenPath}=await fixture((_request,response)=>json(response,200,{...snapshot,rows:[{...snapshot.rows![0],observer}]}));
+ const response=new CompanionHttpClient(baseUrl,tokenPath).status();
+ if(schedulingReason==='private-error-message')await expect(response).rejects.toBeInstanceOf(HudClientError);
+ else await expect(response).resolves.toMatchObject({rows:[{observer}]});
+});
 
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();

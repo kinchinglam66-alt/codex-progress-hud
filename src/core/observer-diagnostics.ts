@@ -23,6 +23,10 @@ export const resultRejectionReasons = [
   'source_identity_changed',
   'schema_invalid',
   'aged_response_invalid',
+  'aged_response_no_estimate',
+  'aged_response_unknown_relation',
+  'aged_response_completed',
+  'aged_response_not_running',
   'estimate_expired_on_arrival',
   'continue_without_summary',
   'replace_without_pending_relation',
@@ -36,6 +40,13 @@ export const resultRejectionReasons = [
 ] as const;
 export type ResultRejectionReason = typeof resultRejectionReasons[number];
 
+export const schedulingReasons=['invalid_clock','invalid_counter','context_missing','request_in_flight',
+  'no_new_information','no_active_progress','global_concurrency_limit','hourly_limit','runtime_ineligible',
+  'initial_delay','cooldown','event_coalescing','adaptive_interval','overdue_already_checked','retry_backoff',
+  'observer_disabled','scheduler_exception','accounting_error','setup_failed','recovery_cooldown',
+  'worker_unavailable','request_unavailable'] as const;
+export type SchedulingReason=typeof schedulingReasons[number];
+
 export const observerContextStates=['history_loading','context_preparing','context_full','context_compressed',
   'context_native','native_context_failed','estimate_timeout',
   'context_images_missing',
@@ -46,6 +57,7 @@ export type ObserverContextState=typeof observerContextStates[number];
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */
 export interface ObserverDiagnostics {
   schedulerRegistered?:boolean;
+  schedulingReason?:SchedulingReason;
   sourceHealth?:'loading'|'ready'|'error'|'missing'|'unavailable';
   missingImages?:number;
   contextState?:ObserverContextState;

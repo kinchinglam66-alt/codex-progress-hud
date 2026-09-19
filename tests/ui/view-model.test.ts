@@ -3,6 +3,13 @@ import { buildConversationViews, buildHudView, createConversationViewProjector, 
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 import type { ConversationRow } from "../../src/server/conversation-projection.js";
+it('explains unavailable worker admission without claiming a model failure',()=>{
+ const row=overdueConversation('running','pending');
+ row.observer!.schedulingReason='worker_unavailable';
+ const view=buildConversationViews([row])[0]!;
+ expect(view.diagnosticLabel).toContain('估时提供方暂不可用');
+ expect(view.diagnosticLabel).not.toContain('估时调用失败');
+});
 it('shows missing-image warning beside ETA and in diagnostics',()=>{
   const row=overdueConversation('running','ready');
   row.observer!.contextState='context_images_missing';
