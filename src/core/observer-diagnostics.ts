@@ -8,6 +8,7 @@ export const resultDiagnostics = ['unknown_response','process_error','rejected_r
 export type ResultDiagnostic = typeof resultDiagnostics[number];
 export const resultRejectionReasons = [
   'result_not_accepted',
+  'critical_event_after_snapshot',
   'ticket_missing',
   'source_epoch_changed',
   'source_epoch_unavailable',
@@ -44,8 +45,22 @@ export const schedulingReasons=['invalid_clock','invalid_counter','context_missi
   'no_new_information','no_active_progress','global_concurrency_limit','hourly_limit','runtime_ineligible',
   'initial_delay','cooldown','event_coalescing','adaptive_interval','overdue_already_checked','retry_backoff',
   'observer_disabled','scheduler_exception','accounting_error','setup_failed','recovery_cooldown',
-  'worker_unavailable','request_unavailable'] as const;
+  'worker_unavailable','request_unavailable','account_refresh_failed','worker_closing',
+  'worker_cleanup_pending','provider_unavailable','runtime_not_ready'] as const;
 export type SchedulingReason=typeof schedulingReasons[number];
+
+/** Fixed codes only: provider exceptions can contain credentials or private paths. */
+export function workerAcquisitionReason(error:unknown):SchedulingReason {
+  const code=error instanceof Error?error.message:'';
+  switch(code){
+    case 'OBSERVER_ACCOUNT_REFRESH_FAILED':return 'account_refresh_failed';
+    case 'OBSERVER_WORKER_CLOSING':case 'PROVIDER_WORKER_CLOSING':return 'worker_closing';
+    case 'OBSERVER_WORKER_CLEANUP_PENDING':return 'worker_cleanup_pending';
+    case 'PROVIDER_UNAVAILABLE':return 'provider_unavailable';
+    case 'OBSERVER_NOT_READY':return 'runtime_not_ready';
+    default:return 'worker_unavailable';
+  }
+}
 
 export const observerContextStates=['history_loading','context_preparing','context_full','context_compressed',
   'context_native','native_context_failed','estimate_timeout',
@@ -56,6 +71,10 @@ export type ObserverContextState=typeof observerContextStates[number];
 
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */
 export interface ObserverDiagnostics {
+  pendingCriticalEvents?:number;
+  reviewIntervalSeconds?:number;
+  eventCoalescingRemainingSeconds?:number;
+  snapshotEventCutoff?:number;
   schedulerRegistered?:boolean;
   schedulingReason?:SchedulingReason;
   sourceHealth?:'loading'|'ready'|'error'|'missing'|'unavailable';

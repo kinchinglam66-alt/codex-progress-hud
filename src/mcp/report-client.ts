@@ -156,6 +156,8 @@ const aggregateSnapshotSchema = z.object({
     observer:z.object({state:z.enum(['pending','history_loading','history_unavailable','estimating','insufficient_context','call_failed','setup_failed','rate_limited','admission_blocked','disabled','ready',...resultDiagnostics]),
       schedulerRegistered:z.boolean().optional(),sourceHealth:z.enum(['loading','ready','error','missing','unavailable']).optional(),
       schedulingReason:z.enum(schedulingReasons).optional(),
+      pendingCriticalEvents:z.number().int().nonnegative().optional(),reviewIntervalSeconds:z.number().finite().nonnegative().optional(),
+      eventCoalescingRemainingSeconds:z.number().finite().nonnegative().optional(),snapshotEventCutoff:z.number().int().nonnegative().optional(),
       missingImages:z.number().int().nonnegative().optional(),
       admissionReason:z.enum(admissionReasons).optional(),
       contextState:z.enum(observerContextStates).optional(),
@@ -163,6 +165,10 @@ const aggregateSnapshotSchema = z.object({
       stopReason:z.enum(['invalid_clock','scheduler_exception','accounting_error']).optional(),stoppedAt:z.number().int().nonnegative().optional(),
       estimateAgeSeconds:z.number().finite().nonnegative().nullable(),callsLastHour:z.number().int().nonnegative(),retryPending:z.boolean()}).strict().optional(),
     goal: z.object({
+      progressState:z.object({scope:z.string().max(128),observedEventSequence:z.number().int().nonnegative(),milestone:z.object({
+        id:z.string().max(128),definition:z.string().max(512),judgment:z.enum(['in_progress','observed_complete','inferred_complete','unknown']),
+        prediction:z.object({remainingSeconds:z.number().finite().min(0).max(31536000),errorPercent:z.number().finite().min(0).max(1000),observedActiveSeconds:z.number().finite().min(0).max(31536000)}).strict().nullable(),
+      }).strict().nullable()}).strict().optional(),
       generation: z.number().int().nonnegative(),
       estimateRevision: z.number().int().nonnegative(),
       sampledAtMs: z.number().int().nonnegative(),

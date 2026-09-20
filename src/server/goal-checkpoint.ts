@@ -442,3 +442,20 @@ export function createGoalCheckpointRepository(options: {
 
   return { load, save };
 }
+
+/** Milestone sidecar shares the exact owner, single-link, bounded and atomic I/O guards.
+ * Kept separate from the v1 goal document so older installations can still roll back. */
+export function createMilestoneCheckpointStorage(options:{directory:string;isOwner:()=>Promise<boolean>}) {
+  const directory=resolve(options.directory),path=join(directory,'milestone-checkpoint.json');
+  let pending:Promise<void>=Promise.resolve();
+  return {
+    load:()=>withCheckpointLock(directory,async()=>{
+      const target=await regularTarget(path);return target===null?null:readBounded(path,target);
+    }),
+    save:(serialized:string)=>{
+      if(Buffer.byteLength(serialized)>MAX_BYTES)return Promise.reject(checkpointError('milestone file is too large'));
+      const operation=pending.then(()=>withCheckpointLock(directory,()=>writeAtomically(directory,path,serialized,options.isOwner)));
+      pending=operation.catch(()=>undefined);return operation;
+    },
+  };
+}

@@ -36,12 +36,12 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...base,contentReady:false})).toBe(false);
     expect(canRequest(base)).toBe(true);
   });
-  it.each([[1800,300],[1801,600],[7200,600],[7201,900],[28800,900],[28801,1800]])(
+  it.each([[600,60],[601,120],[1800,120],[1801,300],[28800,300],[28801,300]])(
     'checks remaining %s at interval %s', (remainingSeconds,delay)=>{
       expect(canRequest({...base,remainingSeconds,lastRequestSeconds:15,elapsedSeconds:15+delay-1})).toBe(false);
       expect(canRequest({...base,remainingSeconds,lastRequestSeconds:15,elapsedSeconds:15+delay})).toBe(true);
     });
-  it.each([[1,300],[2,600],[3,1800],[8,1800]])('backs off after %s unknown results',(unknownResults,delay)=>{
+  it.each([[1,120],[2,120],[3,120],[8,120]])('reviews unknown results every 120 seconds (%s)',(unknownResults,delay)=>{
     const c={...base,remainingSeconds:null,unknownResults,lastRequestSeconds:15};
     expect(canRequest({...c,elapsedSeconds:15+delay-1})).toBe(false);
     expect(canRequest({...c,elapsedSeconds:15+delay})).toBe(true);
@@ -64,11 +64,12 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(decideTrigger({...c,activeSeconds:74.999})).toMatchObject({blockReason:'cooldown'});
     expect(decideTrigger({...c,activeSeconds:75})).toMatchObject({reason:'bootstrap_recovery',eligibleActiveSeconds:75});
   });
-  it('coalesces events without bypassing cooldown',()=>{
+  it('coalesces events for five seconds while retaining minimum fifteen-second spacing',()=>{
     const c={...base,lastRequestSeconds:15,remainingSeconds:50000,eventAtSeconds:70};
-    expect(canRequest({...c,elapsedSeconds:79})).toBe(false);
-    expect(canRequest({...c,elapsedSeconds:80})).toBe(true);
-    expect(canRequest({...c,eventAtSeconds:20,elapsedSeconds:74})).toBe(false);
+    expect(canRequest({...c,elapsedSeconds:74})).toBe(false);
+    expect(canRequest({...c,elapsedSeconds:75})).toBe(true);
+    expect(canRequest({...c,eventAtSeconds:20,elapsedSeconds:29})).toBe(false);
+    expect(canRequest({...c,eventAtSeconds:20,elapsedSeconds:30})).toBe(true);
     expect(canRequest({...c,eventAtSeconds:10,elapsedSeconds:80})).toBe(false);
   });
   it('never calls merely because time passed',()=>{
@@ -110,12 +111,12 @@ describe('long-task request eligibility (not spend authorization)',()=>{
     expect(canRequest({...base,unknownResults:0.5})).toBe(false);
   });
   it('selects a periodic trigger from active progress and exposes its active anchor',()=>{
-    const c={...base,elapsedSeconds:314,lastRequestSeconds:15,activeSeconds:314,
+    const c={...base,elapsedSeconds:134,lastRequestSeconds:15,activeSeconds:134,
       lastRequestActiveSeconds:15,hasNewInformation:false};
     expect(decideTrigger(c)).toMatchObject({reason:null,blockReason:'adaptive_interval',
-      eligibleActiveSeconds:315});
-    expect(decideTrigger({...c,activeSeconds:315})).toMatchObject({reason:'periodic',
-      blockReason:null,eligibleActiveSeconds:315});
+      eligibleActiveSeconds:135});
+    expect(decideTrigger({...c,activeSeconds:135})).toMatchObject({reason:'periodic',
+      blockReason:null,eligibleActiveSeconds:135});
   });
   it('does not treat wall time during a pause as active progress',()=>{
     const c={...base,elapsedSeconds:3615,lastRequestSeconds:15,activeSeconds:15,

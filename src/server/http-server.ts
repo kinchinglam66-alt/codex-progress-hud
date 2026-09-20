@@ -10,10 +10,11 @@ import { parseHookEnvelope, type HookEnvelope } from "../hooks/schema.js";
 
 export type ObserverHookEvent = 'prompt'|'activity'|'final'|'failure';
 
-export function observerEventForHook(envelope: Pick<HookEnvelope, 'hook'|'toolExitCode'>): ObserverHookEvent {
+export function observerEventForHook(envelope: Pick<HookEnvelope, 'hook'|'toolExitCode'|'toolFailure'>): ObserverHookEvent {
   if (envelope.hook === 'UserPromptSubmit') return 'prompt';
   if (envelope.hook === 'Stop') return 'final';
-  if (envelope.hook === 'PostToolUse' && envelope.toolExitCode !== undefined && Number.isSafeInteger(envelope.toolExitCode) && envelope.toolExitCode !== 0) return 'failure';
+  // An exit code alone may mean e.g. grep/rg found no matches, not failed work.
+  if (envelope.hook === 'PostToolUse' && envelope.toolFailure===true) return 'failure';
   return 'activity';
 }
 import { PROTOCOL_VERSION, type HudCapabilities, type HudHealth } from "../lifecycle/types.js";
@@ -28,10 +29,12 @@ import { createConversationNames } from './conversation-names.js';
 import { PassiveContextStore } from './passive-context-store.js';
 import { PassiveGoals } from './passive-goals.js';
 import { ObserverScheduler, type ObserverWorker, type ObserverWorkerSource, type ObserverObservation } from '../estimation/observer-scheduler.js';
+import {parseEstimateTimeoutMs} from '../estimation/request-timeout.js';
 import {ScopedSnapshots} from './scoped-snapshots.js';
 import {createLocalSessionReader} from '../observer/local-session-reader.js';
 import {createConversationSource} from '../observer/conversation-source.js';
 import {createGoalCheckpointRepository,type GoalCheckpointRepository} from './goal-checkpoint.js';
+import {createMilestoneCheckpointRepository} from './milestone-checkpoint.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const REQUEST_DEADLINE_HEADER = "x-codex-progress-hud-deadline-ms";
@@ -374,6 +377,7 @@ export function createProgressServer(options: ProgressServerOptions) {
     observerForConversation:key=>passiveObserver?.diagnostics(key) });
   const scopedSnapshots = new ScopedSnapshots(store);
   const passiveObserver = options.observerWorkers === undefined && workerSource === undefined ? undefined : new ObserverScheduler({
+    requestTimeoutMs:parseEstimateTimeoutMs(process.env.CODEX_PROGRESS_HUD_ESTIMATE_TIMEOUT_MS),
     contexts: passiveContexts, goals: passiveGoals, ...(workerSource ? {workerSource} : {workers: options.observerWorkers!}), now: goalNow,
     ...(options.onObserverObservation?{onObservation:options.onObserverObservation}:{}),
     ...(options.residualResearch?{research:options.residualResearch}:{}),
@@ -392,6 +396,8 @@ export function createProgressServer(options: ProgressServerOptions) {
   let currentAddress: ProgressServerAddress | undefined;
   let shuttingDown = false;
   let checkpointRepository=options.goalCheckpointRepository;
+  let milestoneRepository:ReturnType<typeof createMilestoneCheckpointRepository>|undefined;
+  let milestonePending:ReturnType<PassiveGoals['milestoneCheckpoint']>=[];
   let checkpointReady=false;
   let checkpointState:'disabled'|'loading'|'ready'|'degraded'='disabled';
   let checkpointTimer:ReturnType<typeof setTimeout>|undefined;
@@ -413,13 +419,15 @@ export function createProgressServer(options: ProgressServerOptions) {
     const repository=checkpointRepository;
     // At most one write and one latest snapshot: slow storage cannot grow a backlog.
     checkpointPending=records;
+    milestonePending=passiveGoals.milestoneCheckpoint(now());
     if(checkpointWriting)return checkpointTail;
     checkpointWriting=true;
     checkpointTail=Promise.resolve().then(async()=>{
       try{
         while(checkpointPending!==undefined){
           const next=checkpointPending;checkpointPending=undefined;
-          try{await repository.save(next);checkpointStatus('ready');}
+          const nextMilestones=milestonePending;
+          try{await repository.save(next);await milestoneRepository?.save(nextMilestones);checkpointStatus('ready');}
           catch{checkpointStatus('degraded','write_failed');}
         }
       }finally{checkpointWriting=false;}
@@ -1197,10 +1205,15 @@ export function createProgressServer(options: ProgressServerOptions) {
           checkpointRepository=createGoalCheckpointRepository({directory:dirname(options.tokenPath),
             sourceIdentity:createHmac('sha256',sourceToken!).update(process.platform==='win32'?root.toLowerCase():root).digest('hex'),
             isOwner:options.isGoalCheckpointOwner,now});
+          milestoneRepository=createMilestoneCheckpointRepository({directory:dirname(options.tokenPath),
+            sourceIdentity:createHmac('sha256',sourceToken!).update(process.platform==='win32'?root.toLowerCase():root).digest('hex'),
+            isOwner:options.isGoalCheckpointOwner,now});
         }
         if(checkpointRepository){
           checkpointState='loading';
           try{passiveGoals.restoreCheckpoint(await checkpointRepository.load(),now());checkpointState='ready';}
+          catch{checkpointState='degraded';checkpointError='read_failed';}
+          try{if(milestoneRepository)passiveGoals.restoreMilestoneCheckpoint(await milestoneRepository.load());}
           catch{checkpointState='degraded';checkpointError='read_failed';}
           checkpointReady=true;
         }

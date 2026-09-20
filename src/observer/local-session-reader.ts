@@ -717,8 +717,13 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     const raw=item as unknown as Record<string,unknown>;
     const identityFields=[payload,raw];
     const explicitTurns=identityFields.flatMap(fields=>['turn_id','turnId'].filter(key=>Object.hasOwn(fields,key)).map(key=>fields[key]));
-    const valid=raw.kind==='clock.sleep'&&stringValue(raw.id)!==undefined&&
-      typeof raw.durationMs==='number'&&Number.isFinite(raw.durationMs)&&raw.durationMs>=0&&
+    const action=raw.action;
+    const knownShape=raw.kind==='clock.sleep'
+      ? typeof raw.durationMs==='number'&&Number.isFinite(raw.durationMs)&&raw.durationMs>=0
+      : raw.kind==='web.search'&&typeof raw.query==='string'&&Array.isArray(raw.results)&&
+        action!==null&&typeof action==='object'&&!Array.isArray(action)&&
+        stringValue((action as Record<string,unknown>).type)!==undefined;
+    const valid=knownShape&&stringValue(raw.id)!==undefined&&
       identityFields.every(fields=>['thread_id','threadId'].every(key=>!Object.hasOwn(fields,key)||fields[key]===context.threadId)&&
         ['started_at_ms','completed_at_ms'].every(key=>!Object.hasOwn(fields,key)||
           (typeof fields[key]==='number'&&Number.isFinite(fields[key])&&fields[key]>=0)))&&
@@ -726,7 +731,7 @@ function normalizeEnvelope(context: ParseContext, envelope: Envelope): Conversat
     if(!valid){context.gaps.add('unsupported_payload');return [];}
     // Preserve the full structured envelope as data, never a lifecycle signal.
     const completed=eventType==='item_completed';
-    return withSourceTurn(normalizeTool(context,{...raw,name:'codex:Extension:clock.sleep',
+    return withSourceTurn(normalizeTool(context,{...raw,name:`codex:Extension:${raw.kind}`,
       ...(completed?{output:envelope}:{input:envelope})},atMs,context.offset,completed));
   }
   if (context.options.preserveText && itemType === 'McpToolCall') {

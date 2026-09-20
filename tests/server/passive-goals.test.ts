@@ -32,6 +32,49 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it('keeps milestone state across pause/resume, transfers it explicitly and resets on a new turn',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    const nextMilestone={definition:'检查测试',completionCriterion:'semantic',criterion:'结果已分析',operationRef:null,estimate:{remainingSeconds:100,errorPercent:50}};
+    expect(f.goals.settle(first.ticket,{...answer(),nextMilestone,progressReview:null},2000)).toBe(true);
+    const before=f.goals.view(session,2000)!.progressState!.milestone!;
+    const turn=f.contexts.read(session)!.entries[0]!.turnKey;
+    f.goals.runtime(session,turn,'paused',10000);f.goals.runtime(session,turn,'running',100000);
+    const second=f.request(101000);expect(second.input.progressState?.milestone?.id).toBe(before.id);
+    expect(second.input.activeSeconds).toBe(11);expect(second.input.progressState?.milestone?.prediction?.observedActiveSeconds).toBe(1);
+    f.goals.settle(second.ticket,answer('continue'),101000);
+    f.hook('UserPromptSubmit',102000,'two');expect(f.goals.view(session,102000)?.progressState).toBeUndefined();
+    const third=f.request(103000);expect(third.input.progressState?.milestone).toBeNull();
+  });
+  it('rejects old milestone results when native completion appears only at settlement',()=>{
+    let revision=1;
+    const user={kind:'user' as const,text:'run tests',truncated:false,event:{kind:'user' as const,ordinal:0,atMs:0}};
+    const start={kind:'tool' as const,text:'PRIVATE command',truncated:false,event:{kind:'tool_start' as const,ordinal:7,pairOrdinal:0,atMs:1000}};
+    const end={kind:'tool' as const,text:'failed tests',truncated:false,event:{kind:'tool_result' as const,ordinal:9,pairOrdinal:0,atMs:4000}};
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:revision===1?[user,start]:[user,start,end]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    const operationRef=first.input.progressState!.operations[0]!.operationRef;
+    const nextMilestone={definition:'tests end',completionCriterion:'operation_end',criterion:'command ends',operationRef,estimate:{remainingSeconds:100,errorPercent:50}};
+    expect(f.goals.settle(first.ticket,{...answer(),nextMilestone},2000)).toBe(true);
+    const second=f.request(3000);revision=2;
+    expect(f.goals.settle(second.ticket,{...answer('continue'),nextMilestone},5000)).toBe(false);
+    expect(f.goals.rejectionReason(second.ticket)).toBe('critical_event_after_snapshot');
+    expect(f.goals.view(session,5000)?.progressState?.milestone?.judgment).toBe('observed_complete');
+    expect(JSON.stringify(f.goals.view(session,5000))).not.toContain('PRIVATE command');
+  });
+  it('consumes locally proven milestone evidence at an exact preparation snapshot',()=>{
+    let revision=1;
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:[{kind:'user',text:'run tests',truncated:false}]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0);const request=f.request(1000);revision=2;
+    expect(f.goals.progressAtSnapshot(request.ticket,request.input,1,2000)).toBe(request.input);
+    const updated=f.goals.progressAtSnapshot(request.ticket,request.input,2,2000);expect(updated).not.toBe(request.input);
+    expect(updated.activeSeconds).toBe(2);
+    expect(f.goals.settle(request.ticket,{...answer(),nextMilestone:{definition:'stage',completionCriterion:'semantic',criterion:'observed',operationRef:null,estimate:{remainingSeconds:200,errorPercent:30}}},3000)).toBe(true);
+    const view=f.goals.view(session,3000);
+    expect(view?.prediction?.observedActiveSeconds).toBe(2);
+    expect(view?.progressState?.milestone?.prediction?.observedActiveSeconds).toBe(2);
+  });
   it('rejects a numeric estimate that expired during preparation or inference without moving its anchor',()=>{
     const f=fixture(),session=f.hook('UserPromptSubmit',0),request=f.request(1000);
     const estimate={...answer(),estimate:{remainingSeconds:60,errorPercent:30}};

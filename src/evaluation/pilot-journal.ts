@@ -1,6 +1,7 @@
 import type {ObserverObservation} from '../estimation/observer-scheduler.js';
 import {projectRequestProfile} from '../estimation/request-profile.js';
 import {observerCallStages} from '../estimation/observer-provider.js';
+import {milestoneTelemetrySchema} from '../estimation/progress-state.js';
 import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
@@ -25,23 +26,35 @@ function contextMetrics(value:unknown){
 
 /** Local research metadata only. Bounded asynchronous I/O never gates model work.
  * Missing terminal summary means an unclean recording shutdown, not completion. */
-export function createPilotJournal(directory:string){
+export function createPilotJournal(directory:string,options:{now?:()=>number;openFile?:typeof open}={}){
+  const now=options.now??Date.now,openFile=options.openFile??open;
   const session=randomUUID(),salt=randomUUID();
   let file:FileHandle|undefined,tail=Promise.resolve(),closing:Promise<void>|undefined;
   let written=0,dropped=0,failed=false,pending=0,bytes=0;
+  let failures=0,retryAt=0,created=false;
+  let lastError:'EACCES'|'EPERM'|'ENOSPC'|'EIO'|'EBUSY'|'EEXIST'|'unknown'|null=null;
   const pendingRequests=new Set<number>();
-  const status=()=>({written,dropped,failed});
+  const status=()=>({written,dropped,failed,failures,lastError,retryAt:failed&&failures<=3&&lastError!=='EEXIST'?retryAt:null});
   async function handle(){
-    if(!file){await mkdir(directory,{recursive:true});file=await open(resolve(directory,`pilot-${session}.jsonl`),'wx',0o600);}
+    if(!file){await mkdir(directory,{recursive:true});file=await openFile(resolve(directory,`pilot-${session}.jsonl`),created?'a':'wx',0o600);created=true;}
     return file;
   }
+  async function fail(error:unknown){
+    failed=true;failures++;retryAt=now()+30_000;dropped++;
+    const code=(error as NodeJS.ErrnoException|null)?.code;
+    lastError=['EACCES','EPERM','ENOSPC','EIO','EBUSY','EEXIST'].includes(code??'')?code as Exclude<typeof lastError,null|'unknown'>:'unknown';
+    const previous=file;file=undefined;await previous?.close().catch(()=>undefined);
+  }
+  const canRetry=()=>failed&&failures<=3&&lastError!=='EEXIST'&&now()>=retryAt;
   return {
     record(value:ObserverObservation):void {
-      if(closing || failed || pending>=128){dropped++;return;}
+      if(closing || (failed&&!canRetry()) || pending>=128){dropped++;return;}
       let forecast:ReturnType<typeof makeForecastRecord>|undefined;
+      const milestone=milestoneTelemetrySchema.safeParse(value.milestone);
       try {if(value.forecast)forecast=makeForecastRecord(value.forecast);} catch { /* Invalid research metadata is omitted. */ }
       // Explicit field projection prevents accidental future context/identity logging.
       const row={schemaVersion:1,session,recordedAt:Date.now(),kind:value.kind,at:value.at,
+        ...(milestone.success?{milestone:milestone.data}:{}),eventCutoff:activeAnchor(value.eventCutoff),pendingCriticalEvents:activeAnchor(value.pendingCriticalEvents),
         key:createHmac('sha256',salt).update(value.key).digest('hex'),generation:value.generation,
         activeSeconds:value.activeSeconds,activeTimeKnown:value.activeTimeKnown,runtime:value.runtime,version:value.version,
         timingUncertain:typeof value.timingUncertain==='boolean'?value.timingUncertain:undefined,
@@ -78,11 +91,21 @@ export function createPilotJournal(directory:string){
       }
       bytes+=size;pending++;
       tail=tail.then(async()=>{
-        if(failed){dropped++;return;}
-        try{await (await handle()).writeFile(line);written++;}catch{failed=true;dropped++;}
+        if(failed&&!canRetry()){dropped++;return;}
+        try{
+          const target=await handle();
+          if(failed){
+            // Preserve any partial failed line. A leading newline separates it
+            // from the explicit gap; never rewrite history or replay a result.
+            await target.writeFile('\n'+JSON.stringify({schemaVersion:1,session,kind:'journal_gap',recordedAt:now(),failures,dropped,lastError})+'\n');
+            failed=false;
+          }
+          await target.writeFile(line);written++;
+        }catch(error){await fail(error);}
       }).finally(()=>{pending--;});
     },
     status,
+    flush():Promise<void>{return tail;},
     close():Promise<void>{
       if(closing)return closing;
       closing=tail.then(async()=>{

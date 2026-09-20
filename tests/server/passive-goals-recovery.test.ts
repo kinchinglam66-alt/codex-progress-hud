@@ -31,6 +31,21 @@ function seeded() {
 }
 
 describe('same native turn restart recovery',()=>{
+  it.each([false,true])('restores milestone only when checkpoint revision matches (%s mismatch)',mismatch=>{
+    const before=seeded(),after=fixture(),key=before.event.sessionKey;
+    const next=before.goals.request(key,1000)!;
+    expect(before.goals.settle(next.ticket,{...answer,nextMilestone:{definition:'stage',criterion:'stage evidence',completionCriterion:'semantic',operationRef:null,estimate:{remainingSeconds:600,errorPercent:50}}},2000)).toBe(true);
+    before.goals.runtime(key,before.event.turnKey!,'paused',3000);before.goals.runtime(key,before.event.turnKey!,'running',9000);
+    const checkpoints=before.goals.checkpoint(10000,wall),milestones=before.goals.milestoneCheckpoint(wall);
+    expect(milestones).toHaveLength(1);if(mismatch)milestones[0]!.estimateRevision++;
+    after.goals.restoreCheckpoint(checkpoints,wall+600000);after.goals.restoreMilestoneCheckpoint(milestones);
+    after.goals.observe({...before.event,receivedAt:10},true,10);
+    expect(after.goals.view(key,10)?.progressState).toBeUndefined();
+    after.goals.reconcileSource(key,10);
+    expect(after.goals.view(key,10)?.activeSeconds).toBe(4);
+    if(mismatch)expect(after.goals.view(key,10)?.progressState).toBeUndefined();
+    else expect(after.goals.view(key,10)?.progressState?.milestone?.definition).toBe('stage');
+  });
   it.each([undefined,wall-1,Number.NaN,Number.POSITIVE_INFINITY])('does not invent a recovery gap from an invalid wall clock %s',reloadWall=>{
     const before=seeded(),after=fixture();
     after.goals.restoreCheckpoint(before.goals.checkpoint(100_000,wall),reloadWall);

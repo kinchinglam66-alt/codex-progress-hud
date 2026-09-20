@@ -10,8 +10,10 @@ export function defaultDataDirectory(environment: NodeJS.ProcessEnv = process.en
   if (environment.CODEX_PROGRESS_HUD_DATA_DIR) {
     return environment.CODEX_PROGRESS_HUD_DATA_DIR;
   }
-  if (process.platform === "win32" && environment.APPDATA) {
-    return join(environment.APPDATA, "codex-progress-hud");
+  if (process.platform === "win32") {
+    // AppData is virtualized for children of an MSIX host. Use a per-user
+    // location outside that overlay so Explorer, MCP and hooks share state.
+    return join(environment.USERPROFILE || homedir(), ".codex-progress-hud");
   }
   if (environment.XDG_CONFIG_HOME) {
     return join(environment.XDG_CONFIG_HOME, "codex-progress-hud");

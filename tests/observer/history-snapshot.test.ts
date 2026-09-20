@@ -214,6 +214,25 @@ describe("source-backed history snapshots", () => {
     } finally {await snapshot.close();await reader.close();}
   });
 
+  it.each(['search','openPage'])("preserves native web extension %s as quoted tool data", async actionType => {
+    const payload={type:'item_completed',thread_id:THREAD,turn_id:'turn-1',item:{
+      type:'Extension',kind:'web.search',id:'web-1',query:'fixture query',
+      action:{type:actionType,url:'https://example.test/docs'},
+      results:[{title:'fixture',text:'complete result',extra:{retained:true}}]
+    }};
+    const f=await fixture(meta()+checkpoint('web')+line('event_msg',payload));
+    const reader=createLocalSessionReader({root:f.root});
+    const snapshot=await reader.snapshot(THREAD,signal());
+    try {
+      const records=[];for await(const item of snapshot.records(signal()))records.push(item.record);
+      expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+      const record=records.find(r=>r.toolName==='codex:Extension:web.search');
+      expect(record).toMatchObject({kind:'tool_result',sourceTurnId:'turn-1'});
+      expect(JSON.parse(record!.text!).payload).toEqual(payload);
+      expect(record!.runtime).toBeUndefined();
+    } finally {await snapshot.close();await reader.close();}
+  });
+
   it("does not accept a source-supplied conversation scope on an unattributed message", async () => {
     const f=await fixture(meta()+checkpoint('scope')+line('response_item',{
       type:'message',role:'user',id:'unattributed',sourceScope:'conversation',content:[{type:'input_text',text:'retain the gap'}]
@@ -247,6 +266,10 @@ describe("source-backed history snapshots", () => {
     {type:'item_completed',turn_id:'a',turnId:'b',item:{type:'ContextCompaction',id:'c'}},
     {type:'item_completed',started_at_ms:{content:'must not disappear'},item:{type:'ContextCompaction',id:'c'}},
     {type:'new_unknown_event',text:'future content'},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'web.search',id:'web',query:'q',action:{type:'search'},results:null}},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'web.search',id:'web',query:'q',action:null,results:[]}},
+    {type:'item_completed',thread_id:'foreign',turn_id:'turn-1',item:{type:'Extension',kind:'web.search',id:'web',query:'q',action:{type:'search'},results:[]}},
+    {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'web.search',id:'web',query:'q',action:{type:'search'},results:[],turnId:'other'}},
     {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:-1}},
     {type:'item_completed',turn_id:'turn-1',item:{type:'Extension',kind:'unknown.extension',id:'bad',durationMs:1}},
     {type:'item_completed',thread_id:'foreign',turn_id:'turn-1',item:{type:'Extension',kind:'clock.sleep',id:'bad',durationMs:1}},

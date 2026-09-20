@@ -1,8 +1,61 @@
 import {it,expect} from 'vitest';
-import {mkdtemp,readFile,readdir,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,readdir,rm,open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
+
+it('recovers a transient open failure with an explicit gap and bounded retries',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-retry-'));
+  let clock=0,attempts=0;
+  const journal=createPilotJournal(directory,{now:()=>clock,openFile:async(...args)=>{
+    if(attempts++===0)throw Object.assign(Error('PRIVATE'),{code:'EBUSY'});
+    return open(...args);
+  }});
+  const row={kind:'runtime' as const,at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1};
+  try{
+    journal.record(row);await journal.flush();
+    expect(journal.status()).toMatchObject({failed:true,lastError:'EBUSY',failures:1});
+    journal.record(row);await journal.flush();expect(attempts).toBe(1);
+    clock=30000;journal.record(row);await journal.flush();await journal.close();
+    const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+    expect(raw).not.toContain('PRIVATE');
+    expect(raw.trim().split('\n').map(x=>JSON.parse(x).kind)).toEqual(['journal_gap','runtime','journal_summary']);
+    expect(journal.status()).toMatchObject({failed:false,failures:1,dropped:2,written:1});
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('stops retrying persistent failures without creating an unbounded retry loop',async()=>{
+  let clock=0,attempts=0;
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-fail-'));
+  const journal=createPilotJournal(directory,{now:()=>clock,openFile:async()=>{attempts++;throw Object.assign(Error('PRIVATE'),{code:'ENOSPC'});}});
+  try{
+    for(let i=0;i<10;i++){clock=i*30000;journal.record({kind:'runtime',at:clock,key:'x',generation:1,activeSeconds:1,runtime:'running',version:1});await journal.flush();}
+    expect(attempts).toBe(4);expect(journal.status()).toMatchObject({failed:true,failures:4,retryAt:null,lastError:'ENOSPC'});
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('preserves a partial write and marks the gap without replaying the failed record',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-partial-'));
+  let clock=0,first=true;
+  const journal=createPilotJournal(directory,{now:()=>clock,openFile:async(...args)=>{
+    const handle=await open(...args);
+    if(first){first=false;const write=handle.writeFile.bind(handle);
+      handle.writeFile=async()=>{await write('{"partial":');throw Object.assign(Error('PRIVATE'),{code:'EIO'});};
+    }
+    return handle;
+  }});
+  try{
+    const row={kind:'runtime' as const,at:1,key:'x',generation:1,activeSeconds:1,runtime:'running',version:1};
+    journal.record(row);await journal.flush();clock=30000;
+    journal.record({...row,at:2});await journal.flush();await journal.close();
+    const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+    expect(raw.startsWith('{"partial":\n')).toBe(true);
+    const rows=raw.trim().split('\n').slice(1).map(line=>JSON.parse(line));
+    expect(rows.map(row=>row.kind)).toEqual(['journal_gap','runtime','journal_summary']);
+    expect(rows[1].at).toBe(2);expect(rows[0].lastError).toBe('EIO');
+    expect(journal.status()).toMatchObject({written:1,dropped:1,failures:1,failed:false});
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
 
 it('persists request phase measurements without leaking injected context',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-profile-'));

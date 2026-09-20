@@ -6,7 +6,7 @@ export function createConversationRenderer(container: HTMLElement) {
   const entries = new Map<string, {
     root: HTMLElement; title: HTMLElement; status: HTMLElement;
     bar: HTMLElement; fill: HTMLElement; percent: HTMLElement; eta: HTMLElement;
-    freshness:HTMLElement;details:HTMLDetailsElement;diagnostic:HTMLElement;
+    freshness:HTMLElement;milestone:HTMLElement;details:HTMLDetailsElement;diagnostic:HTMLElement;
   }>();
   return (views: readonly ConversationView[]): void => {
     const keys = new Set(views.map(view => view.key));
@@ -38,11 +38,12 @@ export function createConversationRenderer(container: HTMLElement) {
         const eta = document.createElement("p");
         eta.className = "eta";
         const freshness=document.createElement('p');freshness.className='estimate-freshness';
+        const milestone=document.createElement('p');milestone.className='milestone-eta';
         const details=document.createElement('details');details.className='observer-diagnostics';
         const summary=document.createElement('summary');summary.textContent='估时诊断';
         const diagnostic=document.createElement('p');details.append(summary,diagnostic);
-        root.append(title, status, progress, eta, freshness, details);
-        entry = { root, title, status, bar, fill, percent, eta, freshness, details, diagnostic };
+        root.append(title, status, progress, eta, milestone, freshness, details);
+        entry = { root, title, status, bar, fill, percent, eta, milestone, freshness, details, diagnostic };
         entries.set(view.key, entry);
       }
       entry.root.dataset.tone = view.tone;
@@ -57,6 +58,8 @@ export function createConversationRenderer(container: HTMLElement) {
       entry.percent.textContent = view.progressPercent === null ? "" :
         (view.progressLabel === '预估进度' ? '预估 ' : '') + String(view.progressPercent) + "%";
       entry.eta.textContent = view.etaLabel;
+      entry.milestone.textContent=view.milestoneLabel??'';
+      entry.milestone.hidden=!view.milestoneLabel;
       entry.freshness.textContent=view.freshnessLabel??'';
       entry.freshness.hidden=!view.freshnessLabel;
       entry.details.hidden=!view.diagnosticLabel;

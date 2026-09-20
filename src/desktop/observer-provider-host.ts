@@ -27,6 +27,8 @@ const apiDraft = z.object({selected: z.literal('api'), contextCapacity:configure
 const providerDraft = z.union([z.object({selected: z.literal('subscription'), api: z.null(),contextCapacity:configuredContextCapacitySchema.optional()}).strict(), apiDraft]);
 
 export interface ProviderWorkerOwner extends ProviderOwner {
+  /** Metadata from the account attestation performed by this owner's startup. */
+  startupAccount?: ProviderAccountMetadata;
   workers: readonly ObserverWorker[];
   workerSource?: ObserverWorkerSource;
   check?(signal: AbortSignal): Promise<{ok: boolean; message: string}>;
@@ -73,6 +75,8 @@ export interface ProviderSettingsHost {
 }
 
 export interface ObserverProviderHostOptions {
+  /** Desktop subscription owner performs startup attestation; no UI evidence is reused. */
+  subscriptionStartupInspection?: 'owner';
   followMainAccount?:boolean;
   dataDirectory: string;
   consentProtection: ConsentProtection;
@@ -381,7 +385,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     {
       const combined = AbortSignal.any([signal, controller.signal]);
       try {
-        if (active.selected === 'subscription') await readAccount(combined);
+        if (active.selected === 'subscription'&&options.subscriptionStartupInspection!=='owner') await readAccount(combined);
         if (active.selected === 'api') {
           await apiConsentStore.read();
           if (!active.api || !await keyConfigured(active) || !apiConsentStore.matches(await apiConsentScope(active.api))) return;
@@ -389,10 +393,22 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         const owner = await selection.select(active, combined).then(() => selection.currentOwner());
         combined.throwIfAborted();
         if (owner === null) throw fixedFailure();
+        if(active.selected==='subscription'&&options.subscriptionStartupInspection==='owner'){
+          const metadata=(owner as ProviderWorkerOwner).startupAccount;
+          if(!metadata||!Number.isFinite(metadata.observedAt)||!Number.isFinite(metadata.expiresAt)||metadata.expiresAt<=(options.now??Date.now)())throw fixedFailure('OBSERVER_STARTUP_ACCOUNT_UNAVAILABLE');
+          account={...metadata};accountStatus='ready';accountDiagnostic=undefined;
+        }
         current = owner as ProviderWorkerOwner;
         setDispatchGeneration(++generation);
         state = 'ready';
-      } catch { current = null; state = 'inactive'; setDispatchGeneration(++generation); await drainSelection(); }
+      } catch(error) {
+        if(active.selected==='subscription'&&options.subscriptionStartupInspection==='owner'){
+          account=null;
+          accountDiagnostic=error instanceof AccountInspectionFailure?error.diagnostic:undefined;
+          accountStatus=error instanceof Error&&error.message==='OBSERVER_LOGIN_REQUIRED'?'signed_out':'unavailable';
+        }
+        current = null; state = 'inactive'; setDispatchGeneration(++generation); await drainSelection();
+      }
     }
     } finally { releaseAction(token); }
   }

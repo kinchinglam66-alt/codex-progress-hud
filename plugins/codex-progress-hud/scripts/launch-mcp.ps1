@@ -6,10 +6,12 @@ function Fail-Launcher([int] $Code, [string] $Message) {
 }
 
 try {
-  if ([string]::IsNullOrWhiteSpace($env:APPDATA)) {
+  if ([string]::IsNullOrWhiteSpace($env:USERPROFILE) -and [string]::IsNullOrWhiteSpace($env:CODEX_PROGRESS_HUD_DATA_DIR)) {
     Fail-Launcher 2 "COMPANION_NOT_INSTALLED: Install Codex Progress HUD and retry."
   }
-  $manifestPath = Join-Path $env:APPDATA "codex-progress-hud\install.json"
+  $dataDirectory = if ($env:CODEX_PROGRESS_HUD_DATA_DIR) { $env:CODEX_PROGRESS_HUD_DATA_DIR } else { Join-Path $env:USERPROFILE '.codex-progress-hud' }
+  if (-not [IO.Path]::IsPathRooted($dataDirectory)) { throw 'invalid data directory' }
+  $manifestPath = Join-Path $dataDirectory 'install.json'
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     Fail-Launcher 2 "COMPANION_NOT_INSTALLED: Install Codex Progress HUD and retry."
   }

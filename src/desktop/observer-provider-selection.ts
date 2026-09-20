@@ -3,6 +3,8 @@ import type { ProviderConfig } from './observer-provider-config.js';
 export interface ProviderOwner {
   close(): Promise<void>;
   inspect(signal: AbortSignal): Promise<{label: string; fingerprint: string}>;
+  /** Owner-local startup validation; ordinary inspections remain fresh. */
+  inspectSelection?(signal: AbortSignal): Promise<{label:string;fingerprint:string}>;
 }
 
 export type ProviderSelectionState = 'inactive' | 'switching' | 'ready' | 'failed';
@@ -87,7 +89,7 @@ export function createProviderSelection({open, persist}: ProviderSelectionOption
         owner = next;
         try {
           if (combined.aborted) throw cancellation();
-          await next.inspect(combined);
+          await (next.inspectSelection?next.inspectSelection(combined):next.inspect(combined));
           if (combined.aborted) throw cancellation();
           await persist(config);
           if (combined.aborted) throw cancellation();

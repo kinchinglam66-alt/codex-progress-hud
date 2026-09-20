@@ -422,7 +422,7 @@ describe.runIf(process.platform === "win32")("PowerShell Hook launcher", () => {
     return runProcess(
       powershell,
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", launcher, "-HookName", hookName],
-      { ...process.env, APPDATA: appData, ...extraEnvironment }
+      { ...process.env, APPDATA: appData, CODEX_PROGRESS_HUD_DATA_DIR:join(appData,'codex-progress-hud'), ...extraEnvironment }
     );
   }
 

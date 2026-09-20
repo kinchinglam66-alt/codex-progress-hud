@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {nextMilestoneSchema,progressReviewSchema,progressStateSchema} from './progress-state.js';
 
 const seconds = z.number().finite().nonnegative().max(31_536_000);
 const ordinal = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -61,6 +62,8 @@ export const observerResponseSchema = z.object({
   estimate: z.object({remainingSeconds: seconds,
     errorPercent: z.number().finite().min(0).max(1000)}).strict().nullable(),
   work:workSchema.nullable().optional(),
+  nextMilestone:nextMilestoneSchema.nullable().optional(),
+  progressReview:progressReviewSchema.nullable().optional(),
 }).strict().superRefine((value, context) => {
   if ((value.relation === 'replace' && value.summary === null) ||
       (value.relation === 'unknown' && (value.status !== 'unknown' || value.estimate !== null || value.summary !== null)) ||
@@ -81,6 +84,7 @@ const observationSchema = z.object({
 }).strict();
 export const observerInputSchema = z.object({
   imageContextPending:z.boolean().optional(),
+  progressState:progressStateSchema.optional(),
   goalSummary: z.string().min(1).max(2048).nullable(),
   activeSeconds: seconds,
   nativeTiming:z.object({requestActiveSeconds:seconds}).strict().optional(),

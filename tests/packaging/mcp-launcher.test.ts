@@ -20,7 +20,7 @@ async function appData(): Promise<string> {
 
 function run(path: string, extraEnvironment: NodeJS.ProcessEnv = {}, input?: string) {
   return spawnSync(launcher, ["--mcp-stdio"], {
-    env: { ...process.env, ...extraEnvironment, APPDATA: path },
+    env: { ...process.env, APPDATA: path, USERPROFILE:path, CODEX_PROGRESS_HUD_DATA_DIR:'', ...extraEnvironment },
     encoding: "utf8",
     input,
     windowsHide: true,
@@ -30,7 +30,7 @@ function run(path: string, extraEnvironment: NodeJS.ProcessEnv = {}, input?: str
 
 function runHook(path: string, hookName: string) {
   return spawnSync(launcher, [`--hook-event=${hookName}`], {
-    env: { ...process.env, APPDATA: path },
+    env: { ...process.env, APPDATA: path, USERPROFILE:path, CODEX_PROGRESS_HUD_DATA_DIR:'' },
     encoding: "utf8",
     windowsHide: true,
     shell: false
@@ -38,7 +38,7 @@ function runHook(path: string, hookName: string) {
 }
 
 async function manifest(appDataPath: string, value: unknown): Promise<void> {
-  const path = join(appDataPath, "codex-progress-hud", "install.json");
+  const path = join(appDataPath, ".codex-progress-hud", "install.json");
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value)}\n`, "utf8");
 }
@@ -163,7 +163,7 @@ describe.runIf(process.platform === "win32")("packaged MCP launcher", () => {
     await manifest(data, { executablePath, installDirectory, version: "0.2.0" });
 
     const child = spawn(launcher, ["--mcp-stdio"], {
-      env: { ...process.env, APPDATA: data },
+      env: { ...process.env, APPDATA: data, USERPROFILE:data, CODEX_PROGRESS_HUD_DATA_DIR:'' },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       shell: false

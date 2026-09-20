@@ -7,6 +7,35 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('coalesces critical events during inference into one followup and accounts for the stale result',async()=>{
+ const records:ObserverObservation[]=[],f=fixture(1,6000,r=>records.push(r)),key=f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();f.time(5000);f.scheduler.changed(key,'failure');f.time(7000);f.scheduler.changed(key,'failure');
+  f.time(10000);f.calls[0]!.finish(result());await f.flush();
+  expect(records.find(r=>r.kind==='result')).toMatchObject({accepted:false,rejectionReason:'critical_event_after_snapshot',usage});
+  expect(f.goals.view(key,10000)?.prediction).toBeNull();
+  f.time(14999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(2);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result());await f.flush();f.time(16000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
+it.each([
+ ['OBSERVER_ACCOUNT_REFRESH_FAILED','account_refresh_failed'],
+ ['OBSERVER_WORKER_CLOSING','worker_closing'],
+ ['OBSERVER_WORKER_CLEANUP_PENDING','worker_cleanup_pending'],
+ ['PROVIDER_UNAVAILABLE','provider_unavailable'],
+ ['SECRET','worker_unavailable'],
+] as const)('reports %s and resumes on the next ready tick without consuming a request',async(code,reason)=>{
+ const records:ObserverObservation[]=[];const f=fixture(0,6000,row=>records.push(row),false,true);
+ f.acquireFailure(code);const key=f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();expect(f.scheduler.diagnostics(key)).toMatchObject({schedulingReason:reason,callsLastHour:0});
+  expect(f.calls).toHaveLength(0);expect(JSON.stringify(records)).not.toContain('SECRET');
+  f.acquireFailure(undefined);f.time(1000);f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);expect(f.scheduler.diagnostics(key)).not.toHaveProperty('schedulingReason');
+  f.calls[0]!.finish(result());await f.flush();
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
 it('reports missing worker admission instead of hiding it behind pending',async()=>{
  const f=fixture(1);f.workers[0]!.disable();const key=f.hook('UserPromptSubmit');
  try{
@@ -58,6 +87,23 @@ it('starts a ready first observation on the next tick without a fixed fifteen-se
  try{f.scheduler.tick();expect(f.calls).toHaveLength(1);}
  finally{f.calls[0]?.finish(result());await f.flush();await f.scheduler.close();}
 });
+it('disabled deadline permits a result after 30 seconds without a duplicate request',async()=>{
+ vi.useFakeTimers();const f=fixture(1,6000,undefined,false,false,0);const key=f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();await vi.advanceTimersByTimeAsync(60000);f.time(60000);f.scheduler.tick();
+  expect(f.calls).toHaveLength(1);expect(f.calls[0]!.signal.aborted).toBe(false);
+  f.calls[0]!.finish(result());await f.flush();
+  expect(f.scheduler.diagnostics(key).state).toBe('ready');
+  expect(f.goals.view(key,60000)?.prediction).not.toBeNull();
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();vi.useRealTimers();}
+});
+it('disabled deadline still cancels on user interruption',async()=>{
+ const f=fixture(1,6000,undefined,false,false,0);f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();f.hook('Interrupt');f.scheduler.tick();
+  expect(f.calls[0]!.signal.aborted).toBe(true);
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
 it('expires ETA after 30 seconds without losing cleanup ownership or accepting its late result',async()=>{
  vi.useFakeTimers();const f=fixture(1);const key=f.hook('UserPromptSubmit');
  try{
@@ -94,7 +140,7 @@ it('issues one monotonic retention permit on an accepted ETA and revokes idle st
  expect(f.releases[0]?.permit).toBeNull(); // Initial semantic bootstrap replaces the goal identity.
  f.time(315000);f.scheduler.tick();f.calls[1]!.finish(result('continue'));await f.flush();
  expect(f.releases).toHaveLength(2);
- expect(f.releases[1]).toMatchObject({key,permit:{conversationKey:key,generation:1,idleStartedAtMs:315000,deadlineMs:675000}});
+ expect(f.releases[1]).toMatchObject({key,permit:{conversationKey:key,generation:1,idleStartedAtMs:315000,deadlineMs:435000}});
  f.time(316000);f.scheduler.tick();f.scheduler.tick();expect(f.releases).toHaveLength(2);
  f.hook('Stop');
  expect(f.retentionStates.at(-1)).toMatchObject({key,state:{running:false}});
@@ -187,7 +233,7 @@ it.each(['continue','unknown'] as const)('preserves outage exclusion after an in
   const uncertain=result('continue');uncertain.interpretation={relation,status:relation==='unknown'?'unknown':'running',summary:null,estimate:null};
   f.calls[1]!.finish(uncertain);await f.flush();
   try{
-    f.time(4460000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+    f.time(4459999);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   }finally{for(const call of f.calls)call.finish(result('continue'));await f.flush();await f.scheduler.close();}
 });
 it('retains the overdue reservation after a numeric-less refresh instead of retrying every minute',async()=>{
@@ -237,7 +283,7 @@ it('does not spend the near-expiry opportunity again after a rejected attempt un
   f.calls[0]!.finish(estimate);await f.flush();
   f.time(335000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish({status:'admission_denied',interpretation:null,usage:null});await f.flush();
-  f.time(395000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(394999);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   await f.scheduler.close();
 });
 it('does not count a selected-source outage toward the near-expiry threshold',async()=>{
@@ -246,8 +292,8 @@ it('does not count a selected-source outage toward the near-expiry threshold',as
   f.calls[0]!.finish(estimate);await f.flush();
   f.setAvailable(false);f.time(3600000);f.scheduler.tick();
   f.setAvailable(true);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3679999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3680000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(3659999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(3660000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result('continue'));await f.flush();await f.scheduler.close();
 });
 it('rechecks at eighty percent once per prediction and keeps an overdue fallback after safe failure',async()=>{
@@ -255,7 +301,7 @@ it('rechecks at eighty percent once per prediction and keeps an overdue fallback
   f.hook('UserPromptSubmit');f.time(15000);f.scheduler.tick();
   const estimate=result();estimate.interpretation!.estimate={remainingSeconds:100,errorPercent:30};
   f.calls[0]!.finish(estimate);await f.flush();
-  f.time(94999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(74999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   f.time(95000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   expect(records.filter(r=>r.kind==='request').at(-1)?.triggerReason).toBe('near_expiry');
   f.scheduler.tick();expect(f.calls).toHaveLength(2);
@@ -431,9 +477,10 @@ it('does not let a late old flight overwrite a newer turn diagnostic or forecast
   expect(f.scheduler.diagnostics(key).state).not.toBe('ready');
   await f.scheduler.close();
 });
-function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false, dynamic = false) {
+function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:ObserverObservation)=>void, withProvenance: boolean|'throw' = false, dynamic = false, requestTimeoutMs=30000) {
   let now = 0, id = 0, monotonicFails=false;
   let dynamicMismatches = 0;
+  let acquisitionFailure:string|undefined;
   const contexts = new PassiveContextStore(), goals = new PassiveGoals(contexts);
   const calls: Array<{signal: AbortSignal; key: string; input: unknown; finish(value: ObserverResult, closed?: boolean): void}> = [];
   const makeWorker = (boundKey?: string): ObserverWorker => {
@@ -451,12 +498,12 @@ function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:
   const releases:Array<{key:string;permit:unknown}>=[];
   const retentionStates:Array<{key:string;state:unknown}>=[];
   const workerSource = dynamic ? {
-    acquire(key: string) { const worker = owners.get(key) ?? makeWorker(key); owners.set(key, worker); if (!workers.includes(worker)) workers.push(worker); return worker; },
+    acquire(key: string) { if(acquisitionFailure)throw Error(acquisitionFailure);const worker = owners.get(key) ?? makeWorker(key); owners.set(key, worker); if (!workers.includes(worker)) workers.push(worker); return worker; },
     async release(key: string,permit?:unknown) { releases.push({key,permit}); },
     updateRetentionState(key:string,state:unknown){retentionStates.push({key,state});},
     all() { return workers; }
   } : undefined;
-  const scheduler = new ObserverScheduler({contexts, goals, now: () => now, monotonicNow:()=>{if(monotonicFails)throw Error('CLOCK_UNAVAILABLE');return now;}, closeTimeoutMs, ...(workerSource ? {workerSource} : {workers}), ...(onObservation?{onObservation}:{})});
+  const scheduler = new ObserverScheduler({contexts, goals, requestTimeoutMs, now: () => now, monotonicNow:()=>{if(monotonicFails)throw Error('CLOCK_UNAVAILABLE');return now;}, closeTimeoutMs, ...(workerSource ? {workerSource} : {workers}), ...(onObservation?{onObservation}:{})});
   const hook = (name: HookName, session = 'one', turn = 'first') => {
     const envelope = normalizeHookInput(name, {session_id: session, turn_id: turn, tool_use_id: String(++id)}, now,
       'protected-observer-scheduler-test-token-123456789').envelope;
@@ -468,7 +515,7 @@ function fixture(workerCount = 2, closeTimeoutMs = 6000, onObservation?:(record:
   };
   const time = (value: number) => {now = value;};
   const flush = async () => {await Promise.resolve(); await Promise.resolve();};
-  return {scheduler, goals, contexts, calls, hook, time, flush, releases,retentionStates,workers,failMonotonic:()=>{monotonicFails=true;},dynamicMismatches: () => dynamicMismatches};
+  return {scheduler, goals, contexts, calls, hook, time, flush, releases,retentionStates,workers,acquireFailure:(code:string|undefined)=>{acquisitionFailure=code;},failMonotonic:()=>{monotonicFails=true;},dynamicMismatches: () => dynamicMismatches};
 }
 
 function paceFixture(onObservation?:(record:ObserverObservation)=>void) {
@@ -834,13 +881,13 @@ it.each(['paused','interrupted','stopped','failed'] as const)('does not start an
   f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(0);
 });
 
-it('retries unknown estimates after 300, 600 and 1800 active seconds without new text',async()=>{
+it('reviews unknown estimates every 120 active seconds without new text',async()=>{
   const f=fixture(1);const key=f.hook('UserPromptSubmit');
   f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   const response=result();response.interpretation!.estimate=null;
   f.calls[0]!.finish(response);await f.flush();
   expect(f.goals.view(key,15000)?.prediction).toBeNull();
-  for(const [index,at] of [315000,915000,2715000].entries()){
+  for(const [index,at] of [135000,255000,375000].entries()){
     f.time(at-1);f.scheduler.tick();expect(f.calls).toHaveLength(index+1);
     f.time(at);f.scheduler.tick();expect(f.calls).toHaveLength(index+2);
     const next=result('continue');next.interpretation!.estimate=null;
@@ -878,8 +925,8 @@ it('allows a coalesced final-status judgment in waiting but no repeated waiting 
   const f = fixture(); const session = f.hook('UserPromptSubmit'); f.hook('PostToolUse');
   f.time(15000); f.scheduler.tick(); f.calls[0]!.finish(result()); await f.flush();
   f.time(20000); f.hook('Stop');
-  f.time(74000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
-  f.time(75000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.time(29999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(30000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish({...result('continue'), interpretation: {relation: 'continue', status: 'waiting', summary: null, estimate: null}});
   await f.flush(); f.time(900000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
   expect(f.goals.view(session, 900000)?.activeSeconds).toBe(20);
@@ -894,8 +941,8 @@ it('cancels an in-flight call on pause and resumes only after event coalescing',
   f.calls[0]!.finish({status: 'aborted', interpretation: null, usage}); await f.flush();
   f.time(100000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
   f.goals.runtime(session, turn, 'running', 100000); f.scheduler.changed(session, 'runtime');
-  f.time(109999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
-  f.time(110000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.time(104999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(105000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
 });
 
 it('interrupts an in-flight source estimate when the source reaches waiting', async () => {
@@ -985,7 +1032,7 @@ it('dispatches selected-source changes only when the source revision changes', a
   const key = f.hook(); f.time(15000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
   f.calls[0]!.finish(result()); await f.flush();
 
-  f.time(100000); f.setSource(1); f.scheduler.changed(key, 'activity'); f.scheduler.tick();
+  f.time(74000); f.setSource(1); f.scheduler.changed(key, 'activity'); f.scheduler.tick();
   expect(f.calls).toHaveLength(1);
 
   f.setSource(2); f.scheduler.tick();
@@ -1026,7 +1073,7 @@ it('permits exactly one overdue recheck for a selected-source action', async () 
   f.scheduler.tick(); expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result()); await f.flush();
 
-  f.time(135000); f.scheduler.tick();
+  f.time(134999); f.scheduler.tick();
   expect(f.calls).toHaveLength(2);
   await f.scheduler.close();
 });
@@ -1061,7 +1108,7 @@ it('records static trigger reasons and active scheduling anchors', async () => {
   f.time(315000);f.scheduler.tick();
   const request=records.filter(row=>row.kind==='request').at(-1);
   expect(request).toMatchObject({triggerReason:'periodic',lastRequestActiveSeconds:15,
-    eligibleActiveSeconds:315});
+    eligibleActiveSeconds:75});
   expect(JSON.stringify(records)).not.toContain('task data');
   f.calls[1]!.finish(result('continue')); await f.flush();
   await f.scheduler.close();
@@ -1073,10 +1120,10 @@ it('rebases the scheduler active anchor when an accepted replacement rebases the
   f.time(100000);f.hook('UserPromptSubmit','one','second');f.time(160000);f.scheduler.tick();
   expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result());await f.flush();
-  f.time(459000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
-  f.time(460000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+  f.time(219999);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(220000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
   f.calls[2]!.finish(result('continue'));await f.flush();
-  expect(f.goals.view(key,460000)?.activeSeconds).toBe(360);
+  expect(f.goals.view(key,220000)?.activeSeconds).toBe(120);
   await f.scheduler.close();
 });
 
@@ -1098,8 +1145,8 @@ it('freezes scheduling anchors while the selected source is unavailable', async 
   f.setAvailable(true);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   expect(f.goals.view(key,3600000)?.activeSeconds).toBe(3600);
   f.time(3615000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3899999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3900000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(3659999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(3660000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result('continue'));await f.flush();
   await f.scheduler.close();
 });

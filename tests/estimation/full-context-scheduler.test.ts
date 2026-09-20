@@ -99,7 +99,7 @@ function fixture(options: {checkpoint?:boolean;owned?:boolean;native?:boolean;pa
     disable: () => { disabled = true; },
     close: async () => { disabled = true; }
   };
-  const scheduler = new ObserverScheduler({contexts, goals, workers: [worker], now: () => options.advancingClock?now++:now,
+  const scheduler = new ObserverScheduler({contexts, goals, requestTimeoutMs:30000, workers: [worker], now: () => options.advancingClock?now++:now,
     ...(options.owned?{workerSource:{acquire:()=>worker,all:()=>[worker],release:async()=>{await worker.release?.();}}}:{}),
     onObservation: record => observations.push(record),...(options.research?{research:options.research}:{})});
   const envelope = normalizeHookInput("UserPromptSubmit", {session_id: "session", turn_id: "first"}, now, token).envelope;

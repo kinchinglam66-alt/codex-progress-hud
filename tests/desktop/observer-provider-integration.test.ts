@@ -1,4 +1,4 @@
-import {mkdtemp, readFile, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {describe, expect, it, vi} from 'vitest';
@@ -31,6 +31,22 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it.each(['valid','missing','expired','cancelled'] as const)('uses owner startup account metadata safely (%s)',async mode=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-startup-handoff-')),controller=new AbortController();
+    const metadata={label:'synthetic',observedAt:0,expiresAt:mode==='expired'?0:1000};
+    const owned={...owner('startup'),...(mode==='missing'?{}:{startupAccount:metadata})};
+    const readSubscriptionAccount=vi.fn(async()=>metadata);
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},
+      now:()=>0,subscriptionStartupInspection:'owner',readSubscriptionAccount,autoStartSubscription:true,
+      openSubscription:async()=>{if(mode==='cancelled')controller.abort();return owned;}});
+    try{
+      await host.start(controller.signal);
+      expect(readSubscriptionAccount).not.toHaveBeenCalled();
+      expect(host.status().state).toBe(mode==='valid'?'ready':'inactive');
+      if(mode==='valid')expect(host.status()).toMatchObject({account:metadata,accountStatus:'ready'});
+      else{expect(()=>host.workerSource!.acquire('source')).toThrow();expect(owned.close).toHaveBeenCalled();}
+    }finally{await host.close();await rm(directory,{recursive:true,force:true});}
+  });
   it.each((['nativeSourceDestination','prepareNativeContext','prepareNativeTurnContext','prepareNativeHistoryFallback'] as const)
     .flatMap(method=>(['disable','switch','cancel'] as const).map(change=>({method,change}))))(
     'fences native preparation before and during $method on $change',async({method,change})=>{

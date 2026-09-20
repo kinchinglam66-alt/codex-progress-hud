@@ -24,6 +24,16 @@ const admissionLabels:Record<AdmissionReason,string>={
   unsafe_unknown:'上次估时未安全结算，请在设置中恢复',local_policy:'本地估时暂受限，请查看设置中的恢复状态',
 };
 function observerLabel(observer:ObserverDiagnostics):string{
+  if((observer.pendingCriticalEvents??0)>0&&['ready','estimating','rejected_result'].includes(observer.state))return '新进展已到达，等待更新估时';
+  if(observer.state==='pending'){
+    switch(observer.schedulingReason){
+      case 'account_refresh_failed':return '账户定期检查失败，等待自动重验（不代表已退出登录）';
+      case 'worker_closing':return '旧估时进程正在关闭，等待释放';
+      case 'worker_cleanup_pending':return '旧估时进程清理尚未确认';
+      case 'provider_unavailable':return '估时提供方未就绪，请查看设置';
+      case 'runtime_not_ready':return '估时运行时未就绪，请查看账户检查状态';
+    }
+  }
   if(observer.state==='pending'&&observer.schedulingReason==='worker_unavailable')
     return '估时提供方暂不可用，请查看设置中的账户与启用状态';
   if(observer.state==='pending'&&observer.schedulingReason==='recovery_cooldown')
@@ -60,9 +70,20 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
       etaLabel: view.etaLabel + (row.goal?.prediction != null && updatedKeys.includes(row.conversationKey) ? ' · 已更新' : '')+
         (row.observer?.contextState==='context_images_missing'||(row.observer?.missingImages??0)>0?' · 部分历史图片缺失':''),
       nameFreshness: row.name.freshness,
+      milestoneLabel:row.goal?milestoneLabel(row.goal,elapsedSeconds):'',
       ...(row.observer?observerPresentation(row.observer,elapsedSeconds):{})
     };
   });
+}
+
+function milestoneLabel(goal:NonNullable<ConversationRow['goal']>,elapsedSeconds:number):string {
+  const milestone=goal.progressState?.milestone;
+  if(!milestone||['stopped','failed','interrupted'].includes(goal.runtime)||goal.status==='completed')return '';
+  if(milestone.judgment==='observed_complete')return `下一里程碑：${milestone.definition} · 已观察到结束，等待重估`;
+  if(milestone.judgment==='inferred_complete')return `下一里程碑：${milestone.definition} · 推断完成，待核实`;
+  const active=goal.activeSeconds+(goal.runtime==='running'&&!goal.runtimeUncertain&&Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
+  const countdown=projectCountdown({prediction:milestone.prediction,activeSeconds:active,state:goal.runtime==='running'?'running':goal.runtime==='paused'?'paused':'waiting'});
+  return `下一里程碑：${milestone.definition} · ${countdown.status==='unknown'?'时间未知':countdown.status==='overdue'?'超出估时，等待重估':countdown.timeText}`;
 }
 
 /** Display-only history, scoped to this HUD and goal identity. No inference or work-state writes. */

@@ -18,6 +18,7 @@ import {makeForecastRecord, type ForecastRecord, type ForecastVersions} from './
 import type {ResidualRuntime} from './residual/runtime.js';
 import {captureHistoryFeatures} from './residual/capture.js';
 import {createRequestProfile,type RequestProfile,type RequestProfilePhase} from './request-profile.js';
+import {workerAcquisitionReason} from '../core/observer-diagnostics.js';
 export interface ObserverWorker {
   /** Passive per-flight timing; the returned function detaches only this listener. */
   subscribeContextPhase?(listener:(phase:RequestProfilePhase)=>void):()=>void;
@@ -50,6 +51,9 @@ export interface ObserverWorkerSource {
   all(): readonly ObserverWorker[];
 }
 export interface ObserverObservation {
+  milestone?:{id:string;judgment:'in_progress'|'observed_complete'|'inferred_complete'|'unknown';prediction:{remainingSeconds:number;errorPercent:number;observedActiveSeconds:number}|null};
+  eventCutoff?:number;
+  pendingCriticalEvents?:number;
   nativeFallbackReason?:'pair_unavailable'|'source_unobserved'|'source_checkpoint_unsupported'|'source_terminal_unsupported'|'source_limit'|'history_incomplete';
   kind:'runtime'|'request'|'result'|'skip'|'stage'; at:number; key:string; generation:number; activeSeconds:number;
   runtime:string; version:number; requestId?:number; requestedAt?:number; observedActiveSeconds?:number;
@@ -71,8 +75,10 @@ export interface ObserverObservation {
   contextState?:ObserverContextState;
   contextMetrics?:ContextPreparationMetrics;
 }
-interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; monotonicNow?:()=>number; onChange?: () => void; closeTimeoutMs?: number; onObservation?:(record:ObserverObservation)=>void;research?:ResidualRuntime}
+interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; monotonicNow?:()=>number; onChange?: () => void; closeTimeoutMs?: number; requestTimeoutMs?:number; onObservation?:(record:ObserverObservation)=>void;research?:ResidualRuntime}
 interface Entry {
+  criticalEvents?:Array<{sequence:number;revision:number|null;at:number}>;
+  progressScope?:string;progressEventSequence?:number;milestoneTimerReservation?:string;
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
   eventSequence: number; consumedEventSequence: number;
   version: number; consumed: number; unknown: number; starts: number[];
@@ -97,6 +103,7 @@ interface Entry {
   ended:boolean;
 }
 interface Flight {researchFailure?:import('./residual/contract.js').PrefixFailure;researchGeneration?:number;researchTicket?:object;key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
+  eventCutoff?:number;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
   deadlineAt?:number; timedOut?:boolean;
@@ -121,6 +128,8 @@ export class ObserverScheduler {
   private recoveryGeneration: number | undefined;
   private closing?: Promise<void>;
   constructor(private readonly options: Options) {
+    const requestTimeout=options.requestTimeoutMs??0;
+    if(!Number.isSafeInteger(requestTimeout)||requestTimeout<0||requestTimeout>2_147_483_647)throw Error('INVALID_ESTIMATE_TIMEOUT');
     const closeTimeout = options.closeTimeoutMs ?? 6000;
     if (!Number.isSafeInteger(closeTimeout) || closeTimeout < 1 || closeTimeout > 10000) throw new Error('INVALID_OBSERVER_CLOSE_TIMEOUT');
     this.sourceAwareWorkers = options.workerSource !== undefined;
@@ -208,6 +217,8 @@ export class ObserverScheduler {
       // a new object reuses its numeric generation. Do not mix its live clock in.
       const view=flight && extra.accepted!==true?null:this.options.goals.view(key,at);
       if(view || flight)this.options.onObservation({kind,at,key,generation:view?.generation??flight!.generation,
+        ...(view?.progressState?.milestone?{milestone:{id:view.progressState.milestone.id,judgment:view.progressState.milestone.judgment,prediction:view.progressState.milestone.prediction}}:{}),
+        eventCutoff:flight?.eventCutoff??entry.consumedEventSequence,pendingCriticalEvents:Math.max(0,entry.eventSequence-entry.consumedEventSequence),
         activeSeconds:view?.activeSeconds??flight!.observedActiveSeconds,activeTimeKnown:view!==null&&this.options.goals.activeTimeKnown(key),
         ...(view?{timingUncertain:view.timingUncertain,recoveryState:view.recoveryState,recoveryGapSeconds:view.recoveryGapSeconds}:{}),
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,...extra});
@@ -274,6 +285,7 @@ export class ObserverScheduler {
         if(!paired.supplement.coverage.complete||paired.supplement.coverage.gaps.length)throw Error('history_incomplete');
         await paired.validate(flight.controller.signal);
         if(this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('NATIVE_CONTEXT_STALE');
+        input=this.coverProgressSnapshot(entry,flight,input,paired.revision);
         this.contextState(flight,'context_preparing');let sampled=false;
         const value=await flight.worker.prepareNativeTurnContext(input,paired,flight.controller.signal,flight.key,flight.generation,flight.requestedAt,()=>{
           if(sampled||flight.controller.signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
@@ -304,6 +316,7 @@ export class ObserverScheduler {
           checkpointHistory=opened.snapshot;
           await assertCheckpointWindow(opened.snapshot,signal);
           const verified=await verifyHistoryFallback(opened,signal,checkTicket);
+          input=this.coverProgressSnapshot(entry,flight,input,opened.snapshot.revision);
           this.contextState(flight,'context_preparing');let sampled=false;
           const value=await flight.worker.prepareNativeHistoryFallback!(input,verified,signal,flight.key,flight.generation,flight.requestedAt,()=>{
             if(sampled||signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
@@ -327,6 +340,7 @@ export class ObserverScheduler {
         opened=await this.options.goals.openNativeSource(flight.ticket,flight.controller.signal,destination);
         if(!opened)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
         if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('NATIVE_CONTEXT_STALE');
+        input=this.coverProgressSnapshot(entry,flight,input,opened.snapshot.revision);
         this.contextState(flight,'context_preparing');
         handedToWorker=true;
         let sampled=false;
@@ -367,6 +381,7 @@ export class ObserverScheduler {
           if(!opened.snapshot.coverage.complete||opened.snapshot.coverage.gaps.length)throw Error('history_incomplete');
           if(flight.controller.signal.aborted||this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('history_unavailable');
           const researchCapture=this.options.research?captureHistoryFeatures(opened.snapshot,opened.currentTurnId):undefined;
+          input=this.coverProgressSnapshot(entry,flight,input,opened.snapshot.revision);
           this.contextState(flight,'context_preparing');
           promise=flight.worker.prepareContext(input,researchCapture?{...opened,snapshot:researchCapture.snapshot}:opened,flight.controller.signal,flight.key,flight.generation,flight.requestedAt);
           handedToPlanner=true;
@@ -423,13 +438,37 @@ export class ObserverScheduler {
       try{unsubscribe?.();}catch{/* Passive diagnostics. */}
     }
   }
-  private markEvent(entry:Entry,now:number,reason:TriggerReason):void {
+  private coverProgressSnapshot(entry:Entry,flight:Flight,input:ObserverInput,revision:number):ObserverInput {
+    const updated=this.options.goals.progressAtSnapshot(flight.ticket,input,revision,this.time());
+    const live=this.options.goals.scheduling(flight.key,this.time());if(live)this.syncGoal(entry,live);
+    if(updated===input)return input;
+    flight.observedActiveSeconds=updated.activeSeconds;flight.excludedActiveSeconds=0;
+    // Only locally revision-bound events are proven included. Unknown hook coverage stays pending.
+    for(const event of entry.criticalEvents??[]){
+      if(event.sequence<=(flight.eventCutoff??0))continue;
+      if(event.revision===null||event.revision>revision)break;
+      flight.eventCutoff=event.sequence;entry.consumedEventSequence=event.sequence;
+    }
+    const pending=entry.criticalEvents?.find(e=>e.sequence>entry.consumedEventSequence);
+    if(pending)entry.eventAt=pending.at;
+    return updated;
+  }
+  private markEvent(entry:Entry,now:number,reason:TriggerReason,revision:number|null=null):void {
     const hadPending=entry.eventSequence>entry.consumedEventSequence;
     entry.eventSequence++;
+    entry.criticalEvents=(entry.criticalEvents??[]).filter(e=>e.sequence>entry.consumedEventSequence);
+    entry.criticalEvents.push({sequence:entry.eventSequence,revision,at:now});
+    if(entry.criticalEvents.length>32)entry.criticalEvents=[{sequence:entry.eventSequence,revision:null,at:entry.eventAt??now}];
     if(!hadPending){entry.eventAt=now;entry.eventReason=reason;}
     else if(reason==='status_evidence')entry.eventReason=reason;
   }
   private syncGoal(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
+    const progress=state.view.progressState;
+    if(progress){
+      if(entry.progressScope===progress.scope&&progress.observedEventSequence>(entry.progressEventSequence??0))
+        this.markEvent(entry,this.time(),'important_event',state.revision??null);
+      entry.progressScope=progress.scope;entry.progressEventSequence=progress.observedEventSequence;
+    }
     if(entry.goalIdentity===undefined){
       entry.goalIdentity=state.goalIdentity;entry.predictionIdentity=state.predictionIdentity;
       if(state.view.prediction)entry.overdueEligibleActiveSeconds=
@@ -601,6 +640,13 @@ export class ObserverScheduler {
       const prediction = view.prediction;
       const remaining = prediction ? Math.max(0, prediction.remainingSeconds - Math.max(0,
         view.activeSeconds - prediction.observedActiveSeconds - (entry.predictionExcludedSeconds??0))) : null;
+      const milestone=view.progressState?.milestone;
+      const milestonePrediction=milestone?.judgment==='in_progress'?milestone.prediction:null;
+      const milestoneRemaining=milestonePrediction?Math.max(0,milestonePrediction.remainingSeconds-Math.max(0,
+        view.activeSeconds-milestonePrediction.observedActiveSeconds-(entry.predictionExcludedSeconds??0))):null;
+      const milestoneReservation=milestonePrediction?`${milestone!.id}:${milestonePrediction.observedActiveSeconds}:${milestoneRemaining===0?'overdue':'near'}`:null;
+      const milestoneTimerReady=milestonePrediction!==null&&milestonePrediction!==undefined&&milestoneRemaining!==null&&
+        milestoneRemaining<=milestonePrediction.remainingSeconds*0.2&&entry.milestoneTimerReservation!==milestoneReservation;
       if(state.ready && now<entry.readyAfter){this.skip(key,entry,'initial_delay');continue;}
       // Prediction identity, not a tool event or wall timer, owns this one-shot.
       // Source outages are excluded from remaining above, as are user pauses.
@@ -628,34 +674,37 @@ export class ObserverScheduler {
         ...(entry.eventReason===undefined?{}:{eventReason:entry.eventReason}),
         eventSequence:entry.eventSequence,consumedEventSequence:entry.consumedEventSequence,
          remainingSeconds: remaining, unknownResults: entry.unknown, contentReady: state.ready,
+         milestoneRemainingSeconds:milestoneRemaining,
          hasNewInformation: entry.version > entry.consumed, activeSeconds:view.activeSeconds,
          hasNewContent:entry.contentIdentity!==undefined&&entry.contentIdentity!==entry.consumedContentIdentity,
         lastRequestActiveSeconds:entry.lastRequestActiveSeconds??null,
         overdueActionRecheck: overdueReady,overdueAlreadyChecked:overdueAlready,
-        expiredResultRecheck:expiredResultReady,
-        nearExpiryRecheck:nearExpiryReady,
+        expiredResultRecheck:expiredResultReady||(milestoneTimerReady&&milestoneRemaining===0),
+        nearExpiryRecheck:nearExpiryReady||(milestoneTimerReady&&milestoneRemaining!>0),
          overdueEligibleActiveSeconds:entry.overdueEligibleActiveSeconds??null,retryBackoff:retryBackoff||failureBackoff||expiredResultBackoff,
          preDispatchRetry:entry.retryVersion===entry.version,
          bootstrapRecovery:entry.bootstrapRecoveryEligible===true&&entry.bootstrapRecoveryUsed!==true,
         state: runtime, statusEvidenceArrived: entry.statusEvidence,
         goalInFlight: entry.flight !== undefined, globalInFlight: this.flights.size, conversationStartsLastHour: entry.starts.length});
       if(decision.blockReason){this.skip(key,entry,decision.blockReason);continue;}
+      let acquisitionReason:SchedulingReason|undefined;
       if (!worker) {
         try { worker = this.workerSource.acquire(key); }
-        catch { worker = undefined; }
+        catch (error) { worker = undefined; acquisitionReason=workerAcquisitionReason(error); }
       }
       if(!worker){
         const recoveryDeferred=this.workers().some(candidate=>{
           const state=this.workerState(candidate);if(this.workerInFlight(candidate)||state.active||state.disabled||state.poisoned)return false;
           try{const recovery=candidate.recoveryStatus?.();return recovery?.nextEligibleAt!==undefined&&recovery.nextEligibleAt!==null&&now<recovery.nextEligibleAt||recovery?.cooldownUntil!==undefined&&recovery.cooldownUntil!==null&&now<recovery.cooldownUntil;}catch{return false;}
         });
-        this.skip(key,entry,this.workers().some(candidate=>this.workerState(candidate).setupFailed)?'setup_failed':recoveryDeferred?'recovery_cooldown':'worker_unavailable');continue;
+        this.skip(key,entry,this.workers().some(candidate=>this.workerState(candidate).setupFailed)?'setup_failed':recoveryDeferred?'recovery_cooldown':acquisitionReason??'worker_unavailable');continue;
       }
       const request = this.options.goals.request(key, now);
       if (!request) {this.skip(key,entry,'request_unavailable');continue;}
       worker.updateRetentionState?.(this.retentionState(key,state));
       delete entry.lastSkip;
       const flight: Flight = {key, ticket: request.ticket, controller: new AbortController(), worker,
+        eventCutoff:entry.eventSequence,
         profile:createRequestProfile(this.options.monotonicNow,worker.subscribeContextPhase?'sourceMs':'unattributedMs'),
         requestId:++this.requestSequence,requestedAt:now,observedActiveSeconds:request.input.activeSeconds,
         generation:view.generation,runtime:view.runtime,version:entry.version,triggerReason:decision.reason!,
@@ -665,6 +714,7 @@ export class ObserverScheduler {
       entry.flight = flight; entry.lastStart = now; entry.starts.push(now); entry.consumed = entry.version;
       if(entry.contextState==='estimate_timeout'){delete entry.contextState;delete entry.contextStateTurnKey;}
       entry.consumedEventSequence=entry.eventSequence;
+      if(milestoneTimerReady&&milestoneReservation)entry.milestoneTimerReservation=milestoneReservation;
       entry.lastRequestActiveSeconds=request.input.activeSeconds;
       if(entry.contentIdentity===undefined)delete entry.consumedContentIdentity;else entry.consumedContentIdentity=entry.contentIdentity;
       if(decision.reason==='bootstrap_recovery'){
@@ -681,9 +731,13 @@ export class ObserverScheduler {
       this.record('request',key,entry,{requestId:flight.requestId,triggerReason:flight.triggerReason,
         lastRequestActiveSeconds:flight.lastRequestActiveSeconds,eligibleActiveSeconds:flight.eligibleActiveSeconds});
       this.notify();
-      flight.deadlineAt=performance.now()+30000;
-      const deadline=setTimeout(()=>this.expire(flight),30000);
-      deadline.unref?.();
+      const timeoutMs=this.options.requestTimeoutMs??0;
+      let deadline:ReturnType<typeof setTimeout>|undefined;
+      if(timeoutMs>0){
+        flight.deadlineAt=performance.now()+timeoutMs;
+        deadline=setTimeout(()=>this.expire(flight),timeoutMs);
+        deadline.unref?.();
+      }
       flight.done = this.dispatch(entry,flight,request.input).finally(()=>clearTimeout(deadline));
     }
   }
@@ -703,8 +757,9 @@ export class ObserverScheduler {
   private settle(entry: Entry, flight: Flight, result: ObserverResult|null): void {
     this.checkDeadline(flight);
     const before=this.options.goals.scheduling(flight.key,this.time());
-    if(before&&before.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity)
-      this.syncSourceClock(entry,before);
+    if(before&&before.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity){
+      this.syncGoal(entry,before);this.syncSourceClock(entry,before);
+    }
     const state = this.workerState(flight.worker);
     if (state.active || state.poisoned) {
       this.options.goals.settle(flight.ticket, null, this.time());
@@ -732,13 +787,14 @@ export class ObserverScheduler {
     const mustDisable = result?.status === 'accounting_error';
     // Capture external cancellation before the accounting safety stop aborts other flights.
     // A valid answer is not permission to make another call; goal tickets still reject stale answers.
-    const eligible = flight.schedulerGeneration === this.schedulerGeneration && !this.disabled && !state.disabled && !flight.controller.signal.aborted
+    const staleCritical=entry.eventSequence>(flight.eventCutoff??entry.eventSequence);
+    const eligible = !staleCritical&&flight.schedulerGeneration === this.schedulerGeneration && !this.disabled && !state.disabled && !flight.controller.signal.aborted
       && result?.status === 'interpreted' && (!mustDisable || safeUnknownUsage);
     const settledAt=this.time();
     const accepted = this.options.goals.settle(flight.ticket,
       eligible ? result!.interpretation : null, settledAt);
     const hostRejection=accepted?undefined:this.options.goals.rejectionReason(flight.ticket);
-    const rejectionReason=this.schedulerRejectionReason(flight,state) ??
+    const rejectionReason=(staleCritical?'critical_event_after_snapshot':this.schedulerRejectionReason(flight,state)) ??
       (eligible&&result?.status==='interpreted'?hostRejection:undefined);
     const live=this.options.goals.scheduling(flight.key,settledAt);
     const sameGoal=live!==null&&live.goalIdentity===flight.goalIdentity&&entry.goalIdentity===flight.goalIdentity;
@@ -916,6 +972,12 @@ export class ObserverScheduler {
       ...(contextState?{contextState}:{}),...quality,
       estimateAgeSeconds:null,callsLastHour:this.entries.get(key)?.starts.filter(start=>this.lastClock-start<3600000).length??0,retryPending:false};
     const at=this.stopReason ? this.lastClock : this.time(),view=this.options.goals.view(key,at);
+    const durations=[view?.prediction,view?.progressState?.milestone?.prediction].flatMap(p=>p&&view?
+      [Math.max(0,p.remainingSeconds-(view.activeSeconds-p.observedActiveSeconds-(entry?.predictionExcludedSeconds??0)))]:[]).filter(s=>s>0);
+    const progressDiagnostics={pendingCriticalEvents:Math.max(0,(entry?.eventSequence??0)-(entry?.consumedEventSequence??0)),
+      reviewIntervalSeconds:ordinaryRequestIntervalSeconds(durations.length?Math.min(...durations):null,entry?.unknown??0),
+      eventCoalescingRemainingSeconds:entry?.eventAt===null||entry?.eventAt===undefined?0:Math.max(0,5-(at-entry.eventAt)/1000),
+      snapshotEventCutoff:entry?.flight?.eventCutoff??entry?.consumedEventSequence??0};
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':contextState==='estimate_timeout'?'call_failed':entry?.flight?'estimating':
       this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':
       entry?.lastResultStatus==='admission_denied'?'admission_blocked':
@@ -925,6 +987,7 @@ export class ObserverScheduler {
       (entry?.lastResultDiagnostic ?? (view?.prediction?'ready':entry?.lastResultStatus==='interpreted'?'insufficient_context':'pending'));
     return {state,...routing,...quality,...(contextState?{contextState}:{}),...(this.stopReason ? {stopReason:this.stopReason,stoppedAt:this.stoppedAt!} : {}),...(state==='admission_blocked'?{admissionReason:normalizeAdmissionReason(entry?.lastAdmissionReason)}:{}),
       ...(entry?.lastResultDiagnostic?{resultDiagnostic:entry.lastResultDiagnostic}:{}),
+      ...progressDiagnostics,
       ...(entry?.lastRejectionReason?{rejectionReason:entry.lastRejectionReason}:{}),
       estimateAgeSeconds:view?.prediction&&entry?.lastEstimateAt!==undefined?Math.max(0,(at-entry.lastEstimateAt)/1000):null,
       callsLastHour:entry?.starts.filter(start=>at-start<3600000).length??0,

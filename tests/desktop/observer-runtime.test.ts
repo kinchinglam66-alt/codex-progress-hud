@@ -258,6 +258,38 @@ function dialogFor(events: string[], response = 0) {
 
 describe('desktop observer runtime composition', () => {
   afterEach(() => {vi.useRealTimers();});
+  it('uses host startup evidence only for main-account startup without refreshing its expiry',async()=>{
+    const events:string[]=[],inspectStartupAccount=vi.fn(async()=>({accountLabel:'main',evidence:evidence(0)}));
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>0,events),inspectStartupAccount,
+      subscriptionAccountSource:'main',accountingAccountFingerprint:'a'.repeat(64),now:()=>0,
+      dialog:dialogFor(events),openAccounting:async()=>owner(events)});
+    try{
+      await runtime.start(new AbortController().signal);
+      expect(inspectStartupAccount).toHaveBeenCalledTimes(1);expect(events).not.toContain('inspect');
+      await runtime.start(new AbortController().signal);
+      expect(inspectStartupAccount).toHaveBeenCalledTimes(1);
+    }finally{await runtime.close();}
+  });
+  it.each(['changed','expired','cancelled'] as const)('rejects %s startup handoff before ledger opening',async mode=>{
+    const events:string[]=[],controller=new AbortController();
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>0,events),subscriptionAccountSource:'main',
+      inspectStartupAccount:async()=>{
+        if(mode==='cancelled')controller.abort();
+        return {accountLabel:'main',evidence:mode==='expired'?{...evidence(0),expiresAt:0}:evidence(0,mode==='changed'?'b'.repeat(64):'a'.repeat(64))};
+      },accountingAccountFingerprint:'a'.repeat(64),now:()=>0,dialog:dialogFor(events),
+      openAccounting:async()=>{events.push('open-accounting');return owner(events);}});
+    try{
+      await expect(runtime.start(controller.signal)).rejects.toThrow('OBSERVER_SETUP_UNAVAILABLE');
+      expect(events).not.toContain('open-accounting');expect(runtime.workers.every(w=>w.status().disabled)).toBe(true);
+    }finally{await runtime.close();}
+  });
+  it('never uses main startup handoff for an independent account',async()=>{
+    const events:string[]=[],handoff=vi.fn(async()=>{throw Error('WRONG_ROUTE');});
+    const runtime=createDesktopObserverRuntime({identity:identityFor(()=>0,events),inspectStartupAccount:handoff,
+      subscriptionAccountSource:'independent',now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events)});
+    try{await runtime.start(new AbortController().signal);expect(handoff).not.toHaveBeenCalled();expect(events).toContain('inspect');}
+    finally{await runtime.close();}
+  });
   it('rejects startup account drift before consent or an account-scoped ledger is opened',async()=>{
     const events:string[]=[];
     const runtime=createDesktopObserverRuntime({identity:identityFor(()=>0,events,{inspect:()=>evidence(0,'b'.repeat(64))}),
@@ -498,8 +530,10 @@ describe('desktop observer runtime composition', () => {
     await runtime.start(new AbortController().signal);
     clock = 120000; await vi.advanceTimersByTimeAsync(120000);
     expect(runtime.workers.every(worker => worker.status().disabled)).toBe(true);
+    expect(()=>runtime.workerSource.acquire('refresh-test')).toThrow('OBSERVER_ACCOUNT_REFRESH_FAILED');
     clock = 240000; await vi.advanceTimersByTimeAsync(120000);
     expect(runtime.workers.every(worker => !worker.status().disabled)).toBe(true);
+    expect(()=>runtime.workerSource.acquire('refresh-test')).not.toThrow();
     await runtime.close();
   });
 

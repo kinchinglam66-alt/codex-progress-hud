@@ -8,6 +8,7 @@ export interface RequestContext {
   elapsedSeconds:number;
   lastRequestSeconds:number|null;
   remainingSeconds:number|null;
+  milestoneRemainingSeconds?:number|null;
   unknownResults:number;
   eventAtSeconds:number|null;
   eventSequence?:number;
@@ -40,9 +41,9 @@ export interface TriggerDecision {
   eligibleActiveSeconds:number|null;
 }
 
-export const ordinaryRequestIntervalSeconds=(remaining:number|null,unknown:number):number=>{
-  if(remaining===null)return unknown<=1?300:unknown===2?600:1800;
-  return remaining<=1800?300:remaining<=7200?600:remaining<=28800?900:1800;
+export const ordinaryRequestIntervalSeconds=(remaining:number|null,_unknown:number):number=>{
+  if(remaining===null||remaining<=0)return 120;
+  return remaining<=600?60:remaining<=1800?120:300;
 };
 
 const decision=(blockReason:RequestBlockReason|null, reason:TriggerReason|null = null,
@@ -52,7 +53,7 @@ const decision=(blockReason:RequestBlockReason|null, reason:TriggerReason|null =
 /** Pure trigger eligibility; resource admission and spend authorization remain owner/worker duties. */
 export function decideTrigger(input:RequestContext):TriggerDecision {
   const numeric=[input.elapsedSeconds,input.lastRequestSeconds,input.eventAtSeconds,input.remainingSeconds,
-    input.activeSeconds,input.lastRequestActiveSeconds,input.overdueEligibleActiveSeconds]
+    input.activeSeconds,input.lastRequestActiveSeconds,input.overdueEligibleActiveSeconds,input.milestoneRemainingSeconds]
     .filter((value):value is number=>value!==null&&value!==undefined);
   if(numeric.some(value=>!Number.isFinite(value)||value<0)||
     (input.lastRequestSeconds!==null&&input.lastRequestSeconds>input.elapsedSeconds)||
@@ -76,14 +77,17 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
   const activeProgress=activeClock&&input.activeSeconds!>input.lastRequestActiveSeconds!;
   const bootstrapRecovery=input.bootstrapRecovery===true&&input.remainingSeconds===null&&
     input.hasNewInformation&&input.hasNewContent===true;
-  const interval=ordinaryRequestIntervalSeconds(input.remainingSeconds,input.unknownResults);
+  const positive=[input.remainingSeconds,input.milestoneRemainingSeconds].filter((v):v is number=>typeof v==='number'&&v>0);
+  const interval=ordinaryRequestIntervalSeconds(positive.length?Math.min(...positive):null,input.unknownResults);
   const eligibleActiveSeconds=activeClock?input.lastRequestActiveSeconds!+(bootstrapRecovery?60:interval):null;
 
   if(input.state!=='running'&&!statusEvent)return decision('runtime_ineligible',null,null,eligibleActiveSeconds);
-  if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<60)
-    return decision('cooldown',null,input.lastRequestSeconds+60,eligibleActiveSeconds);
-  if(input.lastRequestSeconds!==null&&freshEvent&&input.eventAtSeconds!==null&&input.elapsedSeconds-input.eventAtSeconds<10)
-    return decision('event_coalescing',null,input.eventAtSeconds+10,eligibleActiveSeconds);
+  if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
+  const cooldown=importantEvent||statusEvent?15:60;
+  if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<cooldown)
+    return decision('cooldown',null,input.lastRequestSeconds+cooldown,eligibleActiveSeconds);
+  if(input.lastRequestSeconds!==null&&freshEvent&&input.eventAtSeconds!==null&&input.elapsedSeconds-input.eventAtSeconds<5)
+    return decision('event_coalescing',null,input.eventAtSeconds+5,eligibleActiveSeconds);
 
   if(input.lastRequestSeconds===null&&!statusEvent){
     return input.hasNewInformation?decision(null,'initial',null,null):
@@ -97,10 +101,9 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
     return decision(null,'bootstrap_recovery',null,eligibleActiveSeconds);
   }
   if(importantEvent)return decision(null,'important_event',null,eligibleActiveSeconds);
-  if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
   if(input.expiredResultRecheck===true)
     return decision(null,'overdue',null,input.overdueEligibleActiveSeconds??input.activeSeconds??null);
-  if(input.nearExpiryRecheck===true&&input.remainingSeconds!==null&&input.remainingSeconds>0)
+  if(input.nearExpiryRecheck===true&&positive.length>0)
     return decision(null,'near_expiry',null,input.activeSeconds??null);
   if(input.overdueActionRecheck===true&&input.remainingSeconds===0)
     return decision(null,'overdue',null,input.overdueEligibleActiveSeconds??input.activeSeconds??null);

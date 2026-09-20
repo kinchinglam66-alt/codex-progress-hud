@@ -111,8 +111,9 @@ describe("local progress HTTP service", () => {
   const taskB = "hud_BCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
   it("promotes only a structured nonzero tool exit code to an observer failure event", () => {
-    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: 7})).toBe("failure");
-    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: -1})).toBe("failure");
+    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: 7,toolFailure:true})).toBe("failure");
+    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: -1})).toBe("activity");
+    expect(observerEventForHook({hook: "PostToolUse", toolExitCode: 1})).toBe("activity");
     expect(observerEventForHook({hook: "PostToolUse", toolExitCode: 0})).toBe("activity");
     expect(observerEventForHook({hook: "PostToolUse"})).toBe("activity");
   });

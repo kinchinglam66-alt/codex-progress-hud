@@ -61,9 +61,15 @@ public static class CodexProgressHudLauncher
 
     private static int Run(string mode)
     {
-        var appData = Environment.GetEnvironmentVariable("APPDATA");
-        if (String.IsNullOrWhiteSpace(appData)) throw new LauncherFailure(2, "COMPANION_NOT_INSTALLED: Install Codex Progress HUD and retry.");
-        var manifestPath = Path.Combine(appData, "codex-progress-hud", "install.json");
+        var dataDirectory = Environment.GetEnvironmentVariable("CODEX_PROGRESS_HUD_DATA_DIR");
+        if (String.IsNullOrEmpty(dataDirectory)) {
+            var profile = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (String.IsNullOrEmpty(profile)) profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (String.IsNullOrEmpty(profile)) throw new LauncherFailure(2, "COMPANION_NOT_INSTALLED: User profile is unavailable.");
+            dataDirectory = Path.Combine(profile, ".codex-progress-hud");
+        }
+        if (!Path.IsPathRooted(dataDirectory)) throw new LauncherFailure(3, "INVALID_DATA_DIRECTORY: An absolute HUD directory is required.");
+        var manifestPath = Path.Combine(dataDirectory, "install.json");
         if (!File.Exists(manifestPath)) throw new LauncherFailure(2, "COMPANION_NOT_INSTALLED: Install Codex Progress HUD and retry.");
 
         Dictionary<string, object> manifest;

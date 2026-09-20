@@ -6,6 +6,7 @@ import { selectEntryIntent, type DesktopLaunchReason } from "../main.js";
 import { createOperationalLogger, type OperationalLogEntry, type OperationalLogger } from "../diagnostics/logger.js";
 import { writeDiagnosticReport, type DiagnosticReportInput } from "../diagnostics/report.js";
 import { readWindowDiagnostics } from "../diagnostics/window-state.js";
+import {writeStartupFileEvidence} from '../diagnostics/startup-files.js';
 import type { TaskStatus } from "../core/types.js";
 import { createLifecycleStateStore } from "../lifecycle/state-store.js";
 import {
@@ -184,6 +185,8 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
   const tokenPath = defaultTokenPath();
   const configuredPort = Number.parseInt(process.env.CODEX_PROGRESS_HUD_PORT ?? "17837", 10);
   const dataDirectory = defaultDataDirectory();
+  // Best-effort local evidence; failure must not change startup or account policy.
+  await writeStartupFileEvidence(dataDirectory,tokenPath).catch(()=>undefined);
   const installManifestPath = defaultInstallManifestPath();
   const stateStore = createLifecycleStateStore({
     settingsPath: defaultSettingsPath(),
@@ -307,10 +310,10 @@ export async function runDesktop(
   launchReason: DesktopLaunchReason = { kind: "explicit" }
 ): Promise<void> {
   const resolved = dependencies ?? await defaultDesktopDependencies();
-  if (process.env.CODEX_PROGRESS_HUD_DATA_DIR) {
+  if (process.env.CODEX_PROGRESS_HUD_DATA_DIR || (dependencies === undefined && process.platform === 'win32')) {
     // Electron resolves its own profile independently of APPDATA overrides.
     // Keep isolated companions from sharing the installed app's singleton lock.
-    const userData = resolve(process.env.CODEX_PROGRESS_HUD_DATA_DIR, "electron");
+    const userData = resolve(defaultDataDirectory(), "electron");
     await mkdir(userData, { recursive: true });
     resolved.app.setPath("userData", userData);
   }

@@ -3,6 +3,24 @@ import { buildConversationViews, buildHudView, createConversationViewProjector, 
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 import type { ConversationRow } from "../../src/server/conversation-projection.js";
+it('shows a separate milestone countdown, freezes on pause and never completes at zero',()=>{
+ const row=overdueConversation('running','ready');
+ row.goal!.activeSeconds=10;row.goal!.progressState={scope:'scope',observedEventSequence:0,milestone:{id:'ms',definition:'测试结束',judgment:'in_progress',prediction:{remainingSeconds:100,errorPercent:50,observedActiveSeconds:10}}};
+ expect(buildConversationViews([row],20)[0]?.milestoneLabel).toContain('00:01:20');
+ row.goal!.runtime='paused';expect(buildConversationViews([row],20)[0]?.milestoneLabel).toContain('00:01:40');
+ row.goal!.runtime='running';expect(buildConversationViews([row],100)[0]?.milestoneLabel).toContain('超出估时');
+ row.goal!.progressState.milestone=null;expect(buildConversationViews([row])[0]?.milestoneLabel).toBe('');
+});
+it.each([
+ ['account_refresh_failed','账户定期检查失败'],
+ ['worker_closing','旧估时进程正在关闭'],
+ ['worker_cleanup_pending','旧估时进程清理尚未确认'],
+ ['provider_unavailable','估时提供方未就绪'],
+ ['runtime_not_ready','估时运行时未就绪'],
+] as const)('explains %s before model dispatch',(reason,label)=>{
+ const row=overdueConversation('running','pending');row.observer!.schedulingReason=reason;
+ expect(buildConversationViews([row])[0]!.diagnosticLabel).toContain(label);
+});
 it('explains unavailable worker admission without claiming a model failure',()=>{
  const row=overdueConversation('running','pending');
  row.observer!.schedulingReason='worker_unavailable';

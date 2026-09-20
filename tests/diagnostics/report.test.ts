@@ -151,10 +151,10 @@ describe("diagnostic report", () => {
     expect(markdown).toContain("Observed state: running");
     expect(markdown).toContain("Host: 127.0.0.1");
     expect(markdown).toContain("AUTH_ERROR");
-    expect(markdown).toContain("%APPDATA%\\codex-progress-hud\\install.json: true");
-    expect(markdown).toContain("%APPDATA%\\codex-progress-hud: true");
+    expect(markdown).toContain("%USERPROFILE%\\.codex-progress-hud\\install.json: true");
+    expect(markdown).toContain("%USERPROFILE%\\.codex-progress-hud: true");
     expect(markdown).toContain("## Safe verification commands");
-    expect(markdown).toContain('Test-Path "$env:APPDATA\\codex-progress-hud\\install.json"');
+    expect(markdown).toContain('Test-Path "$env:USERPROFILE\\.codex-progress-hud\\install.json"');
     expect(markdown).toContain('Invoke-RestMethod -Uri "http://127.0.0.1:17837/health"');
     expect(result.path).toMatch(/^[A-Za-z]:\\|^\//u);
     for (const secret of [

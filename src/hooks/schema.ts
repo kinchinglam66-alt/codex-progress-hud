@@ -31,13 +31,14 @@ export const hookEnvelopeSchema = z.object({
   source: z.enum(["startup", "resume", "clear", "compact"]).optional(),
   receivedAt: z.number().int().nonnegative().safe(),
   toolExitCode: z.number().int().safe().refine(code => code !== 0).optional(),
+  toolFailure:z.boolean().optional(),
   content: z.object({
     kind: z.enum(['user', 'assistant', 'tool']),
     text: z.string().min(1).max(4096),
     truncated: z.boolean()
   }).strict().optional()
 }).strict().superRefine((value, context) => {
-  if (value.toolExitCode !== undefined && value.hook !== 'PostToolUse') {
+  if ((value.toolExitCode !== undefined||value.toolFailure!==undefined) && value.hook !== 'PostToolUse') {
     context.addIssue({code: 'custom', path: ['toolExitCode'], message: 'tool exit code requires PostToolUse'});
   }
   if (value.content === undefined) return;
@@ -62,6 +63,7 @@ export interface HookEnvelope {
   receivedAt: number;
   /** Bounded structured PostToolUse metadata; never inferred from output text. */
   toolExitCode?: number;
+  toolFailure?:boolean;
   /** Private Hook-to-companion content; never include in public progress snapshots. */
   content?: PassiveContent;
 }
@@ -119,6 +121,9 @@ export function createHookEnvelope(
     ? `unscoped-session\u0000${parsed.session_id}`
     : `turn-task\u0000${parsed.session_id}\u0000${parsed.turn_id}`);
   const toolExitCode = structuredToolExitCode(hook, parsed);
+  const toolResponse=parsed.tool_response;
+  const toolFailure=hook==='PostToolUse'&&toolResponse!==null&&typeof toolResponse==='object'&&!Array.isArray(toolResponse)&&
+    Reflect.get(toolResponse,'is_error')===true;
   const eventId = opaqueKey(
     "evt_",
     hmacKey,
@@ -141,7 +146,7 @@ export function createHookEnvelope(
     hook,
     ...(parsed.source === undefined ? {} : { source: parsed.source }),
     receivedAt: nowMs,
-    ...(toolExitCode === undefined ? {} : {toolExitCode})
+    ...(toolExitCode === undefined ? {} : {toolExitCode}),...(toolFailure?{toolFailure:true}:{})
   }) as HookEnvelope;
 }
 

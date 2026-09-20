@@ -431,7 +431,7 @@ it('prepares an estimate with fresh identity evidence but never dispatches it',a
   const runtime=createObserverIdentityRuntime(config());
   const prepared=await runtime.prepareEstimate({goalSummary:null,activeSeconds:20,runtime:'running',messages:[{kind:'user',text:'synthetic goal',truncated:false}],truncated:false},new AbortController().signal);
   expect(prepared.invocation.args).toContain('exec');
-  expect(prepared.provenance).toMatchObject({input:'observer-input-facts-v4',model:'gpt-5.6-luna-medium',algorithm:'pace-v1'});
+  expect(prepared.provenance).toMatchObject({input:'observer-input-facts-v5',model:'gpt-5.6-luna-medium',algorithm:'pace-v1'});
   expect(prepared.evidence.accountFingerprint).toMatch(/^[a-f0-9]{64}$/);
   expect(state.events).toContain('account');await runtime.close();
 });

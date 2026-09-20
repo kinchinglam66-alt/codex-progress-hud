@@ -2,6 +2,7 @@ import {resolve} from 'node:path';
 import {homedir} from 'node:os';
 import {createMainCodexAccountSource} from '../estimation/main-codex-account-source.js';
 import {createMainAccountFollower} from './main-account-follower.js';
+import {createMainStartupInspection} from './main-account-startup-inspection.js';
 import {createHash} from 'node:crypto';
 import {mkdir, open as openFile, readFile} from 'node:fs/promises';
 import {z} from 'zod';
@@ -154,6 +155,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime({...identityOptions,
       reuseHomeCheckProcess:shouldEnablePersistentObserver(options,config)}),dialog:options.dialog,
+      ...(mainAccountSource?{inspectStartupAccount:createMainStartupInspection(account,mainAccountSource)}:{}),
       subscriptionAccountSource:mainAccountSource?'main':'independent',
       accountingAccountFingerprint:account.evidence.accountFingerprint,
       openAccounting:()=>openThreadedReleaseAccounting(accountingDirectory,Date.now),consentStore,
@@ -192,7 +194,13 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
       if(attachedScheduler)runtime.schedulerRecovery.attachScheduler(attachedScheduler);
       currentRuntime=runtime;
       currentAccountFingerprint=account.evidence.accountFingerprint;
-      return {workers:runtime.workers, workerSource:runtime.workerSource, close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime){currentRuntime=undefined;currentAccountFingerprint=null;}},
+      const selectionInspection=mainAccountSource?createMainStartupInspection(account,mainAccountSource):undefined;
+      return {startupAccount:{label:account.accountLabel,observedAt:account.evidence.observedAt,expiresAt:account.evidence.expiresAt},workers:runtime.workers, workerSource:runtime.workerSource, close:async()=>{runtime.disable();await runtime.close();runtimes.delete(runtime);if(currentRuntime===runtime){currentRuntime=undefined;currentAccountFingerprint=null;}},
+        ...(selectionInspection?{inspectSelection:async(selectionSignal:AbortSignal)=>{
+          const snapshot=await selectionInspection(selectionSignal);
+          if(snapshot.evidence.expiresAt<=Date.now())throw Error('OBSERVER_STARTUP_ACCOUNT_EXPIRED');
+          return {label:snapshot.accountLabel,fingerprint:snapshot.evidence.accountFingerprint};
+        }}:{}),
         inspect:async inspectSignal=>{const snapshot=await accountSettings.inspect(inspectSignal);return {label:snapshot.accountLabel,fingerprint:snapshot.evidence.accountFingerprint};}};
     }catch(error){runtimes.delete(runtime);await runtime.close().catch(()=>undefined);throw error;}
   };
@@ -241,7 +249,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
   };
   const host=await createObserverProviderHost({dataDirectory:options.dataDirectory,consentProtection:options.consentProtection,
     followMainAccount:mainAccountSource!==undefined,
-    openSubscription,openApi,autoStartSubscription:config!==null, ...(config?.proxyUrl===undefined?{}:{proxyUrl:config.proxyUrl}),
+    openSubscription,openApi,...(mainAccountSource?{subscriptionStartupInspection:'owner' as const}:{}),autoStartSubscription:config!==null, ...(config?.proxyUrl===undefined?{}:{proxyUrl:config.proxyUrl}),
     ...(accountSettings===undefined?{}:{subscriptionAccount:accountSettings,readSubscriptionAccount:async signal=>{const snapshot=await accountSettings.inspect(signal);return {label:snapshot.accountLabel,observedAt:snapshot.evidence.observedAt,expiresAt:snapshot.evidence.expiresAt};}})});
   const follower=mainAccountSource?createMainAccountFollower({enabled:()=>host.canFollowSubscriptionAccount(),
     currentFingerprint:()=>currentAccountFingerprint,readFingerprint:async signal=>(await mainAccountSource.inspect(signal)).accountFingerprint,

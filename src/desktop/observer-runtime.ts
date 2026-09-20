@@ -67,6 +67,9 @@ type TrustedCompressionPreparation = (request: CompressionRequest, signal: Abort
 export interface DesktopObserverRuntimeOptions {
   subscriptionAccountSource?:'main'|'independent';
   identity: DesktopObserverIdentity;
+  /** Trusted host handoff for this start only. Must revalidate the selected
+   * main account; never used by recovery, manual checks or model preparation. */
+  inspectStartupAccount?: DesktopObserverIdentity['inspect'];
   /** Account selected by the host for this runtime's ledger and receipt directory. */
   accountingAccountFingerprint?: string;
   openAccounting: () => Promise<ReleaseAccountingOwner>;
@@ -133,10 +136,11 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * exposes two stable, initially unavailable slots so the scheduler can be
  * wired before first-use setup without creating an admission path early.
  */
-export function createDesktopObserverRuntime({identity, openAccounting, accountingAccountFingerprint, dialog, now = Date.now, consentStore,subscriptionAccountSource,
+export function createDesktopObserverRuntime({identity, inspectStartupAccount, openAccounting, accountingAccountFingerprint, dialog, now = Date.now, consentStore,subscriptionAccountSource,
   inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation,persistentWorkerFactory,persistentReceiptDirectory}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
+  let accountRefreshFailed = false;
   let setupFailed = false;
   let setup: Promise<void> | undefined;
   let closing: Promise<void> | undefined;
@@ -225,6 +229,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
 
   const workerSource: ObserverWorkerSource = {
     acquire(conversationKey: string): ObserverWorker {
+      if (!disabled && !ready && accountRefreshFailed) throw new Error('OBSERVER_ACCOUNT_REFRESH_FAILED');
       if (disabled || !ready || !accounting) throw new Error('OBSERVER_NOT_READY');
       if(releasingDelegates.has(conversationKey))throw new Error('OBSERVER_WORKER_CLOSING');
       const existing = delegates.get(conversationKey);
@@ -529,9 +534,10 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
           const stored = await readConsent();
           if (stored === null || !gate.restore(stored)) { disable(); return; }
         }
-        if (!disabled && gate.authorized()) ready = true;
+        if (!disabled && gate.authorized()) { ready = true; accountRefreshFailed = false; }
       } catch {
         ready = false;
+        accountRefreshFailed = true;
         // A network failure does not renew old evidence. Expire its gate even
         // without a new dispatch, and reclaim idle native resources promptly.
         if(!gate.authorized())revokeRetention();
@@ -560,7 +566,7 @@ export function createDesktopObserverRuntime({identity, openAccounting, accounti
       try {
         gate.revoke();
         if (combined.aborted) throw new Error('OBSERVER_SETUP_CANCELLED');
-        const snapshot = await identity.inspect(combined);
+        const snapshot = await (subscriptionAccountSource==='main'&&inspectStartupAccount?inspectStartupAccount(combined):identity.inspect(combined));
         if (combined.aborted) throw new Error('OBSERVER_SETUP_CANCELLED');
         if(accountingAccountFingerprint!==undefined&&snapshot.evidence.accountFingerprint!==accountingAccountFingerprint)
           throw new Error('OBSERVER_ACCOUNT_BINDING_CHANGED');
