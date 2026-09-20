@@ -22,7 +22,9 @@ it('retains compacted totals and pending custody across a real database reopen',
   reopened.confirmExit(incident);
   expect(reopened.count()).toBe(141);expect(reopened.pending()).toEqual([]);
  }finally{db.close();rmSync(dir,{recursive:true,force:true});}
-});
+ // Hundreds of durable disk writes may exceed the default 5s on a busy host.
+ // Preserve real persistence and all assertions; this is not a latency test.
+},20_000);
 it('rolls back the archived count when deleting compacted detail fails',()=>{
  const db=new DatabaseSync(':memory:');
  try{

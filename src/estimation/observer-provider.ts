@@ -2,7 +2,7 @@ import type {ObserverResponse} from './observer-contract.js';
 import type {OwnedProcessResult} from './owned-process.js';
 import type {SubscriptionUsage} from './codex-output.js';
 import type {AdmissionKind} from './subscription-accounting.js';
-import type {AdmissionReason} from '../core/observer-diagnostics.js';
+import type {AdmissionReason,ResultRejectionReason} from '../core/observer-diagnostics.js';
 
 export const observerCallStages = ['admission','preparation','reservation','dispatch','provider_returned','settlement','cleanup','finished'] as const;
 export type ObserverCallStage = typeof observerCallStages[number];
@@ -59,6 +59,7 @@ export interface ObserverResult {
   usage: ObserverUsage | null;
   admissionKind?: AdmissionKind;
   admissionReason?: AdmissionReason;
+  rejectionReason?: ResultRejectionReason;
   outcomes?: ObserverCallOutcomes;
   timings?: ObserverCallTimings;
 }

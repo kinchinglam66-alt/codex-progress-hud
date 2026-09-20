@@ -32,6 +32,7 @@ it.each(['none','provider_returned','admission','dispatch','settlement','finishe
    expect(result.usage).toBeNull();expect(accounting.snapshot()).toMatchObject({starts:change==='admission'?0:1,knownTokens:0,unknown:0,inFlight:0,unresolved:0});
    if(change==='dispatch')expect(await readFile(join(dir,'receipts','persistent-session-receipts.jsonl'),'utf8')).toContain('cancelled_before_dispatch');
   }else{
+   if(change==='settlement'||change==='finished')expect(result.rejectionReason).toBe('provider_account_invalid');
    expect(result.usage?.inputTokens).toBe(100);
    expect(accounting.snapshot()).toMatchObject({starts:1,knownTokens:110,unknown:0});
   }

@@ -21,8 +21,10 @@ It does not generate a summary or copy the entire lifetime rollout.
 - Ticket, turn, account, cancellation and source-record validation still apply.
   Missing or changed data cannot be silently treated as complete history.
 - This route does not request new compression. Runtime-managed context uses the
-  pinned provider's capacity checks; the existing 30-second scheduler deadline
-  includes preparation and prevents late model dispatch or ETA delivery.
+  pinned provider's capacity checks. The optional end-to-end scheduler deadline
+  is disabled by default; when configured, it includes preparation and prevents
+  dispatch or delivery after that deadline. See [ETA timeout](ETA-TIMEOUT.md).
+  Source-turn cancellation and stale-result rejection remain independent.
 
 ## Local startup projection
 

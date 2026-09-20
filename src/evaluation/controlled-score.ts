@@ -44,20 +44,27 @@ export function scoreControlled(manifest:readonly {key:string;split:string}[],ev
   }
   const split=new Map(manifest.map(x=>[x.key,x.split]));
   if([...ends.keys(),...predictions.map(x=>x.key)].some(key=>!split.has(key)))throw Error("UNKNOWN_SCORE_TASK");
+  const validTimeline=(p:z.infer<typeof predictionSchema>)=>{
+    const end=ends.get(p.key);
+    return p.deliveredSeconds>=p.metrics.activeSeconds&&(!end||p.metrics.activeSeconds<end.atSeconds);
+  };
+  const lateDelivery=(p:z.infer<typeof predictionSchema>)=>{
+    const end=ends.get(p.key);return p.late||(end!==undefined&&p.deliveredSeconds>=end.atSeconds);
+  };
   const traces:Trace[]=manifest.flatMap(task=>{
     const end=ends.get(task.key);if(!end)return [];
-    const times=[...new Set([0,...predictions.filter(p=>p.key===task.key&&p.metrics.activeSeconds<=end.atSeconds).map(p=>p.metrics.activeSeconds)])].sort((a,b)=>a-b);
+    const times=[...new Set([0,...predictions.filter(p=>p.key===task.key&&validTimeline(p)).map(p=>p.metrics.activeSeconds)])].sort((a,b)=>a-b);
     return [{sampleKey:task.key,observations:times.map(atSeconds=>({atSeconds,state:"running" as const})),
       end:{atSeconds:end.atSeconds,outcome:end.outcome==="verified"?"succeeded_verified":end.outcome}}];
   });
   const local=fitLocalBaseline(traces.filter(x=>split.get(x.sampleKey)==="train"),traces.filter(x=>split.get(x.sampleKey)==="calibration"));
   const rows:Row[]=[],requestRows:Row[]=[];
   for(const [observationIndex,p] of predictions.entries()){
-    const end=ends.get(p.key);if(!end||end.outcome!=="verified")continue;
+    const end=ends.get(p.key);if(!end||end.outcome!=="verified"||!validTimeline(p))continue;
     const parsed=rangeSchema.safeParse(p.result.answer);
     if(parsed.success&&p.result.status==="answered"&&p.metrics.activeSeconds<=end.atSeconds)requestRows.push({key:p.key,observationIndex,split:split.get(p.key)!,source:"model-request-retrospective",
       actualSeconds:end.atSeconds-p.metrics.activeSeconds,...parsed.data,deliveredSeconds:p.metrics.activeSeconds});
-    if(p.late||p.deliveredSeconds>=end.atSeconds)continue;
+    if(lateDelivery(p))continue;
     const point={atSeconds:p.metrics.activeSeconds,activeSeconds:p.metrics.activeSeconds,state:"running" as const};
     const sources:Array<[string,Prediction|null]>=[
       ["model",p.result.status==="answered"&&parsed.success?parsed.data:null],
@@ -76,7 +83,7 @@ export function scoreControlled(manifest:readonly {key:string;split:string}[],ev
   })) as Record<"train"|"calibration"|"test",{model:ReturnType<typeof summarize>;baseline:ReturnType<typeof summarize>}>;
   const availability=Object.fromEntries(["train","calibration","test"].map(s=>{
     const attempts=predictions.filter(x=>split.get(x.key)===s);
-    const timely=attempts.filter(x=>{const end=ends.get(x.key);return end&&!x.late&&x.deliveredSeconds<end.atSeconds&&
+    const timely=attempts.filter(x=>{const end=ends.get(x.key);return end&&validTimeline(x)&&!lateDelivery(x)&&
       x.result.status==="answered"&&rangeSchema.safeParse(x.result.answer).success;});
     return [s,{plannedTasks:manifest.filter(x=>x.split===s).length,attemptedPredictions:attempts.length,
       timelyAnswered:timely.length,timelyAnswerRate:attempts.length?timely.length/attempts.length:null,
@@ -85,7 +92,8 @@ export function scoreControlled(manifest:readonly {key:string;split:string}[],ev
   return {counts:{planned:manifest.length,ended:ends.size,missing:manifest.length-ends.size,
     verified:[...ends.values()].filter(x=>x.outcome==="verified").length,
     failed:[...ends.values()].filter(x=>x.outcome==="failed").length,interrupted:[...ends.values()].filter(x=>x.outcome==="interrupted").length,
-    predictions:predictions.length,late:predictions.filter(x=>x.late).length,
+    predictions:predictions.length,late:predictions.filter(lateDelivery).length,
+    invalidTimeline:predictions.filter(x=>!validTimeline(x)).length,
     abstained:predictions.filter(x=>x.result.status==="abstained").length,
     invalid:predictions.filter(x=>x.result.status==="invalid_answer").length,
     busySkipped:events.filter(x=>(x as {type?:unknown})?.type==="sample_skipped"&&(x as {reason?:unknown}).reason==="busy").length,

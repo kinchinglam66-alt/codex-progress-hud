@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {identityPreparationCode,identityPreparationError,type IdentityPreparationCode} from './identity-preparation-error.js';
 import {spawn} from 'node:child_process';
 import {observerReleaseFiles} from './observer-release-files.js';
 import {observerHomeProfile,OBSERVER_HOME_SCRIPT_SHA256} from './observer-home-assets.js';
@@ -337,6 +338,14 @@ export function createObserverIdentityRuntime(options:Options) {
             ...(readerDiagnostic?{reader:readerDiagnostic}:{}),
             reason:ownersBusy()?'ownership_unconfirmed':combined.aborted||disabled?'cancelled':
               error instanceof ObserverAccountTimeout?'timeout':'check_failed'});
+          if(mode==='session'){
+            const stageCodes:Record<PreparationStage,IdentityPreparationCode>={
+              'home-prepare':'IDENTITY_HOME_PREPARE_FAILED','runtime-preflight':'IDENTITY_RUNTIME_PREFLIGHT_FAILED',
+              'account-read':'IDENTITY_ACCOUNT_READ_FAILED','home-recheck':'IDENTITY_HOME_RECHECK_FAILED',
+              binding:'IDENTITY_BINDING_FAILED',ready:'IDENTITY_READY_FAILED'};
+            throw identityPreparationError('OBSERVER_IDENTITY_UNAVAILABLE',ownersBusy()?'IDENTITY_OWNERSHIP_UNCONFIRMED':
+              combined.aborted||disabled?'IDENTITY_CANCELLED':identityPreparationCode(error)??stageCodes[stage]);
+          }
           throw fail();
         } finally {
           combined.removeEventListener('abort',abort);
@@ -347,7 +356,8 @@ export function createObserverIdentityRuntime(options:Options) {
           // A prepared invocation is not usable until its required transition
           // drain is confirmed. A swallowed retirement error must never escape
           // as successful login/logout/session preparation.
-          if(sharedHome&&poisoned)throw fail();
+          if(sharedHome&&poisoned)throw mode==='session'?
+            identityPreparationError('OBSERVER_IDENTITY_UNAVAILABLE','IDENTITY_OWNERSHIP_UNCONFIRMED'):fail();
         }
       }).finally(()=>{pending=undefined;});
       return pending;

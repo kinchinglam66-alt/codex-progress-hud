@@ -1,5 +1,10 @@
 # Single-owner main-account session preparation
 
+> Historical specification: the original 30-second deadline below has been
+> superseded by an optional deadline, disabled by default. See
+> [ETA timeout](../../ETA-TIMEOUT.md). This does not relax account, consent,
+> cancellation or confirmed-cleanup requirements.
+
 ## Objective
 
 Remove the duplicate ephemeral account metadata process and remote authentication from a cold main-account ETA preparation. Preserve complete effective conversation context, the 30-second ETA deadline, account-change fencing, consent, usage accounting and confirmed cleanup. A faster local test is not proof of end-to-end latency.

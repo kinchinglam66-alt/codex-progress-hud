@@ -10,12 +10,14 @@ interface Dependencies {
   resolveExecutable(): Promise<string>;
   launch(executable:string,cwd:string,env:NodeJS.ProcessEnv): ChildProcessWithoutNullStreams;
 }
-export function createConversationNameService(environment:NodeJS.ProcessEnv=process.env, overrides:Partial<Dependencies>={}) {
+export function createConversationNameService(environment:NodeJS.ProcessEnv=process.env, overrides:Partial<Dependencies>={},fallbackRuntimeRoot?:string) {
   const env=subscriptionEnvironment(environment);
   const dependencies:Dependencies={
     resolveExecutable:async()=>{
-      if(process.platform!=='win32' || !env.LOCALAPPDATA)throw Error();
-      return findPinnedCodex(join(env.LOCALAPPDATA,'OpenAI','Codex','bin'));
+      if(process.platform!=='win32')throw Error();
+      if(env.LOCALAPPDATA)try{return await findPinnedCodex(join(env.LOCALAPPDATA,'OpenAI','Codex','bin'));}catch{/* Try only the host-selected, independently pinned companion runtime. */}
+      if(fallbackRuntimeRoot)return findPinnedCodex(fallbackRuntimeRoot);
+      throw Error('NAME_SOURCE_UNAVAILABLE');
     },
     launch:(exe,cwd,childEnv)=>spawn(exe,nameProcessArguments(),{cwd,env:childEnv,windowsHide:true,shell:false,stdio:['pipe','pipe','pipe']}),
     ...overrides
@@ -36,7 +38,7 @@ export function createConversationNameService(environment:NodeJS.ProcessEnv=proc
     async read(hostId:string,signal:AbortSignal):Promise<string|null> {
       try {
         if(disabled || signal.aborted)throw Error();
-        initialization ??= initialize();
+        initialization ??= initialize().catch(error=>{initialization=undefined;throw error;});
         await initialization;
         if(disabled || signal.aborted || active)throw Error();
         const operation=reader!.read(hostId,signal);

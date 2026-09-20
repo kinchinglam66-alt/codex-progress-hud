@@ -207,7 +207,8 @@ it('never falls back after entering a native worker even when its failure resemb
  const f=fixture({paired:true});let fallback=0;
  f.worker.prepareNativeTurnContext=async()=>{throw Error('history_incomplete');};
  f.worker.prepareNativeHistoryFallback=async()=>{fallback++;return f.preparedContext();};
- try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);}
+ try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);
+  expect(f.observations.find(row=>row.kind==='result')).toMatchObject({status:'process_error',rejectionReason:'preparation_failed',usage:null});}
  finally{f.scheduler.disable();await f.source.close();}
 });
 

@@ -5,6 +5,18 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createPersistentReceiptJournal,preparationErrorCode} from '../../src/estimation/observer-persistent-receipt.js';
 import {LocalSessionSourceError} from '../../src/observer/local-session-reader.js';
+import {identityPreparationCodes,identityPreparationCode,identityPreparationError} from '../../src/estimation/identity-preparation-error.js';
+
+it.each(identityPreparationCodes)('preserves only the fixed identity diagnostic %s',code=>{
+ const error=identityPreparationError('OBSERVER_IDENTITY_UNAVAILABLE',code);
+ expect(identityPreparationCode(error)).toBe(code);
+ expect(preparationErrorCode(error)).toBe(code);
+});
+it('does not evaluate diagnostic accessors or accept private identity codes',()=>{
+ const error=Error('private');Object.defineProperty(error,'code',{get(){throw Error('must not invoke');}});
+ expect(identityPreparationCode(error)).toBeUndefined();
+ expect(identityPreparationCode(Object.assign(Error('private'),{code:'MAIN_AUTH_LOGIN_FAILED private'}))).toBeUndefined();
+});
 
 it.each(['source_identity_mismatch','source_closed','source_cancelled'] as const)('preserves the actual local reader error %s',code=>{
  expect(preparationErrorCode(new LocalSessionSourceError(code))).toBe(code);
@@ -21,7 +33,7 @@ it.each(['SOURCE_SNAPSHOT_INCOMPLETE','SOURCE_HISTORY_BINDING_CHANGED','GOAL_TIC
  }finally{await rm(root,{recursive:true,force:true});}
 });
 
-it.each(['NATIVE_SNAPSHOT_CUSTODY_PATH','NATIVE_SNAPSHOT_CUSTODY_REPLACED','NATIVE_BASE_BINDING_CHANGED','NATIVE_RESOURCE_FORK_LOG_UNKNOWN'])('preserves the bounded native preparation code %s',code=>{
+it.each(['NATIVE_CONTEXT_STALE','SOURCE_PREPARATION_STALE','NATIVE_SNAPSHOT_CUSTODY_PATH','NATIVE_SNAPSHOT_CUSTODY_REPLACED','NATIVE_BASE_BINDING_CHANGED','NATIVE_RESOURCE_FORK_LOG_UNKNOWN'])('preserves the bounded native preparation code %s',code=>{
  expect(preparationErrorCode(Object.assign(Error('private path and account details'),{code}))).toBe(code);
  expect(preparationErrorCode(Error(code))).toBe(code);
 });

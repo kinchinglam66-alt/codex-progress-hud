@@ -33,6 +33,17 @@ describe("Windows release source contract", () => {
     expect(shutdown).not.toMatch(/Write-(?:Output|Host).*token/iu);
   });
 
+  it('retains user data during upgrades and defaults explicit uninstall cleanup to No',async()=>{
+    const installer=await text('build/installer.nsh');
+    const uninstall=installer.split('!macro customUnInstall')[1]!.split('!macroend')[0]!;
+    const guarded=uninstall.match(/\$\{ifNot\} \$\{isUpdated\}([\s\S]*?)\$\{endif\}/u)?.[1];
+    expect(guarded).toContain('Delete "$PROFILE\\.codex-progress-hud\\install.json"');
+    expect(guarded).toContain('RMDir /r "$PROFILE\\.codex-progress-hud"');
+    expect(guarded).toContain('MB_DEFBUTTON2');
+    expect(guarded).toContain('/SD IDNO IDNO keepUserData');
+    expect(uninstall.replace(guarded!, '')).not.toMatch(/\b(?:RMDir|Delete|MessageBox)\b/u);
+  });
+
   it("contains the release marketplace, plugin mirror, and both Node-free launchers", async () => {
     const marketplace = JSON.parse(await text(".agents/plugins/marketplace.json"));
     expect(marketplace.name).toBe("kinchinglam66-alt");

@@ -56,6 +56,23 @@ app.whenReady().then(async()=>{
     render(project([progressRow]));
     if(progressBar.getAttribute('aria-valuenow')!=='50')throw Error('ETA revision reversed progress');
     if(!progressBar.getAttribute('aria-label').includes('预估进度'))throw Error('estimate label missing');
+    progressRow.goal.progressState={scope:'synthetic',observedEventSequence:0,milestone:{id:'milestone',
+      definition:'<img src=x onerror=alert(1)> 测试结束',judgment:'in_progress',
+      prediction:{remainingSeconds:100,errorPercent:30,observedActiveSeconds:100}}};
+    render(project([progressRow],20));
+    const milestoneNode=root.querySelector('.milestone-eta');
+    if(milestoneNode.hidden || !milestoneNode.textContent.includes('00:01:20'))throw Error('milestone countdown absent');
+    if(root.querySelector('img'))throw Error('milestone HTML injection');
+    progressRow.goal.runtime='paused';render(project([progressRow],20));
+    if(!milestoneNode.textContent.includes('00:01:40'))throw Error('paused milestone aged');
+    progressRow.goal.runtime='running';render(project([progressRow],101));
+    if(!milestoneNode.textContent.includes('超出估时') || milestoneNode.textContent.includes('推断完成'))throw Error('milestone zero fabricated completion');
+    progressRow.goal.progressState.milestone.judgment='inferred_complete';render(project([progressRow]));
+    if(!milestoneNode.textContent.includes('推断完成，待核实'))throw Error('milestone inference not distinguished');
+    progressRow.goal.progressState.milestone.judgment='observed_complete';render(project([progressRow]));
+    if(!milestoneNode.textContent.includes('已观察到结束'))throw Error('milestone observation absent');
+    progressRow.goal.progressState.milestone=null;render(project([progressRow]));
+    if(!milestoneNode.hidden || milestoneNode.textContent!=='')throw Error('cleared milestone retained');
     const clock=createHudDisplayClock();
     const goal={generation:1,estimateRevision:1,sampledAtMs:0,runtime:'running',status:'running',activeSeconds:0,
       prediction:{remainingSeconds:3600,errorPercent:30,observedActiveSeconds:0}};
@@ -87,7 +104,7 @@ app.whenReady().then(async()=>{
     simulated=1000;drawTransition();if(!root.textContent.includes('00:01:41'))throw Error('transition middle');
     simulated=2000;drawTransition();if(!root.textContent.includes('00:01:42'))throw Error('transition target');
     if(!root.textContent.includes('±30%'))throw Error('uncertainty mutated');
-    return {domPassed:true,countdownPassed:true,transitionPassed:true};
+    return {domPassed:true,countdownPassed:true,transitionPassed:true,milestonePassed:true};
   })()`);
   console.log(JSON.stringify(result));window.destroy();clearTimeout(timeout);app.exit(0);
 }).catch(error=>{console.error(error.message);clearTimeout(timeout);app.exit(1);});

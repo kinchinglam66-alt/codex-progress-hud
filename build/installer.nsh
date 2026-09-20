@@ -13,8 +13,12 @@
 
 !macro customUnInstall
   nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\stop-companion.ps1"'
-  Delete "$PROFILE\.codex-progress-hud\install.json"
-  MessageBox MB_YESNO|MB_ICONQUESTION "Remove Codex Progress HUD local settings, token, logs, and diagnostics?" IDNO keepUserData
-    RMDir /r "$PROFILE\.codex-progress-hud"
-  keepUserData:
+  ; electron-builder also invokes this macro from the old uninstaller during
+  ; upgrades. Never offer or perform user-data removal on that path.
+  ${ifNot} ${isUpdated}
+    Delete "$PROFILE\.codex-progress-hud\install.json"
+    MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "Remove Codex Progress HUD local settings, token, logs, and diagnostics?" /SD IDNO IDNO keepUserData
+      RMDir /r "$PROFILE\.codex-progress-hud"
+    keepUserData:
+  ${endif}
 !macroend

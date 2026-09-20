@@ -212,6 +212,21 @@ it('uses the real worker protocol for not-dispatched cancellation without usage 
   const restored=await openCompiled(path,()=>0);
   expect(restored.snapshot()).toMatchObject({starts:1,inFlight:0,unknown:0,knownTokens:0});
 });
+it('persists ETA compaction unknowns through the real worker protocol and restart',async()=>{
+ const path=await directory();let owner=await openCompiled(path,()=>1000);
+ for(let i=0;i<4;i++){
+  const view=owner.forConversation(`eta-${i}`),id=(await view.reserve())!;
+  await view.settle(id,null,'confirmed_eta_compaction_unknown');
+ }
+ expect(owner.snapshot()).toMatchObject({starts:4,unknown:4,knownTokens:0,inFlight:0});
+ await owner.close();owner=await openCompiled(path,()=>1000);
+ expect(owner.snapshot()).toMatchObject({starts:4,unknown:4,knownTokens:0});
+ expect(await owner.recoveryAdmission!(1000,true,'next')).toMatchObject({allowed:true});
+ await owner.close();
+ await mutateDatabase(path,db=>{
+  expect(db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE settlement_classification='confirmed_eta_compaction_unknown' AND purpose='eta' AND state='unknown'").get()).toMatchObject({count:4});
+ });
+});
 
 it('propagates compression purpose through the production worker into SQLite', async () => {
   const path = await directory();

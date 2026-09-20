@@ -7,6 +7,24 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it('records admission denial reason without inventing model usage',async()=>{
+ const records:ObserverObservation[]=[],f=fixture(1,6000,row=>records.push(row));f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();f.calls[0]!.finish({status:'admission_denied',interpretation:null,usage:null,admissionReason:'cooldown'});await f.flush();
+  expect(records.find(row=>row.kind==='result')).toMatchObject({status:'admission_denied',accepted:false,admissionReason:'cooldown',usage:null});
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
+it.each(['provider_account_invalid','provider_source_invalid','provider_authorization_revoked','provider_interpretation_missing'] as const)(
+ 'preserves terminal provider rejection %s in diagnostics and journal',async rejectionReason=>{
+  const records:ObserverObservation[]=[],f=fixture(1,6000,row=>records.push(row)),key=f.hook('UserPromptSubmit');
+  try{
+   f.scheduler.tick();f.time(1000);
+   f.calls[0]!.finish({status:'process_error',interpretation:null,usage,rejectionReason});await f.flush();
+   expect(f.scheduler.diagnostics(key)).toMatchObject({resultDiagnostic:'process_error',rejectionReason});
+   expect(records.find(row=>row.kind==='result')).toMatchObject({accepted:false,rejectionReason,usage});
+   expect(f.goals.view(key,1000)?.prediction).toBeNull();
+  }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+ });
 it('coalesces critical events during inference into one followup and accounts for the stale result',async()=>{
  const records:ObserverObservation[]=[],f=fixture(1,6000,r=>records.push(r)),key=f.hook('UserPromptSubmit');
  try{

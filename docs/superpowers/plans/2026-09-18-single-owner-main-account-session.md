@@ -1,5 +1,10 @@
 # Single-owner main-account session implementation plan
 
+> Historical plan: references below to a mandatory 30-second deadline describe
+> the original acceptance target, not the current runtime default. The deadline
+> is now optional and disabled by default; see [ETA timeout](../../ETA-TIMEOUT.md).
+> Account, consent, cancellation and cleanup safeguards remain unchanged.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. User chose inline implementation in the existing isolated worktree and authorized design changes without repeated approval.
 
 **Goal:** Authenticate and prepare a cold main-account ETA using one worker-owned process rather than two.

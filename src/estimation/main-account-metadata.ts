@@ -4,6 +4,7 @@ import {createObserverSessionProcess} from './observer-session-process.js';
 import {authenticateMainAccountSession} from './main-account-session-auth.js';
 import {observerRouteFingerprint} from './observer-route.js';
 import type {MainAccountSessionTransport,OpenMainAccountSession} from './main-account-session-transport.js';
+import {identityPreparationCode,identityPreparationError,type IdentityPreparationCode} from './identity-preparation-error.js';
 const object=(value:unknown):value is Record<string,unknown>=>value!==null&&typeof value==='object'&&!Array.isArray(value);
 const label=(value:unknown):value is string=>typeof value==='string'&&value.length>0&&value.length<=256&&value.trim()===value&&!/[\p{Cc}\p{Cf}]/u.test(value);
 /** Only metadata RPCs. The trusted caller must preflight this isolated,
@@ -19,9 +20,12 @@ export function createMainAccountMetadataReader(options:{invocation:Invocation;s
   let lease:ReturnType<typeof createMainAccountLease>|undefined;
   let borrowed:MainAccountSessionTransport|undefined;
   const abort=()=>{owner?.disable();borrowed?.rpc.close('MAIN_ACCOUNT_METADATA_CANCELLED');};guard.addEventListener('abort',abort,{once:true});
-  const timer=setTimeout(()=>cancel?.abort(),15000);
+  let timedOut=false;
+  let failureCode:IdentityPreparationCode='MAIN_METADATA_SOURCE_FAILED';
+  const timer=setTimeout(()=>{timedOut=true;cancel?.abort();},15000);
   try{
    const binding=await options.source.inspect(guard);guard.throwIfAborted();
+   failureCode='MAIN_METADATA_TRANSPORT_FAILED';
    let rpc:MainAccountSessionTransport['rpc'];
    if(options.openMainAccountSession){
     borrowed=await options.openMainAccountSession(options.invocation,guard);guard.throwIfAborted();
@@ -40,18 +44,22 @@ export function createMainAccountMetadataReader(options:{invocation:Invocation;s
     if(!object(result))throw Error();
     return observerRouteFingerprint(result.config,'ephemeral');
    };
+   failureCode='MAIN_METADATA_ROUTE_FAILED';
    const routeFingerprint=await route();
    await authenticateMainAccountSession(rpc,lease,guard);
+   failureCode='MAIN_METADATA_ACCOUNT_READ_FAILED';
    const result=await rpc.call('account/read',{refreshToken:false});
    if(!object(result)||result.requiresOpenaiAuth!==true||!object(result.account)||result.account.type!=='chatgpt')throw Error();
    const accountLabel=label(result.account.email)?result.account.email:'ChatGPT（跟随主 Codex）';
+   failureCode='MAIN_METADATA_REVALIDATION_FAILED';
    if(await route()!==routeFingerprint||!await lease.validate(guard))throw Error();
    guard.throwIfAborted();
    return {accountFingerprint:binding.accountFingerprint,accountLabel,routeFingerprint,...(borrowed?{mainAccountSession:borrowed}:{})};
-  }catch{borrowed?.rpc.close('MAIN_ACCOUNT_METADATA_FAILED');throw Error('MAIN_ACCOUNT_METADATA_UNAVAILABLE');}
+  }catch(error){borrowed?.rpc.close('MAIN_ACCOUNT_METADATA_FAILED');
+   throw identityPreparationError('MAIN_ACCOUNT_METADATA_UNAVAILABLE',timedOut?'MAIN_METADATA_TIMEOUT':guard.aborted?'MAIN_METADATA_CANCELLED':identityPreparationCode(error)??failureCode);}
   finally{
    clearTimeout(timer);guard.removeEventListener('abort',abort);if(!borrowed)lease?.close();
-   try{await owner?.close();}catch{poisoned=true;throw Error('MAIN_ACCOUNT_METADATA_CLOSE_UNCONFIRMED');}
+   try{await owner?.close();}catch{poisoned=true;throw identityPreparationError('MAIN_ACCOUNT_METADATA_CLOSE_UNCONFIRMED','MAIN_METADATA_CLOSE_UNCONFIRMED');}
    finally{busy=false;cancel=undefined;}
   }
  }

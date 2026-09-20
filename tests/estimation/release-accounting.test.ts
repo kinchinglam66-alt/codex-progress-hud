@@ -9,6 +9,48 @@ const directories: string[] = [];
 const owners: ReleaseAccountingOwner[] = [];
 const DB_NAME = 'release-observer-accounting.sqlite';
 const usage = {inputTokens: 10, outputTokens: 2, cachedInputTokens: 5};
+it('retains confirmed cancellation unknowns across reopen without causing account cooldown',async()=>{
+ const path=await directory();let owner=await open(path,()=>1000);
+ for(let n=0;n<3;n++){
+  const view=owner.forConversation(`cancel-${n}`);
+  await view.settle((await view.reserve())!,null,'confirmed_cancelled_unknown');
+ }
+ expect(owner.snapshot()).toMatchObject({starts:3,unknown:3,knownTokens:0,inFlight:0});
+ await owner.close();owner=await open(path,()=>1000);
+ expect(owner.snapshot()).toMatchObject({unknown:3,knownTokens:0});
+ expect(await owner.recoveryAdmission(1000,true,'other')).toMatchObject({allowed:true});
+ const view=owner.forConversation('compression');
+ await expect(view.settle((await view.reserve('ordinary','context_compression'))!,null,'confirmed_cancelled_unknown')).rejects.toThrow('RELEASE_USAGE_INVALID');
+ const eta=owner.forConversation('eta');
+ await expect(eta.settle((await eta.reserve())!,usage,'confirmed_cancelled_unknown')).rejects.toThrow('RELEASE_USAGE_INVALID');
+});
+it('preserves successful ETA compaction unknowns across reopen without counting them as failures',async()=>{
+ const path=await directory();let owner=await open(path,()=>1000);
+ for(let i=0;i<4;i++){
+  const view=owner.forConversation(`eta-${i}`),id=(await view.reserve())!;
+  await view.settle(id,null,'confirmed_eta_compaction_unknown');
+ }
+ expect(owner.snapshot()).toMatchObject({starts:4,unknown:4,knownTokens:0,inFlight:0});
+ expect(await owner.recoveryAdmission(1000,true,'next')).toMatchObject({allowed:true});
+ await owner.close();owner=await open(path,()=>1000);
+ expect(owner.snapshot()).toMatchObject({unknown:4,knownTokens:0});
+ expect(await owner.recoveryAdmission(1000,true,'next')).toMatchObject({allowed:true});
+ for(let i=0;i<3;i++){
+  const view=owner.forConversation(`failed-${i}`),id=(await view.reserve())!;
+  await view.settle(id,null,'safe_unknown');
+ }
+ expect(await owner.recoveryAdmission(1000,true,'next')).toMatchObject({allowed:false,reason:'cooldown'});
+ expect(owner.snapshot().unknown).toBe(7);
+});
+it('rejects ETA compaction classifications for compression purposes or known usage',async()=>{
+ const owner=await open(await directory(),()=>1000),view=owner.forConversation('one');
+ const compression=(await view.reserve('ordinary','context_compression'))!;
+ await expect(view.settle(compression,null,'confirmed_eta_compaction_unknown')).rejects.toThrow('RELEASE_USAGE_INVALID');
+ const etaView=owner.forConversation('eta'),eta=(await etaView.reserve())!;
+ expect(eta).not.toBeNull();
+ await expect(etaView.settle(eta,usage,'confirmed_eta_compaction_unknown')).rejects.toThrow('RELEASE_USAGE_INVALID');
+ expect(owner.snapshot()).toMatchObject({unknown:0,inFlight:2});
+});
 it('keeps unadmitted unknown work across restart and resumes only after matching process exit',async()=>{
  const path=await directory();let exited=false;
  const incident={ownerUuid:randomUUID(),conversationKey:'source',generation:0,at:1000,pid:123,creationIdentity:'birth',reason:'turn/started' as const};
@@ -25,6 +67,56 @@ it('keeps unadmitted unknown work across restart and resumes only after matching
  exited=true;await owner.reconcileAutomatic!();
  expect(owner.snapshot()).toMatchObject({starts:0,unknown:1,unresolved:0});
  const view=owner.forConversation('other'),id=await view.reserve();expect(id).not.toBeNull();await view.cancelBeforeDispatch(id!);
+});
+it('finishes half-open recovery after an accepted ETA compaction while preserving unknown history',async()=>{
+ let now=0;const owner=await open(await directory(),()=>now);
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ now=300000;const admission=await owner.recoveryAdmission(now,true,'trial');
+ expect(admission).toMatchObject({allowed:true,kind:'half_open'});
+ const view=owner.forConversation('trial'),id=(await view.reserve(admission.kind))!;
+ await view.settle(id,null,'confirmed_eta_compaction_unknown');await owner.releaseRecoveryAdmission('trial');
+ expect(owner.snapshot()).toMatchObject({unknown:4,knownTokens:0});
+ expect(await owner.recoveryAdmission(now,true,'next')).toMatchObject({allowed:true,kind:'ordinary'});
+});
+it.each(['purpose','state'])('rejects forged ETA compaction %s on reopen',async(field)=>{
+ const path=await directory(),owner=await open(path,()=>1000),view=owner.forConversation('eta');
+ const id=(await view.reserve())!;await view.settle(id,null,'confirmed_eta_compaction_unknown');await owner.close();
+ await mutateDatabase(path,db=>{if(field==='purpose')db.prepare("UPDATE admissions SET purpose='context_compression' WHERE id=?").run(id);
+ else db.prepare("UPDATE admissions SET state='settled',input_tokens=1,output_tokens=0,cached_input_tokens=0 WHERE id=?").run(id);});
+ await expect(open(path,()=>1000)).rejects.toThrow('RELEASE_SCHEMA_INVALID');
+});
+it.each(['confirmed_eta_compaction_unknown','confirmed_cancelled_unknown','known_cancelled','known_success','known_non_success','safe_unknown'] as const)('does not let another conversation change an active half-open trial: %s',async classification=>{
+ let now=0;const owner=await open(await directory(),()=>now);
+ const old=owner.forConversation('other'),oldId=(await old.reserve())!;
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ now=300000;const admission=await owner.recoveryAdmission(now,true,'trial');
+ expect(admission).toMatchObject({allowed:true,kind:'half_open'});
+ const trial=owner.forConversation('trial'),trialId=(await trial.reserve(admission.kind))!;
+ await old.settle(oldId,classification.startsWith('known_')?usage:null,classification);
+ expect(await owner.recoveryAdmission(now,true,'next')).toMatchObject({allowed:false,reason:'half_open_busy'});
+ await trial.settle(trialId,null,'confirmed_eta_compaction_unknown');
+ expect(await owner.recoveryAdmission(now,true,'next')).toMatchObject({allowed:true,kind:'ordinary'});
+});
+it.each([false,true])('releases its confirmed cancelled half-open trial without falsely declaring recovery successful (known=%s)',async known=>{
+ let now=0;const owner=await open(await directory(),()=>now);
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ now=300000;const admission=await owner.recoveryAdmission(now,true,'trial');
+ expect(admission).toMatchObject({allowed:true,kind:'half_open'});
+ const trial=owner.forConversation('trial'),id=(await trial.reserve(admission.kind))!;
+ await trial.settle(id,known?usage:null,known?'known_cancelled':'confirmed_cancelled_unknown');
+ expect(owner.snapshot()).toMatchObject({unknown:known?3:4,knownTokens:known?12:0});
+ expect(await owner.recoveryAdmission(now,true,'next')).toMatchObject({allowed:true,kind:'half_open'});
+});
+it('clears an owned expired retry after successful ETA compaction in half-open recovery',async()=>{
+ let now=0;const owner=await open(await directory(),()=>now);
+ for(const key of ['a','b','c']){const view=owner.forConversation(key);await view.settle((await view.reserve())!,null,'safe_unknown');}
+ await owner.recordRecoveryEvent!({kind:'recoverable_failure',at:now,conversationKey:'trial'});
+ now=300000;const admission=await owner.recoveryAdmission(now,true,'trial');
+ expect(admission).toMatchObject({allowed:true,kind:'half_open'});
+ const trial=owner.forConversation('trial'),id=(await trial.reserve(admission.kind))!;
+ await trial.settle(id,null,'confirmed_eta_compaction_unknown');
+ expect(await owner.recoveryAdmission(now,true,'trial')).toMatchObject({allowed:true,kind:'ordinary'});
+ expect(owner.snapshot()).toMatchObject({unknown:4,knownTokens:0});
 });
 it('reserves the granted half-open compression when that conversation also has an expired retry',async()=>{
  let now=0;const owner=await open(await directory(),()=>now);

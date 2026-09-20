@@ -15,6 +15,7 @@ const forecastSchema=z.object({schemaVersion:z.literal(1),predictionId:z.number(
 const resultSchema=z.object({session:z.string(),key:z.string(),generation:z.number().int().nonnegative(),kind:z.literal('result'),
   accepted:z.boolean(),status:z.string(),at:z.number().finite().nonnegative(),requestedAt:z.number().finite().nonnegative(),
   observedActiveSeconds:seconds,activeSeconds:seconds,
+  activeTimeKnown:z.boolean().optional(),timingUncertain:z.boolean().optional(),
   estimate:z.object({remainingSeconds:seconds,errorPercent:z.number().finite().min(0).max(1000)}).nullable(),
   forecast:forecastSchema.optional()});
 
@@ -29,9 +30,15 @@ export function scorePilotGoal(records:readonly unknown[],rawLabel:unknown){
   });
   const points=eligible?attempts.flatMap(value=>{
     const estimate=value.estimate;
-    if(!value.accepted || value.status!=='interpreted' || !estimate || value.at<value.requestedAt ||
+    // A user-confirmed completion boundary cannot repair an unknown prediction
+    // clock. This legacy scorer has no independent timeline reconstruction.
+    if(value.activeTimeKnown===false || value.timingUncertain===true ||
+      (value.forecast!==undefined && (value.forecast.generation!==value.generation ||
+       value.forecast.snapshotActiveSeconds!==value.observedActiveSeconds ||
+       value.forecast.acceptedAt<value.requestedAt || value.forecast.acceptedAt>value.at)) ||
+      !value.accepted || value.status!=='interpreted' || !estimate || value.at<value.requestedAt ||
       value.activeSeconds<value.observedActiveSeconds || value.observedActiveSeconds>=label.completedActiveSeconds ||
-      value.activeSeconds>label.completedActiveSeconds)return [];
+      value.activeSeconds>=label.completedActiveSeconds)return [];
     const actualRemainingSeconds=label.completedActiveSeconds-value.observedActiveSeconds;
     const absoluteErrorSeconds=Math.abs(estimate.remainingSeconds-actualRemainingSeconds);
     const margin=estimate.remainingSeconds*estimate.errorPercent/100;

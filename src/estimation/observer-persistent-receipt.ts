@@ -1,6 +1,7 @@
 import {appendFile,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
+import {identityPreparationCodes} from './identity-preparation-error.js';
 import type {RawTokens} from './observer-persistent-session.js';
 
 const token=z.object({totalTokens:z.number().int().nonnegative().safe(),inputTokens:z.number().int().nonnegative().safe(),
@@ -10,14 +11,14 @@ const sourceKey=z.string().min(1).max(512), sourceEpoch=z.string().max(4096).nul
 const ownerUuid=z.string().uuid(), operationId=z.string().uuid();
 export interface PersistentReceiptBinding {accountFingerprint:string;routeFingerprint:string;assetsFingerprint:string}
 export type PersistentOperationKind='eta'|'context_compression';
-const preparationStages=['session_setup','checkpoint_import','history_import','source_revalidation','input_validation','context_compression'] as const;
+const preparationStages=['session_setup','checkpoint_import','history_import','source_revalidation','observation_refresh','input_validation','context_compression'] as const;
 export type PersistentPreparationStage=typeof preparationStages[number];
-const preparationCodes=['PREPARATION_UNKNOWN','CHECKPOINT_INVALID','CHECKPOINT_REBUILD_REQUIRED','CHECKPOINT_ACK_INVALID',
+const preparationCodes=[...identityPreparationCodes,'PREPARATION_UNKNOWN','CHECKPOINT_INVALID','CHECKPOINT_REBUILD_REQUIRED','CHECKPOINT_ACK_INVALID',
  'IMAGE_PATH_REJECTED','IMAGE_READ_FAILED','IMAGE_FORMAT_UNSUPPORTED','IMAGE_CAPACITY_EXCEEDED','NATIVE_REQUEST_TOO_LARGE',
  'APP_SERVER_RPC_ERROR','APP_SERVER_RPC_CLOSED','APP_SERVER_RPC_EOF','APP_SERVER_RPC_TIMEOUT','APP_SERVER_RPC_FRAME_TOO_LARGE',
  'APP_SERVER_RPC_WRITE_FAILED','SESSION_THREAD_MISSING','SESSION_PROTOCOL_FAILED','SESSION_TIMEOUT',
  'NATIVE_BASE_BINDING_CHANGED','NATIVE_BASE_ID_INVALID','NATIVE_BASE_REUSE_MISSING','NATIVE_BASE_SNAPSHOT_MISSING',
- 'NATIVE_BASE_SOURCE_MISMATCH','NATIVE_BASE_UNAVAILABLE','NATIVE_CONTEXT_UNAVAILABLE','NATIVE_DESTINATION_UNAVAILABLE',
+ 'NATIVE_BASE_SOURCE_MISMATCH','NATIVE_BASE_UNAVAILABLE','NATIVE_CONTEXT_UNAVAILABLE','NATIVE_CONTEXT_STALE','SOURCE_PREPARATION_STALE','NATIVE_DESTINATION_UNAVAILABLE',
  'NATIVE_CONTROLLER_IDENTITY_UNAVAILABLE','NATIVE_FORK_CLEANUP_PENDING','NATIVE_GUARD_POISONED','NATIVE_OWNER_EXIT_UNCONFIRMED',
  'NATIVE_REQUEST_NOT_RELEASED','NATIVE_RESOURCE_BASE_EXISTS','NATIVE_RESOURCE_BASE_MISMATCH','NATIVE_RESOURCE_BUSY',
  'NATIVE_RESOURCE_FORK_LOG_UNKNOWN','NATIVE_RESOURCE_FORK_MISMATCH','NATIVE_RESOURCE_LIMIT','NATIVE_RESOURCE_MANIFEST_UNKNOWN',

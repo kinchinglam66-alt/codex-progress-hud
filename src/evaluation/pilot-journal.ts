@@ -6,7 +6,7 @@ import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
 import {resolve} from 'node:path';
-import {resultDiagnostics,resultRejectionReasons,observerContextStates} from '../core/observer-diagnostics.js';
+import {resultDiagnostics,resultRejectionReasons,observerContextStates,normalizeAdmissionReason} from '../core/observer-diagnostics.js';
 
 const triggerCodes=new Set(['initial','important_event','status_evidence','near_expiry','overdue','periodic','pre_dispatch_retry','bootstrap_recovery']);
 const forecastDiagnosticCodes=new Set(['provenance_unavailable','invalid_provenance']);
@@ -54,6 +54,7 @@ export function createPilotJournal(directory:string,options:{now?:()=>number;ope
       try {if(value.forecast)forecast=makeForecastRecord(value.forecast);} catch { /* Invalid research metadata is omitted. */ }
       // Explicit field projection prevents accidental future context/identity logging.
       const row={schemaVersion:1,session,recordedAt:Date.now(),kind:value.kind,at:value.at,
+        ...(value.kind==='result'&&value.status==='admission_denied'?{admissionReason:normalizeAdmissionReason(value.admissionReason)}:{}),
         ...(milestone.success?{milestone:milestone.data}:{}),eventCutoff:activeAnchor(value.eventCutoff),pendingCriticalEvents:activeAnchor(value.pendingCriticalEvents),
         key:createHmac('sha256',salt).update(value.key).digest('hex'),generation:value.generation,
         activeSeconds:value.activeSeconds,activeTimeKnown:value.activeTimeKnown,runtime:value.runtime,version:value.version,

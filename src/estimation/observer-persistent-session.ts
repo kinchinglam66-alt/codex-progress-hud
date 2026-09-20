@@ -4,6 +4,9 @@ import type {ObserverUsage} from './observer-provider.js';
 import {parseCodexCheckpoint,type NativeCodexCheckpoint} from '../observer/codex-checkpoint.js';
 import {forkObserverThread,type NativeForkOrigin} from './observer-native-fork.js';
 import {nativePreservationInstructions} from './native-preservation.js';
+import {OBSERVER_INPUT_FACTS_VERSION} from './observer-input.js';
+import type {ForecastVersions} from './forecast-record.js';
+const estimateModel='gpt-5.6-luna',estimateEffort='medium';
 
 export interface SessionRpc {call(method:string,params:unknown):Promise<unknown>;subscribe(listener:(n:{method:string;params:Record<string,unknown>})=>void):()=>void}
 type ObjectValue=Record<string,unknown>;
@@ -34,7 +37,7 @@ function tokens(value:unknown):Tokens|null {
 }
 export interface PersistentSessionResult {
  interpretation:ObserverResponse|null;usage:ObserverUsage|null;terminalConfirmed:boolean;cancelled:boolean;compactions:number;
- turnId?:string;usageCompleteness:'single_update'|'multiple_updates'|'inconsistent_delta'|'compaction_observed'|'malformed_snapshot'|'missing';
+ turnId?:string;terminalStatus?:string;usageCompleteness:'single_update'|'multiple_updates'|'inconsistent_delta'|'compaction_observed'|'malformed_snapshot'|'missing';
  usageSnapshots:readonly {total:RawTokens;last:RawTokens;observedAt:number;source:'thread/tokenUsage/updated'}[];
  usageGaps:readonly {observedAt:number;source:'thread/tokenUsage/updated';reason:'malformed_token_snapshot'}[];
 }
@@ -133,7 +136,7 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
  function estimateParams(input:ObserverInput){
    if(submittedBlocksReuse())throw Error('SESSION_SUPPLEMENT_ALREADY_SUBMITTED');
    const supplement=staged.map(record=>({type:'text',text:observedRecord(record.ordinal,0,true,record.text),text_elements:[]}));
-   const params={threadId,model:'gpt-5.6-luna',effort:'medium',serviceTierForTurn:'default',input:[...supplement,
+   const params={threadId,model:estimateModel,effort:estimateEffort,serviceTierForTurn:'default',input:[...supplement,
     {type:'text',text:JSON.stringify({currentObservation:input,importedThroughOrdinal:cursor,
       ...(options.retainSubmittedSupplement?{acceptedThroughOrdinal:acceptedCursor<0?null:acceptedCursor}:{}),
       ...(staged.length?{submittedSupplementThroughOrdinal:staged.at(-1)!.ordinal}:{})}),text_elements:[]}],outputSchema:options.outputSchema};
@@ -165,6 +168,12 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
    return {text:observedRecord(ordinal,part,best===remaining.length,remaining.slice(0,best)),encodedBytes:bestBytes};
  }
  return {
+  provenance():ForecastVersions {
+   return {input:OBSERVER_INPUT_FACTS_VERSION,model:`${estimateModel}-${estimateEffort}`,algorithm:'milestone-events-v1',
+    prompt:createHash('sha256').update(JSON.stringify(['persistent-observer-prompt-v1',instructions,
+     options.nativeInstructions??null,nativePreservationInstructions,options.outputSchema,
+     options.retainSubmittedSupplement===true])).digest('hex')};
+  },
    async bootstrapCheckpoint(checkpoint:NativeCodexCheckpoint,signal:AbortSignal){
      ready();signal.throwIfAborted();
      let verified:NativeCodexCheckpoint|null;
@@ -521,7 +530,7 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
        }
        const usageCompleteness=usageGaps.length>0?'malformed_snapshot':state.compactions>0?'compaction_observed':state.updates===0?'missing':state.updates===1&&usage?'single_update':
          state.updates===1?'inconsistent_delta':'multiple_updates';
-       return {interpretation,usage,terminalConfirmed:true,cancelled:signal.aborted,compactions:state.compactions,turnId,
+       return {interpretation,usage,terminalConfirmed:true,cancelled:signal.aborted,compactions:state.compactions,turnId,...(state.status===undefined?{}:{terminalStatus:state.status}),
          usageCompleteness,usageSnapshots:state.snapshots,usageGaps};
      }catch(e){uncertain=true;if(e instanceof PersistentSessionError)throw e;throw new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status);}
      finally{clearTimeout(timer);unsubscribe();signal.removeEventListener('abort',interrupt);await Promise.allSettled(writeTasks);busy=false;}

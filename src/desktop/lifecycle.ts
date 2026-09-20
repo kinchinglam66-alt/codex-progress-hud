@@ -253,7 +253,7 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     ),
     createTrayController,
     createProgressServer: options => {
-      const names=createConversationNameService();
+      const names=createConversationNameService(process.env,{},resolve(process.resourcesPath,'..','observer-runtime'));
       return createProgressServer({...options,
         ...(options.observerWorkers||options.observerWorkerSource?{observerSessionsRoot:defaultCodexSessionsRoot()}:{}),
         readConversationName:names.read,closeConversationNames:names.close});

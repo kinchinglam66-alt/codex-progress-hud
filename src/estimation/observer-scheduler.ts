@@ -65,6 +65,7 @@ export interface ObserverObservation {
   recoveryGapSeconds?:number|null;
   estimate?:{remainingSeconds:number;errorPercent:number}|null;
   resultDiagnostic?:ResultDiagnostic;
+  admissionReason?:AdmissionReason;
   rejectionReason?:ResultRejectionReason;
   forecast?:Readonly<ForecastRecord>;
   forecastDiagnostic?:'provenance_unavailable'|'invalid_provenance';
@@ -255,10 +256,11 @@ export class ObserverScheduler {
     this.checkDeadline(flight);
     const settledAt=this.time();
     try {this.options.goals.settle(flight.ticket,null,settledAt);}catch{/* opaque ticket cleanup is best effort */}
-    const rejection=this.options.goals.rejectionReason(flight.ticket);
     this.flights.delete(flight.key);
     if(entry.flight===flight)delete entry.flight;
-    this.recordResult(entry,flight,null,false,settledAt,null,this.schedulerRejectionReason(flight,this.workerState(flight.worker))??rejection);
+    // Null settlement releases the ticket; its schema rejection is not the
+    // cause of a preparation failure (no model response was produced).
+    this.recordResult(entry,flight,null,false,settledAt,null,this.schedulerRejectionReason(flight,this.workerState(flight.worker))??'preparation_failed');
     this.releaseRetention(entry,flight,false,null);
     this.notify();
   }
@@ -866,6 +868,7 @@ export class ObserverScheduler {
     this.notify();
   }
   private classifyResult(result:ObserverResult|null,accepted:boolean,rejectionReason?:ResultRejectionReason):{diagnostic?:ResultDiagnostic;rejectionReason?:ResultRejectionReason} {
+    rejectionReason??=result?.rejectionReason;
     if(result===null||result.status==='process_error')return {diagnostic:'process_error',...(rejectionReason?{rejectionReason}:{})};
     if(!accepted)return {diagnostic:'rejected_result',rejectionReason:rejectionReason??'result_not_accepted'};
     if(result.status==='interpreted'&&result.interpretation?.estimate===null)return {diagnostic:'unknown_response'};
@@ -917,6 +920,7 @@ export class ObserverScheduler {
       triggerReason:flight.triggerReason,lastRequestActiveSeconds:flight.lastRequestActiveSeconds,
       eligibleActiveSeconds:flight.eligibleActiveSeconds,
       accepted,status:result?.status??'process_error',
+      ...(result?.status==='admission_denied'?{admissionReason:normalizeAdmissionReason(result.admissionReason)}:{}),
       ...(result?.interpretation?{relation:result.interpretation.relation}:{}),
       estimate:result?.interpretation?.estimate?{...result.interpretation.estimate}:null,
        ...(forecast?{forecast}:{}),...(forecastDiagnostic?{forecastDiagnostic}:{}),

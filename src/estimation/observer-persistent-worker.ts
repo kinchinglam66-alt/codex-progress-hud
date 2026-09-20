@@ -4,6 +4,7 @@ import type {ObserverInput} from './observer-contract.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import {assertCheckpointWindow} from '../observer/verified-history-fallback.js';
 import type {ObserverWorker} from './observer-scheduler.js';
+import type {ForecastVersions} from './forecast-record.js';
 import type {ObserverResult} from './observer-provider.js';
 import {reportObserverStage} from './observer-provider.js';
 import type {ReleaseAccountingOwner} from './release-accounting.js';
@@ -83,6 +84,8 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
   for(const listener of phaseListeners)try{listener(value);}catch{/* Passive diagnostics. */}
  };
  let disabled=false,poisoned=false,pending:Promise<unknown>|undefined,controller:AbortController|undefined;
+ let lifecycleController:AbortController|undefined;
+ let resultProvenance:ForecastVersions|null=null;
  let owner:ReturnType<typeof createObserverSessionProcess>|undefined;
  let mainAccountLease:ReturnType<typeof createMainAccountLease>|undefined;
  let authenticatingMainAccount=false;
@@ -153,6 +156,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  journal=(options.receiptJournalFactory??createPersistentReceiptJournal)(options.receiptDirectory);
  let closing:Promise<void>|undefined,releasing:Promise<void>|undefined;
  const turns=new Map<string,number>();
+ const cleanupInvocations=new Map<string,string>();
  const authorized=()=>{try{return !disabled&&!poisoned&&options.authorize()===true;}catch{return false;}};
  const check=(signal:AbortSignal)=>{signal.throwIfAborted();if(mainAccountLease?.signal.aborted)throw Error('MAIN_ACCOUNT_CHANGED');if(!authorized())throw Error('OBSERVER_NOT_AUTHORIZED');};
  const bind=(key:string,g:number)=>{
@@ -180,6 +184,17 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    nativeSnapshot=undefined;
    await options.nativeContext?.release?.();
    await nativeBase.close();nativeBase=createNativeTurnBaseOwner();nativeBaseRoot=undefined;nativeTurnPrepared=false;nativeTurnValidation=undefined;
+   // Request views may already be closed while their shared process is retained.
+   // Mark all of this owner's invocations only after process and resource cleanup;
+   // never settle usage again or clear the evidence on a failed metadata write.
+   for(const [id,key] of cleanupInvocations){
+     const cleanupView=options.accounting.forConversation(key);
+     try{
+       if(!cleanupView.updateInvocation)throw Error('SESSION_ACCOUNTING_OWNERSHIP');
+       await cleanupView.updateInvocation(id,{phase:'closed',cleanupOutcome:'confirmed'});
+     }finally{await cleanupView.close();}
+     cleanupInvocations.delete(id);
+   }
    ephemeralRequests=0;ephemeralImportedBytes=0;
    owner=undefined;processRpc=undefined;session=undefined;nativeSessionRevision=undefined;processIdentity=undefined;processBinding=undefined;sourceEpoch=undefined;turns.clear();attachments=[];
    nativeGenerationSource=undefined;nativeProcessSource=undefined;nativeOwnerState=null;exitRecorded=false;nativeResourcesOpen=false;
@@ -469,8 +484,17 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
   }
   /** Synchronous fence first; work and cleanup are then serialized with the current operation. */
   function retireNative(reason:NativeRetirementReason='state_revoked'):Promise<void>{
-   revokeIdle();controller?.abort();
+   revokeIdle();
+   // A normal turn/state transition cancels work, but is not an internal
+   // failure. Keep the fault signal independent so a subsequent account,
+   // process or disable failure still vetoes neutral cancellation settlement.
+   if(reason==='state_revoked')lifecycleController?.abort();else controller?.abort();
    if(releasing)return releasing;
+   // A drained worker retains its source/generation fence. New-turn polling
+   // must not turn that harmless old binding into a fresh asynchronous release
+   // before acquire() on every tick, starving the next preparation forever.
+   if(!pending&&!owner&&!nativeResourcesOpen&&!nativeRequestAcquired&&
+      nativeCleanups.length===0&&nativeSnapshots.length===0)return Promise.resolve();
    const cleanup=(async()=>{await pending?.catch(()=>undefined);await reset(reason);})();
    releasing=cleanup.finally(()=>{releasing=undefined;});
    void releasing.catch(()=>{poisoned=true;});
@@ -517,6 +541,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     if(!processIdentity||!view.bindInvocation||!view.updateInvocation)throw Error('SESSION_ACCOUNTING_OWNERSHIP');
     await view.bindInvocation(id,{admissionId:id,conversationKey:key,turnGeneration:g,ownerUuid:processOwnerUuid,providerKind:'subscription',
       phase:'bound',deadline:options.now()+120000,cleanupOutcome:'pending',purpose:kind,...processIdentity});
+    cleanupInvocations.set(id,key);
     return {view,id};
   }
   async function runCompaction(live:ReturnType<typeof createPersistentObserverSession>,signal:AbortSignal,key:string,g:number,onDispatch:()=>void):Promise<PersistentCompactionResult>{
@@ -586,10 +611,10 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       phase('forkImportMs');
     }
   }
- function operation<T>(signal:AbortSignal,work:(combined:AbortSignal)=>Promise<T>,deliver?:(result:T,combined:AbortSignal)=>Promise<T>):Promise<T>{
-   const owned=new AbortController();controller=owned;
-   const combined=AbortSignal.any([signal,owned.signal]);
-   const p=work(combined).then(result=>deliver?deliver(result,combined):result).finally(()=>{if(pending===p)pending=undefined;if(controller===owned)controller=undefined;});pending=p;return p;
+ function operation<T>(signal:AbortSignal,work:(combined:AbortSignal,internal:AbortSignal)=>Promise<T>,deliver?:(result:T,combined:AbortSignal)=>Promise<T>):Promise<T>{
+   const owned=new AbortController(),lifecycle=new AbortController();controller=owned;lifecycleController=lifecycle;
+   const combined=AbortSignal.any([signal,owned.signal,lifecycle.signal]);
+   const p=work(combined,owned.signal).then(result=>deliver?deliver(result,combined):result).finally(()=>{if(pending===p)pending=undefined;if(controller===owned)controller=undefined;if(lifecycleController===lifecycle)lifecycleController=undefined;});pending=p;return p;
  }
  const nativeDiagnostic=():NativeLifecycleDiagnostic=>{
   let idleRemainingMs:number|null=null;
@@ -599,6 +624,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    retained:retentionPermit!==null,idleRemainingMs,retirementReason};
  };
  const worker:ObserverWorker={
+   provenance:()=>resultProvenance===null?null:{...resultProvenance},
    subscribeContextPhase(listener){phaseListeners.add(listener);return ()=>{phaseListeners.delete(listener);};},
    status:()=>({active:pending!==undefined||releasing!==undefined,disabled,poisoned:poisoned||owner?.status().poisoned===true,
     ...((options.nativeContext||options.mainAccount)?{cleanupPending:nativeResourcesOpen||owner!==undefined}:{}),
@@ -664,6 +690,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;},policy?.checkpointOnly===true,policy?.checkpointOnly!==true),'fallback');
        ephemeralImportedBytes+=live.status().importedEncodedBytes;
        preparationStage='source_revalidation';await nativeTurnValidation(combined);check(combined);
+       preparationStage='observation_refresh';
        const fresh=sample?.(),preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};
        preparationStage='input_validation';if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
        rememberPrepared(preparedInput,key,g);return {...imported,input:preparedInput};
@@ -691,6 +718,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        if(source.boundary.completed===null)ephemeralImportedBytes+=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes-previousBytes;
        preparationStage='source_revalidation';await nativeTurnValidation(combined);check(combined);
        if(options.reuseNativeTurnSession)nativeSessionRevision=source.revision;
+       preparationStage='observation_refresh';
        const fresh=sample?.();
        const preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};
        preparationStage='input_validation';if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
@@ -761,6 +789,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    },
    observe(input,signal,key,g=0,onStage){
      if(pending||releasing)return Promise.resolve(empty('busy'));
+     resultProvenance=null;
      if(!authorized())return Promise.resolve(empty('disabled'));
      const parsed=observerInputSchema.safeParse(input);if(!parsed.success)return Promise.resolve(empty('invalid_input'));
      if(parsed.data.imageContextPending===true||
@@ -772,8 +801,8 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
      // A paired-context child belongs to one ETA only. Failed/denied dispatch
      // cannot turn its prepared input into a replay capability.
      if(preparedOwner?.validateSource)preparedOwners.delete(input);
-     return operation(signal,async combined=>{
-       let view:SubscriptionAccounting|undefined,id:string|undefined,operationId:string|undefined,dispatched=false,settled=false,bound=false,settlementAttempted=false,receiptFailure=false;
+     return operation(signal,async(combined,internal)=>{
+       let view:SubscriptionAccounting|undefined,id:string|undefined,operationId:string|undefined,dispatched=false,settled=false,bound=false,settlementAttempted=false,receiptFailure=false,cancellationCleanupFailed=false;
        try{
          reportObserverStage(onStage,'preparation');
          phase('accountProcessMs');
@@ -841,6 +870,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          dispatched=true;
          const acceptanceGuard=validateAcceptance;
          admittedModelWindow=true;
+         const provenance=live.provenance();
          const result=await live.estimate(parsed.data,combined,persistEvidence).finally(()=>{admittedModelWindow=false;});
          phase('deliveryMs');
          reportObserverStage(onStage,'provider_returned');
@@ -862,11 +892,29 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
           await view.updateInvocation!(id,{phase:'settling',cleanupOutcome:'pending'});
          reportObserverStage(onStage,'settlement');
          const accountedUsage=result.usage?{inputTokens:result.usage.inputTokens,outputTokens:result.usage.outputTokens,cachedInputTokens:result.usage.cachedInputTokens}:null;
+         const confirmedEtaCompaction=accepted&&result.terminalConfirmed&&!result.cancelled&&result.usageCompleteness==='compaction_observed';
+         let confirmedCancellation=signal.aborted&&!internal.aborted&&authorized()&&
+           signal.reason instanceof Error&&signal.reason.name==='AbortError'&&result.cancelled&&result.terminalConfirmed&&
+           result.terminalStatus==='interrupted'&&(result.usageCompleteness==='missing'||result.usageCompleteness==='single_update');
+         let cancellationCleaned=false;
+         if(confirmedCancellation){
+           try{
+             await reset();
+           }catch(error){cancellationCleanupFailed=true;poisoned=true;throw error;}
+           cancellationCleaned=true;
+           confirmedCancellation=!internal.aborted&&authorized();
+         }
          settlementAttempted=true;
-         await view.settle(id,accountedUsage,result.usage?(accepted?'known_success':'known_non_success'):'safe_unknown');settled=true;
+         await view.settle(id,accountedUsage,result.usage?(accepted?'known_success':confirmedCancellation?'known_cancelled':'known_non_success'):
+           confirmedEtaCompaction?'confirmed_eta_compaction_unknown':confirmedCancellation?'confirmed_cancelled_unknown':'safe_unknown');settled=true;
          nativeTerminal=accepted&&result.terminalConfirmed&&!result.cancelled;
-         if(!imageSourceValid||!accountValid)await reset();
-         return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage} as ObserverResult;
+         if(accepted)resultProvenance=provenance;
+         if((!imageSourceValid||!accountValid)&&!cancellationCleaned)await reset();
+         const rejectionReason=accepted?undefined:combined.aborted||result.cancelled?'scheduler_aborted':
+           !accountValid?'provider_account_invalid':!imageSourceValid?'provider_source_invalid':
+           !authorized()?'provider_authorization_revoked':'provider_interpretation_missing';
+         return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage,
+           ...(rejectionReason?{rejectionReason}:{})} as ObserverResult;
        }catch(error){
          const sessionFailure=error as PersistentSessionError;
          if(operationId&&!dispatched&&!receiptFailure){
@@ -881,6 +929,12 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
            catch{receiptFailure=true;}
          }
          let cleaned=false;try{await reset();cleaned=true;}catch{poisoned=true;}
+         if(cancellationCleanupFailed){
+           if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
+           // Keep the admission unresolved and retain receipt usage evidence.
+           // A cleanup failure must never commit a neutral cancellation.
+           return empty('accounting_error');
+         }
          if(receiptFailure){
            if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
            poisoned=true;return empty('accounting_error');
@@ -910,8 +964,11 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        if(result.interpretation!==null&&options.mainAccount){
          const valid=!combined.aborted&&await mainAccountLease?.validate(combined).catch(()=>false);
          if(!valid||!authorized()||combined.aborted){
+           const rejectionReason=mainAccountLease?.signal.aborted?'provider_account_invalid':
+             combined.aborted?'scheduler_aborted':!valid?'provider_account_invalid':'provider_authorization_revoked';
+           resultProvenance=null;
            try{await reset();}catch{poisoned=true;}
-           return {...result,status:'process_error' as const,interpretation:null};
+           return {...result,status:'process_error' as const,interpretation:null,rejectionReason} as ObserverResult;
          }
        }
        return result;

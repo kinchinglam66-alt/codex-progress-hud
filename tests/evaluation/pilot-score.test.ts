@@ -18,6 +18,28 @@ it('counts unavailable outcomes but excludes stale predictions and unrelated goa
   const more=[...records,{...records[0],estimate:null},{...records[0],accepted:false},{...records[0],key:'other'}];
   expect(scorePilotGoal(more,label)).toMatchObject({attempts:3,predictions:1,availability:1/3});
 });
+it.each([{activeTimeKnown:false},{timingUncertain:true}])('retains attempts but excludes uncertain clock evidence %j',flags=>{
+  expect(scorePilotGoal([{...records[0],...flags}],label)).toMatchObject({attempts:1,predictions:0,meanAbsoluteErrorSeconds:null});
+});
+it('continues to score explicitly known clocks',()=>{
+  expect(scorePilotGoal([{...records[0],activeTimeKnown:true,timingUncertain:false}],label)).toMatchObject({predictions:1});
+});
+it.each([3600,3601])('retains but does not score delivery at or after completion (%s)',activeSeconds=>{
+  expect(scorePilotGoal([{...records[0],activeSeconds}],label)).toMatchObject({
+    eligible:true,attempts:1,predictions:0,availability:0,meanAbsoluteErrorSeconds:null,points:[],
+  });
+});
+it('still scores delivery just before completion without moving the request anchor',()=>{
+  const score=scorePilotGoal([{...records[0],activeSeconds:3599.5}],label);
+  expect(score).toMatchObject({attempts:1,predictions:1});
+  expect(score.points[0]).toMatchObject({actualRemainingSeconds:3000,actualRemainingAtDeliverySeconds:0.5});
+});
+it.each([{generation:2},{snapshotActiveSeconds:601},{acceptedAt:125001},{acceptedAt:119999}])('rejects inconsistent forecast anchors %j',mismatch=>{
+  const forecast={schemaVersion:1,predictionId:1,generation:1,snapshotActiveSeconds:600,acceptedAt:125000,
+    rawSeconds:2400,shadowSeconds:null,paceReason:'missing_measurements',calibration:'uncalibrated',
+    versions:{input:'v1',prompt:'v1',model:'v1',algorithm:'v1'},...mismatch};
+  expect(scorePilotGoal([{...records[0],forecast}],label)).toMatchObject({attempts:1,predictions:0});
+});
 it('reads versioned forecast metadata while preserving legacy raw scoring',()=>{
   const forecast={schemaVersion:1,predictionId:1,generation:1,snapshotActiveSeconds:600,acceptedAt:125000,
     rawSeconds:2400,shadowSeconds:2100,paceReason:'eligible',calibration:'uncalibrated',
@@ -26,4 +48,5 @@ it('reads versioned forecast metadata while preserving legacy raw scoring',()=>{
   const score=scorePilotGoal([{...records[0],forecast}],label);
   expect(score).toMatchObject({attempts:1,predictions:1});
   expect(score.points[0]).toMatchObject({shadowRemainingSeconds:2100});
+  expect(scorePilotGoal([{...records[0],at:125005,forecast}],label)).toMatchObject({predictions:1});
 });

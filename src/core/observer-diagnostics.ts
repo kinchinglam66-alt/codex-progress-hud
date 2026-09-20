@@ -23,6 +23,7 @@ export const resultRejectionReasons = [
   'source_revision_changed',
   'source_identity_changed',
   'schema_invalid',
+  'preparation_failed',
   'aged_response_invalid',
   'aged_response_no_estimate',
   'aged_response_unknown_relation',
@@ -38,6 +39,10 @@ export const resultRejectionReasons = [
   'worker_disabled',
   'worker_stale',
   'worker_unavailable',
+  'provider_account_invalid',
+  'provider_source_invalid',
+  'provider_authorization_revoked',
+  'provider_interpretation_missing',
 ] as const;
 export type ResultRejectionReason = typeof resultRejectionReasons[number];
 

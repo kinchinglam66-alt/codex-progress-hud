@@ -275,7 +275,7 @@ function ensureSettlementClassification(db: Database): void {
   const columns = new Set<string>();
   for (const row of db.prepare('PRAGMA table_info(admissions)').iterate() as Iterable<Row>) if (typeof row.name === 'string') columns.add(row.name);
   if (!columns.has('settlement_classification')) db.exec("ALTER TABLE admissions ADD COLUMN settlement_classification TEXT NOT NULL DEFAULT 'legacy'");
-  const invalid = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE settlement_classification NOT IN ('legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'confirmed_compression_unknown', 'not_dispatched')").get() as Row;
+  const invalid = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE settlement_classification NOT IN ('legacy', 'known_success', 'known_non_success', 'known_cancelled', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'confirmed_compression_unknown', 'confirmed_eta_compaction_unknown', 'confirmed_cancelled_unknown', 'not_dispatched')").get() as Row;
   if (safeInteger(invalid.count) > 0) fail('RELEASE_SCHEMA_INVALID');
   const legacyUnknown = db.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'unknown' AND settlement_classification = 'legacy'").get() as Row;
   if (safeInteger(legacyUnknown.count) > 0) db.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();
@@ -465,9 +465,12 @@ function validateStoredDatabase(db: Database, initialNow: number,expectedVersion
     const purpose = requirePurpose ? String(row.purpose) : 'eta';
     if (!['eta', 'context_compression'].includes(purpose)) fail('RELEASE_SCHEMA_INVALID');
     const settlementClassification = expectedVersion >= 4 ? String(row.settlement_classification) : 'legacy';
-    if (expectedVersion >= 4 && !['legacy', 'known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'confirmed_compression_unknown', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
-    if (expectedVersion >= 4 && state === 'unknown' && !['legacy', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'confirmed_compression_unknown'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
+    if (expectedVersion >= 4 && !['legacy', 'known_success', 'known_non_success', 'known_cancelled', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'confirmed_compression_unknown', 'confirmed_eta_compaction_unknown', 'confirmed_cancelled_unknown', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
+    if (expectedVersion >= 4 && state === 'unknown' && !['legacy', 'safe_unknown', 'unsafe_unknown', 'abandoned_unconfirmed', 'confirmed_compression_unknown', 'confirmed_eta_compaction_unknown', 'confirmed_cancelled_unknown'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
     if (settlementClassification === 'confirmed_compression_unknown' && (purpose !== 'context_compression' || state !== 'unknown')) fail('RELEASE_SCHEMA_INVALID');
+    if (settlementClassification === 'confirmed_eta_compaction_unknown' && (purpose !== 'eta' || state !== 'unknown')) fail('RELEASE_SCHEMA_INVALID');
+    if (settlementClassification === 'confirmed_cancelled_unknown' && (purpose !== 'eta' || state !== 'unknown')) fail('RELEASE_SCHEMA_INVALID');
+    if (settlementClassification === 'known_cancelled' && (purpose !== 'eta' || state !== 'settled')) fail('RELEASE_SCHEMA_INVALID');
     if (expectedVersion >= 4 && state === 'not_dispatched' && !['legacy', 'not_dispatched'].includes(settlementClassification)) fail('RELEASE_SCHEMA_INVALID');
     if (state !== 'settled' && (inputTokens !== MAX_TOKENS_PER_FIELD || outputTokens !== MAX_TOKENS_PER_FIELD || cachedInputTokens !== MAX_TOKENS_PER_FIELD)) fail('RELEASE_SCHEMA_INVALID');
     const attemptId = expectedVersion >= 4 && row.recovery_attempt_id !== null ? recoveryAttemptId.safeParse(row.recovery_attempt_id) : {success: row.recovery_attempt_id === undefined || row.recovery_attempt_id === null};
@@ -778,20 +781,26 @@ export async function openReleaseAccounting(directory: string, now: () => number
         try {
           copiedId = z.string().uuid().parse(id);
           copiedUsage = inputUsage === null ? null : usageSchema.parse({...inputUsage});
-          if (!['known_success', 'known_non_success', 'safe_unknown', 'unsafe_unknown', 'confirmed_compression_unknown'].includes(classification)) fail('RELEASE_USAGE_INVALID');
-          if (copiedUsage === null && !['safe_unknown', 'unsafe_unknown', 'confirmed_compression_unknown'].includes(classification)) fail('RELEASE_USAGE_INVALID');
-          if (copiedUsage !== null && !['known_success', 'known_non_success'].includes(classification)) fail('RELEASE_USAGE_INVALID');
+          if (!['known_success', 'known_non_success', 'known_cancelled', 'safe_unknown', 'unsafe_unknown', 'confirmed_compression_unknown', 'confirmed_eta_compaction_unknown', 'confirmed_cancelled_unknown'].includes(classification)) fail('RELEASE_USAGE_INVALID');
+          if (copiedUsage === null && !['safe_unknown', 'unsafe_unknown', 'confirmed_compression_unknown', 'confirmed_eta_compaction_unknown', 'confirmed_cancelled_unknown'].includes(classification)) fail('RELEASE_USAGE_INVALID');
+          if (copiedUsage !== null && !['known_success', 'known_non_success', 'known_cancelled'].includes(classification)) fail('RELEASE_USAGE_INVALID');
         }
         catch { return Promise.reject(new Error('RELEASE_USAGE_INVALID')); }
         return track(serial(async () => {
           if (poisoned) throw new Error('RELEASE_DATABASE_UNAVAILABLE');
           try {
             transaction(database, () => {
-              const row = database.prepare('SELECT conversation, state, purpose FROM admissions WHERE id = ?').get(copiedId) as Row | undefined;
+              const row = database.prepare('SELECT conversation, state, purpose, ordinal FROM admissions WHERE id = ?').get(copiedId) as Row | undefined;
               if (!row || row.state !== 'pending' || row.conversation !== key) fail('RELEASE_INVALID_SETTLEMENT');
               if (classification === 'confirmed_compression_unknown' && row.purpose !== 'context_compression') fail('RELEASE_USAGE_INVALID');
+              if (classification === 'confirmed_eta_compaction_unknown' && row.purpose !== 'eta') fail('RELEASE_USAGE_INVALID');
+              if (classification === 'confirmed_cancelled_unknown' && row.purpose !== 'eta') fail('RELEASE_USAGE_INVALID');
+              if (classification === 'known_cancelled' && row.purpose !== 'eta') fail('RELEASE_USAGE_INVALID');
               const retry = database.prepare('SELECT failure_count, claim_admission_id FROM conversation_retries WHERE conversation = ?').get(key) as Row | undefined;
               const ownsRetry = retry?.claim_admission_id === copiedId;
+              const policy = database.prepare('SELECT cooldown_level, half_open, half_open_conversation, half_open_claim_after_ordinal FROM recovery_policy WHERE id = 1').get() as Row;
+              const ownsHalfOpen = safeInteger(policy.half_open) === 1 && policy.half_open_conversation === key &&
+                policy.half_open_claim_after_ordinal !== null && safeInteger(row.ordinal) > safeInteger(policy.half_open_claim_after_ordinal);
               if (copiedUsage === null) {
                 database.prepare("UPDATE admissions SET state = 'unknown', settlement_classification = ? WHERE id = ?").run(classification, copiedId);
                 const stored = metadata(), current = safeInteger(stored.unknown_count), starts = safeInteger(stored.cumulative_starts), revision = safeInteger(stored.recovery_revision);
@@ -802,26 +811,37 @@ export async function openReleaseAccounting(directory: string, now: () => number
                   database.prepare('INSERT INTO conversation_retries(conversation,failure_count,next_eligible,updated_at,claim_admission_id) VALUES(?,1,?,?,NULL)')
                     .run(key,at+RETRY_DELAYS_MS[0],at);
                 }
-                if (ownsRetry) {
+                if (ownsRetry && classification === 'confirmed_eta_compaction_unknown') {
+                  database.prepare('DELETE FROM conversation_retries WHERE conversation = ? AND claim_admission_id = ?').run(key, copiedId);
+                } else if (ownsRetry) {
                   const failureCount = classification === 'unsafe_unknown' ? Math.min(5, safeInteger(retry.failure_count) + 1) : safeInteger(retry.failure_count);
                   const nextEligible = classification === 'unsafe_unknown' ? at + RETRY_DELAYS_MS[failureCount - 1]! : at;
                   database.prepare('UPDATE conversation_retries SET failure_count = ?, next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE conversation = ? AND claim_admission_id = ?')
                     .run(failureCount, nextEligible, at, key, copiedId);
                 }
-                const recentFailureUnknown = safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'unknown' AND settlement_classification <> 'confirmed_compression_unknown' AND admitted_at > ?").get(at - HOUR_MS) as Row).count);
-                const policy = database.prepare('SELECT cooldown_level, half_open FROM recovery_policy WHERE id = 1').get() as Row;
+                const recentFailureUnknown = safeInteger((database.prepare("SELECT COUNT(*) AS count FROM admissions WHERE state = 'unknown' AND settlement_classification NOT IN ('confirmed_compression_unknown', 'confirmed_eta_compaction_unknown', 'confirmed_cancelled_unknown') AND admitted_at > ?").get(at - HOUR_MS) as Row).count);
                 if (classification === 'unsafe_unknown') {
                   database.prepare('UPDATE recovery_safety SET unsafe_unknown = 1 WHERE id = 1').run();
                   database.prepare('UPDATE recovery_policy SET next_eligible = NULL, cooldown_until = NULL, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
-                } else if (classification === 'confirmed_compression_unknown') {
+                } else if (classification === 'confirmed_cancelled_unknown') {
+                  // Cancellation is neither success nor failure. Keep unknown
+                  // usage and existing cooldown/failure history; only release
+                  // the trial owned by this admission, never another one's.
+                  if (ownsHalfOpen) database.prepare('UPDATE recovery_policy SET half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
+                } else if (classification === 'confirmed_compression_unknown' || classification === 'confirmed_eta_compaction_unknown') {
                   // A host-confirmed compression can lack token usage without
                   // being an ETA failure. Preserve all durable unknown totals
-                  // while leaving cooldown and unsafe state untouched.
-                } else if (safeInteger(policy.half_open) === 1) {
+                  // without clearing unsafe state or another request's trial.
+                  if(classification==='confirmed_eta_compaction_unknown'&&ownsHalfOpen){
+                    // A completed ETA, unlike preparatory compression, resolves
+                    // the half-open trial without pretending its usage is known.
+                    database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL, cooldown_until = NULL, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
+                  }
+                } else if (ownsHalfOpen) {
                   const level = Math.min(2, safeInteger(policy.cooldown_level) + 1);
                   const delay = [300_000, 900_000, 3_600_000][level]!;
                   database.prepare('UPDATE recovery_policy SET cooldown_until = ?, next_eligible = ?, cooldown_level = ?, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run(at + delay, at + delay, level);
-                } else if (recentFailureUnknown >= 3) database.prepare('UPDATE recovery_policy SET cooldown_until = ?, next_eligible = ?, cooldown_level = 0, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run(at + 300_000, at + 300_000);
+                } else if (safeInteger(policy.half_open) === 0 && recentFailureUnknown >= 3) database.prepare('UPDATE recovery_policy SET cooldown_until = ?, next_eligible = ?, cooldown_level = 0, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run(at + 300_000, at + 300_000);
               } else {
                 const current = safeInteger(metadata().known_tokens), total = copiedUsage.inputTokens + copiedUsage.outputTokens;
                 if (current > MAX_SAFE - total) fail('RELEASE_COUNTER_OVERFLOW');
@@ -832,11 +852,12 @@ export async function openReleaseAccounting(directory: string, now: () => number
                   if (classification === 'known_success') database.prepare('DELETE FROM conversation_retries WHERE conversation = ? AND claim_admission_id = ?').run(key, copiedId);
                   else database.prepare('UPDATE conversation_retries SET next_eligible = ?, updated_at = ?, claim_admission_id = NULL WHERE conversation = ? AND claim_admission_id = ?').run(at, at, key, copiedId);
                 }
-                const policy = database.prepare('SELECT half_open, cooldown_level FROM recovery_policy WHERE id = 1').get() as Row;
-                if (classification === 'known_success') {
-                  if (safeInteger(policy.half_open) === 1) database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL, cooldown_until = NULL, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
-                  else database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL WHERE id = 1').run();
-                } else if (safeInteger(policy.half_open) === 1) {
+                if (classification === 'known_cancelled') {
+                  if (ownsHalfOpen) database.prepare('UPDATE recovery_policy SET half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
+                } else if (classification === 'known_success') {
+                  if (ownsHalfOpen) database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL, cooldown_until = NULL, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run();
+                  else if (safeInteger(policy.half_open) === 0) database.prepare('UPDATE recovery_policy SET failure_count = 0, next_eligible = NULL WHERE id = 1').run();
+                } else if (ownsHalfOpen) {
                   const level = Math.min(2, safeInteger(policy.cooldown_level) + 1);
                   const delay = [300_000, 900_000, 3_600_000][level]!;
                   database.prepare('UPDATE recovery_policy SET cooldown_until = ?, next_eligible = ?, cooldown_level = ?, half_open = 0, half_open_conversation = NULL, half_open_claim_after_ordinal = NULL WHERE id = 1').run(time() + delay, time() + delay, level);

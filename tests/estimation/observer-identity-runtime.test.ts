@@ -12,6 +12,7 @@ vi.mock('../../src/estimation/codex-preflight.js',()=>({createRuntimePreflightCa
 vi.mock('../../src/estimation/codex-invocation.js',()=>({buildObserverExternalInvocation:()=>({executable:'unused',args:['external-metadata'],env:{},cwd:resolve('.'),input:''}),buildObserverSetupInvocation:(_p:unknown,action:string)=>({executable:'unused',args:action==='device-auth'?['login','--device-auth']:[action],env:{},cwd:resolve('.'),input:''}),buildObserverCodexInvocation:()=>({executable:'unused',args:['exec','--model','gpt-5.6-luna','-c','model_reasoning_effort="medium"'],env:{},cwd:resolve('.'),input:'bounded'}),buildObserverCompressionInvocation:(_p:unknown,input:string)=>{state.compressionInputs.push(input);return {executable:'unused',args:['exec','--compression-schema','pinned-summary-schema','-c','model_instructions_file="pinned-summary-instructions"'],env:{},cwd:resolve('.'),input};}}));
 vi.mock('../../src/estimation/observer-account-reader.js',()=>({createObserverAccountReader:(_launch:unknown,_timeout:unknown,onDiagnostic?:(value:unknown)=>void)=>({read:async()=>{state.events.push('account');if(state.failure==='trusted-timeout')throw new ObserverAccountTimeout();if(state.failure){onDiagnostic?.({reason:'rpc_error',phase:2,elapsedMs:42,privateText:'DO_NOT_EXPOSE'});throw Error(state.failure);}return {accountId:state.accountId,email:'same@example.invalid',planType:'plus',routeFingerprint:state.routeFingerprint};},disable(){},ownership:()=>state.active?'reading':'idle'})}));
 import {createObserverIdentityRuntime} from '../../src/estimation/observer-identity-runtime.js';
+import {preparationErrorCode} from '../../src/estimation/observer-persistent-receipt.js';
 vi.mock('../../src/estimation/main-account-metadata.js',()=>({createMainAccountMetadataReader:(options:any)=>({
  read:async(signal:AbortSignal)=>({accountFingerprint:(await options.source.inspect(signal)).accountFingerprint,accountLabel:'followed@example.invalid',routeFingerprint:state.routeFingerprint,
   ...(options.openMainAccountSession?{mainAccountSession:await options.openMainAccountSession(options.invocation,signal)}:{})}),
@@ -88,6 +89,25 @@ it('retains only the bounded reader failure category and phase for account inspe
     expect(JSON.stringify(failure.diagnostic)).not.toContain('DO_NOT_EXPOSE');
     expect(JSON.stringify(failure.diagnostic)).not.toContain('PRIVATE');
   }finally{await runtime.close();}
+});
+it('preserves a safe session preparation stage through the receipt classifier',async()=>{
+ state.failure='PRIVATE_ACCOUNT_ERROR';const runtime=createObserverIdentityRuntime(config());
+ try{
+  const error=await runtime.prepareSession(new AbortController().signal).catch(error=>error);
+  expect(error).toMatchObject({message:'OBSERVER_IDENTITY_UNAVAILABLE',code:'IDENTITY_ACCOUNT_READ_FAILED'});
+  expect(preparationErrorCode(error)).toBe('IDENTITY_ACCOUNT_READ_FAILED');
+  expect(JSON.stringify(error)).not.toMatch(/PRIVATE_ACCOUNT_ERROR|DO_NOT_EXPOSE/);
+ }finally{await runtime.close();}
+});
+it('retains a bounded nested main-account code through session preparation',async()=>{
+ const source={inspect:async()=>{throw Object.assign(Error('PRIVATE_SOURCE_ERROR'),{code:'MAIN_METADATA_SOURCE_FAILED'});},credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
+ const runtime=createObserverIdentityRuntime({...config(),mainAccountSource:source});
+ try{
+  const error=await runtime.prepareSession(new AbortController().signal).catch(error=>error);
+  expect(preparationErrorCode(error)).toBe('MAIN_METADATA_SOURCE_FAILED');
+  expect(error.message).toBe('OBSERVER_IDENTITY_UNAVAILABLE');
+  expect(error.cause).toBeUndefined();expect(JSON.stringify(error)).not.toContain('PRIVATE_SOURCE_ERROR');
+ }finally{await runtime.close();}
 });
 it('recovers metadata inspection after a closed account timeout without preparing login or inference',async()=>{
   vi.useFakeTimers();state.failure='trusted-timeout';

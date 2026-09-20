@@ -5,6 +5,11 @@ const requestId = '11111111-1111-4111-8111-111111111111';
 const attemptId = '22222222-2222-4222-8222-222222222222';
 
 describe('accounting recovery protocol', () => {
+  it('accepts confirmed cancellation with known usage',()=>{
+    expect(parseRequest({kind:'request',version:1,requestId,operation:'settle',conversationKey:'eta',clock:4,
+      reservationId:attemptId,usage:{inputTokens:10,outputTokens:2,cachedInputTokens:0},settlement:'known_cancelled'}))
+      .toMatchObject({settlement:'known_cancelled'});
+  });
   it('accepts a strict recovery confirmation request', () => {
     expect(parseRequest({
       kind: 'request', version: 1, requestId, operation: 'recovery_confirm',
@@ -12,12 +17,12 @@ describe('accounting recovery protocol', () => {
     })).toMatchObject({operation: 'recovery_confirm', revision: 3});
   });
 
-  it('accepts the confirmed compression unknown settlement classification', () => {
+  it.each(['confirmed_compression_unknown','confirmed_eta_compaction_unknown','confirmed_cancelled_unknown'])('accepts %s settlement classification', settlement => {
     expect(parseRequest({
       kind: 'request', version: 1, requestId, operation: 'settle',
       conversationKey: 'compression', clock: 4, reservationId: attemptId,
-      usage: null, settlement: 'confirmed_compression_unknown',
-    })).toMatchObject({operation: 'settle', settlement: 'confirmed_compression_unknown'});
+      usage: null, settlement,
+    })).toMatchObject({operation: 'settle', settlement});
   });
 
   it('rejects forged, malformed, and unknown recovery commands', () => {

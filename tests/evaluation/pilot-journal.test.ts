@@ -4,6 +4,17 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
 
+it('persists only normalized admission reasons for denied results',async()=>{
+ const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-admission-')),journal=createPilotJournal(directory);
+ try{
+  for(const reason of ['cooldown','unresolved_previous_call','PRIVATE-ERROR'])journal.record({kind:'result',at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1,status:'admission_denied',admissionReason:reason as any});
+  await journal.close();
+  const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+  expect(raw).not.toContain('PRIVATE-ERROR');
+  expect(raw.trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.kind==='result').map(row=>row.admissionReason)).toEqual(['cooldown','unresolved_previous_call','local_policy']);
+ }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
 it('recovers a transient open failure with an explicit gap and bounded retries',async()=>{
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-retry-'));
   let clock=0,attempts=0;

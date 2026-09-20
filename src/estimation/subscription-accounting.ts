@@ -10,7 +10,7 @@ import type {InvocationRecord, InvocationRecordPatch} from './invocation-ownersh
 
 export type AdmissionKind = 'ordinary' | 'retry' | 'half_open';
 export type AccountingPurpose = 'eta' | 'context_compression';
-export type SettlementClassification = 'known_success' | 'known_non_success' | 'safe_unknown' | 'unsafe_unknown' | 'abandoned_unconfirmed' | 'confirmed_compression_unknown';
+export type SettlementClassification = 'known_success' | 'known_non_success' | 'known_cancelled' | 'safe_unknown' | 'unsafe_unknown' | 'abandoned_unconfirmed' | 'confirmed_compression_unknown' | 'confirmed_eta_compaction_unknown' | 'confirmed_cancelled_unknown';
 
 export interface SubscriptionAccounting {
   reserve(admissionKind?: AdmissionKind, purpose?: AccountingPurpose): Promise<string | null>;
