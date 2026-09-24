@@ -44,6 +44,8 @@ jobs:
       - run: node node_modules/electron/install.js
       - run: npm run typecheck
       - run: npm run build
+      - if: runner.os == 'Windows'
+        run: node scripts/ci/probe-windows-persistent.mjs
       - name: Verify Windows native security boundary first
         if: runner.os == 'Windows'
         run: npm test -- --run tests/estimation/native-powershell-environment.test.ts tests/estimation/observer-home.test.ts tests/estimation/identity-reusable-home.test.ts tests/estimation/native-guard.test.ts tests/estimation/native-guard-launch.test.ts --maxWorkers=1 --no-file-parallelism
