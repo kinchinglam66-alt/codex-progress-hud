@@ -30,6 +30,8 @@ for (const [name, env] of [
   ['module-system', { ...environment(minimalKeys), PSModulePath: systemModules }],
   ['module-machine-host', { ...environment(minimalKeys), PSModulePath: machineModuleDirs.join(';') }],
   ['module-machine-fixed', { ...environment(minimalKeys), PSModulePath: [
+    join(process.env.SystemDrive ?? 'C:', 'Program Files/PowerShell/Modules'),
+    join(process.env.SystemDrive ?? 'C:', 'Program Files/PowerShell/7/Modules'),
     join(process.env.SystemDrive ?? 'C:', 'Program Files/WindowsPowerShell/Modules'),
     join(process.env.SystemDrive ?? 'C:', 'Program Files (x86)/WindowsPowerShell/Modules'),
     systemModules
