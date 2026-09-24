@@ -61,7 +61,10 @@ async function readFileIdentity(path:string,required:boolean):Promise<FileIdenti
   }
 }
 
-async function readSnapshot(authHome:string):Promise<IdentitySnapshot> {
+export type ObserverIdentityAuthMode='independent'|'external';
+
+async function readSnapshot(authHome:string,mode:ObserverIdentityAuthMode):Promise<IdentitySnapshot> {
+  if(mode!=='independent'&&mode!=='external')throw Error('IDENTITY_METADATA_UNAVAILABLE');
   if(!isAbsolute(authHome)||/\x00/.test(authHome))throw Error('IDENTITY_METADATA_UNAVAILABLE');
   const inputHome=await lstat(authHome,{bigint:true});
   if(inputHome.isSymbolicLink()||!inputHome.isDirectory())throw Error('IDENTITY_METADATA_UNAVAILABLE');
@@ -69,19 +72,20 @@ async function readSnapshot(authHome:string):Promise<IdentitySnapshot> {
   if(home!==canonical(authHome))throw Error('IDENTITY_METADATA_UNAVAILABLE');
   const homeValue=await lstat(home,{bigint:true});
   if(homeValue.isSymbolicLink()||!homeValue.isDirectory())throw Error('IDENTITY_METADATA_UNAVAILABLE');
-  const auth=await readFileIdentity(join(home,'auth.json'),true);
-  if(!auth.present||!auth.stat)throw Error('IDENTITY_METADATA_UNAVAILABLE');
+  const auth=await readFileIdentity(join(home,'auth.json'),mode==='independent');
+  // External authentication must not acquire a competing persisted identity.
+  if(mode==='external'?auth.present:!auth.present||!auth.stat)throw Error('IDENTITY_METADATA_UNAVAILABLE');
   const config=await readFileIdentity(join(home,'config.toml'),false);
   return {home,homeStat:directoryIdentity(homeValue),auth,config};
 }
 
-/** Captures only independent auth-home metadata; credential contents are never read. */
-export async function captureObserverIdentityFiles(authHome:string):Promise<string|null> {
+/** Captures auth-home metadata only; external mode requires absent credentials. */
+export async function captureObserverIdentityFiles(authHome:string,mode:ObserverIdentityAuthMode='independent'):Promise<string|null> {
   try {
-    const before=await readSnapshot(authHome);
+    const before=await readSnapshot(authHome,mode);
     // Re-resolve and re-stat after every metadata lookup so a replacement or
     // directory race cannot become an apparently stable reuse record.
-    const after=await readSnapshot(authHome);
+    const after=await readSnapshot(authHome,mode);
     if(JSON.stringify(before)!==JSON.stringify(after))return null;
     return JSON.stringify(after);
   } catch {

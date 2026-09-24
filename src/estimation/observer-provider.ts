@@ -54,6 +54,7 @@ export interface ObserverCallTimings {
 }
 
 export interface ObserverResult {
+  wireMetrics?:import('./observation-wire.js').WireMetrics;
   status: Exclude<ObserverStatus, 'estimated'> | 'interpreted';
   interpretation: ObserverResponse | null;
   usage: ObserverUsage | null;

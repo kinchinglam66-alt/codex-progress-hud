@@ -1,6 +1,6 @@
 import { exercisePassiveControls } from './passive-control-smoke.mjs';
 import { assertHookProcess, assertStoppedTurn } from './hook-smoke-assertions.mjs';
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,14 @@ if (process.platform !== "win32") {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
-const executable = resolve(root, "release/win-unpacked/Codex Progress HUD.exe");
+// Exercise the artifact outside the repository tree. Otherwise Node can walk up
+// from app.asar and resolve a missing production dependency from the checkout's
+// node_modules, causing the packaged smoke test to pass while an installation
+// fails at runtime.
+const packageDirectory = await mkdtemp(join(tmpdir(), "hud-packaged-artifact-"));
+const isolatedInstallDirectory = join(packageDirectory, "win-unpacked");
+await cp(resolve(root, "release/win-unpacked"), isolatedInstallDirectory, { recursive: true });
+const executable = resolve(isolatedInstallDirectory, "Codex Progress HUD.exe");
 const requestedDataDirectory = process.env.CODEX_PROGRESS_HUD_SMOKE_DATA_DIR;
 const dataDirectory = requestedDataDirectory === undefined
   ? await mkdtemp(join(tmpdir(), "hud-packaged-smoke-"))
@@ -47,11 +54,12 @@ const environment = {
 };
 const transport = new StdioClientTransport({
   command: executable,
-  args: [resolve(root, "release/win-unpacked/resources/app.asar/dist/main.js"), "--mcp-stdio"],
+  args: [resolve(isolatedInstallDirectory, "resources/app.asar/dist/main.js"), "--mcp-stdio"],
   cwd: dataDirectory,
   env: { ...environment, ELECTRON_RUN_AS_NODE: "1" },
   stderr: "pipe"
 });
+transport.stderr?.pipe(process.stderr);
 const client = new Client({ name: "packaged-release-smoke", version: packageManifest.version });
 
 async function waitForAuthenticatedHealth() {
@@ -153,6 +161,7 @@ await runPackagedCleanup({
   release: closeMcp,
   cleanup: async () => {
     if (ownsDataDirectory) await removeTemporaryDirectory(dataDirectory);
+    await removeTemporaryDirectory(packageDirectory);
   }
 });
 

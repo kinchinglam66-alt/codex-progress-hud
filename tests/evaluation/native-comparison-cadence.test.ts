@@ -1,16 +1,16 @@
 import {expect,it} from 'vitest';
 import * as cadence from '../../src/evaluation/native-comparison-cadence.js';
 const state={conversationKey:'trial-native',turnKey:'source-turn',generation:0,running:true};
-it('leaves fifteen minutes of operation budget after the maximum five-minute cadence',()=>{
- expect(cadence.comparisonRunTimeoutMs(true)-300000).toBe(900000);
+it('leaves fifteen minutes of operation budget after the three-minute cadence',()=>{
+ expect(cadence.comparisonRunTimeoutMs(true)-180000).toBe(900000);
  expect(cadence.comparisonRunTimeoutMs(false)).toBe(900000);
 });
 it('anchors ordinary eligibility to the actual request, not to delayed release',()=>{
  expect(cadence.comparisonReleasePlan(state,1000,21000,300)).toEqual({
-  nextOrdinaryAtMs:61000,
-  permit:{conversationKey:'trial-native',turnKey:'source-turn',generation:0,idleStartedAtMs:21000,deadlineMs:121000}
+  nextOrdinaryAtMs:181000,
+  permit:{conversationKey:'trial-native',turnKey:'source-turn',generation:0,idleStartedAtMs:21000,deadlineMs:241000}
  });
- expect(cadence.comparisonReleasePlan(state,1000,21000,3600).nextOrdinaryAtMs).toBe(301000);
+ expect(cadence.comparisonReleasePlan(state,1000,21000,3600).nextOrdinaryAtMs).toBe(181000);
  expect(()=>cadence.comparisonReleasePlan(state,22000,21000,300)).toThrow('TRIAL_CADENCE_INVALID');
  expect(()=>cadence.comparisonReleasePlan({...state,running:false},1000,21000,300)).toThrow('TRIAL_CADENCE_INVALID');
 });

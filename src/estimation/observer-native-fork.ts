@@ -1,10 +1,12 @@
 import type {SessionRpc} from './observer-persistent-session.js';
 import {nativePreservationInstructions} from './native-preservation.js';
+import {resolveSubscriptionModel,defaultSubscriptionModel,subscriptionEffort,assertSubscriptionModelAvailable,type SubscriptionModel} from './subscription-model.js';
 
 export type NativeForkOrigin =
  | {kind?:'snapshot';sourceThreadId:string;path:string;lastTurnId?:string}
  | {kind:'owned-base';sourceThreadId:string;rootSourceThreadId:string;lastTurnId:string};
 export type NativeForkSource=NativeForkOrigin&{
+ model?:SubscriptionModel;
  cwd:string;baseInstructions:string;developerInstructions:string;custodyTag:string;
 };
 const object=(v:unknown):Record<string,unknown>=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
@@ -12,6 +14,7 @@ const object=(v:unknown):Record<string,unknown>=>v!==null&&typeof v==='object'&&
  * possible model work, and closes the owned process after any failure. Never
  * pass a source task ID to goal/clear, even if the runtime misbehaves. */
 export async function forkObserverThread(rpc:SessionRpc,source:NativeForkSource,signal:AbortSignal,onCreated?:(threadId:string)=>Promise<void>):Promise<{threadId:string}>{
+ const model=resolveSubscriptionModel(source.model);
  signal.throwIfAborted();
  const validId=(value:unknown)=>typeof value==='string'&&value.trim().length>0;
  if(!validId(source.sourceThreadId)||
@@ -21,15 +24,17 @@ export async function forkObserverThread(rpc:SessionRpc,source:NativeForkSource,
   (source.kind==='owned-base'?(Object.hasOwn(source,'path')||!validId(source.rootSourceThreadId)||source.rootSourceThreadId===source.sourceThreadId):!validId(source.path))){
    throw Error('NATIVE_FORK_ORIGIN_INVALID');
  }
+ if(model!==defaultSubscriptionModel)await assertSubscriptionModelAvailable(rpc,model,signal);
+ signal.throwIfAborted();
  const response=object(await rpc.call('thread/fork',{
    threadId:source.sourceThreadId,...(source.kind==='owned-base'?{}:{path:source.path}),
    ...(source.lastTurnId===undefined?{}:{lastTurnId:source.lastTurnId}),
    ephemeral:false,excludeTurns:true,deferGoalContinuation:true,
    threadSource:source.custodyTag,
    cwd:source.cwd,runtimeWorkspaceRoots:[source.cwd],sandbox:'read-only',approvalPolicy:'never',
-   model:'gpt-5.6-luna',modelProvider:'openai',serviceTier:'default',
+   model,modelProvider:'openai',serviceTier:'default',
    baseInstructions:`${source.baseInstructions}\n${nativePreservationInstructions}`,developerInstructions:source.developerInstructions,
-   config:{model_reasoning_effort:'medium',web_search:'disabled',
+   config:{model_reasoning_effort:subscriptionEffort,web_search:'disabled',
      'features.goals':false,'features.tool_suggest':false,'features.in_app_local_automation':false},
  }));
  const threadId=object(response.thread).id;
@@ -38,6 +43,7 @@ export async function forkObserverThread(rpc:SessionRpc,source:NativeForkSource,
  // Persist custody before honoring a cancellation delivered with the reply.
  // A cancelled fork still exists and must remain recoverable by its owner.
  await onCreated?.(threadId);
+ if(typeof response.model==='string'&&response.model!==model)throw Error('SUBSCRIPTION_MODEL_SUBSTITUTED');
  signal.throwIfAborted();
  await rpc.call('thread/goal/clear',{threadId});
  signal.throwIfAborted();

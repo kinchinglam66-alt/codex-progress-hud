@@ -44,7 +44,10 @@ describe('desktop observer provider composition', () => {
       expect(readSubscriptionAccount).not.toHaveBeenCalled();
       expect(host.status().state).toBe(mode==='valid'?'ready':'inactive');
       if(mode==='valid')expect(host.status()).toMatchObject({account:metadata,accountStatus:'ready'});
-      else{expect(()=>host.workerSource!.acquire('source')).toThrow();expect(owned.close).toHaveBeenCalled();}
+      else{
+        expect(()=>host.workerSource!.acquire('source')).toThrow();expect(owned.close).toHaveBeenCalled();
+        expect(JSON.parse(await readFile(join(directory,'observer-provider-state.json'),'utf8'))).toMatchObject({state:'inactive'});
+      }
     }finally{await host.close();await rm(directory,{recursive:true,force:true});}
   });
   it.each((['nativeSourceDestination','prepareNativeContext','prepareNativeTurnContext','prepareNativeHistoryFallback'] as const)

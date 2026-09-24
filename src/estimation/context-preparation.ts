@@ -4,6 +4,7 @@ import {setTimeout as yieldToEventLoop} from 'node:timers/promises';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import type {ConversationRecord} from '../observer/conversation-record.js';
 import {assembleContext} from '../observer/context-assembler.js';
+import {executionObservations} from '../observer/execution-observations.js';
 import type {ObserverInput} from './observer-contract.js';
 import {requestFits,type ContextCapacity,type RequestSizer} from './context-capacity.js';
 import type {PreparedContext} from './prepared-context.js';
@@ -67,6 +68,10 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     };
     type Entry={ordinal:number;record:ConversationRecord};
     let retained:Entry[]=[];
+    // Evidence is derived before message eviction, including textless/runtime
+    // records. Never infer serial execution from a sparse compressed suffix.
+    const executionPrefix:ConversationRecord[]=[];
+    let executionPrefixComplete=true;
     const requirements:Entry[]=[],active=new Map<string,Entry>();
     let latestPair:Entry[]=[];
     let currentSeen=false,laterTurn=false,overflow=false,originalRecords=0;
@@ -94,6 +99,15 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
       if(record.turnId===options.currentTurnId)currentSeen=true;
       else if(currentSeen&&record.turnId!==null)laterTurn=true;
       if(laterTurn)continue;
+      if(entry.ordinal!==executionPrefix.length)executionPrefixComplete=false;
+      executionPrefix.push({id:record.id,turnId:record.turnId,atMs:record.atMs,kind:record.kind,
+        ...(record.actionId!==undefined?{actionId:record.actionId}:{}),
+        ...(record.runtime!==undefined?{runtime:record.runtime}:{}),
+        ...(record.toolName!==undefined?{toolName:record.toolName}:{}),
+        ...(record.cwd!==undefined?{cwd:record.cwd}:{}),
+        ...(record.command!==undefined?{command:record.command}:{}),
+        ...(record.commandArgv!==undefined?{commandArgv:record.commandArgv}:{}),
+        ...(record.reportedExecutionSeconds!==undefined?{reportedExecutionSeconds:record.reportedExecutionSeconds}:{})});
       if(record.turnId===options.currentTurnId){
         if(record.kind==='runtime'&&record.runtime!=='running')active.clear();
         if(record.kind==='user'&&record.text)requirements.push(entry);
@@ -161,6 +175,8 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
     }
     const selected=overflow?combined():retained;
     const input=assemble(selected,snapshot.coverage.complete);
+    if(executionPrefixComplete&&snapshot.coverage.complete)input.executionObservations=executionObservations(
+      executionPrefix,options.currentTurnId,options.observedAtMs);
     const currentAction=[...active.values()].at(-1)?.record;
     if(input.observation)input.observation.currentAction=currentAction?.text?
       {text:currentAction.text,elapsedSeconds:Math.max(0,(options.observedAtMs-currentAction.atMs)/1000)}:null;
@@ -189,6 +205,9 @@ export async function prepareContext(options:ContextPreparationOptions):Promise<
       activeTimeKnown:observation?.activeTimeKnown??false,historyComplete:complete,
       nowMs:options.observedAtMs,previousEstimate:observation?.previousEstimate??null,
       runtime:baseInput.runtime,currentTurnId:options.currentTurnId});
+    // assembleContext sees selected messages, not the original source prefix.
+    // Final evidence is attached separately from the unfiltered metadata above.
+    delete packet.executionObservations;
     if(baseInput.paceMeasurements)packet.paceMeasurements=baseInput.paceMeasurements.map(value=>({...value}));
     packet.representation={mode:complete?'full':'incomplete',sourceComplete:complete,
       originalRecords:packet.messages.length,compressedThroughOrdinal:null,sizing:options.sizer.kind};

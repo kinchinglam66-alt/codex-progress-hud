@@ -67,7 +67,7 @@ async function verify(files:CodexFiles):Promise<void> {
 function parseFeatures(evidence:string):string[] {
   const features:string[]=[],seen=new Set<string>();
   for(const line of evidence.trim().split(/\r?\n/)) {
-    const match=/^([a-z][a-z0-9_]*)\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.exec(line.trim());
+    const match=/^([a-z][a-z0-9_.]*)\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.exec(line.trim());
     if(!match || seen.has(match[1]!)) throw Error();
     seen.add(match[1]!);
     if(match[2]!=='removed') features.push(match[1]!);
@@ -107,7 +107,7 @@ export async function preflightCodex(input:CodexFiles,probe:Probe):Promise<Codex
     if(version === null || evidence.login.trim()!=="Logged in using ChatGPT") throw Error();
     const features:string[]=[],seen=new Set<string>();
     for(const line of evidence.features.trim().split(/\r?\n/)) {
-      const match=/^([a-z][a-z0-9_]*)\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.exec(line.trim());
+      const match=/^([a-z][a-z0-9_.]*)\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.exec(line.trim());
       if(!match || seen.has(match[1]!)) throw Error();
       seen.add(match[1]!);
       if(match[2]!=="removed") features.push(match[1]!);

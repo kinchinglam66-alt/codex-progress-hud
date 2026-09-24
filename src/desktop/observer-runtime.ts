@@ -84,6 +84,9 @@ export interface DesktopObserverRuntimeOptions {
     receiptDirectory:string;
     authorize:()=>boolean;now:()=>number})=>ObserverWorker;
   persistentReceiptDirectory?:string;
+  /** Host-private setup diagnostics. Never include account labels, fingerprints,
+   * paths, consent payloads, or model input. */
+  onSetupDiagnostic?:(value:{stage:'account'|'binding'|'consent-read'|'consent-authorized'|'consent-persisted'|'accounting'|'recovery'|'ready';outcome:'start'|'passed'|'failed';reason?:string})=>void;
 }
 
 export interface ObserverInlineConsent {
@@ -137,7 +140,7 @@ function serial<T>(tail: Promise<void>, operation: () => Promise<T>): {result: P
  * wired before first-use setup without creating an admission path early.
  */
 export function createDesktopObserverRuntime({identity, inspectStartupAccount, openAccounting, accountingAccountFingerprint, dialog, now = Date.now, consentStore,subscriptionAccountSource,
-  inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation,persistentWorkerFactory,persistentReceiptDirectory}: DesktopObserverRuntimeOptions) {
+  inspectRecoveryBootBoundary: inspectBootBoundary, contextPreparation,persistentWorkerFactory,persistentReceiptDirectory,onSetupDiagnostic}: DesktopObserverRuntimeOptions) {
   let disabled = false;
   let ready = false;
   let accountRefreshFailed = false;
@@ -563,16 +566,24 @@ export function createDesktopObserverRuntime({identity, inspectStartupAccount, o
     setupController = new AbortController();
     const combined = AbortSignal.any([signal, setupController.signal]);
     const operation = (async () => {
+      let setupStage:'account'|'binding'|'consent-read'|'consent-authorized'|'consent-persisted'|'accounting'|'recovery'|'ready'='account';
+      const emitSetup=(outcome:'start'|'passed'|'failed',reason?:string)=>{
+        try{onSetupDiagnostic?.({stage:setupStage,outcome,...(reason===undefined?{}:{reason})});}catch{/* Diagnostics cannot affect setup. */}
+      };
       try {
         gate.revoke();
         if (combined.aborted) throw new Error('OBSERVER_SETUP_CANCELLED');
+        emitSetup('start');
         const snapshot = await (subscriptionAccountSource==='main'&&inspectStartupAccount?inspectStartupAccount(combined):identity.inspect(combined));
+        emitSetup('passed');setupStage='binding';emitSetup('start');
         if (combined.aborted) throw new Error('OBSERVER_SETUP_CANCELLED');
         if(accountingAccountFingerprint!==undefined&&snapshot.evidence.accountFingerprint!==accountingAccountFingerprint)
           throw new Error('OBSERVER_ACCOUNT_BINDING_CHANGED');
         gate.update(snapshot.evidence);
         authorizedBinding = binding(snapshot.evidence);
+        emitSetup('passed');setupStage='consent-read';emitSetup('start');
         const stored = await readConsent();
+        emitSetup('passed');setupStage='consent-authorized';emitSetup('start');
         // Only a grant explicitly covering future main-account switches can
         // cross identities. Independent/legacy grants remain account-bound;
         // every other scope field is still checked by the gate.
@@ -589,8 +600,10 @@ export function createDesktopObserverRuntime({identity, inspectStartupAccount, o
           : false;
         const consent = restored ? true : inlineConsent !== undefined ? inline : await waitForSignal(requestObserverConsent(gate, dialog, snapshot.accountLabel,subscriptionAccountSource), combined);
         if (!consent || !gate.authorized() || combined.aborted || disabled) throw new Error('OBSERVER_CONSENT_REQUIRED');
+        emitSetup('passed');setupStage='consent-persisted';emitSetup('start');
         if (!restored) await consentStore?.grant({...observerConsentScope(snapshot.evidence),
           ...(subscriptionAccountSource==='main'?{accountPolicy:'main-follow-v1' as const}:{})}, now());
+        emitSetup('passed');setupStage='accounting';emitSetup('start');
 
         ledgerOpening = true;
         openingCancelled = false;
@@ -609,7 +622,9 @@ export function createDesktopObserverRuntime({identity, inspectStartupAccount, o
           return;
         }
         accounting = owner;
+        emitSetup('passed');setupStage='recovery';emitSetup('start');
         await reconcileRecoveredCalls(combined);
+        emitSetup('passed');
         check(combined);
         installDelegates(owner);
         if (typeof owner.recoveryStatus === 'function' && typeof owner.preflightRecovery === 'function' &&
@@ -623,7 +638,11 @@ export function createDesktopObserverRuntime({identity, inspectStartupAccount, o
         }
         ready = true;
         beginRefresh();
-      } catch {
+        setupStage='ready';emitSetup('passed');
+      } catch (error) {
+        const errorCode=typeof (error as NodeJS.ErrnoException)?.code==='string'&&/^[A-Z0-9_]{1,32}$/u.test((error as NodeJS.ErrnoException).code!)
+          ?`FS_${(error as NodeJS.ErrnoException).code}`:undefined;
+        emitSetup('failed',error instanceof Error&&/^[A-Z0-9_:-]{1,96}$/u.test(error.message)?error.message:errorCode??'OBSERVER_SETUP_FAILED');
         if (!combined.aborted && !disabled) setupFailed = true;
         disable();
       }

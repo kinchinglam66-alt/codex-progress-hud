@@ -6,6 +6,11 @@ import {parseObserverPilotConfig,observerPilotEnvironment,readObserverPilotConfi
 
 const config={executable:resolve('codex.exe'),parentDirectory:resolve('private-pilot'),cwd:resolve('private-pilot/empty'),version:'0.153.4',proxyUrl:'http://127.0.0.1:7890'};
 describe('local observer pilot configuration',()=>{
+  it('supports explicit candidate models without changing old configuration',()=>{
+    expect(parseObserverPilotConfig(config).subscriptionModel).toBeUndefined();
+    for(const subscriptionModel of ['gpt-6-luna','gpt-6-sol','gpt-5.6-sol'])expect(parseObserverPilotConfig({...config,subscriptionModel}).subscriptionModel).toBe(subscriptionModel);
+    expect(()=>parseObserverPilotConfig({...config,subscriptionModel:'latest'})).toThrow('OBSERVER_PILOT_CONFIG_INVALID');
+  });
   it('preserves explicit main-account and independent subscription choices',()=>{
     expect(parseObserverPilotConfig({...config,subscriptionAccountSource:'main'})).toMatchObject({subscriptionAccountSource:'main'});
     expect(parseObserverPilotConfig({...config,subscriptionAccountSource:'independent'})).toMatchObject({subscriptionAccountSource:'independent'});
@@ -21,6 +26,12 @@ describe('local observer pilot configuration',()=>{
     expect(parseObserverPilotConfig({...config,executableSha256})).toMatchObject({executableSha256});
     expect(()=>parseObserverPilotConfig({...config,executableSha256:'0'.repeat(64)})).toThrow();
     expect(()=>parseObserverPilotConfig({...config,version:'0.153.3',executableSha256})).toThrow();
+  });
+  it('accepts only the exact qualified prerelease build and hash pair',()=>{
+    const prerelease={...config,version:'0.155.0-alpha.9.2',
+      executableSha256:'bc45017e8239dc150258f69309ced9df6bbcdf5b8e4f346decf780ac0999e226'};
+    expect(parseObserverPilotConfig(prerelease)).toMatchObject(prerelease);
+    expect(()=>parseObserverPilotConfig({...prerelease,executableSha256:'0'.repeat(64)})).toThrow();
   });
   it('accepts explicit local paths and a loopback proxy',()=>{
     expect(parseObserverPilotConfig(config)).toEqual(config);

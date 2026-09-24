@@ -170,6 +170,7 @@ interface Item {
   output?: unknown;
   aggregated_output?: unknown;
   exit_code?: unknown;
+  duration?: unknown;
 }
 
 function errorCode(error: unknown): LocalSessionSourceErrorCode {
@@ -509,7 +510,9 @@ function normalizeCommand(
 ): ConversationRecord[] {
   const actionId = stringValue(value.id) ?? stringValue(value.call_id);
   if (actionId === undefined) throw new LocalSessionSourceError("source_malformed");
-  const rawText = result ? value.aggregated_output ?? value.output : value.command;
+  const argv=Array.isArray(value.command)&&value.command.length>0&&value.command.every(v=>typeof v==='string')
+    ?value.command as string[]:undefined;
+  const rawText = result ? value.aggregated_output ?? value.output : argv?JSON.stringify(argv):value.command;
   if (!result && rawText !== undefined && typeof rawText !== "string") {
     throw new LocalSessionSourceError("source_malformed");
   }
@@ -526,6 +529,13 @@ function normalizeCommand(
   if (result) {
     record.complete = true;
     record.endedAtMs = atMs;
+    const duration=value.duration as {secs?:unknown;nanos?:unknown}|null|undefined;
+    if(duration&&typeof duration==='object'&&typeof duration.secs==='number'&&Number.isSafeInteger(duration.secs)&&
+      duration.secs>=0&&duration.secs<=31_536_000&&typeof duration.nanos==='number'&&
+      Number.isInteger(duration.nanos)&&duration.nanos>=0&&duration.nanos<1_000_000_000){
+      const seconds=duration.secs+duration.nanos/1_000_000_000;
+      if(seconds<=31_536_000)record.reportedExecutionSeconds=seconds;
+    }
   } else {
     record.startedAtMs = atMs;
   }
@@ -533,6 +543,7 @@ function normalizeCommand(
   if (cwd !== undefined) record.cwd = cwd;
   const command = stringValue(value.command);
   if (command !== undefined) record.command = command;
+  if (argv !== undefined) record.commandArgv = [...argv];
   if (result && value.exit_code === null) record.exitCode = null;
   if (result && typeof value.exit_code === "number" && Number.isFinite(value.exit_code)) {
     record.exitCode = value.exit_code;

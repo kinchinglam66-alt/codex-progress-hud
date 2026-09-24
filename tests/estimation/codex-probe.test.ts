@@ -14,6 +14,12 @@ it('recognizes exact 0.153.4 read-only version evidence', async () => {
   const probe = createCodexProbe({}, runner([output('codex-cli 0.153.4'), ...fixtures.slice(1)]));
   expect((await probe.probe(process.execPath, process.cwd())).version).toBe('codex-cli 0.153.4');
 });
+it('accepts exact qualified prerelease versions and dotted capability names',async()=>{
+  const p=createObserverRuntimeProbe({},resolve('observer-runtime-home'),runner([
+    output('codex-cli 0.155.0-alpha.9.2'),output('guardianv2.thread_context\tunder development\tfalse')]));
+  await expect(p.probe(process.execPath,process.cwd())).resolves.toEqual({
+    version:'codex-cli 0.155.0-alpha.9.2',features:'guardianv2.thread_context\tunder development\tfalse'});
+});
 it("dispatches only the fixed read-only commands with isolated environment",async()=>{
   const r=runner(),p=createCodexProbe({HTTPS_PROXY:"http://proxy.invalid",CODEX_HOME:"login",GITHUB_TOKEN:"secret"},r);
   expect(await p.probe(process.execPath,process.cwd())).toEqual({version:"codex-cli 0.153.3",features:"hooks\tstable\ttrue",login:"Logged in using ChatGPT"});

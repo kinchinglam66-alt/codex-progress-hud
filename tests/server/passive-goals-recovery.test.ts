@@ -31,6 +31,13 @@ function seeded() {
 }
 
 describe('same native turn restart recovery',()=>{
+  it('marks recovered numeric forecasts with unknown conditions rather than inventing an unconditional estimate',()=>{
+    const before=seeded(),after=fixture(),key=before.event.sessionKey;
+    after.goals.restoreCheckpoint(before.goals.checkpoint(1000,wall));
+    after.goals.observe({...before.event,receivedAt:10},true,10);after.goals.reconcileSource(key,10);
+    expect(after.goals.view(key,10)?.estimateCondition).toEqual({selectedPath:'unknown',displayPath:'unknown',issue:'missing_conditions'});
+    expect(after.goals.view(key,10)?.prediction?.remainingSeconds).toBe(3600);
+  });
   it.each([false,true])('restores milestone only when checkpoint revision matches (%s mismatch)',mismatch=>{
     const before=seeded(),after=fixture(),key=before.event.sessionKey;
     const next=before.goals.request(key,1000)!;

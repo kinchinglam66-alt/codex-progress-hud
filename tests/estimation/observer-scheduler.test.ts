@@ -1,4 +1,7 @@
 import {expect, it, vi} from 'vitest';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {createHash} from 'node:crypto';
 import {createDesktopObserverRuntime} from '../../src/desktop/observer-runtime.js';
 import {ObserverScheduler, type ObserverWorker, type ObserverObservation} from '../../src/estimation/observer-scheduler.js';
 import {PassiveGoals} from '../../src/server/passive-goals.js';
@@ -7,6 +10,199 @@ import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
 import type {ObserverResult} from '../../src/estimation/observer-provider.js';
 
 const usage = {kind: 'subscription-tokens' as const, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0};
+it.runIf(!!process.env.HUD_PRIVATE_REPLAY_ROOT)('replays frozen historical failure events through production scheduler',async()=>{
+ const root=process.env.HUD_PRIVATE_REPLAY_ROOT!;
+ const read=(p:string)=>JSON.parse(readFileSync(join(root,p),'utf8'));
+ const index=read('analysis/raw/index.json'),tasks=read('analysis/results.json').tasks;
+ const report:unknown[]=[];
+ for(const task of tasks){
+  const source=index.find((s:{sha256:string})=>s.sha256===task.reference.evidence[0].sha256);
+  expect(source.startOffset).toBe(0);
+  const bytes=readFileSync(join(root,'analysis/raw',source.file));
+  expect(createHash('sha256').update(bytes).digest('hex')).toBe(source.sha256);
+  const rows=bytes.toString().trim().split(/\r?\n/).map(line=>JSON.parse(line));
+  const start=task.reference.startMs,end=task.reference.finishMs;
+  const publicRow=rows.find(r=>r.payload?.type==='function_call_output'&&
+    typeof r.payload.output==='string'&&r.payload.output.startsWith('<codex_delegation>'));
+  expect(publicRow).toBeDefined();
+  const ready=Math.max(0,(Date.parse(publicRow.timestamp)-start)/1000),duration=(end-start)/1000;
+  const seen=new Set<string>();
+  const events=rows.flatMap(r=>{
+   const item=r.payload?.item,at=(Date.parse(r.timestamp)-start)/1000;
+   if(item?.type!=='CommandExecution'||item.status!=='failed'||!item.id||at<0||at>=duration||seen.has(item.id))return [];
+   seen.add(item.id);return [{at,ordinal:r.ordinal}];
+  });
+  for(const latency of [0,25,60]){
+   const observations:ObserverObservation[]=[],f=selectedSourceFixture(1,row=>observations.push(row));
+   const starts:number[]=[];let key:string|undefined,next=0,settled=0;
+   const evidence:Array<{ordinal:number;at:number;sequence:number;requestIndex:number|null;dispatchLagSeconds:number|null}>=[];
+   try{
+    for(let second=0;second<=Math.ceil(duration)+120;second++){
+     f.time(second*1000);
+     if(key===undefined&&second>=ready)key=f.hook();
+     while(events[next]&&events[next]!.at<=second){
+      f.setSource(next+2);
+      expect(key).toBeDefined();
+      if(key){
+       f.scheduler.changed(key,'failure');
+       const diagnostic=f.scheduler.diagnostics(key);
+       if(diagnostic.snapshotEventCutoff===undefined||diagnostic.pendingCriticalEvents===undefined)
+        throw Error('REPLAY_EVENT_DIAGNOSTIC_MISSING');
+       evidence.push({...events[next]!,sequence:diagnostic.snapshotEventCutoff+diagnostic.pendingCriticalEvents,
+        requestIndex:null,dispatchLagSeconds:null});
+      }
+      next++;
+     }
+     if(second>=duration&&key)f.goals.end(key);
+     if(starts[settled]!==undefined&&second>=starts[settled]!+latency){
+      const response=result('continue');response.interpretation!.estimate=null;
+      f.calls[settled]!.finish(response);settled++;await f.flush();
+     }
+     f.scheduler.tick();f.scheduler.tick();
+     while(starts.length<f.calls.length){
+      const cutoff=f.scheduler.diagnostics(key!).snapshotEventCutoff;
+      if(cutoff===undefined)throw Error('REPLAY_DISPATCH_CUTOFF_MISSING');
+      for(const event of evidence)if(event.requestIndex===null&&event.sequence<=cutoff){
+       event.requestIndex=starts.length;event.dispatchLagSeconds=second-event.at;
+      }
+      starts.push(second);
+     }
+    }
+    expect(starts.length).toBeGreaterThan(0);
+    expect(starts.every(at=>at>=ready&&at<duration)).toBe(true);
+    expect(starts.slice(1).every((at,i)=>at-starts[i]!>=15)).toBe(true);
+    expect(evidence).toHaveLength(events.length);
+    const pending=evidence.filter(e=>e.requestIndex===null);
+    // Any unserved final burst must be too close to termination to stabilize
+    // and clear the simulated in-flight/minimum-spacing gate.
+    expect(pending.every(e=>duration-e.at<=Math.max(latency,15)+2)).toBe(true);
+    expect(evidence.filter(e=>e.requestIndex!==null).every(e=>e.dispatchLagSeconds!>=0)).toBe(true);
+    report.push({task:task.task,sourceSha256:source.sha256,latencySeconds:latency,
+     failureEvents:events.length,evidence,pendingAtTerminal:pending.map(e=>e.ordinal),starts,
+     requests:observations.filter(r=>r.kind==='request').map(r=>({at:r.requestedAt,reason:r.triggerReason}))});
+   }finally{for(const c of f.calls)c.finish(result());await f.flush();await f.scheduler.close();}
+  }
+ }
+ const output=process.env.HUD_PRIVATE_REPLAY_OUTPUT;
+ if(output)writeFileSync(output,JSON.stringify({schemaVersion:1,remoteCalls:0,accuracyEvidence:false,
+  limitations:['Wall-clock; approval waits unresolved','Synthetic null estimates and fixed latency; no counterfactual accuracy','Only structured failures; no semantic events or account/outage simulation'],scenarios:report},null,2),{flag:'wx'});
+});
+it('does not rearm consumed status evidence when the same final is replayed',async()=>{
+ const f=selectedSourceFixture(),key=f.hook();
+ try{
+  f.setSource(1,'action',true);f.scheduler.changed(key,'final');
+  const entries=(f.scheduler as unknown as {entries:Map<string,{statusEvidence:boolean;eventSequence:number}>}).entries;
+  const entry=entries.get(key)!;
+  expect(entry.statusEvidence).toBe(true);
+  entry.statusEvidence=false;const sequence=entry.eventSequence;
+  f.scheduler.changed(key,'final');
+  expect(entry).toMatchObject({statusEvidence:false,eventSequence:sequence});
+  f.setSource(2,'action',true);f.scheduler.changed(key,'final');
+  expect(entry).toMatchObject({statusEvidence:true,eventSequence:sequence+1});
+ }finally{await f.scheduler.close();}
+});
+it('preserves retry counters when source-bound failure evidence is replayed',async()=>{
+ const f=selectedSourceFixture(),key=f.hook();
+ try{
+  f.scheduler.changed(key,'failure');
+  const entries=(f.scheduler as unknown as {entries:Map<string,{unknown:number;expiredTimerResults:number;eventSequence:number}>}).entries;
+  const entry=entries.get(key)!;
+  entry.unknown=2;entry.expiredTimerResults=3;
+  const sequence=entry.eventSequence;
+  f.time(30000);f.scheduler.changed(key,'failure');
+  expect(entry).toMatchObject({unknown:2,expiredTimerResults:3,eventSequence:sequence});
+  f.setSource(2);f.scheduler.changed(key,'failure');
+  expect(entry).toMatchObject({unknown:0,expiredTimerResults:0,eventSequence:sequence+1});
+ }finally{await f.scheduler.close();}
+});
+it('replays 600 one-second ticks through production scheduling without duplicate dispatch or lost bursts',async()=>{
+ const records:ObserverObservation[]=[];
+ const f=selectedSourceFixture(1,row=>records.push(row)),key=f.hook(),starts:number[]=[];
+ let settled=0;
+ try{
+  for(let second=0;second<=600;second++){
+   f.time(second*1000);
+   if(second===40){f.setSource(2);f.scheduler.changed(key,'failure');}
+   if(second===41)f.scheduler.changed(key,'failure'); // same evidence, not a new event
+   if([100,101,102].includes(second)){f.setSource(second);f.scheduler.changed(key,'failure');}
+   if(second===500)f.goals.end(key);
+   if(starts[settled]!==undefined&&second>=starts[settled]!+7){
+    f.calls[settled]!.finish(result('continue'));settled++;await f.flush();
+   }
+   f.scheduler.tick();f.scheduler.tick();
+   while(starts.length<f.calls.length)starts.push(second);
+  }
+  expect(starts).toEqual([0,42,104,284,464]);
+  expect(records.filter(r=>r.kind==='request').map(r=>r.triggerReason)).toEqual([
+   'initial','important_event','important_event','periodic','periodic']);
+  expect(records.filter(r=>r.kind==='result').every(r=>r.accepted===true)).toBe(true);
+  expect(starts.slice(1).every((at,i)=>at-starts[i]!>=15)).toBe(true);
+  expect(starts.filter(at=>at>=500)).toEqual([]);
+ }finally{for(const c of f.calls)c.finish(result());await f.flush();await f.scheduler.close();}
+});
+it('replays a long interrupted interval without periodic or expiry calls',async()=>{
+ const f=fixture(1),key=f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();f.calls[0]!.finish(result());await f.flush();
+  f.time(30000);f.hook('Interrupt');
+  for(let second=30;second<=1200;second++){f.time(second*1000);f.scheduler.tick();}
+  expect(f.calls).toHaveLength(1);
+  expect(f.scheduler.diagnostics(key).schedulingReason).toBe('runtime_ineligible');
+ }finally{for(const c of f.calls)c.finish(result());await f.flush();await f.scheduler.close();}
+});
+it('keeps different event reasons at the same source revision',async()=>{
+ const f=selectedSourceFixture(),key=f.hook();
+ try{
+  f.time(15000);f.scheduler.tick();f.calls[0]!.finish(result());await f.flush();
+  f.time(30000);f.scheduler.changed(key,'failure');
+  f.time(32000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result());await f.flush();
+  f.time(50000);f.setSource(1,'action',true);f.scheduler.changed(key,'final');
+  f.time(52000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+ }finally{for(const c of f.calls)c.finish(result());await f.flush();await f.scheduler.close();}
+});
+it.each(['epoch','turn'] as const)('does not reuse evidence deduplication across a new %s',async boundary=>{
+ const f=selectedSourceFixture(),key=f.hook();
+ try{
+  f.time(15000);f.scheduler.tick();f.calls[0]!.finish(result());await f.flush();
+  f.time(30000);f.scheduler.changed(key,'failure');
+  f.time(32000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result());await f.flush();
+  f.time(50000);
+  if(boundary==='epoch')f.setEpoch(1);else f.hook('one','second');
+  f.scheduler.changed(key,'failure');
+  f.time(52000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+ }finally{for(const c of f.calls)c.finish(result());await f.flush();await f.scheduler.close();}
+});
+it('does not postpone stability for duplicate source-bound failure evidence',async()=>{
+ const f=selectedSourceFixture(),key=f.hook();
+ try{
+  f.time(15000);f.scheduler.tick();
+  f.time(30000);f.scheduler.changed(key,'failure');
+  f.time(31900);f.scheduler.changed(key,'failure');
+  f.calls[0]!.finish(result());await f.flush();
+  f.time(31999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(32000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.calls[1]!.finish(result());await f.flush();
+  f.time(50000);f.scheduler.changed(key,'failure');f.scheduler.tick();
+  expect(f.calls).toHaveLength(2);
+  f.setSource(2);f.scheduler.changed(key,'failure');
+  f.time(52000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+ }finally{for(const c of f.calls)c.finish(result());await f.flush();await f.scheduler.close();}
+});
+it('waits two stable seconds after the latest in-flight critical event, not the first',async()=>{
+ const f=fixture(1),key=f.hook('UserPromptSubmit');
+ try{
+  f.scheduler.tick();
+  f.time(15000);f.scheduler.changed(key,'failure');
+  f.time(16900);f.scheduler.changed(key,'failure');
+  f.time(17000);f.calls[0]!.finish(result());await f.flush();
+  f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(18899);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(18900);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.scheduler.tick();expect(f.calls).toHaveLength(2);
+ }finally{for(const call of f.calls)call.finish(result());await f.flush();await f.scheduler.close();}
+});
 it('records admission denial reason without inventing model usage',async()=>{
  const records:ObserverObservation[]=[],f=fixture(1,6000,row=>records.push(row));f.hook('UserPromptSubmit');
  try{
@@ -158,7 +354,7 @@ it('issues one monotonic retention permit on an accepted ETA and revokes idle st
  expect(f.releases[0]?.permit).toBeNull(); // Initial semantic bootstrap replaces the goal identity.
  f.time(315000);f.scheduler.tick();f.calls[1]!.finish(result('continue'));await f.flush();
  expect(f.releases).toHaveLength(2);
- expect(f.releases[1]).toMatchObject({key,permit:{conversationKey:key,generation:1,idleStartedAtMs:315000,deadlineMs:435000}});
+ expect(f.releases[1]).toMatchObject({key,permit:{conversationKey:key,generation:1,idleStartedAtMs:315000,deadlineMs:555000}});
  f.time(316000);f.scheduler.tick();f.scheduler.tick();expect(f.releases).toHaveLength(2);
  f.hook('Stop');
  expect(f.retentionStates.at(-1)).toMatchObject({key,state:{running:false}});
@@ -310,8 +506,8 @@ it('does not count a selected-source outage toward the near-expiry threshold',as
   f.calls[0]!.finish(estimate);await f.flush();
   f.setAvailable(false);f.time(3600000);f.scheduler.tick();
   f.setAvailable(true);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3659999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3660000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(3679999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(3680000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result('continue'));await f.flush();await f.scheduler.close();
 });
 it('rechecks at eighty percent once per prediction and keeps an overdue fallback after safe failure',async()=>{
@@ -637,7 +833,7 @@ it('anchors null replacement forecasts to the new goal snapshot, excluding respo
   await f.scheduler.close();
 });
 
-function selectedSourceFixture(workerCount = 1) {
+function selectedSourceFixture(workerCount = 1,onObservation?:(record:ObserverObservation)=>void) {
   let now = 0, id = 0, revision = 1, sourceEpoch = 0, available = true, currentActionId: string|null = 'action', finalAvailable = false,
     contentFingerprint = 'content-a';
   const contexts = new PassiveContextStore();
@@ -645,7 +841,7 @@ function selectedSourceFixture(workerCount = 1) {
     health: () => available ? 'ready' as const : 'error' as const,
     epoch: () => available ? sourceEpoch : null,
     read: (_key: string, _turnKey: string, query: {activeSeconds: number; runtime: 'running'|'waiting'|'paused'}) => ({
-      epoch: 0, revision, currentActionId, contentFingerprint, finalAvailable,
+      epoch: sourceEpoch, revision, currentActionId, contentFingerprint, finalAvailable,
       input: {goalSummary: null, activeSeconds: query.activeSeconds, runtime: query.runtime,
         messages: [{kind: 'user' as const, text: 'source task', truncated: false}], truncated: false}
     })
@@ -659,7 +855,7 @@ function selectedSourceFixture(workerCount = 1) {
     });}, disable() {disabled = true;}, async close() {disabled = true;},
       status: () => ({active, disabled, poisoned: false})};
   });
-  const scheduler = new ObserverScheduler({contexts, goals, workers, now: () => now});
+  const scheduler = new ObserverScheduler({contexts, goals, workers, now: () => now,...(onObservation?{onObservation}:{})});
   const hook = (session = 'one', turn = 'first') => {
     const envelope = normalizeHookInput('UserPromptSubmit',
       {session_id: session, turn_id: turn, tool_use_id: String(++id)}, now,
@@ -851,7 +1047,7 @@ it('records distinct skip reasons once per transition without leaking prompt con
   f.calls[0]!.finish(result());await f.flush();
   f.scheduler.tick();f.scheduler.tick();
   expect(records.filter(row=>row.kind==='skip').map(row=>row.status)).toEqual([
-    'context_missing','request_in_flight','cooldown']);
+    'context_missing','request_in_flight','no_active_progress']);
   expect(JSON.stringify(records)).not.toContain('task data');
   await f.scheduler.close();
 });
@@ -899,13 +1095,13 @@ it.each(['paused','interrupted','stopped','failed'] as const)('does not start an
   f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(0);
 });
 
-it('reviews unknown estimates every 120 active seconds without new text',async()=>{
+it('reviews unknown estimates every 180 active seconds without new text',async()=>{
   const f=fixture(1);const key=f.hook('UserPromptSubmit');
   f.time(15000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   const response=result();response.interpretation!.estimate=null;
   f.calls[0]!.finish(response);await f.flush();
   expect(f.goals.view(key,15000)?.prediction).toBeNull();
-  for(const [index,at] of [135000,255000,375000].entries()){
+  for(const [index,at] of [195000,375000,555000].entries()){
     f.time(at-1);f.scheduler.tick();expect(f.calls).toHaveLength(index+1);
     f.time(at);f.scheduler.tick();expect(f.calls).toHaveLength(index+2);
     const next=result('continue');next.interpretation!.estimate=null;
@@ -959,8 +1155,8 @@ it('cancels an in-flight call on pause and resumes only after event coalescing',
   f.calls[0]!.finish({status: 'aborted', interpretation: null, usage}); await f.flush();
   f.time(100000); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
   f.goals.runtime(session, turn, 'running', 100000); f.scheduler.changed(session, 'runtime');
-  f.time(104999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
-  f.time(105000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
+  f.time(101999); f.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  f.time(102000); f.scheduler.tick(); expect(f.calls).toHaveLength(2);
 });
 
 it('interrupts an in-flight source estimate when the source reaches waiting', async () => {
@@ -1126,7 +1322,7 @@ it('records static trigger reasons and active scheduling anchors', async () => {
   f.time(315000);f.scheduler.tick();
   const request=records.filter(row=>row.kind==='request').at(-1);
   expect(request).toMatchObject({triggerReason:'periodic',lastRequestActiveSeconds:15,
-    eligibleActiveSeconds:75});
+    eligibleActiveSeconds:195});
   expect(JSON.stringify(records)).not.toContain('task data');
   f.calls[1]!.finish(result('continue')); await f.flush();
   await f.scheduler.close();
@@ -1138,10 +1334,10 @@ it('rebases the scheduler active anchor when an accepted replacement rebases the
   f.time(100000);f.hook('UserPromptSubmit','one','second');f.time(160000);f.scheduler.tick();
   expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result());await f.flush();
-  f.time(219999);f.scheduler.tick();expect(f.calls).toHaveLength(2);
-  f.time(220000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
+  f.time(339999);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(340000);f.scheduler.tick();expect(f.calls).toHaveLength(3);
   f.calls[2]!.finish(result('continue'));await f.flush();
-  expect(f.goals.view(key,220000)?.activeSeconds).toBe(120);
+  expect(f.goals.view(key,340000)?.activeSeconds).toBe(240);
   await f.scheduler.close();
 });
 
@@ -1163,8 +1359,8 @@ it('freezes scheduling anchors while the selected source is unavailable', async 
   f.setAvailable(true);f.scheduler.tick();expect(f.calls).toHaveLength(1);
   expect(f.goals.view(key,3600000)?.activeSeconds).toBe(3600);
   f.time(3615000);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3659999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
-  f.time(3660000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
+  f.time(3779999);f.scheduler.tick();expect(f.calls).toHaveLength(1);
+  f.time(3780000);f.scheduler.tick();expect(f.calls).toHaveLength(2);
   f.calls[1]!.finish(result('continue'));await f.flush();
   await f.scheduler.close();
 });

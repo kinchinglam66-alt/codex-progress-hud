@@ -3,6 +3,7 @@ import {z} from 'zod';
 import type {ApiUsage} from './observer-api-accounting.js';
 import type {SubscriptionUsage} from './codex-output.js';
 import {packObserverInput} from './observer-input.js';
+import {bindProgressReviewOutputSchema} from './progress-review-output-schema.js';
 
 /** The planner-facing request. Conversation text is untrusted and is never
  * interpreted as observer instructions by this module. */
@@ -93,7 +94,7 @@ export function serializeObserverTransport(input: unknown, options: TransportSer
     ...(options.reasoningEffort === undefined ? {} : {reasoning: {effort: options.reasoningEffort}}),
     instructions: options.instructions, input: packObserverInput(input), store: false,
     max_output_tokens: options.maxOutputTokens,
-    text: {format: {type: 'json_schema', name: 'observer_response', strict: true, schema: options.schema}}});
+    text: {format: {type: 'json_schema', name: 'observer_response', strict: true, schema: bindProgressReviewOutputSchema(options.schema,input)}}});
 }
 
 /** Serialize the complete Responses request used by compression. Passing this

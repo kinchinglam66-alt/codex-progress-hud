@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import {estimateConditionAssessmentSchema} from '../estimation/estimate-conditions.js';
+import {progressStateSchema} from '../estimation/progress-state.js';
 import type { ProgressEnvelope } from "../core/schema.js";
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
 import { hookEnvelopeSchema, type HookEnvelope } from "../hooks/schema.js";
@@ -165,10 +167,12 @@ const aggregateSnapshotSchema = z.object({
       stopReason:z.enum(['invalid_clock','scheduler_exception','accounting_error']).optional(),stoppedAt:z.number().int().nonnegative().optional(),
       estimateAgeSeconds:z.number().finite().nonnegative().nullable(),callsLastHour:z.number().int().nonnegative(),retryPending:z.boolean()}).strict().optional(),
     goal: z.object({
+      estimateUncertain:z.boolean().optional(),
+      estimateCondition:estimateConditionAssessmentSchema.optional(),
       progressState:z.object({scope:z.string().max(128),observedEventSequence:z.number().int().nonnegative(),milestone:z.object({
         id:z.string().max(128),definition:z.string().max(512),judgment:z.enum(['in_progress','observed_complete','inferred_complete','unknown']),
         prediction:z.object({remainingSeconds:z.number().finite().min(0).max(31536000),errorPercent:z.number().finite().min(0).max(1000),observedActiveSeconds:z.number().finite().min(0).max(31536000)}).strict().nullable(),
-      }).strict().nullable()}).strict().optional(),
+      }).strict().nullable(),reviewApplication:progressStateSchema.shape.reviewApplication}).strict().optional(),
       generation: z.number().int().nonnegative(),
       estimateRevision: z.number().int().nonnegative(),
       sampledAtMs: z.number().int().nonnegative(),

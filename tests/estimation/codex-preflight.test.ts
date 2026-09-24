@@ -87,6 +87,12 @@ it("preflights the runtime before login without requiring or claiming account ev
   expect(profile).toEqual({executable:files.executable,cwd:files.cwd,
     schemaPath:files.schemaPath,instructionsPath:files.instructionsPath,version:"0.153.3",features:names});
 });
+it('preserves dotted capability names emitted by qualified desktop runtimes',async()=>{
+  const files=await fixture();
+  const profile=await preflightCodexRuntime(files,async()=>({version:evidence.version,
+    features:`${evidence.features}\nguardianv2.thread_context\tunder development\tfalse`}));
+  expect(profile.features).toContain('guardianv2.thread_context');
+});
 it("keeps the runtime preflight subject to the same pinned-file gate",async()=>{
   const files=await fixture();let probed=false;
   await expect(preflightCodexRuntime({...files,schemaSha256:"0".repeat(64)},async()=>{

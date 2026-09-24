@@ -9,7 +9,7 @@ import type {VerifiedHistoryFallback} from '../observer/verified-history-fallbac
 import {assertCheckpointWindow,verifyHistoryFallback} from '../observer/verified-history-fallback.js';
 import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSample,BoundNativeTurnSource} from '../observer/native-source-request.js';
 import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
-import {decideTrigger, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
+import {decideTrigger, EVENT_STABILITY_SECONDS, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
 import {createNativeRetentionPermit,type NativeRetentionPermit,type NativeRetentionState,type NativeLifecycleDiagnostic} from './native-owner-retention.js';
 import {normalizeAdmissionReason, schedulingReasons, type SchedulingReason, type AdmissionReason, type ObserverContextState, type ObserverDiagnostics, type ResultDiagnostic, type ResultRejectionReason} from '../core/observer-diagnostics.js';
 export type {ObserverContextState} from '../core/observer-diagnostics.js';
@@ -19,6 +19,9 @@ import type {ResidualRuntime} from './residual/runtime.js';
 import {captureHistoryFeatures} from './residual/capture.js';
 import {createRequestProfile,type RequestProfile,type RequestProfilePhase} from './request-profile.js';
 import {workerAcquisitionReason} from '../core/observer-diagnostics.js';
+import {requestCorrelation} from './request-correlation.js';
+import {validateCompletionOutlook,estimateUncertain} from './completion-outlook.js';
+import {assessEstimateCondition,type EstimateConditionAssessment} from './estimate-conditions.js';
 export interface ObserverWorker {
   /** Passive per-flight timing; the returned function detaches only this listener. */
   subscribeContextPhase?(listener:(phase:RequestProfilePhase)=>void):()=>void;
@@ -51,6 +54,11 @@ export interface ObserverWorkerSource {
   all(): readonly ObserverWorker[];
 }
 export interface ObserverObservation {
+  estimateCondition?:EstimateConditionAssessment|undefined;
+  estimateUncertain?:boolean;
+  completionPath?:'deliver_result'|'report_blocker'|'uncertain'|undefined;
+  wireMetrics?:import('./observation-wire.js').WireMetrics;
+  correlationId?:string;
   milestone?:{id:string;judgment:'in_progress'|'observed_complete'|'inferred_complete'|'unknown';prediction:{remainingSeconds:number;errorPercent:number;observedActiveSeconds:number}|null};
   eventCutoff?:number;
   pendingCriticalEvents?:number;
@@ -78,6 +86,7 @@ export interface ObserverObservation {
 }
 interface Options {contexts: PassiveContextStore; goals: PassiveGoals; workers?: readonly ObserverWorker[]; workerSource?: ObserverWorkerSource; now: () => number; monotonicNow?:()=>number; onChange?: () => void; closeTimeoutMs?: number; requestTimeoutMs?:number; onObservation?:(record:ObserverObservation)=>void;research?:ResidualRuntime}
 interface Entry {
+  seenCriticalEvidence?:Set<string>;
   criticalEvents?:Array<{sequence:number;revision:number|null;at:number}>;
   progressScope?:string;progressEventSequence?:number;milestoneTimerReservation?:string;
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
@@ -222,7 +231,8 @@ export class ObserverScheduler {
         eventCutoff:flight?.eventCutoff??entry.consumedEventSequence,pendingCriticalEvents:Math.max(0,entry.eventSequence-entry.consumedEventSequence),
         activeSeconds:view?.activeSeconds??flight!.observedActiveSeconds,activeTimeKnown:view!==null&&this.options.goals.activeTimeKnown(key),
         ...(view?{timingUncertain:view.timingUncertain,recoveryState:view.recoveryState,recoveryGapSeconds:view.recoveryGapSeconds}:{}),
-        runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,...extra});
+        runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,
+        ...((flight??entry.flight)?{correlationId:requestCorrelation((flight??entry.flight)!.controller.signal)}:{}),...extra});
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
   }
   private contextState(flight:Flight,state:ObserverContextState,metrics?:ContextPreparationMetrics):void {
@@ -282,21 +292,39 @@ export class ObserverScheduler {
       try{
         paired=await this.options.goals.openNativeTurn(flight.ticket,flight.controller.signal);
         if(!paired)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
+        // Native preparation already scans the fixed current-turn supplement.
+        // Piggyback anonymous residual features on that same source rather than
+        // allocating or replaying inherited history solely for research.
+        const researchCapture=this.options.research?captureHistoryFeatures(paired.supplement,paired.currentTurnId):undefined;
+        const pairedForWorker=researchCapture?{...paired,supplement:researchCapture.snapshot}:paired;
         // Only the fixed current-turn supplement is scanned, not inherited history.
-        for await(const _record of paired.supplement.records(flight.controller.signal)){}
-        if(!paired.supplement.coverage.complete||paired.supplement.coverage.gaps.length)throw Error('history_incomplete');
-        await paired.validate(flight.controller.signal);
+        for await(const _record of pairedForWorker.supplement.records(flight.controller.signal)){}
+        if(!pairedForWorker.supplement.coverage.complete||pairedForWorker.supplement.coverage.gaps.length)throw Error('history_incomplete');
+        await pairedForWorker.validate(flight.controller.signal);
         if(this.disabled||!this.options.goals.isTicketValid(flight.ticket,this.time()))throw Error('NATIVE_CONTEXT_STALE');
-        input=this.coverProgressSnapshot(entry,flight,input,paired.revision);
+        input=this.coverProgressSnapshot(entry,flight,input,pairedForWorker.revision);
         this.contextState(flight,'context_preparing');let sampled=false;
-        const value=await flight.worker.prepareNativeTurnContext(input,paired,flight.controller.signal,flight.key,flight.generation,flight.requestedAt,()=>{
+        const value=await flight.worker.prepareNativeTurnContext(input,pairedForWorker,flight.controller.signal,flight.key,flight.generation,flight.requestedAt,()=>{
           if(sampled||flight.controller.signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
           const fresh=this.options.goals.refreshNativeObservation(flight.ticket,this.time());if(!fresh)throw Error('NATIVE_CONTEXT_STALE');
           sampled=true;flight.observedActiveSeconds=fresh.activeSeconds;flight.excludedActiveSeconds=0;return fresh;
         });
         if(!value||!sampled)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
         if(!isInferenceEligible(value.representation))throw Error('history_incomplete');
-        prepared=value.input;flight.researchFailure='incomplete_scan';
+        prepared=value.input;
+        try{
+          const actions=researchCapture?.result(),owner=this.options.goals.researchOwner(flight.ticket);
+          if(!actions)flight.researchFailure=researchCapture?.reason()??'incomplete_scan';
+          else if(!owner)flight.researchFailure='owner_changed';
+          else if(owner.fingerprint===undefined)flight.researchFailure='fingerprint_missing';
+          else if(owner.fingerprint!==researchCapture?.fingerprint())flight.researchFailure='fingerprint_changed';
+          if(actions&&owner&&owner.fingerprint!==undefined&&owner.fingerprint===researchCapture?.fingerprint()&&this.options.research){
+            flight.researchTicket=this.options.research.capture(owner,flight.requestId,
+              JSON.stringify([pairedForWorker.supplement.identity,pairedForWorker.supplement.sourceEpoch,pairedForWorker.supplement.revision]),
+              flight.observedActiveSeconds,actions);
+            flight.researchGeneration=owner.generation;
+          }
+        }catch{flight.researchFailure='capture_error';/* Research capture cannot fail context preparation. */}
         this.contextState(flight,'context_native');
       }catch(error){
         // Recovery is only for source acquisition, never a retry after a worker
@@ -433,7 +461,7 @@ export class ObserverScheduler {
       const result=await flight.worker.observe(prepared,flight.controller.signal,flight.key,flight.generation,
         stage=>this.record('stage',flight.key,entry,{requestId:flight.requestId,stage},flight));
       if(paired||checkpointHistory)await closePaired();
-      this.settle(entry,flight,result);
+      this.settle(entry,flight,result.interpretation?{...result,interpretation:validateCompletionOutlook(result.interpretation,prepared)}:result);
     }catch{if(paired||checkpointHistory)await closePaired();this.settle(entry,flight,null);}
     }finally{
       if(paired||checkpointHistory)await closePaired();
@@ -451,18 +479,29 @@ export class ObserverScheduler {
       if(event.revision===null||event.revision>revision)break;
       flight.eventCutoff=event.sequence;entry.consumedEventSequence=event.sequence;
     }
-    const pending=entry.criticalEvents?.find(e=>e.sequence>entry.consumedEventSequence);
+    const pending=entry.criticalEvents?.filter(e=>e.sequence>entry.consumedEventSequence).at(-1);
     if(pending)entry.eventAt=pending.at;
     return updated;
   }
-  private markEvent(entry:Entry,now:number,reason:TriggerReason,revision:number|null=null):void {
+  private markEvent(entry:Entry,now:number,reason:TriggerReason,revision:number|null=null,evidence?:string):boolean {
+    if(evidence!==undefined){
+      const identity=JSON.stringify([reason,evidence]);
+      const seen=entry.seenCriticalEvidence??=new Set();
+      if(seen.has(identity))return false;
+      seen.add(identity);
+      // Bound metadata; eviction can allow an old duplicate, never lose new evidence.
+      if(seen.size>128)seen.delete(seen.values().next().value!);
+    }
     const hadPending=entry.eventSequence>entry.consumedEventSequence;
     entry.eventSequence++;
     entry.criticalEvents=(entry.criticalEvents??[]).filter(e=>e.sequence>entry.consumedEventSequence);
     entry.criticalEvents.push({sequence:entry.eventSequence,revision,at:now});
-    if(entry.criticalEvents.length>32)entry.criticalEvents=[{sequence:entry.eventSequence,revision:null,at:entry.eventAt??now}];
-    if(!hadPending){entry.eventAt=now;entry.eventReason=reason;}
+    if(entry.criticalEvents.length>32)entry.criticalEvents=[{sequence:entry.eventSequence,revision:null,at:now}];
+    // Stability is measured from the latest evidence, including events arriving in flight.
+    entry.eventAt=now;
+    if(!hadPending){entry.eventReason=reason;}
     else if(reason==='status_evidence')entry.eventReason=reason;
+    return true;
   }
   private syncGoal(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
     const progress=state.view.progressState;
@@ -478,6 +517,7 @@ export class ObserverScheduler {
       return;
     }
     if(entry.goalIdentity!==state.goalIdentity){
+      delete entry.seenCriticalEvidence;
       entry.timerFailures=0;
       entry.sourceActiveSeconds=state.view.activeSeconds;entry.sourceClockAvailable=state.sourceAvailable;
       entry.predictionExcludedSeconds=0;
@@ -559,9 +599,17 @@ export class ObserverScheduler {
       entry.flight.goalIdentity!==state.goalIdentity || state.view.runtime!=='running'))
       entry.flight.controller.abort();
     const resumed=entry.runtime!=='running'&&state.view.runtime==='running';
-    if(event==='prompt')this.markEvent(entry,now,'important_event');
-    if(event==='final'&&state.finalAvailable){entry.statusEvidence=true;this.markEvent(entry,now,'status_evidence');}
-    if(event==='failure'){entry.unknown=0;entry.expiredTimerResults=0;this.markEvent(entry,now,'important_event');}
+    // Only source-bound notifications have a stable evidence identity. Unbound
+    // hooks remain conservative: equal timing or text is not proof of duplication.
+    const evidence=selectedSource&&state.sourceAvailable?JSON.stringify([this.options.goals.currentTurnKey(key),
+      state.view.progressState?.scope,state.contentIdentity,state.revision,event]):undefined;
+    if(event==='prompt')this.markEvent(entry,now,'important_event',null,evidence);
+    if(event==='final'&&state.finalAvailable&&this.markEvent(entry,now,'status_evidence',null,evidence)){
+      entry.statusEvidence=true;
+    }
+    if(event==='failure'&&this.markEvent(entry,now,'important_event',null,evidence)){
+      entry.unknown=0;entry.expiredTimerResults=0;
+    }
     if(event==='runtime'&&resumed){entry.statusEvidence=false;entry.unknown=0;entry.expiredTimerResults=0;
       delete entry.expiredResultPending;
       delete entry.overdueEligibleActiveSeconds;this.markEvent(entry,now,'important_event');}
@@ -923,13 +971,14 @@ export class ObserverScheduler {
       ...(result?.status==='admission_denied'?{admissionReason:normalizeAdmissionReason(result.admissionReason)}:{}),
       ...(result?.interpretation?{relation:result.interpretation.relation}:{}),
       estimate:result?.interpretation?.estimate?{...result.interpretation.estimate}:null,
+      ...(result?.interpretation?{estimateUncertain:estimateUncertain(result.interpretation),completionPath:result.interpretation.completionOutlook?.path,estimateCondition:assessEstimateCondition(result.interpretation)}:{}),
        ...(forecast?{forecast}:{}),...(forecastDiagnostic?{forecastDiagnostic}:{}),
        ...(classification.diagnostic?{resultDiagnostic:classification.diagnostic}:{}),
       ...(classification.rejectionReason?{rejectionReason:classification.rejectionReason}:{}),
       ...(flight.contextState?{contextState:flight.contextState}:{}),
       ...(flight.contextMetrics?{contextMetrics:{...flight.contextMetrics}}:{}),
       ...(result?.timings?{timings:{...result.timings}}:{}),
-      usage:result?.usage?{...result.usage}:null},flight);
+      ...(result?.wireMetrics?{wireMetrics:{...result.wireMetrics}}:{}),usage:result?.usage?{...result.usage}:null},flight);
   }
   stats() {return {disabled: this.disabled, inFlight: this.flights.size, tracked: this.entries.size, capacityReached: this.capacityReached};}
   async prepareRecovery(): Promise<number> {
@@ -980,7 +1029,7 @@ export class ObserverScheduler {
       [Math.max(0,p.remainingSeconds-(view.activeSeconds-p.observedActiveSeconds-(entry?.predictionExcludedSeconds??0)))]:[]).filter(s=>s>0);
     const progressDiagnostics={pendingCriticalEvents:Math.max(0,(entry?.eventSequence??0)-(entry?.consumedEventSequence??0)),
       reviewIntervalSeconds:ordinaryRequestIntervalSeconds(durations.length?Math.min(...durations):null,entry?.unknown??0),
-      eventCoalescingRemainingSeconds:entry?.eventAt===null||entry?.eventAt===undefined?0:Math.max(0,5-(at-entry.eventAt)/1000),
+      eventCoalescingRemainingSeconds:entry?.eventAt===null||entry?.eventAt===undefined?0:Math.max(0,EVENT_STABILITY_SECONDS-(at-entry.eventAt)/1000),
       snapshotEventCutoff:entry?.flight?.eventCutoff??entry?.consumedEventSequence??0};
     const state:ObserverDiagnostics['state']=this.disabled?'disabled':contextState==='estimate_timeout'?'call_failed':entry?.flight?'estimating':
       this.workers().some(worker=>this.workerState(worker).setupFailed)?'setup_failed':

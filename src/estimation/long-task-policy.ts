@@ -41,10 +41,9 @@ export interface TriggerDecision {
   eligibleActiveSeconds:number|null;
 }
 
-export const ordinaryRequestIntervalSeconds=(remaining:number|null,_unknown:number):number=>{
-  if(remaining===null||remaining<=0)return 120;
-  return remaining<=600?60:remaining<=1800?120:300;
-};
+export const EVENT_STABILITY_SECONDS=2;
+export const MIN_REQUEST_SPACING_SECONDS=15;
+export const ordinaryRequestIntervalSeconds=(_remaining:number|null,_unknown:number):number=>180;
 
 const decision=(blockReason:RequestBlockReason|null, reason:TriggerReason|null = null,
   earliestEligibleWallSeconds:number|null = null, eligibleActiveSeconds:number|null = null):TriggerDecision =>
@@ -83,19 +82,26 @@ export function decideTrigger(input:RequestContext):TriggerDecision {
 
   if(input.state!=='running'&&!statusEvent)return decision('runtime_ineligible',null,null,eligibleActiveSeconds);
   if(input.retryBackoff===true)return decision('retry_backoff',null,null,input.overdueEligibleActiveSeconds??eligibleActiveSeconds);
-  const cooldown=importantEvent||statusEvent?15:60;
+  const cooldown=MIN_REQUEST_SPACING_SECONDS;
   if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<cooldown)
     return decision('cooldown',null,input.lastRequestSeconds+cooldown,eligibleActiveSeconds);
-  if(input.lastRequestSeconds!==null&&freshEvent&&input.eventAtSeconds!==null&&input.elapsedSeconds-input.eventAtSeconds<5)
-    return decision('event_coalescing',null,input.eventAtSeconds+5,eligibleActiveSeconds);
+  if(input.lastRequestSeconds!==null&&freshEvent&&input.eventAtSeconds!==null&&input.elapsedSeconds-input.eventAtSeconds<EVENT_STABILITY_SECONDS)
+    return decision('event_coalescing',null,input.eventAtSeconds+EVENT_STABILITY_SECONDS,eligibleActiveSeconds);
 
   if(input.lastRequestSeconds===null&&!statusEvent){
     return input.hasNewInformation?decision(null,'initial',null,null):
       decision('no_new_information',null,null,null);
   }
-  if(input.preDispatchRetry===true)return decision(null,'pre_dispatch_retry',null,eligibleActiveSeconds);
+  if(input.preDispatchRetry===true){
+    if(input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<60)
+      return decision('retry_backoff',null,input.lastRequestSeconds+60,eligibleActiveSeconds);
+    return decision(null,'pre_dispatch_retry',null,eligibleActiveSeconds);
+  }
   if(statusEvent)return decision(null,'status_evidence',null,eligibleActiveSeconds);
   if(bootstrapRecovery){
+    // Recovery backoff is separate from the shared minimum start spacing.
+    if(!activeClock&&input.lastRequestSeconds!==null&&input.elapsedSeconds-input.lastRequestSeconds<60)
+      return decision('cooldown',null,input.lastRequestSeconds+60,eligibleActiveSeconds);
     if(activeClock&&input.activeSeconds!<eligibleActiveSeconds!)
       return decision('cooldown',null,null,eligibleActiveSeconds);
     return decision(null,'bootstrap_recovery',null,eligibleActiveSeconds);

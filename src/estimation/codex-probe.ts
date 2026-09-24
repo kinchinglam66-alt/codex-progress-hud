@@ -40,7 +40,7 @@ export function createCodexProbe(env:NodeJS.ProcessEnv,runner=createOwnedProcess
           }
           if(index===0 && parseCodexVersion(text) === null) throw Error();
           if(index===1 && (!text || Buffer.byteLength(text)>65536 || text.split(/\r?\n/).some(line=>
-            !/^[a-z][a-z0-9_]*\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.test(line)))) throw Error();
+            !/^[a-z][a-z0-9_.]*\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.test(line)))) throw Error();
           if(index===2 && text!=="Logged in using ChatGPT") throw Error();
           texts.push(text);
         }
@@ -77,7 +77,7 @@ export function createObserverRuntimeProbe(env:NodeJS.ProcessEnv,observerHome:st
           const text=result.stdout.trim();
           if(index===0 && parseCodexVersion(text)===null) throw Error();
           if(index===1 && (!text || text.split(/\r?\n/).some(line=>
-            !/^[a-z][a-z0-9_]*\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.test(line)))) throw Error();
+            !/^[a-z][a-z0-9_.]*\s+(stable|experimental|under development|deprecated|removed)\s+(true|false)$/.test(line)))) throw Error();
           texts.push(text);
         }
         return {version:texts[0]!,features:texts[1]!};

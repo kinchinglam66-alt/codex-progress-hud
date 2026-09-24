@@ -370,6 +370,22 @@ it('captures the full-context prefix without changing production ETA when resear
   await ordinary.scheduler.close();await withResearch.scheduler.close();
 });
 
+it('keeps native ETA dispatch independent when residual capture fails',async()=>{
+  let captures=0;
+  const research:ResidualRuntime={capture(){captures++;throw Error('recording failure');},accept(){throw Error('recording failure');},unavailable(){},boundary(){},forget(){},async close(){}};
+  const f=fixture({research,paired:true});
+  f.worker.prepareNativeTurnContext=async(input,source,signal,_key,_generation,_at,sample)=>{
+    for await(const _record of source.supplement.records(signal)){}
+    sample!();return {...f.preparedContext(),input};
+  };
+  try{
+    await f.start();
+    expect(captures).toBe(1);
+    expect(f.counts()).toMatchObject({prepared:0,observed:1});
+    expect(f.goals.view(f.envelope.sessionKey,16000)?.prediction).not.toBeNull();
+  }finally{await f.scheduler.close();await f.source.close();}
+});
+
 it('does not prepare a source whose turn changed during the local scan',async()=>{
   const f=fixture({deferHistory:true});let release!:()=>void;
   const snapshot=history([],{value:0});let closed=0;
@@ -408,6 +424,34 @@ it.each([false,true])('joins a real scheduler forecast with independent same-tur
     f.worker.observe=async()=>({status:'interpreted',interpretation:{...answer,relation:'continue'},usage:null});
     await f.start();
     expect(f.counts().prepared).toBe(1);
+    f.time(20000);f.setRecords([{id:'end',turnId:'first',atMs:20000,kind:'runtime',runtime:'waiting',outcome:'completed'}]);
+    f.source.tick();await f.flush();f.goals.reconcileSource(f.envelope.sessionKey,20000);
+    await f.scheduler.close();await research.close();
+    const result=buildDataset((await readResidualSegments(directory)).records);
+    expect(result.samples,JSON.stringify(result)).toHaveLength(1);
+    expect(result.samples[0]).toMatchObject({features:{rawSeconds:100}});
+    expect(result.samples[0]!.actualSeconds).toBeCloseTo(4,1);
+  }finally{await f.scheduler.close();await research.close();await rm(directory,{recursive:true,force:true});}
+});
+it('joins a native completed-turn forecast with independent same-turn source completion',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'residual-native-scheduler-'));
+  const research=await createResidualRuntime(directory),f=fixture({research,paired:true});
+  f.worker.provenance=()=>({input:'i1',prompt:'p1',model:'m1',algorithm:'a1'});
+  let nativePrepares=0,nativeObserves=0;
+  f.worker.prepareNativeTurnContext=async(input,source,signal,_key,_generation,_at,sample)=>{
+    nativePrepares++;
+    await source.validate(signal);
+    for await(const _record of source.supplement.records(signal)){}
+    const fresh=sample!();
+    return {...f.preparedContext(),input:{...input,...fresh}};
+  };
+  try{
+    await f.flush();
+    const bootstrap=f.goals.request(f.envelope.sessionKey,500)!;
+    f.goals.settle(bootstrap.ticket,answer,500);
+    f.worker.observe=async()=>{nativeObserves++;return {status:'interpreted',interpretation:{...answer,relation:'continue'},usage:null};};
+    await f.start();
+    expect(nativePrepares).toBe(1);expect(nativeObserves).toBe(1);expect(f.counts().prepared).toBe(0);
     f.time(20000);f.setRecords([{id:'end',turnId:'first',atMs:20000,kind:'runtime',runtime:'waiting',outcome:'completed'}]);
     f.source.tick();await f.flush();f.goals.reconcileSource(f.envelope.sessionKey,20000);
     await f.scheduler.close();await research.close();

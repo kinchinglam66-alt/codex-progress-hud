@@ -28,6 +28,17 @@ it('rejects unverified runtime pins and unbounded source sizes',()=>{
  for(const maxSourceBytes of [0,-1,Infinity,1.5,Number.MAX_SAFE_INTEGER])
   expect(()=>createNativeObserverTrial(identity,{maxSourceBytes})).toThrow('NATIVE_TRIAL_SOURCE_LIMIT_INVALID');
 });
+
+it('accepts the exact qualified desktop prerelease runtime',()=>{
+ expect(()=>createNativeObserverTrial({...identity,version:'0.155.0-alpha.9.2',
+  executableSha256:'bc45017e8239dc150258f69309ced9df6bbcdf5b8e4f346decf780ac0999e226'},
+ {maxSourceBytes:1024})).not.toThrow();
+});
+it('accepts the OpenAI-signed 0.153.4 Windows release after account preflight',()=>{
+ expect(()=>createNativeObserverTrial({...identity,
+  executableSha256:'444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b'},
+ {maxSourceBytes:1024})).not.toThrow();
+});
 it('retains the guard only with explicit native guard ownership and bounded host policy',()=>{
  hooks.guard.mockClear();
  expect(()=>createNativeObserverTrial(identity,{maxSourceBytes:1000,retainNativeGuard:true})).toThrow('NATIVE_TRIAL_GUARD_RETENTION_INVALID');

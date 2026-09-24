@@ -9,6 +9,28 @@ import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
 const base:ObserverInput={goalSummary:null,activeSeconds:12,runtime:'running',messages:[{kind:'user',text:'projection',truncated:true}],truncated:true};
 const capacity={contextTokens:1000000,outputReserveTokens:2000,requestBytes:null,source:'configured' as const};
 const sizer={kind:'conservative' as const,count:(text:string)=>Buffer.byteLength(text)};
+it('keeps original execution ordinals and overlap when compression evicts an inner tool',async()=>{
+ const records:ConversationRecord[]=[record('req','current','user','task'),
+  {...record('a','current','tool_start','long A'),actionId:'a',atMs:200},
+  {...record('b','current','tool_start','inner B'),actionId:'b',atMs:300},
+  {...record('br','current','tool_result','inner result'),actionId:'b',atMs:400},
+  ...Array.from({length:20},(_,i)=>({...record(`fill${i}`,'current','assistant','x'.repeat(500)),atMs:500+i})),
+  {...record('ar','current','tool_result','A result'),actionId:'a',atMs:1000}];
+ const prepared=await prepareContext({...options(source(records)),
+  capacity:{...capacity,contextTokens:6000,outputReserveTokens:500},
+  compressor:{async summarize(request){return {...request,text:'summary'};}}});
+ expect(prepared.representation.mode).toBe('compressed');
+ expect(prepared.input.messages.some(m=>m.text==='inner B')).toBe(false);
+ expect(prepared.input.executionObservations?.samples).toEqual(expect.arrayContaining([
+  expect.objectContaining({startOrdinal:1,endOrdinal:24,overlapsOtherTool:true}),
+  expect.objectContaining({startOrdinal:2,endOrdinal:3,overlapsOtherTool:true})]));
+ expect(prepared.input.messages.find(m=>m.text==='A result')?.event?.ordinal).toBe(24);
+ expect(()=>packObserverInput(prepared.input)).not.toThrow();
+});
+it('does not assert prefix execution evidence for incomplete source history',async()=>{
+ const prepared=await prepareContext(options(source([record('req','current','user','task')],false)));
+ expect(prepared.input.executionObservations).toBeUndefined();
+});
 it('does not drop checkpoint images on the stateless preparation path',async()=>{
  const snapshot=source([record('req','current','user','inspect')]);
  snapshot.checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[

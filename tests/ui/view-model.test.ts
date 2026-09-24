@@ -3,6 +3,24 @@ import { buildConversationViews, buildHudView, createConversationViewProjector, 
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 import type { ConversationRow } from "../../src/server/conversation-projection.js";
+it.each(['report_blocker','continue_work','unknown'] as const)('labels %s conditions, including overdue forecasts, without completing the turn',path=>{
+ const row=overdueConversation('running','ready');row.goal!.prediction={remainingSeconds:10,errorPercent:100,observedActiveSeconds:row.goal!.activeSeconds};
+ row.goal!.estimateCondition={selectedPath:path,displayPath:path,issue:path==='unknown'?'unknown_path':'conditional'};
+ const text=path==='report_blocker'?'若报告阻塞结束':path==='continue_work'?'若继续实施至本轮结束':'适用条件未明';
+ expect(buildConversationViews([row])[0]!.etaLabel).toContain(text);
+ const overdue=buildConversationViews([row],20)[0]!;expect(overdue.etaLabel).toContain(text);expect(overdue.statusLabel).toContain('执行中');
+ row.goal!.runtime='interrupted';expect(buildConversationViews([row])[0]!.etaLabel).toBe('工作计时已停止');
+});
+it('marks contradictory numeric estimates rather than changing or hiding the number',()=>{
+ const row=overdueConversation('running','ready');row.goal!.prediction={remainingSeconds:300,errorPercent:50,observedActiveSeconds:row.goal!.activeSeconds};
+ row.goal!.estimateCondition={selectedPath:'report_blocker',displayPath:'unknown',issue:'estimate_mismatch'};
+ const view=buildConversationViews([row])[0]!;expect(view.etaLabel).toContain('条件不一致');expect(view.etaLabel).toContain('00:05:00');
+});
+it('labels an uncertain numeric ETA without changing task state or countdown',()=>{
+ const row=overdueConversation('running','ready');row.goal!.prediction={remainingSeconds:300,errorPercent:50,observedActiveSeconds:row.goal!.activeSeconds};
+ const before=buildConversationViews([row])[0]!;row.goal!.estimateUncertain=true;const after=buildConversationViews([row])[0]!;
+ expect(after.etaLabel).toContain('粗略估时／结束方式未明');expect(after.etaLabel).toContain('00:05:00');expect(after.statusLabel).toBe(before.statusLabel);
+});
 it('shows a separate milestone countdown, freezes on pause and never completes at zero',()=>{
  const row=overdueConversation('running','ready');
  row.goal!.activeSeconds=10;row.goal!.progressState={scope:'scope',observedEventSequence:0,milestone:{id:'ms',definition:'测试结束',judgment:'in_progress',prediction:{remainingSeconds:100,errorPercent:50,observedActiveSeconds:10}}};
