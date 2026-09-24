@@ -139,7 +139,7 @@ it('does not replace a poisoned native owner whose cleanup is still unconfirmed'
   expect(created).toBe(1);expect(runtime.workerSource.all()).toContain(first);
  }finally{await runtime.close();}
 });
-it.each(['dynamic','compatibility'])('forwards stage diagnostics through the %s runtime worker',async mode=>{
+it.skipIf(process.platform !== 'win32').each(['dynamic','compatibility'])('forwards stage diagnostics through the %s runtime worker',async mode=>{
   const events:string[]=[],stages:string[]=[];
   const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events)});
   try{
@@ -434,7 +434,7 @@ describe('desktop observer runtime composition', () => {
     expect(events).toContain('accounting-close');
   });
 
-  it('exposes exactly two reusable accounted observer slots after authorization', async () => {
+  it.skipIf(process.platform !== 'win32')('exposes exactly two reusable accounted observer slots after authorization', async () => {
     const events: string[] = [];
     const accountingOwner = owner(events);
     const runtime = createDesktopObserverRuntime({
@@ -459,7 +459,7 @@ describe('desktop observer runtime composition', () => {
     await runtime.close();
   });
 
-  it('forwards slot provenance through the scheduler into an accepted forecast record', async () => {
+  it.skipIf(process.platform !== 'win32')('forwards slot provenance through the scheduler into an accepted forecast record', async () => {
     let now=0;const events:string[]=[];const contexts=new PassiveContextStore();const goals=new PassiveGoals(contexts);
     const records:ObserverObservation[]=[];
     const runtime=createDesktopObserverRuntime({

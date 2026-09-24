@@ -40,7 +40,7 @@ import {withContextPreparation, type PreparationConfiguration, type PreparationS
 
 const rootOwnerSchema=z.object({version:z.literal(1),ownerFingerprint:z.string().regex(/^[a-f0-9]{64}$/).nullable()}).strict();
 const rootOwnerPath=(dataDirectory:string):string=>resolve(dataDirectory,'observer-accounting-root-owner.json');
-const SUBSCRIPTION_MODEL='gpt-5.6-luna';
+import {resolveSubscriptionModel,defaultSubscriptionModel,type SubscriptionModel} from '../estimation/subscription-model.js';
 const conservativeByteSizer:RequestSizer={kind:'conservative',count:value=>Buffer.byteLength(value,'utf8')};
 // The identity runtime owns the actual argv. This is only a deliberately
 // bounded framing policy for planning, never a claim about invocation args.
@@ -54,10 +54,10 @@ function subscriptionSizer(assets:{instructions:string;schema:unknown},compressi
   return [serialized.stdin,serialized.instructions,serialized.schema,framingUpperBound].join('\n');
 }
 
-function subscriptionCapacity(contextCapacity: ProviderConfig['contextCapacity']): ContextCapacity|null {
+function subscriptionCapacity(contextCapacity: ProviderConfig['contextCapacity'],model:SubscriptionModel): ContextCapacity|null {
   if (!contextCapacity || !Number.isSafeInteger(contextCapacity.outputReserveTokens) || contextCapacity.outputReserveTokens <= 0) return null;
   return resolveConfiguredCapacity({version:1,selected:'subscription',api:null,
-    contextCapacity},SUBSCRIPTION_MODEL,contextCapacity.outputReserveTokens);
+    contextCapacity},model,contextCapacity.outputReserveTokens);
 }
 
 function inputBudgetBytes(capacity: ContextCapacity|null): number|undefined {
@@ -110,7 +110,7 @@ export function shouldEnablePersistentObserver(options:{enablePersistentObserver
 
 /** Explicit local pilot opt-in, never configuration taken from a chat/HTTP request.
  * Construction reads settings only. Account/process work begins after HUD readiness. */
-export async function loadDesktopObserverPilot(options:{dataDirectory:string;resourcesDirectory:string;dialog:ObserverConsentDialog;environment:NodeJS.ProcessEnv;consentProtection:ConsentProtection;enablePersistentObserver?:boolean;nativeContextTrial?:NativeObserverTrial}) {
+export async function loadDesktopObserverPilot(options:{dataDirectory:string;resourcesDirectory:string;dialog:ObserverConsentDialog;environment:NodeJS.ProcessEnv;consentProtection:ConsentProtection;enablePersistentObserver?:boolean;nativeContextTrial?:NativeObserverTrial;onRuntimeSetupDiagnostic?:Parameters<typeof createDesktopObserverRuntime>[0]['onSetupDiagnostic']}) {
   if(options.nativeContextTrial!==undefined&&options.enablePersistentObserver!==true)throw Error('NATIVE_TRIAL_REQUIRES_EXPLICIT_PERSISTENT_HOST');
   let config: Awaited<ReturnType<typeof readObserverPilotConfig>>;
   try {
@@ -121,6 +121,8 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     if (!(error instanceof Error) || error.message !== 'OBSERVER_PILOT_CONFIG_INVALID') throw error;
     config=null;
   }
+  const selectedModel=resolveSubscriptionModel(config?.subscriptionModel);
+  if(selectedModel!==defaultSubscriptionModel&&!shouldEnablePersistentObserver(options,config))throw Error('SUBSCRIPTION_MODEL_REQUIRES_PERSISTENT_SESSION');
   const systemRoot=options.environment.SystemRoot??options.environment.SYSTEMROOT;
   const mainAccountSource=config&&config.subscriptionAccountSource!=='independent'
     ?createMainCodexAccountSource({home:options.environment.CODEX_HOME??resolve(options.environment.USERPROFILE??options.environment.HOME??homedir(),'.codex')}):undefined;
@@ -149,9 +151,9 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     const account=await accountSettings.inspect(signal);
     const accountingDirectory=subscriptionAccountingDirectory(options.dataDirectory,account.evidence.accountFingerprint,rootOwnerFingerprint);
     const summaryCache=createContextSummaryCache();
-    const capacity=subscriptionCapacity(contextCapacity);
+    const capacity=subscriptionCapacity(contextCapacity,selectedModel);
     const preparedInputBudgetBytes=inputBudgetBytes(capacity);
-    const cacheScope=JSON.stringify(['subscription',account.evidence.accountFingerprint,SUBSCRIPTION_MODEL,
+    const cacheScope=JSON.stringify(['subscription',account.evidence.accountFingerprint,selectedModel,
       identityOptions.version,identityOptions.executableSha256??null,identityOptions.proxyUrl]);
     const runtime=createDesktopObserverRuntime({identity:createObserverIdentityRuntime({...identityOptions,
       reuseHomeCheckProcess:shouldEnablePersistentObserver(options,config)}),dialog:options.dialog,
@@ -163,9 +165,9 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
         persistentWorkerFactory:workerOptions=>{
           const accountOptions=mainAccountSource?{mainAccount:{source:mainAccountSource,accountFingerprint:account.evidence.accountFingerprint}}:{};
           if(options.nativeContextTrial===undefined)return createDesktopPersistentWorker(identityOptions,
-            {...workerOptions,...accountOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema},assets.instructions);
+            {...workerOptions,...accountOptions,...persistentHistoryPolicy(capacity),model:selectedModel,outputSchema:assets.schema},assets.instructions);
           const nativeContext=createNativeObserverTrial(identityOptions,options.nativeContextTrial);
-          return createPersistentObserverWorker({...workerOptions,...accountOptions,...persistentHistoryPolicy(capacity),outputSchema:assets.schema,
+          return createPersistentObserverWorker({...workerOptions,...accountOptions,...persistentHistoryPolicy(capacity),model:selectedModel,outputSchema:assets.schema,
             ...(nativeContext===undefined?{}:{nativeContext,nativeInstructions:assets.instructions,completedTurnContext:options.nativeContextTrial?.mode==='completed-turn'})});
         }}:{}),
       contextPreparation:{...(preparedInputBudgetBytes === undefined ? {} : {inputBudgetBytes:preparedInputBudgetBytes}),configure:async(scope,prepareCompression,authorize,owner)=>{
@@ -184,7 +186,7 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
           summaryCache,cacheScope,
           close:async()=>{await session.close();},
         };
-      }} });
+      }},...(options.onRuntimeSetupDiagnostic===undefined?{}:{onSetupDiagnostic:options.onRuntimeSetupDiagnostic}) });
     runtimes.add(runtime);
     try{
       await runtime.start(signal, inlineConsent === undefined ? undefined : {

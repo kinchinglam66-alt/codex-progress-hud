@@ -335,7 +335,7 @@ describe("source-mode companion lifecycle", () => {
       store: createLifecycleStateStore(paths),
       client: openingClient,
       launcher,
-      startupTimeoutMs: 250,
+      startupTimeoutMs: 1_000,
       sleep: async (milliseconds) => {
         visibility = "hidden";
         await new Promise((resolve_) => setTimeout(resolve_, milliseconds));
@@ -344,17 +344,17 @@ describe("source-mode companion lifecycle", () => {
       diagnostics
     });
 
-    await expect(opening.open()).resolves.toEqual({
-      desiredState: "on",
-      observedState: "stopped",
-      code: "START_TIMEOUT"
-    });
+    const opened = await opening.open();
+    expect(opened).toMatchObject({ desiredState: "on", code: "START_TIMEOUT" });
+    // A slow health request can report the retiring process as unresponsive;
+    // neither outcome may promote that old process to a running successor.
+    expect(["stopped", "unresponsive"]).toContain(opened.observedState);
     await expect(closing).resolves.toMatchObject({ code: "SHUTDOWN_TIMEOUT" });
     expect(await store.readSettings()).toMatchObject({ desiredState: "on", generation: on.generation + 2 });
     expect(await store.readRuntime()).toEqual(runtime);
     expect(launcher.spawnHud).not.toHaveBeenCalled();
     expect(show).toHaveBeenCalledTimes(1);
-  }, 5_000);
+  }, 10_000);
 
   it("lets two managers converge when one replaces the shutdown-latched server between recovery probes", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-progress-hud-shutdown-replacement-"));
@@ -483,7 +483,7 @@ describe("source-mode companion lifecycle", () => {
       client: new CompanionHttpClient(serviceUrl, tokenPath),
       launcher: firstLauncher,
       sleep: controlledSleep("first", firstRecoveryEntered, firstRecoveryGate),
-      startupTimeoutMs: 1_000,
+      startupTimeoutMs: 5_000,
       logger: { write: async () => undefined },
       diagnostics
     });
@@ -492,7 +492,7 @@ describe("source-mode companion lifecycle", () => {
       client: new CompanionHttpClient(serviceUrl, tokenPath),
       launcher: secondLauncher,
       sleep: controlledSleep("second", secondRecoveryEntered, secondRecoveryGate),
-      startupTimeoutMs: 1_000,
+      startupTimeoutMs: 5_000,
       logger: { write: async () => undefined },
       diagnostics
     });

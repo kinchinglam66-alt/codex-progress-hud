@@ -2,10 +2,10 @@ import {expect,it,vi,beforeEach,afterEach} from 'vitest';
 import {resolve} from 'node:path';
 import {ObserverAccountTimeout,ObserverPreDispatchTransient} from '../../src/estimation/observer-call-failure.js';
 const state=vi.hoisted(()=>({events:[] as string[],accountId:'account-one',routeFingerprint:'b'.repeat(64),failure:'',active:false,compressionInputs:[] as string[],identityCaptureCount:0,identityGateCall:null as null|number,identityGate:null as null|{promise:Promise<void>;release:()=>void}}));
-const identityFiles=vi.hoisted(()=>({value:'stable-identity-files'}));
+const identityFiles=vi.hoisted(()=>({value:'stable-identity-files',modes:[] as string[]}));
 vi.mock('../../src/estimation/observer-home.js',()=>({createObserverHomeManager:()=>({prepare:async()=>{state.events.push('home');return resolve('private/observer-auth');},disable(){},status:()=>({active:false,poisoned:false})})}));
 vi.mock('../../src/estimation/codex-probe.js',()=>({createObserverRuntimeProbe:()=>({probe:async()=>({version:'codex-cli 0.153.4',features:'x stable false'}),disable(){}})}));
-vi.mock('../../src/estimation/observer-identity-files.js',()=>({captureObserverIdentityFiles:async()=>{state.identityCaptureCount++;if(state.identityGate&&(state.identityGateCall===null||state.identityGateCall===state.identityCaptureCount))await state.identityGate.promise;return identityFiles.value;}}));
+vi.mock('../../src/estimation/observer-identity-files.js',()=>({captureObserverIdentityFiles:async(_home:string,mode:string)=>{identityFiles.modes.push(mode);state.identityCaptureCount++;if(state.identityGate&&(state.identityGateCall===null||state.identityGateCall===state.identityCaptureCount))await state.identityGate.promise;return identityFiles.value;}}));
 vi.mock('../../src/estimation/codex-preflight.js',()=>({createRuntimePreflightCache:()=>({
   check:async()=>{state.events.push('preflight');return {version:'0.153.4'};},invalidate(){state.events.push('cache-invalidated');}
 })}));
@@ -38,6 +38,17 @@ it('uses the main source for both inspection and prepared identity and forbids i
 });
 beforeEach(()=>{state.events=[];state.accountId='account-one';state.routeFingerprint='b'.repeat(64);state.failure='';state.active=false;state.compressionInputs=[];state.identityCaptureCount=0;state.identityGateCall=null;state.identityGate=null;identityFiles.value='stable-identity-files';});
 afterEach(()=>vi.useRealTimers());
+it.each([false,true])('binds every metadata capture to host external-auth mode=%s',async(external)=>{
+ identityFiles.modes=[];
+ const source={inspect:async()=>({accountFingerprint:'e'.repeat(64),expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
+ const runtime=createObserverIdentityRuntime({...config(),...(external?{mainAccountSource:source}:{})});
+ try{
+  const prepared=await runtime.prepareSession(new AbortController().signal);
+  expect(await prepared.validateAcceptance!(new AbortController().signal)).toBe(true);
+  expect(identityFiles.modes.length).toBeGreaterThanOrEqual(4);
+  expect(new Set(identityFiles.modes)).toEqual(new Set([external?'external':'independent']));
+ }finally{await runtime.close();}
+});
 it('returns the attested worker transport and its exact invocation after main-account preparation',async()=>{
  const source={inspect:async()=>({accountFingerprint:'e'.repeat(64),expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})};
  const runtime=createObserverIdentityRuntime({...config(),mainAccountSource:source});
@@ -451,7 +462,7 @@ it('prepares an estimate with fresh identity evidence but never dispatches it',a
   const runtime=createObserverIdentityRuntime(config());
   const prepared=await runtime.prepareEstimate({goalSummary:null,activeSeconds:20,runtime:'running',messages:[{kind:'user',text:'synthetic goal',truncated:false}],truncated:false},new AbortController().signal);
   expect(prepared.invocation.args).toContain('exec');
-  expect(prepared.provenance).toMatchObject({input:'observer-input-facts-v5',model:'gpt-5.6-luna-medium',algorithm:'pace-v1'});
+  expect(prepared.provenance).toMatchObject({input:'observer-input-facts-v7',model:'gpt-5.6-luna-medium',algorithm:'pace-v1'});
   expect(prepared.evidence.accountFingerprint).toMatch(/^[a-f0-9]{64}$/);
   expect(state.events).toContain('account');await runtime.close();
 });

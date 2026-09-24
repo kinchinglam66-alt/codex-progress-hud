@@ -747,8 +747,8 @@ describe("lifecycle state store", () => {
   it("reads a valid install manifest", async () => {
     const paths = testPaths();
     const manifest = {
-      executablePath: "C:\\Program Files\\Codex Progress HUD\\Codex Progress HUD.exe",
-      installDirectory: "C:\\Program Files\\Codex Progress HUD",
+      executablePath: join(directory, "Codex Progress HUD.exe"),
+      installDirectory: directory,
       version: "0.1.0"
     };
     await writeFile(paths.installManifestPath, `${JSON.stringify(manifest)}\n`);

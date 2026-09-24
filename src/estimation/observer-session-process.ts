@@ -4,6 +4,7 @@ import type {Invocation} from './owned-process.js';
 import {captureInvocationProcessIdentity} from './invocation-process.js';
 import {createObserverAppServerRpc} from './observer-app-server-rpc.js';
 import type {ChatgptAuthRefreshHandler} from './observer-auth-refresh-rpc.js';
+import {createModelCatalogTimeoutReader} from './model-catalog-timeout.js';
 
 /** One direct child for a source conversation, independent of individual
  * operations. Caller persists its captured identity against active admissions.
@@ -45,13 +46,14 @@ export function createObserverSessionProcess(options:{captureIdentity?:typeof ca
      owned.stdin.on('error',()=>{rpc?.close();kill();});
      owned.stderr.on('error',()=>{rpc?.close();kill();});
      // Drain diagnostics without retaining private stderr. Bound abnormal floods.
-     let stderrBytes=0;owned.stderr.on('data',(chunk:Buffer)=>{stderrBytes+=chunk.length;if(stderrBytes>65536){rpc?.close();kill();}});
+     const catalog=createModelCatalogTimeoutReader();
+     let stderrBytes=0;owned.stderr.on('data',(chunk:Buffer)=>{stderrBytes+=chunk.length;if(stderrBytes>65536){rpc?.close();kill();}else catalog.push(chunk);});
      rpc=createObserverAppServerRpc({input:owned.stdin,output:owned.stdout,...(options.onRemoteError?{onRemoteError:options.onRemoteError}:{}),...(options.onChatgptAuthTokensRefresh?{onChatgptAuthTokensRefresh:options.onChatgptAuthTokensRefresh}:{})});
      try{
        const pid=owned.pid;if(!pid)throw Error('SESSION_PROCESS_SPAWN');
        const creationIdentity=await (options.captureIdentity??captureInvocationProcessIdentity)(pid);
        if(!creationIdentity||closed||disabled)throw Error('SESSION_PROCESS_IDENTITY');
-       return {rpc,pid,creationIdentity};
+       return {rpc:{...rpc,modelCatalogTimeoutCount:catalog.count},pid,creationIdentity};
      }catch(error){await close();throw error;}
    },
  };

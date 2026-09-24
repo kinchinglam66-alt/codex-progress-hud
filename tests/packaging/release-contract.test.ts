@@ -86,6 +86,7 @@ describe("Windows release source contract", () => {
   it("exposes reproducible package and release verification scripts", async () => {
     const pkg = JSON.parse(await text("package.json"));
     expect(pkg.version).toBe("0.2.1");
+    expect(pkg.dependencies["zod-to-json-schema"]).toBeTypeOf("string");
     for (const name of ["build:launcher", "pack:win", "dist:win", "sync:plugin", "check:plugin-sync", "package:plugin", "checksums", "test:package-contract", "verify:release"]) {
       expect(pkg.scripts[name]).toBeTypeOf("string");
     }
@@ -98,6 +99,9 @@ describe("Windows release source contract", () => {
     const smoke = await text("scripts/smoke-packaged.mjs");
     const diagnostic = await text("scripts/diagnose-packaged-mcp.mjs");
     expect(smoke).toContain('readFile(resolve(root, "package.json"), "utf8")');
+    expect(smoke).toContain('mkdtemp(join(tmpdir(), "hud-packaged-artifact-")');
+    expect(smoke).toContain('cp(resolve(root, "release/win-unpacked"), isolatedInstallDirectory, { recursive: true })');
+    expect(smoke).toContain('resolve(isolatedInstallDirectory, "resources/app.asar/dist/main.js")');
     expect(smoke).toContain("APPDATA: dataDirectory");
     expect(smoke).toContain('ELECTRON_RUN_AS_NODE: "1"');
     expect(smoke).toContain('name: "hud_open"');

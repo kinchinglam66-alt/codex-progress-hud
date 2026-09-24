@@ -64,3 +64,28 @@ it('does not treat unrelated child creation as an identity-file replacement',asy
   await writeFile(join(authHome,'app-server-runtime.log'),'transient app-server state');
   expect(await captureObserverIdentityFiles(authHome)).toBe(before);
 });
+
+it('requires explicit external mode for credential-free homes and rejects credentials appearing',async()=>{
+  expect(await captureObserverIdentityFiles(authHome,'external')).toBeNull();
+  await rm(join(authHome,'auth.json'));
+  expect(await captureObserverIdentityFiles(authHome)).toBeNull();
+  const captured=await captureObserverIdentityFiles(authHome,'external');
+  expect(captured).toEqual(expect.any(String));
+  expect(await captureObserverIdentityFiles(authHome,'external')).toBe(captured);
+  await writeFile(join(authHome,'auth.json'),'unexpected-identity');
+  expect(await captureObserverIdentityFiles(authHome,'external')).toBeNull();
+});
+
+it('tracks external home replacement and config changes without reading secrets',async()=>{
+  await rm(join(authHome,'auth.json'));
+  const original=await captureObserverIdentityFiles(authHome,'external');
+  await writeFile(join(authHome,'config.toml'),'private-config-value');
+  const configured=await captureObserverIdentityFiles(authHome,'external');
+  expect(configured).not.toBeNull();
+  expect(configured).not.toBe(original);
+  expect(configured).not.toContain('private-config-value');
+  await rename(authHome,join(root,'previous-home'));
+  await mkdir(authHome);
+  expect(await captureObserverIdentityFiles(authHome,'external')).not.toBe(original);
+  expect(await captureObserverIdentityFiles(join(root,'missing'),'external')).toBeNull();
+});

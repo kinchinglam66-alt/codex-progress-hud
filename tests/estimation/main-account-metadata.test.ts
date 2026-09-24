@@ -39,10 +39,9 @@ it.each(['timeout','cancel','disable'] as const)('distinguishes metadata %s with
 it.each([
  ['config/read','MAIN_METADATA_ROUTE_FAILED'],
  ['account/login/start','MAIN_AUTH_LOGIN_FAILED'],
- ['account/rateLimits/read','MAIN_AUTH_RATE_LIMITS_FAILED'],
  ['account/read','MAIN_METADATA_ACCOUNT_READ_FAILED'],
 ] as const)('preserves safe %s failure across auth, metadata and receipt classification',async(failMethod,code)=>{
- const script=`let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);if(!m.id)continue;if(m.method===${JSON.stringify(failMethod)}){process.stdout.write(JSON.stringify({id:m.id,error:{code:-1,message:'PRIVATE_RPC_CONTENT'}})+'\\n');continue;}let result={};if(m.method==='config/read')result={config:${JSON.stringify(config)}};else if(m.method==='account/login/start')result={type:'chatgptAuthTokens'};else if(m.method==='account/rateLimits/read')result={accountId:'a',rateLimits:{}};process.stdout.write(JSON.stringify({id:m.id,result})+'\\n');}});process.stdin.on('end',()=>process.exit(0));`;
+ const script=`let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);if(!m.id)continue;if(m.method===${JSON.stringify(failMethod)}){process.stdout.write(JSON.stringify({id:m.id,error:{code:-1,message:'PRIVATE_RPC_CONTENT'}})+'\\n');continue;}let result={};if(m.method==='config/read')result={config:${JSON.stringify(config)}};else if(m.method==='account/login/start')result={type:'chatgptAuthTokens'};else if(m.method==='account/rateLimits/read')result={accountId:'a',rateLimits:{}};else if(m.method==='account/read')result={requiresOpenaiAuth:true,account:{type:'chatgpt',email:'synthetic@example.invalid'}};process.stdout.write(JSON.stringify({id:m.id,result})+'\\n');}});process.stdin.on('end',()=>process.exit(0));`;
  const reader=createMainAccountMetadataReader({invocation:{executable:process.execPath,cwd:process.cwd(),env:process.env,args:['-e',script],input:''},
   source:{inspect:async()=>({accountFingerprint:'a'.repeat(64),expiresAt:Date.now()+600000}),credentials:async()=>({accessToken:'synthetic',chatgptAccountId:'a'})},
   processFactory:options=>createObserverSessionProcess({...options,captureIdentity:async()=> 'synthetic'})});

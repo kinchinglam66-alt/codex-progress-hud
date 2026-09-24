@@ -18,6 +18,20 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci --registry=https://registry.npmjs.org
+      - name: Prepare canonical test temp directory
+        shell: pwsh
+        run: |
+          $testTemp = Join-Path ([System.IO.Path]::GetPathRoot($env:RUNNER_TEMP)) 'hud-ci-temp'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $canonical = node -p "require('node:fs').realpathSync(process.argv[1])" $testTemp
+          if ([System.IO.Path]::GetFullPath($canonical) -ne [System.IO.Path]::GetFullPath($testTemp)) {
+            throw "Test temp directory is not canonical: $testTemp -> $canonical"
+          }
+          "TEMP=$testTemp" >> $env:GITHUB_ENV
+          "TMP=$testTemp" >> $env:GITHUB_ENV
+          "TMPDIR=$testTemp" >> $env:GITHUB_ENV
+      - run: node node_modules/electron/install.js
+      - run: npm run build
       - name: Verify tag matches package version
         shell: pwsh
         run: |
@@ -36,7 +50,13 @@ jobs:
           "plugin=release/codex-progress-hud-plugin-$version.zip" >> $env:GITHUB_OUTPUT
       - name: Verify checksums
         shell: pwsh
-        run: Get-Content release/SHA256SUMS.txt | ForEach-Object { $hash, $file = $_ -split '  ', 2; if ((Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "Checksum mismatch: $file" } }
+        run: |
+          Get-Content release/SHA256SUMS.txt | ForEach-Object {
+            $hash, $file = $_ -split '  ', 2
+            if ((Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+              throw "Checksum mismatch: $file"
+            }
+          }
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |

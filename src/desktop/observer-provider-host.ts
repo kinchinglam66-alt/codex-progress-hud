@@ -159,6 +159,9 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
   let current: ProviderWorkerOwner | null = null;
   let inlineSubscriptionConsent: ProviderInlineConsent | undefined;
   let followingResume=false;
+  // A caller may explicitly retry startup in this process after repairing the
+  // environment. The persisted state still stays inactive across relaunches.
+  let startupRetryAllowed=false;
   let dispatchGeneration = generation;
   let dispatchController=new AbortController();
   function setDispatchGeneration(value:number):void {
@@ -380,7 +383,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
     const {controller,token}=acquireAction();
     try {
     const persisted = await readState(statePath(options.dataDirectory));
-    if (persisted === 'invalid' || (persisted?.state !== 'ready' && !(persisted === null && options.autoStartSubscription && active.selected === 'subscription'))) { releaseAction(token); return; }
+    if (persisted === 'invalid' || (persisted?.state !== 'ready' && !startupRetryAllowed && !(persisted === null && options.autoStartSubscription && active.selected === 'subscription'))) { releaseAction(token); return; }
     if (state === 'ready' && current !== null) { releaseAction(token); return; }
     {
       const combined = AbortSignal.any([signal, controller.signal]);
@@ -400,14 +403,17 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         }
         current = owner as ProviderWorkerOwner;
         setDispatchGeneration(++generation);
-        state = 'ready';
+        state = 'ready';startupRetryAllowed=false;
       } catch(error) {
         if(active.selected==='subscription'&&options.subscriptionStartupInspection==='owner'){
           account=null;
           accountDiagnostic=error instanceof AccountInspectionFailure?error.diagnostic:undefined;
           accountStatus=error instanceof Error&&error.message==='OBSERVER_LOGIN_REQUIRED'?'signed_out':'unavailable';
         }
-        current = null; state = 'inactive'; setDispatchGeneration(++generation); await drainSelection();
+        current = null; state = 'inactive';startupRetryAllowed=true;setDispatchGeneration(++generation); await drainSelection();
+        // Persist startup failure so settings and the next launch do not keep
+        // advertising a stale ready provider after a missing/mismatched runtime.
+        await writeState({version:1,generation,revision,state:'inactive',selected:active.selected}).catch(()=>undefined);
       }
     }
     } finally { releaseAction(token); }

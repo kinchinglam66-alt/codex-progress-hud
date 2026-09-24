@@ -1,4 +1,6 @@
-import {expect,it,vi} from 'vitest';
+import {expect,it as test,vi} from 'vitest';
+// Real durable process ownership uses the Windows-only StartTime/handle probe.
+const it = test.skipIf(process.platform !== 'win32');
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
@@ -22,7 +24,7 @@ import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 fixture.script=`let b='',init=0,login=0,turns=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);if(!m.id)continue;const send=v=>process.stdout.write(JSON.stringify(v)+'\\n');let result={};
 if(m.method==='initialize'&&++init>1||m.method==='account/login/start'&&++login>1){send({id:m.id,error:{code:-1,message:'duplicate setup'}});continue;}
 if(m.method==='config/read')result={config:{model_provider:'openai',forced_login_method:'chatgpt',cli_auth_credentials_store:'ephemeral',chatgpt_base_url:'https://chatgpt.com/backend-api/',model_providers:{}}};
-if(m.method==='account/login/start')result={type:'chatgptAuthTokens'};
+if(m.method==='account/login/start'){result={type:'chatgptAuthTokens'};send({method:'account/login/completed',params:{loginId:null,success:true,error:null}});}
 if(m.method==='account/rateLimits/read')result={accountId:'a',rateLimits:{}};
 if(m.method==='account/read')result={requiresOpenaiAuth:true,account:{type:'chatgpt',email:'synthetic@example.invalid'}};
 if(m.method==='thread/start')result={thread:{id:'t'}};

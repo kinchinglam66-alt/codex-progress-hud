@@ -1,4 +1,6 @@
-import {afterEach,expect,it} from 'vitest';
+import {afterEach,expect,it as test} from 'vitest';
+// These cases execute Windows PowerShell and validate Windows ACLs.
+const it=test.skipIf(process.platform!=='win32');
 import {mkdtemp,mkdir,rm,stat} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir,homedir} from 'node:os';

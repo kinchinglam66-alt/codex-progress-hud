@@ -32,6 +32,48 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it('exposes rejected review diagnostics while retaining numeric ETA and native runtime',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    const nextMilestone={definition:'stage',completionCriterion:'semantic',criterion:'checked',operationRef:null,estimate:{remainingSeconds:100,errorPercent:50}};
+    expect(f.goals.settle(first.ticket,{...answer(),nextMilestone},2000)).toBe(true);
+    const second=f.request(3000),milestoneId=second.input.progressState!.milestone!.id;
+    expect(f.goals.settle(second.ticket,{...answer('continue'),estimate:{remainingSeconds:240,errorPercent:50},
+      progressReview:{milestoneId,assessment:'inferred_complete',evidenceRefs:['te_'+'a'.repeat(32)],changedAssumptions:[]}},4000)).toBe(true);
+    const view=f.goals.view(session,4000)!;
+    expect(view.runtime).toBe('running');expect(view.prediction?.remainingSeconds).toBe(240);
+    expect(view.progressState?.reviewApplication?.outcome).toBe('evidence_not_in_scope');
+    expect(view.progressState?.milestone?.judgment).toBe('in_progress');
+    view.progressState!.reviewApplication!.outcome='applied';
+    expect(f.goals.view(session,4000)?.progressState?.reviewApplication?.outcome).toBe('evidence_not_in_scope');
+  });
+  it('binds conditions to their accepted prediction, retains them on null refresh and drops them on a new turn',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    const estimate={remainingSeconds:10,errorPercent:100};
+    const response={...answer(),estimate,estimateConditions:{selectedPath:'report_blocker',reportBlocker:estimate,continueWork:null,milestonePath:'unknown'}};
+    expect(f.goals.settle(first.ticket,response,2000)).toBe(true);
+    expect(f.goals.view(session,2000)!.estimateCondition).toMatchObject({displayPath:'report_blocker',issue:'conditional'});
+    const second=f.request(3000);expect(f.goals.settle(second.ticket,{...answer('continue'),estimate:null},4000)).toBe(true);
+    expect(f.goals.view(session,4000)!.estimateCondition?.displayPath).toBe('report_blocker');
+    f.hook('UserPromptSubmit',5000,'two');expect(f.goals.view(session,5000)?.estimateCondition).toBeUndefined();
+  });
+  it.each([{endAt:120000,expected:29},{endAt:50000,expected:null}])('maps milestone completion after pause only within the current segment: %j',({endAt,expected})=>{
+    let revision=1;
+    const user={kind:'user' as const,text:'run tests',truncated:false,event:{kind:'user' as const,ordinal:0,atMs:0}};
+    const start={kind:'tool' as const,text:'command',truncated:false,event:{kind:'tool_start' as const,ordinal:1,pairOrdinal:0,atMs:500}};
+    const end={kind:'tool' as const,text:'done',truncated:false,event:{kind:'tool_result' as const,ordinal:2,pairOrdinal:0,atMs:endAt}};
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:revision===1?[user,start]:[user,start,end]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    const operationRef=first.input.progressState!.operations[0]!.operationRef;
+    expect(f.goals.settle(first.ticket,{...answer(),nextMilestone:{definition:'end',completionCriterion:'operation_end',criterion:'command ends',operationRef,estimate:{remainingSeconds:100,errorPercent:50}}},2000)).toBe(true);
+    const turn=f.contexts.read(session)!.entries[0]!.turnKey;
+    f.goals.runtime(session,turn,'paused',10000);f.goals.runtime(session,turn,'running',100000);
+    revision=2;
+    const second=f.request(121000);
+    expect(second.input.progressState?.lastObservedMilestone?.actualRemainingActiveSeconds).toBe(expected);
+    expect(second.input.progressState?.lastObservedMilestone?.operationWallSeconds).toBe((endAt-500)/1000);
+    expect(second.input.activeSeconds).toBe(31);
+  });
   it('keeps milestone state across pause/resume, transfers it explicitly and resets on a new turn',()=>{
     const f=fixture(),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
     const nextMilestone={definition:'检查测试',completionCriterion:'semantic',criterion:'结果已分析',operationRef:null,estimate:{remainingSeconds:100,errorPercent:50}};

@@ -1,6 +1,7 @@
 import {appendFile,mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
+import {currentRequestCorrelation} from './request-correlation.js';
 import {identityPreparationCodes} from './identity-preparation-error.js';
 import type {RawTokens} from './observer-persistent-session.js';
 
@@ -78,7 +79,9 @@ export function createPersistentReceiptJournal(directory:string):PersistentRecei
    }).catch(()=>{failed=true;throw Error('PERSISTENT_RECEIPT_WRITE_FAILED');});
    tail=next.catch(()=>undefined);return next;
  };
- const base=(kind:string,value:RecordValue)=>record({kind,at:Date.now(),fullPipelineVerified:false,...value});
+ const base=(kind:string,value:RecordValue)=>record({kind,at:Date.now(),fullPipelineVerified:false,
+   ...(['preparation_failure','operation','usage_snapshot','usage_gap'].includes(kind)&&currentRequestCorrelation()
+     ?{correlationId:currentRequestCorrelation()}:{}),...value});
  return {
    preparationFailed:async value=>{
      await append(base('preparation_failure',{ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),

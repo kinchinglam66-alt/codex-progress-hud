@@ -24,7 +24,8 @@ function run(path: string, extraEnvironment: NodeJS.ProcessEnv = {}, input?: str
     encoding: "utf8",
     input,
     windowsHide: true,
-    shell: false
+    shell: false,
+    timeout: 10_000
   });
 }
 
@@ -140,9 +141,9 @@ describe.runIf(process.platform === "win32")("packaged MCP launcher", () => {
     const failed = run(data, { HUD_FAKE_EXIT: "7" }, "mcp-request\n");
     expect(failed.status).toBe(7);
     expect(failed.stdout.replaceAll("\\", "/").trimEnd()).toMatch(/resources\/app\.asar\/dist\/main\.js\|--mcp-stdio\|mcp-request$/u);
-  });
+  }, 30_000);
 
-  it("streams stdin before the MCP client closes its long-lived pipe", async () => {
+  it("streams BOM-free UTF-8 before the MCP client closes its long-lived pipe", async () => {
     const data = await appData();
     const installDirectory = join(data, "installed");
     const executablePath = join(installDirectory, "Codex Progress HUD.exe");
@@ -154,7 +155,10 @@ describe.runIf(process.platform === "win32")("packaged MCP launcher", () => {
       "using System;",
       "public static class Program {",
       "  public static int Main() {",
-      "    Console.WriteLine(Console.ReadLine());",
+      "    var input = Console.OpenStandardInput();",
+      "    var bytes = new System.Collections.Generic.List<byte>();",
+      "    for (int value; (value = input.ReadByte()) >= 0 && value != 10;) bytes.Add((byte)value);",
+      "    Console.WriteLine(BitConverter.ToString(bytes.ToArray()));",
       "    return 0;",
       "  }",
       "}"
@@ -176,9 +180,10 @@ describe.runIf(process.platform === "win32")("packaged MCP launcher", () => {
         resolveOutput(chunk);
       });
     });
-    child.stdin.write("live-request\n");
+    const frame = JSON.stringify({text: '估时🌙'});
+    child.stdin.write(frame + "\n");
 
-    await expect(output).resolves.toBe("live-request\r\n");
+    await expect(output).resolves.toBe(Buffer.from(frame + '\r', 'utf8').toString('hex').match(/../g)!.join('-').toUpperCase() + '\r\n');
     await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
   });
 });

@@ -1,4 +1,6 @@
 import {z} from 'zod';
+import {completionOutlookSchema,turnEvidenceSchema} from './completion-outlook.js';
+import {estimateConditionsSchema} from './estimate-conditions.js';
 import {nextMilestoneSchema,progressReviewSchema,progressStateSchema} from './progress-state.js';
 
 const seconds = z.number().finite().nonnegative().max(31_536_000);
@@ -55,6 +57,8 @@ const workSchema=z.object({composition:z.enum(['serial','unknown']),
   changeReason:z.enum(['routine','scope_change','failure','unknown']),
   parts:z.array(workPartSchema).min(1).max(8)}).strict();
 export const observerResponseSchema = z.object({
+  completionOutlook:completionOutlookSchema.nullable().optional(),
+  estimateConditions:estimateConditionsSchema.nullable().optional(),
   relation: z.enum(['continue', 'replace', 'unknown']),
   status: z.enum(['running', 'waiting', 'completed', 'unknown']),
   summary: z.string().trim().min(1).max(2048).nullable(),
@@ -83,6 +87,36 @@ const observationSchema = z.object({
   omittedCategories: z.array(z.enum(['user', 'assistant', 'tool', 'summary'])).max(4)
 }).strict();
 export const observerInputSchema = z.object({
+  turnEvidence:turnEvidenceSchema.optional(),
+  executionObservations:z.object({schemaVersion:z.literal(1),snapshotAtMs:ordinal,throughOrdinal:ordinal,
+    samples:z.array(z.object({startOrdinal:ordinal,endOrdinal:ordinal,startedAtMs:ordinal,endedAtMs:ordinal,
+      elapsedSeconds:seconds,clock:z.literal('wall'),overlapsOtherTool:z.boolean(),
+      operationKey:z.string().regex(/^[a-f0-9]{64}$/).optional()}).strict()
+      .refine(v=>v.startOrdinal<v.endOrdinal&&v.startedAtMs<=v.endedAtMs&&
+        Math.abs(v.elapsedSeconds-(v.endedAtMs-v.startedAtMs)/1000)<0.000001)).max(5),
+    comparableGroups:z.array(z.object({operationKey:z.string().regex(/^[a-f0-9]{64}$/),
+      sampleEndOrdinals:z.array(ordinal).min(1).max(5),count:z.number().int().min(1).max(5),
+      medianSeconds:seconds,minSeconds:seconds,maxSeconds:seconds,minimumSampleCountMet:z.boolean()}).strict()).max(5).optional(),
+    reportedSamples:z.array(z.object({endOrdinal:ordinal,reportedSeconds:seconds,
+      provenance:z.literal('native_reported_duration'),startTimeKnown:z.literal(false),
+      overlapKnown:z.literal(false),activeTimeKnown:z.literal(false)}).strict()).max(5).optional(),
+    extrapolationAllowed:z.literal(false)}).strict().refine(v=>{
+      const keys=new Set<string>();
+      return (v.comparableGroups??[]).every(g=>{
+        if(keys.has(g.operationKey))return false;keys.add(g.operationKey);
+        const matched=v.samples.filter(s=>s.operationKey===g.operationKey&&!s.overlapsOtherTool);
+        const values=matched.map(s=>s.elapsedSeconds).sort((a,b)=>a-b);
+        return matched.length===g.count&&g.sampleEndOrdinals.length===g.count&&
+          new Set(g.sampleEndOrdinals).size===g.count&&matched.every(s=>g.sampleEndOrdinals.includes(s.endOrdinal))&&
+          g.minSeconds===values[0]&&g.maxSeconds===values[values.length-1]&&
+          g.medianSeconds===(values[Math.floor((values.length-1)/2)]!+values[Math.floor(values.length/2)]!)/2&&
+          g.minimumSampleCountMet===(g.count>=3);
+      });
+    }).refine(v=>new Set([...v.samples,...(v.reportedSamples??[])].map(s=>s.endOrdinal)).size===v.samples.length+(v.reportedSamples?.length??0))
+    .refine(v=>new Set(v.samples.map(s=>s.startOrdinal)).size===v.samples.length)
+    .refine(v=>(v.reportedSamples??[]).every(s=>s.endOrdinal<=v.throughOrdinal&&!v.samples.some(p=>p.endOrdinal===s.endOrdinal)))
+    .refine(v=>v.samples.every(s=>
+      s.endOrdinal<=v.throughOrdinal&&s.endedAtMs<=v.snapshotAtMs)).optional(),
   imageContextPending:z.boolean().optional(),
   progressState:progressStateSchema.optional(),
   goalSummary: z.string().min(1).max(2048).nullable(),

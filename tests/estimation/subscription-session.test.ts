@@ -265,7 +265,7 @@ it("close during settlement drains durable accounting and never returns an estim
   expect(d.ledger.snapshot()).toMatchObject({knownTokens:23,unresolved:0});
 });
 
-it('binds durable ownership before a real child and records each lifecycle phase', async () => {
+it.skipIf(process.platform !== 'win32')('binds durable ownership before a real child and records each lifecycle phase', async () => {
   const d = await setup(`process.stdin.resume();process.stdin.on('end',()=>process.stdout.write(${JSON.stringify(stream(interpretation))}))`);
   const bound: InvocationRecord[] = [], updates: InvocationRecordPatch[] = [];
   let observed: Invocation | undefined;

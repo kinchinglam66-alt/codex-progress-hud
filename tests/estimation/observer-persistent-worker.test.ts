@@ -157,7 +157,7 @@ it('retains version evidence for a successful persistent forecast without leakin
   const prepared=await f.worker.prepareContext!(input,{snapshot:history([]),currentTurnId:'t'},signal,'source',0,0);
   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
   const evidence=f.worker.provenance!()!;
-  expect(evidence).toMatchObject({input:'observer-input-facts-v5',model:'gpt-5.6-luna-medium',algorithm:'milestone-events-v1'});
+  expect(evidence).toMatchObject({input:'observer-input-facts-v7',model:'gpt-5.6-luna-medium',algorithm:'milestone-events-v4'});
   expect(evidence.prompt).toMatch(/^[a-f0-9]{64}$/);
   evidence.model='changed';expect(f.worker.provenance!()!.model).toBe('gpt-5.6-luna-medium');
   await f.worker.release!();expect(f.worker.provenance!()!.prompt).toBe(evidence.prompt);
@@ -743,7 +743,7 @@ it.each(['missing retention state','wrong conversation binding'] as const)('fail
  }finally{await f.worker.close();await f.accounting.close();}
 });
 
-it.each(['thread/fork','thread/inject_items'])('captures unadmitted model work during %s and never enters ETA',async(method)=>{
+it.skipIf(process.platform !== 'win32').each(['thread/fork','thread/inject_items'])('captures unadmitted model work during %s and never enters ETA',async(method)=>{
  const f=await retainedNativeFixture(undefined,{transformScript:text=>text.replace("if(!m.id)continue;",`if(!m.id)continue;if(m.method===${JSON.stringify(method)})emit({method:'turn/started',params:{threadId:'unexpected',turn:{id:'unadmitted'}}});`)}),signal=new AbortController().signal;
  try{
   await expect(f.worker.prepareNativeTurnContext!(input,pairedSource(1),signal,'source',0,0)).rejects.toThrow();
@@ -766,6 +766,19 @@ it('fails closed when unexpected-model evidence cannot be persisted',async()=>{
   expect(receipts).toContain('"kind":"process_owner"');
   await expect(f.worker.close()).rejects.toThrow();
  }finally{await f.worker.close().catch(()=>undefined);await f.accounting.close();}
+});
+it.each([false,true])('preserves execution observations through native supplement preparation and dispatch (inline=%s)',async inline=>{
+ const f=await retainedNativeFixture(undefined,{inlineCurrentTurnSupplement:inline}),signal=new AbortController().signal;
+ const facts:NonNullable<ObserverInput['executionObservations']>={schemaVersion:1,snapshotAtMs:2000,
+  throughOrdinal:2,extrapolationAllowed:false,samples:[{startOrdinal:1,endOrdinal:2,startedAtMs:100,
+   endedAtMs:1100,elapsedSeconds:1,clock:'wall',overlapsOtherTool:false}]};
+ try{
+  const p=await f.worker.prepareNativeTurnContext!({...input,executionObservations:facts},pairedSource(3),signal,'source',0,0);
+  expect(p.input.executionObservations).toEqual(facts);
+  expect((await f.worker.observe(p.input,signal,'source',0)).status).toBe('interpreted');
+  const rows=(f.modelInputs[0] as any).input;
+  expect(JSON.parse(rows.at(-1).text).currentObservation.executionObservations).toEqual(facts);
+ }finally{await f.worker.close();await f.accounting.close();}
 });
 it('batches the whole short current-turn supplement into one child RPC',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
@@ -1600,7 +1613,7 @@ it('does not allow a worker to mix source conversations',async()=>{
    expect(other.interpretation).toBeNull();expect(f.accounting.snapshot().starts).toBe(1);
  }finally{await f.worker.close();await f.accounting.close();}
 });
-it.each([false,true])('records an unconfirmed timed-out operation and leaves its admission unresolved (cancelled=%s)',async cancelled=>{
+it.each([false,true])('settles timed-out usage as unknown after confirmed cleanup and releases same-conversation admission (cancelled=%s)',async cancelled=>{
  const f=await fixture(false,{script:timeoutScript,sessionTimeoutMs:cancelled?500:10});
  const controller=new AbortController();
  try{
@@ -1615,10 +1628,47 @@ it.each([false,true])('records an unconfirmed timed-out operation and leaves its
    }
    const r=await observing;
    expect(r.status).toBe('process_error');expect(f.settlementAttempts()).toBe(0);
-   expect(f.accounting.snapshot()).toMatchObject({inFlight:1,unresolved:1,unknown:0});
+   expect(f.accounting.snapshot()).toMatchObject({inFlight:0,unresolved:0,unknown:1,knownTokens:0});
+   expect(await f.accounting.recoveryAdmission!(Date.now()+31000,true,'source')).toMatchObject({allowed:true});
    expect(f.lastProcess()?.status().closed).toBe(true);
    const lines=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line) as Record<string,unknown>);
    expect(lines.some(line=>line.kind==='operation'&&line.terminalState==='unconfirmed'&&line.turnId==='r1')).toBe(true);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('keeps timed-out usage unresolved when cleanup confirmation fails',async()=>{
+ let fail=true;
+ const f=await fixture(false,{script:timeoutScript,sessionTimeoutMs:10,afterProcessClose:()=>{if(fail)throw Error('synthetic cleanup failure');}});
+ try{
+  expect((await f.worker.observe(input,new AbortController().signal,'source',0)).status).toBe('accounting_error');
+  expect(f.accounting.snapshot()).toMatchObject({inFlight:1,unresolved:1,unknown:0,knownTokens:0});
+  expect(f.worker.status().poisoned).toBe(true);
+ }finally{fail=false;await f.worker.close();await f.accounting.close();}
+});
+it('does not retry or erase a failed settlement after timed-out process cleanup',async()=>{
+ const f=await fixture(true,{script:timeoutScript,sessionTimeoutMs:10});
+ try{
+  expect((await f.worker.observe(input,new AbortController().signal,'source',0)).status).toBe('accounting_error');
+  expect(f.settlementAttempts()).toBe(1);
+  expect(f.accounting.snapshot()).toMatchObject({inFlight:1,unresolved:1,unknown:0,knownTokens:0});
+  expect(f.worker.status().poisoned).toBe(true);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('retains usage evidence on protocol failure while settling only unknown usage after cleanup',async()=>{
+ const f=await fixture(false,{script:script.replace("status:'completed'","status:null")});
+ const settlements:unknown[]=[];
+ const original=f.accounting.forConversation.bind(f.accounting);
+ f.accounting.forConversation=key=>{const view=original(key);return {...view,settle:async(id,usage,classification)=>{
+  settlements.push({usage,classification});await view.settle(id,usage,classification);
+ }};};
+ try{
+  const r=await f.worker.observe(input,new AbortController().signal,'source',0);
+  expect(r.status).toBe('process_error');expect(r.usage).toBeNull();
+  expect(settlements).toEqual([{usage:null,classification:'safe_unknown'}]);
+  expect(f.accounting.snapshot()).toMatchObject({starts:1,inFlight:0,unresolved:0,unknown:1,knownTokens:0});
+  const lines=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(lines.some(line=>line.kind==='usage_snapshot')).toBe(true);
+  expect(lines.some(line=>line.kind==='operation'&&line.usageCompleteness==='protocol_failed')).toBe(true);
+  expect(await f.accounting.recoveryAdmission!(Date.now()+31000,true,'source')).toMatchObject({allowed:true});
  }finally{await f.worker.close();await f.accounting.close();}
 });
 it('poisons on asynchronous usage receipt failure without settling its admission',async()=>{

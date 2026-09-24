@@ -1,3 +1,4 @@
+import {resolve as fixturePath} from 'node:path';
 import {describe,it,expect,vi} from 'vitest';
 // @ts-expect-error Diagnostic entry point deliberately remains a standalone JS script.
 import {buildCompletedTurnPreflightSource,createNoModelForkGuard,createNoModelPreparationGuard} from '../../scripts/diagnostics/completed-turn-native-base.mjs';
@@ -7,7 +8,7 @@ import {createCompletedTurnComparisonFixtures} from '../../src/evaluation/native
 
 describe('completed-turn native preflight contract',()=>{
  it('puts an explicit image in the active request without changing completed history',()=>{
-  const original=createCompletedTurnComparisonFixtures({sourceThreadId:'99999999-9999-4999-8999-999999999999',cwd:'C:/empty',targetBytes:1048576})[0]!;
+  const original=createCompletedTurnComparisonFixtures({sourceThreadId:'99999999-9999-4999-8999-999999999999',cwd:fixturePath('empty'),targetBytes:1048576})[0]!;
   expect(preflight).toHaveProperty('withCurrentTurnImage');
   const modified=preflight.withCurrentTurnImage(original.rollout);
   const before=original.rollout.trimEnd().split('\n'),after=modified.trimEnd().split('\n');
@@ -18,7 +19,7 @@ describe('completed-turn native preflight contract',()=>{
   expect(content[0]).toEqual(JSON.parse(before[index]!).payload.content[0]);
   expect(content[1].type).toBe('input_image');expect(content[1].image_url).toMatch(/^data:image\/png;base64,/);
   expect(()=>preflight.withCurrentTurnImage(modified)).toThrow();
-  expect(()=>preflight.withCurrentTurnImage(buildCompletedTurnPreflightSource('C:/empty').rollout)).toThrow();
+  expect(()=>preflight.withCurrentTurnImage(buildCompletedTurnPreflightSource(fixturePath('empty')).rollout)).toThrow();
  });
  it('allows current-context injection only into owned forks and never allows model RPC',async()=>{
   const call=vi.fn().mockResolvedValueOnce({thread:{id:'base'}}).mockResolvedValueOnce({thread:{id:'child'}}).mockResolvedValue({});
@@ -32,7 +33,7 @@ describe('completed-turn native preflight contract',()=>{
   expect(call.mock.calls.map(c=>c[0])).toEqual(['thread/fork','thread/fork','thread/inject_items']);
  });
  it('builds six terminal turns and a whole active seventh without private input',()=>{
-  const source=buildCompletedTurnPreflightSource('C:/synthetic-empty');
+  const source=buildCompletedTurnPreflightSource(fixturePath('synthetic-empty'));
   const lines=source.rollout.trimEnd().split('\n').map(JSON.parse);
   expect(lines.filter((x:any)=>x.payload.type==='task_complete')).toHaveLength(6);
   expect(lines.filter((x:any)=>x.payload.type==='task_started')).toHaveLength(7);
@@ -51,20 +52,20 @@ describe('completed-turn native preflight contract',()=>{
   expect(call).not.toHaveBeenCalled();
  });
  it.each(['task_failed','turn_aborted'])('preserves the explicit previous terminal %s without calling it completed',(terminal)=>{
-  const source=buildCompletedTurnPreflightSource('C:/synthetic-empty',{previousTerminal:terminal});
+  const source=buildCompletedTurnPreflightSource(fixturePath('synthetic-empty'),{previousTerminal:terminal});
   const lines=source.rollout.trimEnd().split('\n').map(JSON.parse);
   expect(lines.filter((x:any)=>x.payload.type===terminal)).toHaveLength(1);
   expect(lines.filter((x:any)=>x.payload.type==='task_complete')).toHaveLength(5);
  });
  it('keeps an earlier failed fifth turn before a completed sixth cutoff',()=>{
-  const source=buildCompletedTurnPreflightSource('C:/synthetic-empty',{earlierFailure:true});
+  const source=buildCompletedTurnPreflightSource(fixturePath('synthetic-empty'),{earlierFailure:true});
   const lines=source.rollout.trimEnd().split('\n').map(JSON.parse);
   const failed=lines.filter((x:any)=>x.payload.type==='task_failed');
   expect(failed).toHaveLength(1);expect(failed[0].payload.turn_id).toBe('aaaaaaaa-aaaa-4aaa-8aaa-000000000005');
   expect(lines.filter((x:any)=>x.payload.type==='task_complete').at(-1).payload.turn_id).toBe(source.lastTurnId);
  });
  it('uses a genuinely empty historical prefix in the first-turn case',()=>{
-  const source=buildCompletedTurnPreflightSource('C:/synthetic-empty',{firstTurn:true});
+  const source=buildCompletedTurnPreflightSource(fixturePath('synthetic-empty'),{firstTurn:true});
   const lines=source.rollout.trimEnd().split('\n').map(JSON.parse);
   expect(lines.filter((x:any)=>x.payload.type==='task_started')).toHaveLength(1);
   expect(lines.filter((x:any)=>x.payload.type==='task_complete')).toHaveLength(0);

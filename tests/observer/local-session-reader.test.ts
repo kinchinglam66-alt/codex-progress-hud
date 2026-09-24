@@ -8,6 +8,7 @@ import {assembleContext} from "../../src/observer/context-assembler.js";
 import {createLocalSessionReader} from "../../src/observer/local-session-reader.js";
 import {createPrefixFingerprint} from '../../src/estimation/residual/fingerprint.js';
 import {captureHistoryFeatures} from '../../src/estimation/residual/capture.js';
+import {executionObservations} from '../../src/observer/execution-observations.js';
 
 const THREAD_A = "11111111-1111-4111-8111-111111111111";
 const THREAD_B = "22222222-2222-4222-8222-222222222222";
@@ -15,6 +16,31 @@ const THREAD_V7 = "01a0766f-e48a-70e0-b8a8-4abb83140175";
 const PARENT_THREAD = "33333333-3333-7333-8333-333333333333";
 const CHILD_THREAD = "44444444-4444-7444-8444-444444444444";
 const cleanups: Array<() => Promise<void>> = [];
+it.each([{secs:2,nanos:500000000},{secs:-1,nanos:0},{secs:1,nanos:1000000000}])('retains only valid reported duration without inventing a start: %j',async duration=>{
+ const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('turn')+line('event_msg',{
+  type:'item_completed',turn_id:'turn',item:{type:'CommandExecution',id:'reported',command:['echo','data'],cwd:'/app',duration,aggregated_output:'done'}},1_700_000_004_000));
+ const reader=createLocalSessionReader({root:f.root});
+ try{
+  const batch=await reader.read(THREAD_A,signal());
+  const observation=executionObservations(batch.records,'turn',1_700_000_005_000)!;
+  expect(observation.samples).toEqual([]);
+  if(duration.secs===2)expect(observation.reportedSamples).toEqual([expect.objectContaining({reportedSeconds:2.5,startTimeKnown:false,activeTimeKnown:false})]);
+  else expect(observation.reportedSamples).toEqual([]);
+ }finally{await reader.close();}
+});
+
+it('preserves native argv boundaries and feeds paired operation timing without execution',async()=>{
+ const argv=['pwsh.exe','-Command','echo "a b"'];
+ const start=line('event_msg',{type:'item_started',turn_id:'turn',item:{type:'CommandExecution',id:'argv',command:argv,cwd:'/app'}},1_700_000_003_000);
+ const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('turn')+start+commandCompleted('argv','turn'));
+ const reader=createLocalSessionReader({root:f.root});
+ try{
+  const batch=await reader.read(THREAD_A,signal());
+  expect(batch.records.find(r=>r.kind==='tool_start')).toMatchObject({commandArgv:argv,text:JSON.stringify(argv)});
+  const observations=executionObservations(batch.records,'turn',1_700_000_005_000)!;
+  expect(observations.comparableGroups[0]).toMatchObject({count:1,medianSeconds:1,minimumSampleCountMet:false});
+ }finally{await reader.close();}
+});
 
 it('preserves estimator attribution differences but canonicalizes research fingerprints',async()=>{
   const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('turn')+user('work','u','turn')+

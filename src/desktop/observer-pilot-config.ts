@@ -2,6 +2,7 @@ import {isAbsolute,resolve} from 'node:path';
 import {lstat,open} from 'node:fs/promises';
 import {z} from 'zod';
 import {codexRuntimeProfiles} from '../estimation/codex-runtime-profiles.js';
+import {subscriptionModels} from '../estimation/subscription-model.js';
 
 const pathSchema=z.string().min(1).max(4096).refine(value=>isAbsolute(value) && !/[\p{Cc}\p{Cf}]/u.test(value) &&
   (process.platform!=='win32' || /^[a-z]:[\\/]/i.test(value)));
@@ -9,6 +10,7 @@ const schema=z.object({executable:pathSchema,parentDirectory:pathSchema,cwd:path
   version:z.string().refine(value=>codexRuntimeProfiles.some(profile=>profile.version===value)),
   executableSha256:z.string().regex(/^[a-f0-9]{64}$/).optional(),
   persistentObserver:z.boolean().optional(),
+  subscriptionModel:z.enum(subscriptionModels).optional(),
   subscriptionAccountSource:z.enum(['main','independent']).optional(),
   proxyUrl:z.string().max(256).refine(value=>{
     try {const url=new URL(value);return url.protocol==='http:' && ['127.0.0.1','[::1]'].includes(url.hostname) &&

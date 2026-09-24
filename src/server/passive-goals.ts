@@ -1,4 +1,6 @@
 import type {HookEnvelope} from '../hooks/schema.js';
+import {estimateUncertain} from '../estimation/completion-outlook.js';
+import {assessEstimateCondition,type EstimateConditionAssessment} from '../estimation/estimate-conditions.js';
 import type {PassiveContextStore} from './passive-context-store.js';
 import {observerResponseSchema, type ObserverInput} from '../estimation/observer-contract.js';
 import type {CountdownPrediction} from '../ui/countdown.js';
@@ -18,7 +20,9 @@ type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
 export interface SourceTurnTakeover {turnKey:string;startedAtMs:number;identity:string;taskHandle?:string;previousTurnKey?:string}
 export interface PassiveGoalView {
-  progressState?:{scope:string;observedEventSequence:number;milestone:Pick<NonNullable<ProgressState['milestone']>,'id'|'definition'|'prediction'|'judgment'>|null};
+  estimateUncertain?:boolean;
+  estimateCondition?:EstimateConditionAssessment|undefined;
+  progressState?:{scope:string;observedEventSequence:number;reviewApplication?:ProgressState['reviewApplication'];milestone:Pick<NonNullable<ProgressState['milestone']>,'id'|'definition'|'prediction'|'judgment'>|null};
   progressFloor?: number;
   recoveryState?: 'pending'|'restored';
   recoveryGapSeconds?: number|null;
@@ -33,6 +37,8 @@ export interface PassiveGoalView {
   changeReason?:'routine'|'scope_change'|'failure'|'unknown';
 }
 interface Goal {
+  estimateUncertain?:boolean;
+  estimateCondition?:EstimateConditionAssessment|undefined;
   progressState?:ProgressState;
   progressScanRevision?:number;
   progressFloor?: number;
@@ -322,6 +328,15 @@ export class PassiveGoals {
   private active(goal: Goal, now: number): number {
     return goal.elapsed + (goal.runtime === 'running' ? (now - goal.since) / 1000 : 0);
   }
+  private observeMilestone(goal:Goal,progress:ProgressState,messages:ObserverInput['messages'],nowMs:number):void {
+    observeProgress(progress,messages,atMs=>{
+      // Only the presently observed runtime segment is invertible. Prior
+      // transitions, restart gaps and clock uncertainty never get interpolated.
+      if(goal.runtime!=='running'||goal.timingUncertain||goal.runtimeUncertain||goal.recoveryPending||goal.recovered||
+        !Number.isFinite(atMs)||atMs<goal.since||atMs>nowMs)return null;
+      return this.active(goal,atMs);
+    });
+  }
   private invalidate(goal: Goal): void {
     goal.epoch++;
     delete goal.pending;
@@ -508,7 +523,7 @@ export class PassiveGoals {
       current.userFingerprint!==captured.userFingerprint)return input;
     const activeSeconds=current.input.activeSeconds;
     if(!Number.isFinite(activeSeconds)||activeSeconds<captured.activeSeconds||activeSeconds>31_536_000)return input;
-    const progress=this.progressFor(captured.sessionKey,captured.goal);observeProgress(progress,current.input.messages);
+    const progress=this.progressFor(captured.sessionKey,captured.goal);this.observeMilestone(captured.goal,progress,current.input.messages,nowMs);
     this.progressTickets.set(ticket,{scope:progress.scope,sequence:progress.observedEventSequence});
     captured.sourceRevision=revision;
     captured.activeSeconds=activeSeconds;
@@ -595,7 +610,7 @@ export class PassiveGoals {
     const baseInput=selected?.input ?? {goalSummary: goal.summary, activeSeconds,
       runtime: goal.runtime, messages, truncated: context?.truncated ?? false};
     const progressState=this.progressFor(sessionKey,goal);
-    observeProgress(progressState,baseInput.messages);
+    this.observeMilestone(goal,progressState,baseInput.messages,nowMs);
     const frozen=freezePaceRequest({...baseInput,progressState:structuredClone(progressState)},this.paceMeasurements.snapshot(goal.measurementScope));
     const ticket = Object.freeze({});
     this.progressTickets.set(ticket,{scope:progressState.scope,sequence:progressState.observedEventSequence});
@@ -616,7 +631,7 @@ export class PassiveGoals {
       const selected=this.sourceContext(sessionKey,goal,nowMs,true);
       if(selected&&goal.progressState?.milestone?.completionCriterion==='operation_end'&&goal.progressScanRevision!==selected.revision){
         const detailed=this.sourceContext(sessionKey,goal,nowMs);
-        if(detailed)observeProgress(this.progressFor(sessionKey,goal),detailed.input.messages);
+        if(detailed)this.observeMilestone(goal,this.progressFor(sessionKey,goal),detailed.input.messages,nowMs);
         goal.progressScanRevision=selected.revision;
       }
       view=this.view(sessionKey,nowMs)!;
@@ -676,7 +691,7 @@ export class PassiveGoals {
     }
     const parsed = observerResponseSchema.safeParse(response);
     const progressTicket=this.progressTickets.get(ticket);
-    if(goal.progressState?.milestone&&this.source){const current=this.sourceContext(captured.sessionKey,goal,nowMs);if(current)observeProgress(goal.progressState,current.input.messages);}
+    if(goal.progressState?.milestone&&this.source){const current=this.sourceContext(captured.sessionKey,goal,nowMs);if(current)this.observeMilestone(goal,goal.progressState,current.input.messages,nowMs);}
     if(progressTicket&&goal.progressState&&(progressTicket.scope!==goal.progressState.scope||
       progressTicket.sequence!==goal.progressState.observedEventSequence))return this.reject(ticket,'critical_event_after_snapshot');
     if (!parsed.success) return this.reject(ticket,'schema_invalid');
@@ -696,6 +711,8 @@ export class PassiveGoals {
       if(result.estimate===null)return this.reject(ticket,'aged_response_no_estimate');
       if(goal.runtime!=='running')return this.reject(ticket,'aged_response_not_running');
       goal.prediction={...result.estimate,observedActiveSeconds:captured.activeSeconds};
+      goal.estimateUncertain=estimateUncertain(result);
+      goal.estimateCondition=assessEstimateCondition(result);
       delete goal.changeReason;
       goal.predictionIdentity={};
       goal.estimateRevision++;goal.lastObservedAt=nowMs;
@@ -754,6 +771,8 @@ export class PassiveGoals {
       (!bootstrap||goal.recovered) && result.status !== 'completed';
     if (!retainPrediction) {
       goal.prediction = result.estimate === null ? null : {...result.estimate, observedActiveSeconds: anchor};
+      goal.estimateUncertain=result.estimate!==null&&estimateUncertain(result);
+      goal.estimateCondition=assessEstimateCondition(result);
       goal.changeReason=result.estimate===null?undefined:result.work?.changeReason;
       goal.predictionIdentity = result.estimate === null ? null : {};
     }
@@ -806,6 +825,7 @@ export class PassiveGoals {
     this.progress(goal,nowMs);
     return {generation: goal.generation, estimateRevision: goal.estimateRevision, status: goal.status, runtime: goal.runtime,
       ...(goal.progressState?{progressState:{scope:goal.progressState.scope,observedEventSequence:goal.progressState.observedEventSequence,
+        ...(goal.progressState.reviewApplication?{reviewApplication:{...goal.progressState.reviewApplication}}:{}),
         milestone:goal.progressState.milestone?{id:goal.progressState.milestone.id,definition:goal.progressState.milestone.definition,
           prediction:goal.progressState.milestone.prediction?{...goal.progressState.milestone.prediction}:null,judgment:goal.progressState.milestone.judgment}:null}}:{}),
       ...(goal.progressFloor===undefined?{}:{progressFloor:goal.progressFloor}),
@@ -813,6 +833,9 @@ export class PassiveGoals {
       ...(goal.recoveryGapSeconds===undefined?{}:{recoveryGapSeconds:goal.recoveryGapSeconds}),
       ...(goal.timingUncertain?{timingUncertain:true}:{}),...(goal.runtimeUncertain?{runtimeUncertain:true}:{}),
       activeSeconds: this.active(goal, nowMs), prediction: goal.prediction && {...goal.prediction},
+      ...(goal.prediction&&goal.estimateUncertain?{estimateUncertain:true}:{}),
+      ...(goal.prediction?{estimateCondition:goal.estimateCondition?{...goal.estimateCondition}:
+        {selectedPath:'unknown' as const,displayPath:'unknown' as const,issue:'missing_conditions' as const}}:{}),
       ...(goal.prediction&&goal.changeReason?{changeReason:goal.changeReason}:{})};
   }
   end(sessionKey: string): void {

@@ -7,6 +7,60 @@ const start={kind:'tool',text:'test run',event:{ordinal:7,kind:'tool_start',atMs
 const end={kind:'tool',text:'tests failed',event:{ordinal:9,kind:'tool_result',atMs:3000,pairOrdinal:0}};
 const semantic={definition:'完成针对性测试',completionCriterion:'semantic' as const,criterion:'测试结果已分析',operationRef:null,estimate:{remainingSeconds:100,errorPercent:50}};
 const total={remainingSeconds:300,errorPercent:50};
+it.each(['te_'+'a'.repeat(32),'ev_'+'b'.repeat(32)])('diagnoses wrong evidence %s without discarding numeric ETA',evidence=>{
+ const s=state();applyProgress(s,semantic,null,total,10);
+ expect(applyProgress(s,undefined,{milestoneId:s.milestone!.id,assessment:'inferred_complete',evidenceRefs:[evidence],changedAssumptions:[]},total,20)).toBe('progress_review_evidence_not_in_scope');
+ expect(s.reviewApplication).toEqual({revision:2,outcome:'evidence_not_in_scope'});
+ expect(s.review).toBeNull();expect(s.milestone!.judgment).toBe('in_progress');
+ expect(s.previousTurnEstimate).toEqual({...total,observedActiveSeconds:20});
+ expect(progressStateSchema.parse(s).reviewApplication).toEqual(s.reviewApplication);
+});
+it('accepts exact current operation evidence and resets diagnostic for absent reviews',()=>{
+ const s=state();observeProgress(s,[start]);applyProgress(s,semantic,null,total,10);
+ const review={milestoneId:s.milestone!.id,assessment:'inferred_complete' as const,evidenceRefs:[s.operations[0]!.evidenceRef],changedAssumptions:[]};
+ expect(applyProgress(s,undefined,review,total,20)).toBeNull();
+ expect(s.reviewApplication?.outcome).toBe('applied');expect(s.review).toEqual(review);
+ applyProgress(s,undefined,null,total,30);expect(s.reviewApplication?.outcome).toBe('not_provided');
+ applyProgress(s,undefined,undefined,total,40);expect(s.reviewApplication?.outcome).toBe('not_provided');
+});
+it('does not let an accepted model review undo observed completion',()=>{
+ const s=state();observeProgress(s,[start]);
+ applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
+ observeProgress(s,[start,end]);
+ applyProgress(s,undefined,{milestoneId:s.milestone!.id,assessment:'unknown',evidenceRefs:[s.operations[0]!.evidenceRef],changedAssumptions:[]},total,20);
+ expect(s.reviewApplication?.outcome).toBe('applied');
+ expect(s.milestone?.judgment).toBe('observed_complete');
+});
+it.each(['other-task','other-turn'])('rejects cross-scope operation evidence (%s)',key=>{
+ const s=state(),other=createProgressState(progressScope(key,key,1,0));
+ observeProgress(s,[start]);observeProgress(other,[start]);applyProgress(s,semantic,null,total,10);
+ applyProgress(s,undefined,{milestoneId:s.milestone!.id,assessment:'inferred_complete',evidenceRefs:[other.operations[0]!.evidenceRef],changedAssumptions:[]},total,20);
+ expect(s.reviewApplication?.outcome).toBe('evidence_not_in_scope');expect(s.review).toBeNull();
+});
+it('rejects stale milestone even with valid evidence; still accepts independent next milestone',()=>{
+ const s=state();observeProgress(s,[start]);applyProgress(s,semantic,null,total,10);const old=s.milestone!.id;
+ applyProgress(s,{...semantic,definition:'new stage'},null,total,20);
+ expect(applyProgress(s,semantic,{milestoneId:old,assessment:'inferred_complete',evidenceRefs:[s.operations[0]!.evidenceRef],changedAssumptions:[]},total,30)).toBe('progress_review_milestone_mismatch');
+ expect(s.reviewApplication?.outcome).toBe('milestone_mismatch');expect(s.milestone!.definition).toBe(semantic.definition);
+});
+it.each([null,9,Number.NaN,25])('compares milestone prediction only with a valid active-clock mapping: %s',mapped=>{
+ const s=state();observeProgress(s,[start]);
+ applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
+ observeProgress(s,[start,end],()=>mapped);
+ expect(s.lastObservedMilestone?.actualRemainingActiveSeconds).toBe(mapped===25?15:null);
+ expect(s.lastObservedMilestone?.limitation).toBe(mapped===25?'current_runtime_segment':'active_clock_mapping_unavailable');
+});
+it('retains observed operation duration and previous prediction without fabricating active remaining time',()=>{
+ const s=state();observeProgress(s,[start]);
+ applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
+ observeProgress(s,[start,end]);
+ expect(s.lastObservedMilestone).toMatchObject({operationWallSeconds:2,actualRemainingActiveSeconds:null,
+  prediction:{remainingSeconds:100,observedActiveSeconds:10},limitation:'active_clock_mapping_unavailable'});
+ const previous=structuredClone(s.lastObservedMilestone);
+ applyProgress(s,semantic,null,total,20);
+ expect(s.lastObservedMilestone).toEqual(previous);
+ expect(progressStateSchema.safeParse(s).success).toBe(true);
+});
 it('keeps explicit cross-call state and a common snapshot anchor',()=>{
  const s=state();expect(applyProgress(s,semantic,null,total,10)).toBeNull();
  expect(s.milestone?.prediction?.observedActiveSeconds).toBe(10);expect(s.previousTurnEstimate?.observedActiveSeconds).toBe(10);
@@ -29,6 +83,7 @@ it('does not promote model inference to local evidence or dispatch events',()=>{
  const s=state();applyProgress(s,semantic,null,total,10);
  applyProgress(s,undefined,{milestoneId:s.milestone!.id,assessment:'inferred_complete',evidenceRefs:[],changedAssumptions:[]},total,20);
  expect(s.milestone?.judgment).toBe('inferred_complete');expect(s.observedEventSequence).toBe(0);
+ expect(s.lastObservedMilestone).toBeUndefined();
 });
 it.each(['a2','b'])('isolates operation identities by conversation %s',key=>{
  const a=state(),b=createProgressState(progressScope(key,'turn',1,0));observeProgress(a,[start]);observeProgress(b,[start]);
@@ -65,7 +120,7 @@ it('changes milestone identity on definition change and hides explicit null',()=
 const context:RequestContext={elapsedSeconds:300,lastRequestSeconds:0,remainingSeconds:4000,milestoneRemainingSeconds:null,
  unknownResults:0,eventAtSeconds:null,contentReady:true,hasNewInformation:false,activeSeconds:300,lastRequestActiveSeconds:0,
  state:'running',statusEvidenceArrived:false,goalInFlight:false,globalInFlight:99,conversationStartsLastHour:99};
-it.each([[600,60],[601,120],[1800,120],[1801,300],[null,300]])('uses shorter milestone %s for active interval %s',(remaining,interval)=>{
+it.each([[600,180],[601,180],[1800,180],[1801,180],[null,180]])('keeps fallback interval %s independent of milestone countdown (%s seconds)',(remaining,interval)=>{
  expect(decideTrigger({...context,milestoneRemainingSeconds:remaining,activeSeconds:interval-1}).blockReason).toBe('adaptive_interval');
  expect(decideTrigger({...context,milestoneRemainingSeconds:remaining,activeSeconds:interval}).reason).toBe('periodic');
 });

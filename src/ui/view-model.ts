@@ -150,10 +150,15 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
         : observer?.state === 'rate_limited' ? '重估受限，等待额度' : '等待重新估时';
     return `已超出预计时间 · ${action}`;
   };
+  const condition=goal.estimateCondition;
+  const conditionLabel=condition?.displayPath==='report_blocker'?' · 条件估时：若报告阻塞结束'
+    :condition?.displayPath==='continue_work'?' · 条件估时：若继续实施至本轮结束'
+    :condition&&['missing_conditions','unknown_path'].includes(condition.issue)?' · 粗略估时／适用条件未明'
+    :condition?' · 粗略估时／条件不一致':'';
   const etaLabel = terminal ? '工作计时已停止'
     : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabel(observer):'剩余时间未知'
-    : countdown.status === 'overdue' ? overdueLabel()
-    : `${display.timeText} · 上次估时误差 ${countdown.uncertaintyText}`;
+    : countdown.status === 'overdue' ? overdueLabel()+conditionLabel
+    : `${display.timeText} · 上次估时误差 ${countdown.uncertaintyText}${conditionLabel}${goal.estimateUncertain?' · 粗略估时／结束方式未明':''}`;
   return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',
     progressMode: running ? 'indeterminate' : 'paused', progressPercent: null, etaLabel};
 }

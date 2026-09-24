@@ -20,6 +20,15 @@ it('rejects owner loss without replacing saved state',async()=>{
  const blocked=createMilestoneCheckpointRepository({...f.options,isOwner:async()=>false});await expect(blocked.save([])).rejects.toThrow();
  expect(await f.repository.load()).toHaveLength(1);
 });
+it('persists bounded review diagnostics without requiring them in legacy records',async()=>{
+ const f=await fixture();
+ f.record.progressState.reviewApplication={revision:2,outcome:'evidence_not_in_scope'};
+ await f.repository.save([f.record]);
+ expect((await f.repository.load())[0]?.progressState.reviewApplication).toEqual({revision:2,outcome:'evidence_not_in_scope'});
+ delete f.record.progressState.reviewApplication;
+ await f.repository.save([f.record]);
+ expect((await f.repository.load())[0]?.progressState.reviewApplication).toBeUndefined();
+});
 it('does not restore a different source',async()=>{const f=await fixture();await f.repository.save([f.record]);
  expect(await createMilestoneCheckpointRepository({...f.options,sourceIdentity:'other'}).load()).toEqual([]);
 });

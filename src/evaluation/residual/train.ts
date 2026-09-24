@@ -1,6 +1,6 @@
 import {identityKey,sampleSchema,type Sample} from '../../estimation/residual/contract.js';
 import {vectorize} from '../../estimation/residual/features.js';
-import {createArtifact,featureMissing,missingMask,normalizeVector,type ResidualArtifact} from '../../estimation/residual/predict.js';
+import {createArtifact,featureMissing,missingMask,normalizeVector,predictResidual,type ResidualArtifact} from '../../estimation/residual/predict.js';
 
 /** Equal total weight per turn, independent of snapshot frequency. */
 export function turnWeights(samples:readonly Sample[]):number[]{
@@ -50,14 +50,20 @@ export function trainResidual(rawTrain:readonly Sample[],rawValidation:readonly 
     const [intercept,...coefficients]=solve(matrix,target);
     const model=createArtifact({schemaVersion:1,featureVersion:'residual-prefix-v1',versions,trainingTurns,trainingGroups,validationGroups,
       means,scales,minimum,maximum,missingMasks:[...new Set(vectors.map(missingMask))].sort(),coefficients,intercept:intercept!,lambda,logScale});
-    const validationWeights=turnWeights(validation);let loss=0;
-    for(let i=0;i<validation.length;i++){
-      const s=validation[i]!,v=normalizeVector(vectorize(s.features),model);
-      const logPrediction=Math.max(0,Math.log1p(s.features.rawSeconds)+model.intercept+v.reduce((n,x,j)=>n+x*coefficients[j]!,0));
-      loss+=validationWeights[i]!*Math.abs(logPrediction-Math.log1p(s.actualSeconds));
+    // Select hyperparameters on the same support that runtime inference accepts.
+    // Unsupported validation rows remain coverage evidence, but cannot be
+    // silently scored as predictions that production would never emit.
+    const eligible=validation.map(sample=>({sample,shadow:predictResidual(model,sample.features,sample.versions)}))
+      .filter((row):row is {sample:Sample;shadow:{seconds:number;reason:'predicted';artifactId:string}}=>row.shadow.reason==='predicted');
+    if(!eligible.length)continue;
+    const validationWeights=turnWeights(eligible.map(row=>row.sample));let loss=0;
+    for(let i=0;i<eligible.length;i++){
+      const row=eligible[i]!;
+      loss+=validationWeights[i]!*Math.abs(Math.log1p(row.shadow.seconds)-Math.log1p(row.sample.actualSeconds));
     }
     if(!Number.isFinite(loss))throw Error('RESIDUAL_NON_FINITE_VALIDATION');
     if(loss<=bestLoss+1e-12){bestLoss=loss;best=model;}
   }
-  return best!;
+  if(!best)throw Error('RESIDUAL_VALIDATION_UNSUPPORTED');
+  return best;
 }

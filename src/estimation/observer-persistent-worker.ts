@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {withRequestCorrelation} from './request-correlation.js';
 import {observerInputSchema,isInferenceEligible} from './observer-contract.js';
 import type {ObserverInput} from './observer-contract.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
@@ -11,6 +12,7 @@ import type {ReleaseAccountingOwner} from './release-accounting.js';
 import type {SubscriptionAccounting} from './subscription-accounting.js';
 import type {Invocation} from './owned-process.js';
 import {createObserverSessionProcess} from './observer-session-process.js';
+import {resolveSubscriptionModel} from './subscription-model.js';
 import {createMainAccountLease,type MainAccountSource} from './main-account-lease.js';
 import {authenticateMainAccountSession} from './main-account-session-auth.js';
 import {createPersistentObserverSession, type PersistentCompactionResult, type PersistentSessionError, type PersistentContextCapacityPolicy,type PersistentSourcePart,type PersistentSourceRecord} from './observer-persistent-session.js';
@@ -38,6 +40,7 @@ export interface NativeWorkerResources {
 export interface NativeWorkerClaim {tag:string;recordFork(threadId:string):Promise<void>;afterProcessClosed():Promise<void>}
 
 export interface PersistentWorkerOptions {
+ model?:import('./subscription-model.js').SubscriptionModel;
  /** Host-selected account, fixed for this worker and its accounting owner. */
  mainAccount?:{source:MainAccountSource;accountFingerprint:string};
  /** Trusted host assets, not user/source-provided instructions. */
@@ -76,6 +79,7 @@ const empty=(status:ObserverResult['status']):ObserverResult=>({status,interpret
  * Invocation records remain in settling/pending while their process lives:
  * an operation terminal must never masquerade as a closed process. */
 export function createPersistentObserverWorker(options:PersistentWorkerOptions):ObserverWorker {
+ const selectedModel=resolveSubscriptionModel(options.model);
  if(options.reuseNativeTurnSession&&(!options.completedTurnContext||!options.nativeContext))throw Error('NATIVE_TURN_REUSE_OPTIONS_INVALID');
  const timing=createNativeTurnTiming(()=>performance.now(),options.onNativeTurnTiming);
  const phaseListeners=new Set<Parameters<NonNullable<ObserverWorker['subscribeContextPhase']>>[0]>();
@@ -320,7 +324,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     check(signal);
    }
    if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();
-    const newSession=()=>createPersistentObserverSession(processRpc!,{cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now,
+    const newSession=()=>createPersistentObserverSession(processRpc!,{model:selectedModel,cwd:prepared.invocation.cwd,outputSchema:options.outputSchema,now:options.now,
       runtimeManagedContext:nativeTurn!==undefined||checkpointOnly,
       retainSubmittedSupplement:!!(nativeTurn&&options.reuseNativeTurnSession&&options.inlineCurrentTurnSupplement),
       ...(options.nativeInstructions===undefined?{}:{nativeInstructions:options.nativeInstructions}),
@@ -354,7 +358,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
      }),baseState);
      await measuredSource.validate(signal);check(signal);
      await timing.measure('child_fork',async()=>{
-     if(base.threadId===null){await childSession.start();ephemeralRequests++;}
+     if(base.threadId===null){await childSession.start(signal);ephemeralRequests++;}
      else{
       if(!nativeBaseRoot||!base.lastTurnId)throw Error('NATIVE_BASE_SOURCE_MISMATCH');
       const custody=await claimChild({baseThreadId:base.threadId,rootSourceThreadId:nativeBaseRoot},prepared.invocation,processIdentity!,signal);
@@ -370,7 +374,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       nativeCleanups.push(nativeCleanup);
       check(signal);
       await session.startNative({sourceThreadId:nativeSource.snapshot.sourceThreadId,path:nativeSource.snapshot.path,custodyTag:custody.tag},signal,custody.recordFork);
-    }else {await session.start();if(historyFallback)ephemeralRequests++;}
+    }else {await session.start(signal);if(historyFallback)ephemeralRequests++;}
     check(signal);return session;
   }
   async function importHistory(input:ObserverInput,history:{snapshot:HistorySnapshot},live:ReturnType<typeof createPersistentObserverSession>,combined:AbortSignal,key:string,g:number,stage:(value:PersistentPreparationStage)=>void,batchCompleteRecords=false,allowCompaction=true){
@@ -614,7 +618,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  function operation<T>(signal:AbortSignal,work:(combined:AbortSignal,internal:AbortSignal)=>Promise<T>,deliver?:(result:T,combined:AbortSignal)=>Promise<T>):Promise<T>{
    const owned=new AbortController(),lifecycle=new AbortController();controller=owned;lifecycleController=lifecycle;
    const combined=AbortSignal.any([signal,owned.signal,lifecycle.signal]);
-   const p=work(combined,owned.signal).then(result=>deliver?deliver(result,combined):result).finally(()=>{if(pending===p)pending=undefined;if(controller===owned)controller=undefined;if(lifecycleController===lifecycle)lifecycleController=undefined;});pending=p;return p;
+   const p=withRequestCorrelation(signal,()=>work(combined,owned.signal).then(result=>deliver?deliver(result,combined):result).finally(()=>{if(pending===p)pending=undefined;if(controller===owned)controller=undefined;if(lifecycleController===lifecycle)lifecycleController=undefined;}));pending=p;return p;
  }
  const nativeDiagnostic=():NativeLifecycleDiagnostic=>{
   let idleRemainingMs:number|null=null;
@@ -913,7 +917,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          const rejectionReason=accepted?undefined:combined.aborted||result.cancelled?'scheduler_aborted':
            !accountValid?'provider_account_invalid':!imageSourceValid?'provider_source_invalid':
            !authorized()?'provider_authorization_revoked':'provider_interpretation_missing';
-         return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage,
+         return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage,wireMetrics:live.status().wireMetrics,
            ...(rejectionReason?{rejectionReason}:{})} as ObserverResult;
        }catch(error){
          const sessionFailure=error as PersistentSessionError;
@@ -939,10 +943,16 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
            if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
            poisoned=true;return empty('accounting_error');
          }
-         if(sessionFailure instanceof Error&&typeof sessionFailure.code==='string'&&sessionFailure.code.startsWith('SESSION_')){
+         const failedSession=sessionFailure instanceof Error&&typeof sessionFailure.code==='string'&&sessionFailure.code.startsWith('SESSION_');
+         if(failedSession&&!cleaned){
            if(id&&view&&bound)try{await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});}catch{poisoned=true;}
-           return empty('process_error');
+           poisoned=true;return empty('accounting_error');
          }
+         // A failed remote terminal can leave usage unknown even after the
+         // owned process and resources are confirmed closed. Retain its receipt,
+         // but settle that uncertainty instead of stranding a live admission.
+         // Receipt/cleanup failures above and settlement failures below still
+         // fail closed; this is not a successful or zero-token model response.
          if(id&&view&&!settled){
            try{
              if(bound)await view.updateInvocation?.(id,{phase:cleaned?'closed':'settling',cleanupOutcome:cleaned?'confirmed':'unconfirmed'});
@@ -951,7 +961,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
              else await view.cancelBeforeDispatch(id);
            }catch{poisoned=true;return empty('accounting_error');}
          }
-         return empty(combined.aborted?'aborted':'process_error');
+         return empty(failedSession?'process_error':combined.aborted?'aborted':'process_error');
        }finally{
          await view?.releaseRecoveryAdmission?.().catch(()=>undefined);
          await options.accounting.releaseRecoveryAdmission?.(key).catch(()=>undefined);

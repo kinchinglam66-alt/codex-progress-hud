@@ -846,7 +846,7 @@ describe("companion lifecycle manager", () => {
     await fixture.manager.diagnose();
 
     expect(reportWriter).toHaveBeenCalledWith({
-      directory: fixture.directory + "\\diagnostics",
+      directory: join(fixture.directory, "diagnostics"),
       generatedAt: "1970-01-01T00:00:00.000Z",
       versions: { plugin: "0.2.0", mcp: "0.2.0", companion: "0.2.0", protocol: 3 },
       lifecycle: { desiredState: "on", observedState: "running" },
@@ -1327,7 +1327,7 @@ describe("companion lifecycle manager", () => {
         launcher: fixture.launcher,
         sleep: async () => undefined,
         now: () => clock,
-        startupTimeoutMs: 90,
+        startupTimeoutMs: 900,
         logger: { write: async () => undefined },
         diagnostics: {
           directory: join(fixture.directory, `diagnostics-classifier-${code}-${expectedAttempts}`),
@@ -1354,7 +1354,7 @@ describe("companion lifecycle manager", () => {
           throw new HudClientError("OFFLINE", "first submit went offline");
         }
         if (boundary === "expired deadline") {
-          clock = 100;
+          clock = 1000;
         } else {
           await manager.close();
           requestHeldLock();

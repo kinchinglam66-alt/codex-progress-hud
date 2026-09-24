@@ -195,7 +195,7 @@ export function createStartupClaimStore(dataDirectory: string, options: { now?: 
                 if(released||!Number.isSafeInteger(pid)||pid<=0)throw Error('startup child binding invalid');
                 await assertTrustedDirectory(directory,nodeFileSystemOperations);
                 const existing=await readClaim(directory,claimPath);
-                if(!existing||existing.identity.dev!==currentIdentity.dev||existing.identity.ino!==currentIdentity.ino)throw Error('startup ownership changed');
+                if(!existing||existing.identity.dev!==currentIdentity.dev||existing.identity.ino!==currentIdentity.ino||existing.claim.ownerNonce!==candidate.ownerNonce||existing.claim.generation!==candidate.generation)throw Error('startup ownership changed');
                 if(candidate.childPid!==undefined&&candidate.childPid!==pid)throw Error('startup child already bound');
                 const temporaryName=`${CLAIM_FILENAME}.${randomUUID()}.bind.tmp`,temporaryPath=join(directory.path,temporaryName);
                 let handle:FileHandle|undefined;
@@ -214,6 +214,10 @@ export function createStartupClaimStore(dataDirectory: string, options: { now?: 
                 if (released) return;
                 released = true;
                 await assertTrustedDirectory(directory, nodeFileSystemOperations);
+                // Inodes may be reused after an expired claim is removed. The
+                // logical owner must still match before an old lease can unlink.
+                const existing = await readClaim(directory, claimPath);
+                if (!existing || existing.claim.ownerNonce !== candidate.ownerNonce || existing.claim.generation !== candidate.generation) return;
                 await unlinkIfIdentical(claimPath, currentIdentity, undefined, nodeLifecycleStateLockFileSystem).catch(() => false);
               });}
             }

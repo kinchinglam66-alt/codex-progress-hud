@@ -4,7 +4,9 @@ import {once} from 'node:events';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {promisify} from 'node:util';
-import {afterEach,expect,it} from 'vitest';
+import {afterEach,expect,it as test} from 'vitest';
+// These cases execute Windows PowerShell and validate Windows ACLs.
+const it=test.skipIf(process.platform!=='win32');
 import {prepareNativeGuardInvocation} from '../../src/estimation/native-guard-launch.js';
 import {createNativeStorage} from '../../src/estimation/native-storage.js';
 import {resolveTrustedPowerShellPath} from '../../src/estimation/recovery-boot-boundary.js';

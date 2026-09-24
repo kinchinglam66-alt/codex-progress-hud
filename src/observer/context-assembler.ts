@@ -1,6 +1,8 @@
 import type {ConversationRecord} from './conversation-record.js';
 import type {ObserverInput} from '../estimation/observer-contract.js';
 import {retainObserverInput} from '../estimation/observer-retention.js';
+import {executionObservations} from './execution-observations.js';
+import {collectTurnEvidence} from '../estimation/completion-outlook.js';
 
 type Estimate={remainingSeconds:number;errorPercent:number;observedActiveSeconds:number};
 export interface AssemblyOptions {
@@ -68,6 +70,10 @@ export function assembleContext(records:readonly ConversationRecord[],options:As
         elapsedSeconds:Math.max(0,(options.nowMs-action.atMs)/1000)}:null,
       previousEstimate:options.previousEstimate?{...options.previousEstimate}:null,omittedCategories:[]}};
   result.observation.omittedCategories=[...omitted];
+  const execution=executionObservations(records,options.currentTurnId,options.nowMs);
+  if(execution)result.executionObservations=execution;
+  const turnEvidence=collectTurnEvidence(records,options.currentTurnId,options.nowMs);
+  if(turnEvidence)result.turnEvidence=turnEvidence;
   retainObserverInput(result);
   return result;
 }

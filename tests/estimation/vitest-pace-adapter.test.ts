@@ -1,3 +1,4 @@
+import {resolve as fixturePath} from 'node:path';
 import {describe, expect, it} from "vitest";
 import {pairCompletedToolCapture, parseVitestPace, type ToolCapture} from "../../src/estimation/vitest-pace-adapter.js";
 import type {ConversationRecord} from "../../src/observer/conversation-record.js";
@@ -28,7 +29,7 @@ function validCapture(): ToolCapture {
   return {
     name: "exec",
     actionId: "action-vitest",
-    cwd: "C:\\repo",
+    cwd: fixturePath("repo"),
     command,
     complete: true,
     exitCode: 0,
@@ -87,7 +88,7 @@ describe("strict Vitest pace adapter", () => {
         {identity: "tests/c.test.ts", startMs: 150, endMs: 180}
       ],
       signature: expect.stringContaining("repo"),
-      project: process.platform === "win32" ? "c:\\repo" : "C:\\repo"
+      project: (process.platform === "win32" ? fixturePath("repo").toLowerCase() : fixturePath("repo"))
     });
   });
 
@@ -165,15 +166,15 @@ describe("strict Vitest pace adapter", () => {
   it("rejects ambiguous or conflicting completed pairs", () => {
     const start: ConversationRecord = {
       id: "start", turnId: "turn", atMs: 100, kind: "tool_start", actionId: "action",
-      toolName: "CommandExecution", cwd: "C:\\repo", command, startedAtMs: 100
+      toolName: "CommandExecution", cwd: fixturePath("repo"), command, startedAtMs: 100
     };
     const result: ConversationRecord = {
       id: "result", turnId: "turn", atMs: 200, kind: "tool_result", actionId: "action",
-      toolName: "CommandExecution", cwd: "C:\\repo", command, complete: true, exitCode: 0,
+      toolName: "CommandExecution", cwd: fixturePath("repo"), command, complete: true, exitCode: 0,
       endedAtMs: 200, output: JSON.stringify(report()), outputComplete: true
     };
     expect(pairCompletedToolCapture([start, result, {...start, id: "duplicate-start"}])).toBeNull();
-    expect(pairCompletedToolCapture([start, {...result, cwd: "C:\\other"}])).toBeNull();
+    expect(pairCompletedToolCapture([start, {...result, cwd: fixturePath("other")}])).toBeNull();
     expect(pairCompletedToolCapture([start, {...result, command: `${command} --unknown`}])).toBeNull();
     expect(pairCompletedToolCapture([start, {...result, toolName: "other-tool"}])).toBeNull();
   });

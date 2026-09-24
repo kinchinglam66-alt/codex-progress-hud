@@ -37,6 +37,11 @@ public static class CodexProgressHudLauncher
 
     private static int Relay(string executable, string entryScript, string mode)
     {
+        // Process.StandardInput inherits Console.InputEncoding on .NET Framework.
+        // A BOM-bearing encoding can prefix the first JSON frame before our
+        // BaseStream writer runs, which strict MCP parsers silently reject.
+        Console.InputEncoding = new UTF8Encoding(false);
+        Console.OutputEncoding = new UTF8Encoding(false);
         var start = new ProcessStartInfo {
             FileName = executable,
             Arguments = Quote(entryScript) + " " + Quote(mode),

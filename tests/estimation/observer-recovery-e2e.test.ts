@@ -1,7 +1,9 @@
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {afterEach, expect, it} from 'vitest';
+import {afterEach, expect, it as test} from 'vitest';
+// Real durable process ownership uses the Windows-only StartTime/handle probe.
+const it = test.skipIf(process.platform !== 'win32');
 import {openReleaseAccounting, type ReleaseAccountingOwner} from '../../src/estimation/release-accounting.js';
 import {createAccountedObserverWorker} from '../../src/estimation/observer-worker.js';
 import {ObserverScheduler, type ObserverWorker} from '../../src/estimation/observer-scheduler.js';

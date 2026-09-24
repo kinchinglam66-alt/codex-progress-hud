@@ -1,3 +1,4 @@
+import {resolve as fixturePath} from 'node:path';
 import {describe, expect, it} from "vitest";
 import {PaceMeasurements, parsePaceEvidence, type PaceContinuity, type PaceEvidence} from "../../src/estimation/pace-measurements.js";
 import type {ConversationRecord} from "../../src/observer/conversation-record.js";
@@ -31,11 +32,11 @@ function recordsFor(files: readonly string[], turnId = "turn-1", actionId = "act
   return [
     {
       id: `${actionId}-start`, turnId, atMs: 900, kind: "tool_start", actionId,
-      toolName: "exec", cwd: "C:\\repo", command: command(files), startedAtMs: 900
+      toolName: "exec", cwd: fixturePath("repo"), command: command(files), startedAtMs: 900
     },
     {
       id: `${actionId}-result`, turnId, atMs: 1_500, kind: "tool_result", actionId,
-      toolName: "exec", cwd: "C:\\repo", command: command(files), complete: true,
+      toolName: "exec", cwd: fixturePath("repo"), command: command(files), complete: true,
       exitCode: 0, endedAtMs: 1_500, output: report(files), outputComplete: true
     }
   ];
@@ -49,7 +50,7 @@ function evidence(files: readonly string[], turnId = "turn-1", actionId = "actio
       endMs: 1_050 + index * 100
     })),
     signature: "signature-v1",
-    project: "c:\\repo",
+    project: (process.platform === "win32" ? fixturePath("repo").toLowerCase() : fixturePath("repo")),
     turnId,
     actionId,
     startedAtMs: 900,
@@ -83,7 +84,7 @@ describe("bounded pace measurement ownership", () => {
       actionId: "action-1",
       startedAtMs: 900,
       endedAtMs: 1_500,
-      project: "c:\\repo"
+      project: (process.platform === "win32" ? fixturePath("repo").toLowerCase() : fixturePath("repo"))
     });
     expect(parsed?.files).toHaveLength(3);
   });
@@ -93,7 +94,7 @@ describe("bounded pace measurement ownership", () => {
 
     expect(owner.snapshot(goal)).toEqual([{
       signature: "signature-v1",
-      project: "c:\\repo",
+      project: (process.platform === "win32" ? fixturePath("repo").toLowerCase() : fixturePath("repo")),
       workClass: "file_processing",
       unit: "file",
       intervals: [

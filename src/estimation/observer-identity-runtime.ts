@@ -49,6 +49,7 @@ const copyInvocation=(value:Invocation):Invocation=>({...value,args:[...value.ar
  * no login, model dispatch or consent grant is implicit in inspection. */
 export function createObserverIdentityRuntime(options:Options) {
   const config=Object.freeze({...options});
+  const captureIdentityFiles=(home:string)=>captureObserverIdentityFiles(home,config.mainAccountSource?'external':'independent');
   const env={...(options.environment??process.env)};
   const now=options.now??Date.now;
   const monotonicNow=options.monotonicNow??(()=>performance.now());
@@ -102,13 +103,13 @@ export function createObserverIdentityRuntime(options:Options) {
         if(poisoned||combinedGuard.aborted)throw Error();
         const guardAuthHome=await guardHome.prepare(false,combinedGuard);
         if(guardAuthHome!==expected.authHome||combinedGuard.aborted)throw Error();
-        if(await captureObserverIdentityFiles(guardAuthHome)!==expected.identityFiles)throw Error();
+        if(await captureIdentityFiles(guardAuthHome)!==expected.identityFiles)throw Error();
         guardProbe=createObserverRuntimeProbe(env,guardAuthHome,guardRunner);
         const guardProfile=await runtimeCache.check(guardProbe.probe);
         if(guardProfile.version!==config.version)throw Error();
         const verifiedHome=await guardHome.prepare(true,combinedGuard);
         if(verifiedHome!==expected.authHome||combinedGuard.aborted)throw Error();
-        if(await captureObserverIdentityFiles(verifiedHome)!==expected.identityFiles)throw Error();
+        if(await captureIdentityFiles(verifiedHome)!==expected.identityFiles)throw Error();
         const homeStatus=guardHome.status(),runnerStatus=guardRunner.status();
         valid=!disabled&&!combinedGuard.aborted&&!homeStatus.active&&!homeStatus.poisoned&&
           !runnerStatus.active&&!runnerStatus.poisoned;
@@ -210,7 +211,7 @@ export function createObserverIdentityRuntime(options:Options) {
           let identityFilesAfter:string|null=null;
           if(mode!=='logout'&&mode!=='cleanup') {
             identityWorkStarted=true;
-            if(mode==='session'){identityFilesBefore=await captureObserverIdentityFiles(authHome);checkPreparationEpoch();}
+            if(mode==='session'){identityFilesBefore=await captureIdentityFiles(authHome);checkPreparationEpoch();}
             if(config.mainAccountSource){
               accountAttempts++;
               mainReader=createMainAccountMetadataReader({invocation:buildObserverExternalInvocation(profile,env,authHome),source:config.mainAccountSource,
@@ -246,13 +247,13 @@ export function createObserverIdentityRuntime(options:Options) {
               }
             }
             }
-            if(mode==='session'&&account){identityFilesAfter=await captureObserverIdentityFiles(authHome);checkPreparationEpoch();}
+            if(mode==='session'&&account){identityFilesAfter=await captureIdentityFiles(authHome);checkPreparationEpoch();}
           }
           checkPreparationEpoch();
           if(mode!=='cleanup')emit('passed');stage='home-recheck';
           await home.prepare(true,combined);checkPreparationEpoch();
           if(mode==='session'&&identityFilesAfter!==null){
-            const finalIdentityFiles=await captureObserverIdentityFiles(authHome);checkPreparationEpoch();
+            const finalIdentityFiles=await captureIdentityFiles(authHome);checkPreparationEpoch();
             if(identityFilesAfter!==finalIdentityFiles)identityFilesAfter=null;
           }
           emit('passed');stage='binding';

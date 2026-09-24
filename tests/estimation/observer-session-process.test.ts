@@ -1,5 +1,16 @@
 import {expect,it} from 'vitest';
 import {createObserverSessionProcess} from '../../src/estimation/observer-session-process.js';
+import {assertSubscriptionModelAvailable} from '../../src/estimation/subscription-model.js';
+it('rechecks metadata in the same owned process after a catalog timeout without inference',async()=>{
+ const p=createObserverSessionProcess({captureIdentity:async()=> 'synthetic-identity'});
+ const script=`let b='',count=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);if(m.method!=='model/list')process.exit(2);count++;if(count===1)process.stderr.write('models_manager: catalog timeout\\n');setTimeout(()=>process.stdout.write(JSON.stringify({id:m.id,result:{data:count===1?[]:[{model:'gpt-6-sol',supportedReasoningEfforts:[{reasoningEffort:'medium'}]}]}})+'\\n'),30);}});process.stdin.on('end',()=>process.exit(0));`;
+ try{
+  const opened=await p.start({...invocation(),args:['-e',script]});
+  await assertSubscriptionModelAvailable(opened.rpc,'gpt-6-sol');
+  expect(opened.rpc.modelCatalogTimeoutCount()).toBe(1);
+ }finally{await p.close();}
+ expect(p.status().closed).toBe(true);
+});
 const invocation=()=>({executable:process.execPath,cwd:process.cwd(),env:process.env,input:'',args:['-e',`let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);if(m.id)process.stdout.write(JSON.stringify({id:m.id,result:{echo:m.params}})+'\\n');}});process.stdin.on('end',()=>process.exit(0));`]});
 it('owns one process across multiple RPC operations, then confirms explicit closure',async()=>{
  const p=createObserverSessionProcess({captureIdentity:async()=> 'synthetic-identity'});

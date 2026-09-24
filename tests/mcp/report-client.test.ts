@@ -63,6 +63,17 @@ const health = {
 };
 
 describe("CompanionHttpClient", () => {
+  it.each(['applied','not_provided','milestone_mismatch','evidence_not_in_scope','private-error-text'])('validates review application diagnostics (%s)',async outcome=>{
+    const store=new TaskStore({now:()=>100});store.apply({taskId:'test',event:{type:'tracking_started'}});
+    const snapshot=store.snapshot();
+    const goal={generation:0,estimateRevision:0,sampledAtMs:100,status:'unknown',runtime:'running',activeSeconds:0,prediction:null,
+      progressState:{scope:'scope_'+'a'.repeat(32),observedEventSequence:0,milestone:null,reviewApplication:{revision:1,outcome}}};
+    const row={conversationKey:'conversation',task:snapshot.selected!.task,eta:null,name:{value:null,freshness:'unavailable'},goal};
+    const {baseUrl,tokenPath}=await fixture((_request,response)=>json(response,200,{...snapshot,rows:[row]}));
+    const result=new CompanionHttpClient(baseUrl,tokenPath).status();
+    if(outcome==='private-error-text')await expect(result).rejects.toBeInstanceOf(HudClientError);
+    else await expect(result).resolves.toMatchObject({rows:[{goal}]});
+  });
   it.each([true,false,'true',null])('validates typed timing and runtime uncertainty diagnostics (%s)',async(value)=>{
     const store=new TaskStore({now:()=>100});
     store.apply({taskId:'test',event:{type:'tracking_started'}});

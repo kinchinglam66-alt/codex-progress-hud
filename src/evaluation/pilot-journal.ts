@@ -1,5 +1,8 @@
 import type {ObserverObservation} from '../estimation/observer-scheduler.js';
 import {projectRequestProfile} from '../estimation/request-profile.js';
+import {projectRequestCorrelation} from '../estimation/request-correlation.js';
+import {projectWireMetrics} from '../estimation/observation-wire.js';
+import {estimateConditionAssessmentSchema} from '../estimation/estimate-conditions.js';
 import {observerCallStages} from '../estimation/observer-provider.js';
 import {milestoneTelemetrySchema} from '../estimation/progress-state.js';
 import {makeForecastRecord} from '../estimation/forecast-record.js';
@@ -51,9 +54,15 @@ export function createPilotJournal(directory:string,options:{now?:()=>number;ope
       if(closing || (failed&&!canRetry()) || pending>=128){dropped++;return;}
       let forecast:ReturnType<typeof makeForecastRecord>|undefined;
       const milestone=milestoneTelemetrySchema.safeParse(value.milestone);
+      const condition=estimateConditionAssessmentSchema.safeParse(value.estimateCondition);
       try {if(value.forecast)forecast=makeForecastRecord(value.forecast);} catch { /* Invalid research metadata is omitted. */ }
       // Explicit field projection prevents accidental future context/identity logging.
       const row={schemaVersion:1,session,recordedAt:Date.now(),kind:value.kind,at:value.at,
+        correlationId:projectRequestCorrelation(value.correlationId),
+        wireMetrics:projectWireMetrics(value.wireMetrics),
+        ...(condition.success?{estimateCondition:condition.data}:{}),
+        ...(typeof value.estimateUncertain==='boolean'?{estimateUncertain:value.estimateUncertain}:{}),
+        ...(['deliver_result','report_blocker','uncertain'].includes(value.completionPath??'')?{completionPath:value.completionPath}:{}),
         ...(value.kind==='result'&&value.status==='admission_denied'?{admissionReason:normalizeAdmissionReason(value.admissionReason)}:{}),
         ...(milestone.success?{milestone:milestone.data}:{}),eventCutoff:activeAnchor(value.eventCutoff),pendingCriticalEvents:activeAnchor(value.pendingCriticalEvents),
         key:createHmac('sha256',salt).update(value.key).digest('hex'),generation:value.generation,

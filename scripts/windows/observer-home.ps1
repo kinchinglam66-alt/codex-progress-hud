@@ -21,7 +21,8 @@ try {
     if ($parentPath.Length -le 3) { throw 'root parent' }
     Assert-PlainDirectory $parentPath
     $targetPath = [System.IO.Path]::Combine($parentPath, 'observer-auth')
-    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $userSid = $identity.User
     $allowed = @($userSid.Value, 'S-1-5-18', 'S-1-5-32-544')
     if (-not [System.IO.Directory]::Exists($targetPath)) {
         if ($VerifyOnly -or [System.IO.File]::Exists($targetPath)) { throw 'missing directory' }
@@ -68,7 +69,12 @@ try {
         if ($name -ieq 'auth.json') {
             if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) { throw 'invalid credentials file' }
             $fileAcl = [System.IO.File]::GetAccessControl($entry)
-            if ($fileAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $userSid.Value) { throw 'invalid credentials owner' }
+            $fileOwner = $fileAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            # Elevated Windows processes may create files owned by Administrators.
+            # Do not accept that group owner from a non-elevated caller.
+            $adminOwnerAllowed = $fileOwner -eq 'S-1-5-32-544' -and
+                ([System.Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+            if ($fileOwner -ne $userSid.Value -and -not $adminOwnerAllowed) { throw 'invalid credentials owner' }
             foreach ($fileRule in $fileAcl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
                 if ($fileRule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
                     $fileRule.IdentityReference.Value -notin $allowed) { throw 'permissive credentials access' }

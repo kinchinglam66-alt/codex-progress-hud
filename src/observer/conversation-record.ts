@@ -32,6 +32,9 @@ export interface ConversationRecord {
   toolName?: string;
   cwd?: string;
   command?: string;
+  /** Native argv boundaries retained as data, never joined for execution. */
+  commandArgv?: string[];
+  reportedExecutionSeconds?: number;
   complete?: boolean;
   exitCode?: number | null;
   startedAtMs?: number;

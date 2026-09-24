@@ -1,11 +1,12 @@
 import {EventEmitter} from 'node:events';
+import {resolve} from 'node:path';
 import {PassThrough} from 'node:stream';
 import type {ChildProcessWithoutNullStreams} from 'node:child_process';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {createHomeCheckTransport} from '../../src/estimation/home-check-transport.js';
 
 const path='C:\\synthetic\\observer-auth';
-const invocation={executable:'C:/Windows/powershell.exe',cwd:'C:/synthetic',args:[],env:{}};
+const invocation={executable:process.execPath,cwd:resolve('synthetic'),args:[],env:{}};
 function fixture(autoClose=true) {
   const children:Array<EventEmitter & {stdin:PassThrough;stdout:PassThrough;stderr:PassThrough;kill:()=>boolean;requests:string[]}> = [];
   const transport=createHomeCheckTransport(invocation,path,{spawn:()=>{

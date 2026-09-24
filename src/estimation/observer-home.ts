@@ -1,6 +1,7 @@
 import {join} from 'node:path';
 import {createOwnedProcessRunner} from './owned-process.js';
 import {createObserverHomeValidation} from './observer-home-validation.js';
+import {nativePowerShellEnvironment} from './native-powershell-environment.js';
 
 export interface ObserverHomeProfile {parentDirectory:string; powershell:string; scriptPath:string; scriptSha256:string}
 /** Trusted desktop inputs only. Pin and executable provenance come from release
@@ -13,7 +14,7 @@ export function createObserverHomeManager(profile: ObserverHomeProfile) {
   let active=false, disabled=false;
   const fail=()=>new Error('OBSERVER_HOME_UNAVAILABLE');
   const disable=()=>{disabled=true;runner.disable();};
-  const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>['SYSTEMROOT','WINDIR','TEMP','TMP','PATH'].includes(key.toUpperCase())));
+  const env=nativePowerShellEnvironment();
   return {disable,
     status() {
       const child = runner.status();

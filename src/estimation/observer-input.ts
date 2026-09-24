@@ -2,7 +2,7 @@ import {observerInputSchema} from './observer-contract.js';
 import {retainObserverInput} from './observer-retention.js';
 
 /** Version of lossless readable-history assembly and capacity preparation. */
-export const OBSERVER_INPUT_FACTS_VERSION='observer-input-facts-v5';
+export const OBSERVER_INPUT_FACTS_VERSION='observer-input-facts-v7';
 
 /** The packet is private estimator input. Task text is intentionally lossless;
  * diagnostics and public snapshots have separate privacy contracts. */
