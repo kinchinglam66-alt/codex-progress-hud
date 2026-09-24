@@ -44,7 +44,13 @@ jobs:
           "plugin=release/codex-progress-hud-plugin-$version.zip" >> $env:GITHUB_OUTPUT
       - name: Verify checksums
         shell: pwsh
-        run: Get-Content release/SHA256SUMS.txt | ForEach-Object { $hash, $file = $_ -split '  ', 2; if ((Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "Checksum mismatch: $file" } }
+        run: |
+          Get-Content release/SHA256SUMS.txt | ForEach-Object {
+            $hash, $file = $_ -split '  ', 2
+            if ((Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+              throw "Checksum mismatch: $file"
+            }
+          }
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
