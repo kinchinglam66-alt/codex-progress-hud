@@ -439,9 +439,9 @@ describe("operational logger", () => {
     const script = [
       'const net = require("node:net");',
       'const server = net.createServer((socket) => socket.destroy());',
-      'server.listen(process.argv[1], () => process.stdout.write("READY\\n"));'
+      'server.listen(JSON.parse(process.argv[1]), () => process.stdout.write("READY\\n"));'
     ].join("");
-    const child = spawn(process.execPath, ["-e", script, crashedOwnerAddress], {
+    const child = spawn(process.execPath, ["-e", script, JSON.stringify(crashedOwnerAddress)], {
       stdio: ["ignore", "pipe", "pipe"]
     });
     const childExited = once(child, "exit");

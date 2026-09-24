@@ -17,6 +17,19 @@ async function claimDirectory(): Promise<string> {
 }
 
 describe("startup claim", () => {
+  it("does not mutate a different owner even when the file inode is unchanged", async () => {
+    const directory = await claimDirectory();
+    const acquired = await createStartupClaimStore(directory, {now: () => 100}).tryAcquire(3, 1000);
+    if (acquired.kind !== 'acquired') throw Error('claim missing');
+    const path = join(directory, '.companion-startup-claim.json');
+    const successor = {generation: 3, ownerNonce: 'successor', expiresAt: 2000};
+    // In-place replacement deterministically retains the inode, just as reuse
+    // after unlink can do on Linux. Logical ownership is a separate fence.
+    await writeFile(path, JSON.stringify(successor));
+    await expect(acquired.lease.bindChild(1234)).rejects.toThrow('startup ownership changed');
+    await acquired.lease.release();
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(successor);
+  });
   it("allows only one concurrent manager to claim a generation", async () => {
     const directory = await claimDirectory();
     const first = createStartupClaimStore(directory, { now: () => 100 });

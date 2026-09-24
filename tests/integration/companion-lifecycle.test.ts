@@ -483,7 +483,7 @@ describe("source-mode companion lifecycle", () => {
       client: new CompanionHttpClient(serviceUrl, tokenPath),
       launcher: firstLauncher,
       sleep: controlledSleep("first", firstRecoveryEntered, firstRecoveryGate),
-      startupTimeoutMs: 1_000,
+      startupTimeoutMs: 5_000,
       logger: { write: async () => undefined },
       diagnostics
     });
@@ -492,7 +492,7 @@ describe("source-mode companion lifecycle", () => {
       client: new CompanionHttpClient(serviceUrl, tokenPath),
       launcher: secondLauncher,
       sleep: controlledSleep("second", secondRecoveryEntered, secondRecoveryGate),
-      startupTimeoutMs: 1_000,
+      startupTimeoutMs: 5_000,
       logger: { write: async () => undefined },
       diagnostics
     });

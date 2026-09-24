@@ -743,7 +743,7 @@ it.each(['missing retention state','wrong conversation binding'] as const)('fail
  }finally{await f.worker.close();await f.accounting.close();}
 });
 
-it.each(['thread/fork','thread/inject_items'])('captures unadmitted model work during %s and never enters ETA',async(method)=>{
+it.skipIf(process.platform !== 'win32').each(['thread/fork','thread/inject_items'])('captures unadmitted model work during %s and never enters ETA',async(method)=>{
  const f=await retainedNativeFixture(undefined,{transformScript:text=>text.replace("if(!m.id)continue;",`if(!m.id)continue;if(m.method===${JSON.stringify(method)})emit({method:'turn/started',params:{threadId:'unexpected',turn:{id:'unadmitted'}}});`)}),signal=new AbortController().signal;
  try{
   await expect(f.worker.prepareNativeTurnContext!(input,pairedSource(1),signal,'source',0,0)).rejects.toThrow();

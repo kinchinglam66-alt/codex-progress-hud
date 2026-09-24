@@ -1,4 +1,6 @@
-import {expect,it,vi} from 'vitest';
+import {expect,it as test,vi} from 'vitest';
+// Real durable process ownership uses the Windows-only StartTime/handle probe.
+const it = test.skipIf(process.platform !== 'win32');
 import {mkdtemp,mkdir,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
