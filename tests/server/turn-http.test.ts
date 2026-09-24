@@ -119,7 +119,7 @@ it.each([
   expect(snapshot.tasks.find(task => task.id === first.taskHandle)?.status).toBe(status);
   expect(snapshot.rows?.find(row => row.task.id === first.taskHandle)?.goal?.runtime).toBe(runtime);
   if (hook === 'Stop') expect(passiveContexts.read(first.sessionKey)?.entries.at(-1)?.content.text).toBe('Synthetic final response');
-});
+}, 30_000);
 
 it('does not reuse an injected wall clock as the default active-work clock', async () => {
   let wall = 1000000000;

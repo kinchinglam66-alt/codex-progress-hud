@@ -45,6 +45,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - if: runner.os == 'Windows'
+        run: node scripts/ci/probe-windows-native.mjs
+      - if: runner.os == 'Windows'
         run: npm test -- --run --maxWorkers=1 --no-file-parallelism
       - if: runner.os == 'Linux'
         run: xvfb-run -a npm test -- --run --maxWorkers=1 --no-file-parallelism
