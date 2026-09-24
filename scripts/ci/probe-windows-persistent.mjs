@@ -27,6 +27,13 @@ for (const [name, env] of variants) {
     if (setup.status !== 0) throw new Error('synthetic home setup failed');
     const auth = join(parent, 'observer-auth', 'auth.json');
     writeFileSync(auth, 'synthetic-not-a-token');
+    if (name === 'full') {
+      const acl = spawnSync(shell, [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+        "$p=$env:HUD_TEST_TARGET; $d=[IO.Directory]::GetAccessControl([IO.Path]::GetDirectoryName($p)); $a=[IO.File]::GetAccessControl($p); [Console]::Out.WriteLine('dirProtected='+$d.AreAccessRulesProtected+' fileOwner='+$a.GetOwner([Security.Principal.SecurityIdentifier]).Value+' user='+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value); foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){[Console]::Out.WriteLine('ace='+$r.IdentityReference.Value+','+$r.IsInherited+','+$r.AccessControlType)}"
+      ], { cwd: parent, env: { ...process.env, HUD_TEST_TARGET: auth }, timeout: 10000, windowsHide: true, encoding: 'utf8' });
+      console.log(`before-grant-acl: exit=${acl.status} ${acl.stdout.trim().replaceAll('\r\n', ' ')}`);
+    }
     const result = spawnSync(shell, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', script, '-ParentDirectory', parent, '-Persistent'
