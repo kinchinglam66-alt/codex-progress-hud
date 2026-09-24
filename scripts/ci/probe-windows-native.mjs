@@ -8,11 +8,10 @@ if (process.platform !== 'win32') process.exit(0);
 const script = resolve('scripts/windows/observer-home.ps1');
 const shell = join(process.env.SystemRoot ?? 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
 const minimalKeys = ['SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'PATH'];
-const profileKeys = ['USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME'];
-const appKeys = ['APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA'];
 const shellKeys = ['COMSPEC', 'PATHEXT', 'PSMODULEPATH'];
 const environment = (keys) => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   keys.includes(key.toUpperCase())));
+const systemModules = join(process.env.SystemRoot ?? 'C:/Windows', 'System32/WindowsPowerShell/v1.0/Modules');
 
 for (const [name, value] of [['temp', tmpdir()], ['script', script], ['powershell', shell]]) {
   const canonical = realpathSync(value);
@@ -22,10 +21,10 @@ for (const [name, value] of [['temp', tmpdir()], ['script', script], ['powershel
 for (const [name, env] of [
   ['full', process.env],
   ['minimal', environment(minimalKeys)],
-  ['profile', environment([...minimalKeys, ...profileKeys])],
-  ['app', environment([...minimalKeys, ...appKeys])],
-  ['shell', environment([...minimalKeys, ...shellKeys])],
-  ['profile-app-shell', environment([...minimalKeys, ...profileKeys, ...appKeys, ...shellKeys])]
+  ['comspec-pathext', environment([...minimalKeys, 'COMSPEC', 'PATHEXT'])],
+  ['module-from-env', environment([...minimalKeys, 'PSMODULEPATH'])],
+  ['module-system', { ...environment(minimalKeys), PSModulePath: systemModules }],
+  ['shell', environment([...minimalKeys, ...shellKeys])]
 ]) {
   const parent = mkdtempSync(join(tmpdir(), 'hud-native-preflight-'));
   try {
