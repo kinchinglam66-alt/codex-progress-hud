@@ -1,11 +1,12 @@
 import {EventEmitter} from 'node:events';
+import {resolve} from 'node:path';
 import {PassThrough} from 'node:stream';
 import type {ChildProcessWithoutNullStreams} from 'node:child_process';
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {createNativeGuardTransport} from '../../src/estimation/native-guard-transport.js';
 function fixture(autoClose=true,idleTimeoutMs?:number){
  const children:Array<EventEmitter & {stdin:PassThrough;stdout:PassThrough;stderr:PassThrough;kill:()=>boolean}>=[];
- const transport=createNativeGuardTransport({executable:'C:/Windows/powershell.exe',args:[],cwd:'C:/synthetic',env:{}},{...(idleTimeoutMs===undefined?{}:{idleTimeoutMs}),spawn:()=>{
+ const transport=createNativeGuardTransport({executable:process.execPath,args:[],cwd:resolve('synthetic'),env:{}},{...(idleTimeoutMs===undefined?{}:{idleTimeoutMs}),spawn:()=>{
   const child=Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>{
    if(autoClose)queueMicrotask(()=>child.emit('close',0));return true;
   }});children.push(child);return child as unknown as ChildProcessWithoutNullStreams;

@@ -1,3 +1,4 @@
+import {resolve as fixturePath} from 'node:path';
 import {createHash} from "node:crypto";
 import {inflateSync} from "node:zlib";
 import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
@@ -22,7 +23,7 @@ afterEach(async () => {
 
 describe("native comparison fixtures", () => {
   it("separates the source task horizon from the observer evidence request", () => {
-    const fixtures = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"});
+    const fixtures = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")});
     for (const fixture of fixtures) {
       expect(fixture.sourceGoal).toMatch(/CSV.*integration tests/u);
       expect(fixture.sourceGoal).not.toMatch(/estimate|markers|dominant color/iu);
@@ -34,7 +35,7 @@ describe("native comparison fixtures", () => {
     expect(fixtures[2].sourceGoal).not.toBe(fixtures[1].sourceGoal);
   });
   it("provides a visible opaque red image rather than a one-pixel visual probe", () => {
-    const [fixture] = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"});
+    const [fixture] = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")});
     const parts = fixture.rollout.trim().split("\n").map(line => JSON.parse(line))
       .flatMap(row => row.payload.content ?? []).filter(part => part.type === "input_image");
     expect(parts).toHaveLength(1);
@@ -60,7 +61,7 @@ describe("native comparison fixtures", () => {
     }
   });
   it("requests context evidence without supplying acceptance answers", () => {
-    const fixtures = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"});
+    const fixtures = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")});
     for (const fixture of fixtures) {
       for (const marker of fixtures.flatMap(item => item.expectedMarkers)) {
         expect(fixture.requestText).not.toContain(marker);
@@ -77,18 +78,18 @@ describe("native comparison fixtures", () => {
   });
 
   it("emits the verified native metadata shape independently of the local reader", () => {
-    for (const fixture of createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"})) {
+    for (const fixture of createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")})) {
       const meta = JSON.parse(fixture.rollout.split("\n")[0]!);
       expect(meta.type).toBe("session_meta");
       expect(meta.payload).toMatchObject({id: SOURCE_THREAD_ID, originator: "codex_cli_rs",
         cli_version: "0.153.4", source: "cli", model_provider: "openai", history_mode: "legacy",
-        cwd: "C:\\synthetic\\empty", timestamp: meta.timestamp, base_instructions: {text: expect.any(String)}});
+        cwd: fixturePath("synthetic/empty"), timestamp: meta.timestamp, base_instructions: {text: expect.any(String)}});
       expect(meta.payload.base_instructions.text).toMatch(/never run commands/iu);
     }
   });
 
   it("emits native function arguments as a JSON string with a paired output", () => {
-    const [fixture] = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"});
+    const [fixture] = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")});
     const items = fixture.rollout.trimEnd().split("\n").map(line => JSON.parse(line))
       .filter(entry => entry.type === "response_item").map(entry => entry.payload);
     const calls = items.filter(item => item.type === "function_call");
@@ -105,7 +106,7 @@ describe("native comparison fixtures", () => {
   });
 
   it("keeps deterministic timestamps in file order across the completed and new turns", () => {
-    const options = {sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"};
+    const options = {sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")};
     const fixtures = createNativeComparisonFixtures(options);
     expect(createNativeComparisonFixtures(options)).toEqual(fixtures);
     for (const fixture of fixtures) {
@@ -124,7 +125,7 @@ describe("native comparison fixtures", () => {
   it("creates bounded cumulative native rollouts with stable hashes and markers", () => {
     const fixtures = createNativeComparisonFixtures({
       sourceThreadId: SOURCE_THREAD_ID,
-      cwd: "C:\\synthetic\\empty"
+      cwd: fixturePath("synthetic/empty")
     });
 
     expect(fixtures).toHaveLength(3);
@@ -156,7 +157,7 @@ describe("native comparison fixtures", () => {
   });
 
   it("provides an unfinished synthetic task, so ETA validity is not confused with an empty workload", () => {
-    const fixtures = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: "C:\\synthetic\\empty"});
+    const fixtures = createNativeComparisonFixtures({sourceThreadId: SOURCE_THREAD_ID, cwd: fixturePath("synthetic/empty")});
     for (const fixture of fixtures) {
       const rows = fixture.rollout.trim().split("\n").map(line => JSON.parse(line));
       const last = rows.at(-1).payload.content[0].text;
@@ -169,7 +170,7 @@ describe("native comparison fixtures", () => {
   it("rejects invalid source IDs and non-absolute fixture paths", () => {
     expect(() => createNativeComparisonFixtures({
       sourceThreadId: "not-a-uuid",
-      cwd: "C:\\synthetic\\empty"
+      cwd: fixturePath("synthetic/empty")
     })).toThrow(/sourceThreadId/);
     expect(() => createNativeComparisonFixtures({
       sourceThreadId: SOURCE_THREAD_ID,
@@ -180,7 +181,7 @@ describe("native comparison fixtures", () => {
   it("reads each fixture through the local snapshot reader and retains markers and image parts", async () => {
     const fixtures = createNativeComparisonFixtures({
       sourceThreadId: SOURCE_THREAD_ID,
-      cwd: "C:\\synthetic\\empty"
+      cwd: fixturePath("synthetic/empty")
     });
 
     for (const fixture of fixtures) {

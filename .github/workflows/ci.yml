@@ -23,9 +23,20 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci --registry=https://registry.npmjs.org
-      - run: npm test -- --run
+      - name: Prepare canonical test temp directory
+        shell: pwsh
+        run: |
+          $testTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          "TEMP=$testTemp" >> $env:GITHUB_ENV
+          "TMP=$testTemp" >> $env:GITHUB_ENV
+          "TMPDIR=$testTemp" >> $env:GITHUB_ENV
+      - run: node node_modules/electron/install.js
       - run: npm run typecheck
       - run: npm run build
+      - if: runner.os == 'Windows'
+        run: npm test -- --run --maxWorkers=1 --no-file-parallelism
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a npm test -- --run --maxWorkers=1 --no-file-parallelism
       - run: npm run validate:plugin
       - if: runner.os == 'Windows'
         run: npm run build:launcher:release

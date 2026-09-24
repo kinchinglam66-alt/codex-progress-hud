@@ -3,13 +3,15 @@ import {mkdtemp,rm,rename} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {promisify} from 'node:util';
-import {afterEach,expect,it} from 'vitest';
+import {afterEach,expect,it as test} from 'vitest';
+// These cases execute Windows PowerShell and validate Windows ACLs.
+const it=test.skipIf(process.platform!=='win32');
 import {createNativeStorage} from '../../src/estimation/native-storage.js';
 import {createNativeGuardTransport} from '../../src/estimation/native-guard-transport.js';
 import {captureInvocationProcessIdentity} from '../../src/estimation/invocation-process.js';
 import {resolveTrustedPowerShellPath} from '../../src/estimation/recovery-boot-boundary.js';
 const execute=promisify(execFile),roots:string[]=[],transports:ReturnType<typeof createNativeGuardTransport>[]=[];
-const shell=resolveTrustedPowerShellPath(),helper=resolve('scripts/windows/native-guard.ps1');
+const shell=process.platform==='win32'?resolveTrustedPowerShellPath():'',helper=resolve('scripts/windows/native-guard.ps1');
 const flags=['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass'];
 async function fixture(){
  const root=await mkdtemp(join(tmpdir(),'hud-native-guard-'));roots.push(root);const home=join(root,'observer-auth');

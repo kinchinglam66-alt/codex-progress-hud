@@ -18,6 +18,14 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci --registry=https://registry.npmjs.org
+      - name: Prepare canonical test temp directory
+        shell: pwsh
+        run: |
+          $testTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          "TEMP=$testTemp" >> $env:GITHUB_ENV
+          "TMP=$testTemp" >> $env:GITHUB_ENV
+      - run: node node_modules/electron/install.js
+      - run: npm run build
       - name: Verify tag matches package version
         shell: pwsh
         run: |

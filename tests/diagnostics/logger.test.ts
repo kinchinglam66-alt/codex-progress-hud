@@ -38,7 +38,9 @@ async function logDirectory(): Promise<string> {
 }
 
 function ownerAddress(token: string): string {
-  return `\\\\.\\pipe\\codex-progress-hud-owner-${token}`;
+  return process.platform === "win32"
+    ? `\\\\.\\pipe\\codex-progress-hud-owner-${token}`
+    : `\0codex-progress-hud-owner-${token}`;
 }
 
 interface HeldOwner {
