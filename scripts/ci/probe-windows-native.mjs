@@ -12,6 +12,10 @@ const shellKeys = ['COMSPEC', 'PATHEXT', 'PSMODULEPATH'];
 const environment = (keys) => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   keys.includes(key.toUpperCase())));
 const systemModules = join(process.env.SystemRoot ?? 'C:/Windows', 'System32/WindowsPowerShell/v1.0/Modules');
+const hostModuleDirs = (process.env.PSModulePath ?? '').split(';').filter(Boolean);
+const machineModuleDirs = hostModuleDirs.filter((path) =>
+  /^[a-z]:\\(?:Windows|Program Files(?: \(x86\))?)\\/i.test(path));
+console.log('module-directories:', JSON.stringify(hostModuleDirs));
 
 for (const [name, value] of [['temp', tmpdir()], ['script', script], ['powershell', shell]]) {
   const canonical = realpathSync(value);
@@ -24,6 +28,12 @@ for (const [name, env] of [
   ['comspec-pathext', environment([...minimalKeys, 'COMSPEC', 'PATHEXT'])],
   ['module-from-env', environment([...minimalKeys, 'PSMODULEPATH'])],
   ['module-system', { ...environment(minimalKeys), PSModulePath: systemModules }],
+  ['module-machine-host', { ...environment(minimalKeys), PSModulePath: machineModuleDirs.join(';') }],
+  ['module-machine-fixed', { ...environment(minimalKeys), PSModulePath: [
+    join(process.env.SystemDrive ?? 'C:', 'Program Files/WindowsPowerShell/Modules'),
+    join(process.env.SystemDrive ?? 'C:', 'Program Files (x86)/WindowsPowerShell/Modules'),
+    systemModules
+  ].join(';') }],
   ['shell', environment([...minimalKeys, ...shellKeys])]
 ]) {
   const parent = mkdtempSync(join(tmpdir(), 'hud-native-preflight-'));
