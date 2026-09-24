@@ -26,7 +26,18 @@ jobs:
       - name: Prepare canonical test temp directory
         shell: pwsh
         run: |
-          $testTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          if ($IsWindows) {
+            # The hosted runner's profile uses RUNNER~1, which Node may expand
+            # differently on a second realpath call. Use a stable root path.
+            $testTemp = Join-Path ([System.IO.Path]::GetPathRoot($env:RUNNER_TEMP)) 'hud-ci-temp'
+            New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          } else {
+            $testTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          }
+          $canonical = node -p "require('node:fs').realpathSync(process.argv[1])" $testTemp
+          if ([System.IO.Path]::GetFullPath($canonical) -ne [System.IO.Path]::GetFullPath($testTemp)) {
+            throw "Test temp directory is not canonical: $testTemp -> $canonical"
+          }
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "TMP=$testTemp" >> $env:GITHUB_ENV
           "TMPDIR=$testTemp" >> $env:GITHUB_ENV

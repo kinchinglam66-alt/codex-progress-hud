@@ -21,9 +21,15 @@ jobs:
       - name: Prepare canonical test temp directory
         shell: pwsh
         run: |
-          $testTemp = node -p "require('node:fs').realpathSync(require('node:os').tmpdir())"
+          $testTemp = Join-Path ([System.IO.Path]::GetPathRoot($env:RUNNER_TEMP)) 'hud-ci-temp'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $canonical = node -p "require('node:fs').realpathSync(process.argv[1])" $testTemp
+          if ([System.IO.Path]::GetFullPath($canonical) -ne [System.IO.Path]::GetFullPath($testTemp)) {
+            throw "Test temp directory is not canonical: $testTemp -> $canonical"
+          }
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "TMP=$testTemp" >> $env:GITHUB_ENV
+          "TMPDIR=$testTemp" >> $env:GITHUB_ENV
       - run: node node_modules/electron/install.js
       - run: npm run build
       - name: Verify tag matches package version
