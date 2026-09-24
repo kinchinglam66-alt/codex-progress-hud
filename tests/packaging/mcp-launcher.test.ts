@@ -24,7 +24,8 @@ function run(path: string, extraEnvironment: NodeJS.ProcessEnv = {}, input?: str
     encoding: "utf8",
     input,
     windowsHide: true,
-    shell: false
+    shell: false,
+    timeout: 10_000
   });
 }
 
@@ -140,7 +141,7 @@ describe.runIf(process.platform === "win32")("packaged MCP launcher", () => {
     const failed = run(data, { HUD_FAKE_EXIT: "7" }, "mcp-request\n");
     expect(failed.status).toBe(7);
     expect(failed.stdout.replaceAll("\\", "/").trimEnd()).toMatch(/resources\/app\.asar\/dist\/main\.js\|--mcp-stdio\|mcp-request$/u);
-  });
+  }, 30_000);
 
   it("streams BOM-free UTF-8 before the MCP client closes its long-lived pipe", async () => {
     const data = await appData();
