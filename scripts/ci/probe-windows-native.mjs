@@ -7,15 +7,26 @@ if (process.platform !== 'win32') process.exit(0);
 
 const script = resolve('scripts/windows/observer-home.ps1');
 const shell = join(process.env.SystemRoot ?? 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
-const minimal = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-  ['SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'PATH'].includes(key.toUpperCase())));
+const minimalKeys = ['SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'PATH'];
+const profileKeys = ['USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME'];
+const appKeys = ['APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA'];
+const shellKeys = ['COMSPEC', 'PATHEXT', 'PSMODULEPATH'];
+const environment = (keys) => Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+  keys.includes(key.toUpperCase())));
 
 for (const [name, value] of [['temp', tmpdir()], ['script', script], ['powershell', shell]]) {
   const canonical = realpathSync(value);
   console.log(`${name}: ${value === canonical ? 'canonical' : 'alias'}`);
 }
 
-for (const [name, env] of [['full', process.env], ['minimal', minimal]]) {
+for (const [name, env] of [
+  ['full', process.env],
+  ['minimal', environment(minimalKeys)],
+  ['profile', environment([...minimalKeys, ...profileKeys])],
+  ['app', environment([...minimalKeys, ...appKeys])],
+  ['shell', environment([...minimalKeys, ...shellKeys])],
+  ['profile-app-shell', environment([...minimalKeys, ...profileKeys, ...appKeys, ...shellKeys])]
+]) {
   const parent = mkdtempSync(join(tmpdir(), 'hud-native-preflight-'));
   try {
     const result = spawnSync(shell, [
@@ -28,4 +39,7 @@ for (const [name, env] of [['full', process.env], ['minimal', minimal]]) {
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
+}
+if (process.env.HUD_NATIVE_PROBE_ONLY === '1') {
+  throw new Error('Native environment diagnosis completed; stop before the full suite');
 }
