@@ -5,6 +5,7 @@ import {createNativeStorage} from './native-storage.js';
 import {createObserverHomeValidation} from './observer-home-validation.js';
 import {resolveTrustedPowerShellPath} from './recovery-boot-boundary.js';
 import type {Invocation} from './owned-process.js';
+import {nativePowerShellEnvironment} from './native-powershell-environment.js';
 export const NATIVE_GUARD_SCRIPT_SHA256='17f7a0e9987c427e89b424f462319f482f815ce77c6961eaf5ea3edc99dd2ad5';
 /** Execute the exact hash-verified bytes, never reopen the source pathname in PowerShell. */
 export async function prepareNativeGuardInvocation(runtimeHome:string,scriptPath:string):Promise<Omit<Invocation,'input'>>{
@@ -25,6 +26,6 @@ export async function prepareNativeGuardInvocation(runtimeHome:string,scriptPath
  }finally{await handle.close();}
  const command=`& {\n${script}\n} -RuntimeHome ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(home,'utf8').toString('base64')}')))`,encoded=Buffer.from(command,'utf16le').toString('base64');
  if(encoded.length>30000)throw Error('NATIVE_GUARD_COMMAND_LIMIT');
- const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>['SYSTEMROOT','WINDIR','TEMP','TMP','PATH'].includes(key.toUpperCase())));
+ const env=nativePowerShellEnvironment();
  return {executable:powershell,cwd:parentDirectory,env,args:['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded]};
 }

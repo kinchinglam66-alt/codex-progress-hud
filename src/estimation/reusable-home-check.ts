@@ -1,11 +1,12 @@
 import type {ObserverHomeProfile} from './observer-home.js';
 import {createObserverHomeValidation} from './observer-home-validation.js';
 import {createHomeCheckTransport} from './home-check-transport.js';
+import {nativePowerShellEnvironment} from './native-powershell-environment.js';
 
 /** One identity runtime owns this executor. No verification-result cache. */
 export function createReusableHomeCheck(profile:ObserverHomeProfile) {
   const config=Object.freeze({...profile}),validation=createObserverHomeValidation(config);
-  const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>['SYSTEMROOT','WINDIR','TEMP','TMP','PATH'].includes(key.toUpperCase())));
+  const env=nativePowerShellEnvironment();
   const transport=createHomeCheckTransport({executable:config.powershell,cwd:config.parentDirectory,env,
     args:['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',config.scriptPath,'-ParentDirectory',config.parentDirectory,'-Persistent']},validation.authHome);
   let checking=false,disabled=false,epoch=0;
