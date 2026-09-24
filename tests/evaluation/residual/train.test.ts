@@ -21,3 +21,9 @@ it('does not let repeated snapshots overweight a turn',()=>{
   const second=trainResidual([...data,...Array.from({length:10},()=>({...data[0]!,predictionId:2}))],samples(100,10));
   expect(second.intercept).toBeCloseTo(first.intercept,10);
 });
+it('refuses validation rows that runtime inference would entirely abstain from',()=>{
+  const unseenMask=samples(100,10).map(sample=>({...sample,features:{...sample.features,elapsedActiveSeconds:10}}));
+  expect(()=>trainResidual(samples(),unseenMask)).toThrow('RESIDUAL_VALIDATION_UNSUPPORTED');
+  const outsideRange=samples(100,10).map(sample=>({...sample,features:{...sample.features,rawSeconds:600}}));
+  expect(()=>trainResidual(samples(),outsideRange)).toThrow('RESIDUAL_VALIDATION_UNSUPPORTED');
+});

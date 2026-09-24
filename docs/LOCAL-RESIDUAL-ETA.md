@@ -41,6 +41,8 @@ For benchmark repeats, supply `--group-map FILE` to `dataset`: a JSON object map
 
 Training requires at least 30 eligible turns in at least 10 training groups, plus a nonempty disjoint validation partition with matching estimator versions. No real benchmark is launched by these commands. Score refuses training/validation groups in the test input. Preliminary aggregate claims require at least 10 test groups with usable paired predictions; otherwise the report flags insufficient evidence.
 
+Hyperparameter selection uses only validation rows that the frozen runtime artifact would actually predict. Rows with unseen missingness patterns or features outside the training range remain validation-coverage evidence, but are not scored as predictions. Training stops with `RESIDUAL_VALIDATION_UNSUPPORTED` when every validation row would be rejected; it never promotes an arbitrary model from a zero-prediction validation pass.
+
 ## Model and metrics
 
 The candidate fits `log1p(actual remaining seconds) - log1p(raw seconds)` with turn-balanced ridge regression. The comparison scale baseline is a weighted median log residual. Missing fields use training means plus missingness flags; normalization and hyperparameter selection never use the final test partition.
