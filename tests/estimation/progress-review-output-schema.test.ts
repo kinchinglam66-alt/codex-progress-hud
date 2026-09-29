@@ -3,6 +3,7 @@ import {expect,it} from 'vitest';
 import {bindProgressReviewOutputSchema} from '../../src/estimation/progress-review-output-schema.js';
 import {createProgressState,progressScope,applyProgress,observeProgress} from '../../src/estimation/progress-state.js';
 import {serializeObserverTransport} from '../../src/estimation/context-compression.js';
+import {retainPendingMilestone} from '../../src/estimation/pending-milestone.js';
 const schema=JSON.parse(readFileSync(new URL('../../src/estimation/assets/observer.schema.json',import.meta.url),'utf8'));
 function state(task='one'){
  const s=createProgressState(progressScope(task,'turn',1,0));
@@ -11,9 +12,9 @@ function state(task='one'){
  return s;
 }
 const bind=(progressState?:ReturnType<typeof state>)=>bindProgressReviewOutputSchema(schema,{progressState}) as any;
-it('binds exact milestone and current refs while retaining nullable review and other output fields',()=>{
+it('requires a review for an existing milestone while binding exact current refs',()=>{
  const s=state(),result=bind(s),p=result.properties.progressReview;
- expect(p.type).toEqual(['object','null']);
+ expect(p.type).toBe('object');
  expect(p.properties.milestoneId.enum).toEqual([s.milestone!.id]);
  expect(p.properties.evidenceRefs.items.enum).toEqual(s.operations.map(o=>o.evidenceRef));
  expect(p.properties.assessment).toEqual(schema.properties.progressReview.properties.assessment);
@@ -52,4 +53,18 @@ it('includes request-bound refs in the real API serialization and capacity bytes
  const s=state(),input={goalSummary:'test',activeSeconds:1,runtime:'running',messages:[{kind:'user',text:'test',truncated:false}],truncated:false,progressState:s};
  const body=JSON.parse(serializeObserverTransport(input,{model:'test',instructions:'test',schema,maxOutputTokens:200}));
  expect(body.text.format.schema).toEqual(bind(s));expect(body.text.format.strict).toBe(true);
+});
+it('binds historical candidate review separately even with no accepted milestone',()=>{
+ const s=state();s.milestone=null;
+ const pending=retainPendingMilestone({definition:'finding',criterion:'finding',completionCriterion:'semantic',operationRef:null,estimate:null},s,1,2,1,null)!;
+ const input={goalSummary:'test',activeSeconds:3,runtime:'running',messages:[{kind:'user',text:'test',truncated:false}],truncated:false,progressState:s,pendingMilestone:pending};
+ const body=JSON.parse(serializeObserverTransport(input,{model:'test',instructions:'test',schema,maxOutputTokens:200}));
+ const bound=body.text.format.schema;
+ expect(bound.properties.progressReview.type).toBe('null');
+ expect(bound.properties.pendingMilestoneReview.type).toBe('object');
+ expect(bound.properties.pendingMilestoneReview.properties.candidateId.enum).toEqual([pending.id]);
+ expect(bound.properties.pendingMilestoneReview.properties.evidenceRefs.items.enum).toEqual(s.operations.map(o=>o.evidenceRef));
+ expect(JSON.stringify(body.input)).toContain(pending.id);
+ expect((bindProgressReviewOutputSchema(schema,{...input,progressState:state('other')}) as any).properties.pendingMilestoneReview.type).toBe('null');
+ expect(schema.properties.pendingMilestoneReview.type).toEqual(['object','null']);
 });

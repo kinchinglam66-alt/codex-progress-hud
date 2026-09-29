@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
 import type {HistorySnapshot} from './history-snapshot.js';
 import {parseCodexCheckpoint} from './codex-checkpoint.js';
+import {historyCapacityError} from '../estimation/history-capacity-error.js';
 
 export interface VerifiedHistoryFallback {
  snapshot:HistorySnapshot;
@@ -15,7 +16,7 @@ export async function assertCheckpointWindow(snapshot:HistorySnapshot,signal:Abo
  const checkpoint=parseCodexCheckpoint({type:'compacted',payload:{replacement_history:snapshot.checkpoint.items}});
  if(!checkpoint||checkpoint.fingerprint!==snapshot.checkpoint.fingerprint)throw Error('CHECKPOINT_INVALID');
  let bytes=checkpoint.encodedBytes;
- const checkSize=()=>{if(bytes>8*1024*1024)throw Error('context_too_large:checkpoint_window');};
+ const checkSize=()=>{if(bytes>8*1024*1024)throw historyCapacityError('checkpoint_window',bytes,8*1024*1024);};
  checkSize();
  for await(const item of snapshot.records(signal)){
   signal.throwIfAborted();bytes+=Buffer.byteLength(JSON.stringify(item),'utf8');checkSize();

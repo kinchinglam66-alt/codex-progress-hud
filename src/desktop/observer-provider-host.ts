@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {correlatedPreparationSignal} from '../estimation/request-correlation.js';
 import {mkdir, lstat, open} from 'node:fs/promises';
 import {join} from 'node:path';
 import {z} from 'zod';
@@ -324,7 +325,7 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         }
       };
       if(delegate.prepareContext)guarded.prepareContext=async(input,history,signal,conversationKey,turnGeneration,observedAtMs)=>{
-        const combined=AbortSignal.any([signal,preparationSignal]);
+        const combined=correlatedPreparationSignal(signal,preparationSignal);
         if(current!==owner||state!=='ready'||expected!==dispatchGeneration||combined.aborted){
           await history.snapshot.close();throw fixedFailure('CONTEXT_PROVIDER_CHANGED');
         }
@@ -333,12 +334,12 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         return result;
       };
       if(delegate.nativeSourceDestination)guarded.nativeSourceDestination=async signal=>{
-        const combined=AbortSignal.any([signal,preparationSignal]);assertPreparationCurrent(combined);
+        const combined=correlatedPreparationSignal(signal,preparationSignal);assertPreparationCurrent(combined);
         const result=await delegate.nativeSourceDestination!(combined);
         assertPreparationCurrent(combined);return result;
       };
       if(delegate.prepareNativeContext)guarded.prepareNativeContext=async(input,source,signal,...rest)=>{
-        const combined=AbortSignal.any([signal,preparationSignal]);
+        const combined=correlatedPreparationSignal(signal,preparationSignal);
         if(!preparationCurrent(combined)){
           // Scheduler hands this snapshot to the worker before calling us.
           // No delegate accepted it yet, so the wrapper must close it here.
@@ -348,13 +349,13 @@ export async function createObserverProviderHost(options: ObserverProviderHostOp
         assertPreparationCurrent(combined);return result;
       };
       if(delegate.prepareNativeTurnContext)guarded.prepareNativeTurnContext=async(input,source,signal,...rest)=>{
-        const combined=AbortSignal.any([signal,preparationSignal]);assertPreparationCurrent(combined);
+        const combined=correlatedPreparationSignal(signal,preparationSignal);assertPreparationCurrent(combined);
         // Paired readers remain caller-owned; the delegate owns any base copy.
         const result=await delegate.prepareNativeTurnContext!(input,source,combined,...rest);
         assertPreparationCurrent(combined);return result;
       };
       if(delegate.prepareNativeHistoryFallback)guarded.prepareNativeHistoryFallback=async(input,history,signal,...rest)=>{
-        const combined=AbortSignal.any([signal,preparationSignal]);assertPreparationCurrent(combined);
+        const combined=correlatedPreparationSignal(signal,preparationSignal);assertPreparationCurrent(combined);
         const result=await delegate.prepareNativeHistoryFallback!(input,history,combined,...rest);
         assertPreparationCurrent(combined);return result;
       };

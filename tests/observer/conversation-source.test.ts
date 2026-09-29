@@ -169,6 +169,52 @@ it('exposes an opaque current-turn text digest while excluding runtime and times
   }finally{await f.source.close();}
 });
 
+it('keeps the source revision stable on empty successful polls without a reset',async()=>{
+  const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  try{
+    const first=f.source.goals.inspect?.('key','opaque-current',query);
+    const epoch=f.source.goals.epoch('key');
+    f.set({records:[],caughtUp:true,partialLine:false,reset:false});
+    for(const at of [5500,10500,15500]){
+      f.time(at);f.source.tick();await f.flush();
+      const current=f.source.goals.inspect?.('key','opaque-current',query);
+      expect(current?.revision).toBe(first?.revision);
+      expect(current?.contentFingerprint).toBe(first?.contentFingerprint);
+      expect(f.source.goals.epoch('key')).toBe(epoch);
+    }
+  }finally{await f.source.close();}
+});
+
+it('changes the private paired-result fingerprint only when a current action has a result',async()=>{
+  const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  const fingerprint=()=>f.source.goals.inspect?.('key','opaque-current',query)?.pairedResultFingerprint;
+  try{
+    const initial=fingerprint();expect(initial).toMatch(/^[a-f0-9]{64}$/u);
+    f.set({records:[...records,{id:'thinking',turnId:'current',atMs:3000,kind:'assistant',text:'still working'}],
+      caughtUp:true,partialLine:false,reset:false});
+    f.time(5500);f.source.tick();await f.flush();expect(fingerprint()).toBe(initial);
+    f.set({records:[...records,{id:'result',turnId:'current',atMs:4000,kind:'tool_result',actionId:'call',text:'done'}],
+      caughtUp:true,partialLine:false,reset:false});
+    f.time(10500);f.source.tick();await f.flush();expect(fingerprint()).not.toBe(initial);
+  }finally{await f.source.close();}
+});
+
+it('does not treat an unchanged text fingerprint as proof of unchanged completion evidence',async()=>{
+  const f=setup();
+  const message={id:'phase',turnId:'current',atMs:3000,kind:'assistant' as const,text:'Checks finished',assistantPhase:'commentary' as const};
+  f.set({records:[...records,message],caughtUp:true,partialLine:false,reset:false});
+  f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  try{
+    const first=f.source.goals.inspect?.('key','opaque-current',query);
+    expect(first?.finalAvailable).toBe(false);
+    f.set({records:[...records,{...message,assistantPhase:'final'}],caughtUp:true,partialLine:false,reset:true});
+    f.time(5500);f.source.tick();await f.flush();
+    const second=f.source.goals.inspect?.('key','opaque-current',query);
+    expect(second?.contentFingerprint).toBe(first?.contentFingerprint);
+    expect(second?.finalAvailable).toBe(true);
+  }finally{await f.source.close();}
+});
+
 it('inspects eligibility without taking an inference-time snapshot',async()=>{
   const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
   for(let n=0;n<10;n++)expect(f.source.goals.inspect?.('key','opaque-current',query)).toMatchObject({ready:true,currentActionId:'call'});

@@ -3,6 +3,7 @@ import {PassiveGoals, type GoalContextSource} from '../../src/server/passive-goa
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
 import {ObserverScheduler,type ObserverObservation} from '../../src/estimation/observer-scheduler.js';
+import {randomUUID} from 'node:crypto';
 
 const token='checkpoint-test-token-not-a-live-credential';
 const wall=1_800_000_000_000;
@@ -31,6 +32,18 @@ function seeded() {
 }
 
 describe('same native turn restart recovery',()=>{
+  it('does not invent provenance for a recovered prediction',()=>{
+    const before=seeded(),after=fixture(),key=before.event.sessionKey;
+    const source={instanceId:randomUUID(),turnRef:'a'.repeat(64),correlationId:randomUUID(),requestId:1};
+    expect(before.goals.settle(before.goals.request(key,100)!.ticket,answer,200,source)).toBe(true);
+    expect(before.goals.view(key,200)?.predictionSource).toEqual(source);
+    const checkpoint=before.goals.checkpoint(1000,wall);
+    expect(JSON.stringify(checkpoint)).not.toContain(source.correlationId);
+    after.goals.restoreCheckpoint(checkpoint);after.goals.observe({...before.event,receivedAt:10},true,10);
+    after.goals.reconcileSource(key,10);
+    expect(after.goals.view(key,10)?.prediction).not.toBeNull();
+    expect(after.goals.view(key,10)?.predictionSource).toBeUndefined();
+  });
   it('marks recovered numeric forecasts with unknown conditions rather than inventing an unconditional estimate',()=>{
     const before=seeded(),after=fixture(),key=before.event.sessionKey;
     after.goals.restoreCheckpoint(before.goals.checkpoint(1000,wall));

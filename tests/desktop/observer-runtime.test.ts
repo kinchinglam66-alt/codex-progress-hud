@@ -84,6 +84,35 @@ it('serializes account preparations and rejects a queued cancellation without to
   expect(reads).toBe(1);expect(invalidations).toBe(0);
  }finally{held.resolve();await runtime.close();}
 });
+it.each([['prepare',false],['acceptance',false],['prepare',true],['acceptance',true]] as const)('queues result acceptance behind shared identity %s (cancelled=%s)',async(mode,cancelled)=>{
+ const events:string[]=[],signal=new AbortController().signal,held=deferred<void>();
+ let options:any,busy=false,hold=false,entered=0,guardCalls=0;
+ const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),
+  identity:{...identityFor(()=>0,events),prepareSession:async()=>{
+   if(busy)throw Error('identity busy');
+   busy=true;try{if(hold&&mode==='prepare'){entered++;await held.promise;}}
+   finally{busy=false;}
+   return {accountLabel:'synthetic',evidence:evidence(0),invocation:invocation(),validateAcceptance:async()=>{
+    guardCalls++;
+    if(busy)return false;
+    busy=true;try{if(hold&&mode==='acceptance'){entered++;await held.promise;}return true;}finally{busy=false;}
+   }};
+  }},persistentReceiptDirectory:'test-receipts',persistentWorkerFactory:value=>{options=value;return {
+   observe:async()=>({status:'disabled',interpretation:null,usage:null}),status:()=>({active:false,disabled:false,poisoned:false}),disable(){},close:async()=>{}};}});
+ try{
+  await runtime.start(signal);runtime.workerSource.acquire('source');
+  const prepared=await options.prepareSession(signal);hold=true;
+  const first=mode==='prepare'?options.prepareSession(signal):prepared.validateAcceptance(signal);
+  await vi.waitFor(()=>expect(entered).toBe(1));
+  const queuedController=new AbortController(),callsBefore=guardCalls;
+  const second=prepared.validateAcceptance(queuedController.signal);
+  if(cancelled)queuedController.abort();
+  hold=false;held.resolve();await first;
+  expect(await second).toBe(!cancelled);
+  expect(guardCalls-callsBefore).toBe(cancelled?0:1);
+  expect(await prepared.validateAcceptance(signal)).toBe(true);
+ }finally{held.resolve();await runtime.close();}
+});
 it('retains a healthy persistent worker between scheduler operations and closes it on shutdown',async()=>{
   const events:string[]=[];let created=0,released=0,closed=0;
   const runtime=createDesktopObserverRuntime({now:()=>0,dialog:dialogFor(events),openAccounting:async()=>owner(events),identity:identityFor(()=>0,events),

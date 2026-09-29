@@ -3,6 +3,62 @@ import {mkdtemp,readFile,readdir,rm,open} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createPilotJournal} from '../../src/evaluation/pilot-journal.js';
+import {ETA_TIME_BASIS} from '../../src/core/eta-time-basis.js';
+
+it('preserves clock basis on new rows without relabelling old rows or logging invalid flags',async()=>{
+ const directory=await mkdtemp(resolve(tmpdir(),'hud-clock-basis-')),journal=createPilotJournal(directory);
+ try{
+  const base={kind:'result' as const,at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1};
+  journal.record({...base,timeBasis:ETA_TIME_BASIS,blockingUnknown:true,humanBlocked:false});
+  journal.record(base);
+  journal.record({...base,timeBasis:ETA_TIME_BASIS,blockingUnknown:'PRIVATE' as any});
+  await journal.close();
+  const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+  const rows=raw.trim().split('\n').map(s=>JSON.parse(s)).filter(r=>r.kind==='result');
+  expect(rows[0]).toMatchObject({timeBasis:ETA_TIME_BASIS,blockingUnknown:true,humanBlocked:false});
+  expect(rows[1].timeBasis).toBeUndefined();expect(raw).not.toContain('PRIVATE');
+ }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('records allowlisted milestone decisions and event counts without private definitions',async()=>{
+ const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-milestone-'));
+ try{
+  const journal=createPilotJournal(directory);
+  journal.record({kind:'result',at:42,key:'private-key',generation:1,activeSeconds:42,runtime:'running',version:2,
+   pairedResultSequence:2,observedEventSequence:0,semanticReviewEventSequence:1,
+   reviewOutcome:'not_provided',milestoneApplicationOutcome:'accepted',
+   reviewEvidenceRefs:['ev_'+'b'.repeat(32)],
+   lastObservedMilestone:{milestoneId:'ms_'+'c'.repeat(32),operationRef:'op_'+'d'.repeat(32),
+    evidenceRef:'ev_'+'e'.repeat(32),sourceEndedAtMs:40000,actualRemainingActiveSeconds:null},
+   milestone:{id:'ms_'+'a'.repeat(32),judgment:'in_progress',completionCriterion:'semantic',operationRef:null,
+    prediction:{remainingSeconds:100,errorPercent:40,observedActiveSeconds:40}},
+   ...{definition:'PRIVATE_CONTEXT',reviewOutcomeDetail:'PRIVATE_CONTEXT'}});
+  await journal.close();
+  const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+  expect(JSON.parse(raw.split('\n')[0]!)).toMatchObject({pairedResultSequence:2,observedEventSequence:0,
+   semanticReviewEventSequence:1,reviewOutcome:'not_provided',milestoneApplicationOutcome:'accepted',
+   milestone:{completionCriterion:'semantic',operationRef:null},reviewEvidenceRefs:['ev_'+'b'.repeat(32)],
+   lastObservedMilestone:{evidenceRef:'ev_'+'e'.repeat(32)}});
+  expect(raw).not.toContain('PRIVATE_CONTEXT');expect(raw).not.toContain('private-key');
+ }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+it('projects bounded per-result progress settlement metadata and leaves old or rejected rows unknown',async()=>{
+ const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-progress-settlement-')),journal=createPilotJournal(directory);
+ try{
+  const base={kind:'result' as const,at:1,key:'private',generation:1,activeSeconds:1,runtime:'running' as const,version:1};
+  const diagnostic={responseKind:'provided',outcome:'aged_numeric_only',detail:'PRIVATE_CONTEXT'} as const;
+  journal.record({...base,accepted:true,progressSettlement:diagnostic});
+  journal.record({...base,accepted:false,progressSettlement:diagnostic});
+  journal.record({...base,accepted:true});
+  journal.record({...base,accepted:true,progressSettlement:{...diagnostic,outcome:'PRIVATE_CONTEXT'} as any});
+  await journal.close();
+  const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+  expect(raw).not.toContain('PRIVATE_CONTEXT');
+  const rows=raw.trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.kind==='result');
+  expect(rows.map(row=>row.progressSettlement)).toEqual([{responseKind:'provided',outcome:'aged_numeric_only'},undefined,undefined,undefined]);
+ }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
 
 it('persists only normalized admission reasons for denied results',async()=>{
  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-admission-')),journal=createPilotJournal(directory);
@@ -12,6 +68,24 @@ it('persists only normalized admission reasons for denied results',async()=>{
   const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
   expect(raw).not.toContain('PRIVATE-ERROR');
   expect(raw.trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.kind==='result').map(row=>row.admissionReason)).toEqual(['cooldown','unresolved_previous_call','local_policy']);
+ }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it.each([undefined,'aged_response_no_estimate','estimate_expired_on_arrival'] as const)('links a retained historical forecast to its review without writing definitions or changing clocks (rejection=%s)',async rejectionReason=>{
+ const accepted=rejectionReason===undefined;
+ const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-pending-milestone-')),journal=createPilotJournal(directory);
+ const id='pc_'+'a'.repeat(32),evidence='ev_'+'b'.repeat(32);
+ const base={kind:'result' as const,at:2,key:'private',generation:1,activeSeconds:20,runtime:'running' as const,version:1,accepted:true};
+ try{
+  journal.record({...base,pendingMilestoneDecision:{retained:true,reviewOutcome:'not_provided',retainedCandidate:{id,observedActiveSeconds:1,sourceRevision:4,completionCriterion:'semantic',estimate:{remainingSeconds:100,errorPercent:30}},...{definition:'PRIVATE_CONTEXT'}}});
+  journal.record({...base,accepted,...(rejectionReason?{rejectionReason}:{}),pendingMilestoneDecision:{retained:false,reviewOutcome:'reviewed',candidateId:id,assessment:'inferred_complete',evidenceRefs:[evidence],snapshotActiveSeconds:10,sourceRevision:8}});
+  await journal.close();const raw=await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8');
+  expect(raw).not.toContain('PRIVATE_CONTEXT');
+  const rows=raw.trim().split('\n').map(line=>JSON.parse(line)).filter(row=>row.kind==='result');
+  expect(rows[0].pendingMilestoneDecision.retainedCandidate).toMatchObject({id,observedActiveSeconds:1,sourceRevision:4});
+  expect(rows[1].pendingMilestoneDecision).toMatchObject({candidateId:id,assessment:'inferred_complete',snapshotActiveSeconds:10,sourceRevision:8});
+  expect(rows[1].activeSeconds).toBe(20);
+  expect(rows[1].accepted).toBe(accepted);
  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
 });
 

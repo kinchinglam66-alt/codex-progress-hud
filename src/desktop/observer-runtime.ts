@@ -370,10 +370,15 @@ export function createDesktopObserverRuntime({identity, inspectStartupAccount, o
       }
       const capturedBinding=binding(prepared.evidence);
       const acceptanceAuthorized=()=>!disabled&&ready&&gate.authorized()&&authorizedBinding===capturedBinding;
-      return {invocation:prepared.invocation,...(prepared.mainAccountSession?{mainAccountSession:prepared.mainAccountSession}:{}),validateAcceptance:async (acceptanceSignal:AbortSignal)=>{
-        if(acceptanceSignal.aborted||!acceptanceAuthorized()||!prepared.validateAcceptance)return false;
-        const valid=await prepared.validateAcceptance(acceptanceSignal).catch(()=>false);
-        return valid&&!acceptanceSignal.aborted&&acceptanceAuthorized();
+      return {invocation:prepared.invocation,...(prepared.mainAccountSession?{mainAccountSession:prepared.mainAccountSession}:{}),validateAcceptance:(acceptanceSignal:AbortSignal)=>{
+        // All checks share one identity runtime. A busy local checker is not
+        // evidence of an account change; serialize with preparations and reuse.
+        const acceptance=serial(metadataTail,async()=>{
+          if(acceptanceSignal.aborted||!acceptanceAuthorized()||!prepared.validateAcceptance)return false;
+          const valid=await prepared.validateAcceptance(acceptanceSignal).catch(()=>false);
+          return valid&&!acceptanceSignal.aborted&&acceptanceAuthorized();
+        });
+        metadataTail=acceptance.next;return acceptance.result;
       },binding:{accountFingerprint:prepared.evidence.accountFingerprint,
         routeFingerprint:prepared.evidence.routeFingerprint,assetsFingerprint:prepared.evidence.assetsFingerprint},
         ...(prepared.reuse?{reuse:guardedReuse(prepared.reuse,prepared.evidence)}:{})};

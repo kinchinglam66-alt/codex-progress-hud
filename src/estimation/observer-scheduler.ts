@@ -1,4 +1,6 @@
 import type {ObserverInput} from './observer-contract.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-contract.js';
+import {TASK_OBJECTIVE_TARGET} from '../core/task-objective.js';
 import {isInferenceEligible} from './observer-contract.js';
 import type {ObserverResult} from './observer-provider.js';
 import type {ObserverCallStage} from './observer-provider.js';
@@ -20,6 +22,7 @@ import {captureHistoryFeatures} from './residual/capture.js';
 import {createRequestProfile,type RequestProfile,type RequestProfilePhase} from './request-profile.js';
 import {workerAcquisitionReason} from '../core/observer-diagnostics.js';
 import {requestCorrelation} from './request-correlation.js';
+import {createMeasurementIdentity,type MeasurementIdentity} from './prediction-source.js';
 import {validateCompletionOutlook,estimateUncertain} from './completion-outlook.js';
 import {assessEstimateCondition,type EstimateConditionAssessment} from './estimate-conditions.js';
 export interface ObserverWorker {
@@ -54,12 +57,27 @@ export interface ObserverWorkerSource {
   all(): readonly ObserverWorker[];
 }
 export interface ObserverObservation {
+  predictionTarget?:typeof TASK_OBJECTIVE_TARGET;
+  objectiveTargetId?:string;
+  timeBasis?:typeof ETA_TIME_BASIS;
+  blockingUnknown?:boolean;
+  humanBlocked?:boolean;
+  measurementIdentity?:MeasurementIdentity;
+  pendingMilestoneDecision?:NonNullable<ReturnType<PassiveGoals['pendingMilestoneDecision']>>;
+  progressSettlement?:NonNullable<ReturnType<PassiveGoals['progressSettlement']>>;
   estimateCondition?:EstimateConditionAssessment|undefined;
   estimateUncertain?:boolean;
   completionPath?:'deliver_result'|'report_blocker'|'uncertain'|undefined;
   wireMetrics?:import('./observation-wire.js').WireMetrics;
   correlationId?:string;
-  milestone?:{id:string;judgment:'in_progress'|'observed_complete'|'inferred_complete'|'unknown';prediction:{remainingSeconds:number;errorPercent:number;observedActiveSeconds:number}|null};
+  milestone?:{id:string;judgment:'in_progress'|'observed_complete'|'inferred_complete'|'unknown';prediction:{remainingSeconds:number;errorPercent:number;observedActiveSeconds:number}|null;
+    completionCriterion?:'operation_end'|'semantic';operationRef?:string|null};
+  pairedResultSequence?:number;observedEventSequence?:number;semanticReviewEventSequence?:number;
+  reviewOutcome?:'applied'|'not_provided'|'milestone_mismatch'|'evidence_not_in_scope';
+  reviewEvidenceRefs?:string[];
+  lastObservedMilestone?:{milestoneId:string;operationRef:string;evidenceRef:string;sourceEndedAtMs:number;
+    actualRemainingActiveSeconds:number|null;forecastErrorSeconds?:number|null};
+  milestoneApplicationOutcome?:'accepted'|'hidden'|'not_provided'|'invalid_operation'|'inconsistent_estimate';
   eventCutoff?:number;
   pendingCriticalEvents?:number;
   nativeFallbackReason?:'pair_unavailable'|'source_unobserved'|'source_checkpoint_unsupported'|'source_terminal_unsupported'|'source_limit'|'history_incomplete';
@@ -89,6 +107,8 @@ interface Entry {
   seenCriticalEvidence?:Set<string>;
   criticalEvents?:Array<{sequence:number;revision:number|null;at:number}>;
   progressScope?:string;progressEventSequence?:number;milestoneTimerReservation?:string;
+  semanticMilestoneId?:string;pairedResultSequence?:number;semanticReviewEventSequence?:number;
+  semanticReviewReservedMilestoneId?:string;
   born: number; readyAfter: number; lastStart: number|null; eventAt: number|null;
   eventSequence: number; consumedEventSequence: number;
   version: number; consumed: number; unknown: number; starts: number[];
@@ -113,7 +133,9 @@ interface Entry {
   ended:boolean;
 }
 interface Flight {researchFailure?:import('./residual/contract.js').PrefixFailure;researchGeneration?:number;researchTicket?:object;key: string; ticket: object; controller: AbortController; worker: ObserverWorker; requestId:number; requestedAt:number; observedActiveSeconds:number;
+  objectiveTargetId?:string;
   eventCutoff?:number;
+  timeBasis?:typeof ETA_TIME_BASIS;
   generation:number;runtime:string;version:number;triggerReason:TriggerReason; excludedActiveSeconds:number;
   lastRequestActiveSeconds:number|null; eligibleActiveSeconds:number|null; goalIdentity:object; schedulerGeneration:number;
   deadlineAt?:number; timedOut?:boolean;
@@ -124,6 +146,7 @@ interface Flight {researchFailure?:import('./residual/contract.js').PrefixFailur
  * changed never dispatches synchronously on the task Hook/HTTP path.
  */
 export class ObserverScheduler {
+  private readonly measurementIdentity=createMeasurementIdentity();
   private readonly entries = new Map<string, Entry>();
   private readonly flights = new Map<string, Flight>();
   private readonly workerSource: ObserverWorkerSource;
@@ -172,18 +195,24 @@ export class ObserverScheduler {
       idleEligible:!this.disabled&&state.sourceAvailable!==false&&state.finalAvailable===true&&state.view.runtime==='waiting',
       running:!this.disabled&&state.sourceAvailable!==false&&state.view.runtime==='running'&&state.view.status!=='completed'}:null;
   }
-  private releaseRetention(entry:Entry,flight:Flight,accepted:boolean,live:ReturnType<PassiveGoals['scheduling']>):void {
+  private releaseRetention(entry:Entry,flight:Flight,retentionEligible:boolean,live:ReturnType<PassiveGoals['scheduling']>):void {
     let permit:NativeRetentionPermit|null=null;
     try{
     const state=this.retentionState(flight.key,live);
     this.workerSource.updateRetentionState?.(flight.key,state);
-    if(accepted&&live&&state&&state.turnKey===flight.turnKey&&state.generation===flight.generation&&
+    if(retentionEligible&&live&&state&&state.turnKey===flight.turnKey&&state.generation===flight.generation&&
       live.goalIdentity===flight.goalIdentity&&Number.isFinite(live.view.activeSeconds)&&
       entry.lastRequestActiveSeconds!==undefined){
       const prediction=live.view.prediction;
       const remaining=prediction?Math.max(0,prediction.remainingSeconds-Math.max(0,
         live.view.activeSeconds-prediction.observedActiveSeconds-(entry.predictionExcludedSeconds??0))):null;
-      const until=Math.max(0,entry.lastRequestActiveSeconds+ordinaryRequestIntervalSeconds(remaining,entry.unknown)-live.view.activeSeconds);
+      // Repeated expired answers use a longer recovery backoff. Retention must
+      // cover that existing schedule, not expire at the ordinary review time.
+      // This only sizes the bounded idle permit; it never advances dispatch.
+      const nextActiveSeconds=Math.max(
+        entry.lastRequestActiveSeconds+ordinaryRequestIntervalSeconds(remaining,entry.unknown),
+        entry.expiredResultPending?entry.overdueEligibleActiveSeconds??0:0);
+      const until=Math.max(0,nextActiveSeconds-live.view.activeSeconds);
       const idleStartedAtMs=(this.options.monotonicNow??(()=>performance.now()))();
       permit=createNativeRetentionPermit({...state,idleStartedAtMs,nextOrdinaryAtMs:idleStartedAtMs+until*1000});
     }
@@ -220,19 +249,36 @@ export class ObserverScheduler {
       const at=this.stopReason ? this.lastClock : this.time();
       if(this.stopReason&&kind==='skip'){
         this.options.onObservation({kind,at,key,generation:0,activeSeconds:0,activeTimeKnown:false,
+          ...(this.options.goals.predictionEndpoint()?{predictionTarget:this.options.goals.predictionEndpoint()!}:{}),
+          ...(this.options.goals.clockBasis()?{timeBasis:this.options.goals.clockBasis()!}:{}),
           runtime:entry.runtime,version:entry.version,...extra});
         return;
       }
       // Rejected tickets may belong to a removed/replaced goal object, even if
       // a new object reuses its numeric generation. Do not mix its live clock in.
       const view=flight && extra.accepted!==true?null:this.options.goals.view(key,at);
+      const progress=view?this.options.goals.progressDiagnostic(key):undefined;
       if(view || flight)this.options.onObservation({kind,at,key,generation:view?.generation??flight!.generation,
-        ...(view?.progressState?.milestone?{milestone:{id:view.progressState.milestone.id,judgment:view.progressState.milestone.judgment,prediction:view.progressState.milestone.prediction}}:{}),
+        ...(this.options.goals.predictionEndpoint()?{predictionTarget:this.options.goals.predictionEndpoint()!}:{}),
+        ...((view?.objectiveTargetId??flight?.objectiveTargetId)?{objectiveTargetId:(view?.objectiveTargetId??flight?.objectiveTargetId)!}:{}),
+        ...(progress?.milestone?{milestone:{id:progress.milestone.id,judgment:progress.milestone.judgment,prediction:progress.milestone.prediction,
+          completionCriterion:progress.milestone.completionCriterion,operationRef:progress.milestone.operationRef}}:{}),
+        ...(progress?{...(progress.pairedResultSequence===undefined?{}:{pairedResultSequence:progress.pairedResultSequence}),
+          observedEventSequence:progress.observedEventSequence,
+          ...(progress.reviewApplication?{reviewOutcome:progress.reviewApplication.outcome}:{}),
+          ...(progress.reviewEvidenceRefs?{reviewEvidenceRefs:[...progress.reviewEvidenceRefs]}:{}),
+          ...(progress.lastObservedMilestone?{lastObservedMilestone:{...progress.lastObservedMilestone}}:{}),
+          ...(progress.milestoneApplication?{milestoneApplicationOutcome:progress.milestoneApplication.outcome}:{})}:{}),
+        ...(entry.semanticReviewEventSequence===undefined?{}:{semanticReviewEventSequence:entry.semanticReviewEventSequence}),
         eventCutoff:flight?.eventCutoff??entry.consumedEventSequence,pendingCriticalEvents:Math.max(0,entry.eventSequence-entry.consumedEventSequence),
         activeSeconds:view?.activeSeconds??flight!.observedActiveSeconds,activeTimeKnown:view!==null&&this.options.goals.activeTimeKnown(key),
+        ...((view?.timeBasis??flight?.timeBasis)?{timeBasis:(view?.timeBasis??flight?.timeBasis)!,
+          ...(view?.blockingUnknown===undefined?{}:{blockingUnknown:view.blockingUnknown}),
+          ...(view?.humanBlocked===undefined?{}:{humanBlocked:view.humanBlocked})}:{}),
         ...(view?{timingUncertain:view.timingUncertain,recoveryState:view.recoveryState,recoveryGapSeconds:view.recoveryGapSeconds}:{}),
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,
-        ...((flight??entry.flight)?{correlationId:requestCorrelation((flight??entry.flight)!.controller.signal)}:{}),...extra});
+        ...((flight??entry.flight)?{correlationId:requestCorrelation((flight??entry.flight)!.controller.signal),
+          measurementIdentity:this.measurementIdentity(key,(flight??entry.flight)!.turnKey)}:{}),...extra});
     }catch{/* Recording must never authorize, retry or interrupt inference. */}
   }
   private contextState(flight:Flight,state:ObserverContextState,metrics?:ContextPreparationMetrics):void {
@@ -504,11 +550,29 @@ export class ObserverScheduler {
     return true;
   }
   private syncGoal(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
-    const progress=state.view.progressState;
+    const progress=state.progressDiagnostic;
     if(progress){
-      if(entry.progressScope===progress.scope&&progress.observedEventSequence>(entry.progressEventSequence??0))
+      const sameScope=entry.progressScope===progress.scope;
+      if(sameScope&&progress.observedEventSequence>(entry.progressEventSequence??0))
         this.markEvent(entry,this.time(),'important_event',state.revision??null);
       entry.progressScope=progress.scope;entry.progressEventSequence=progress.observedEventSequence;
+      const semantic=progress.milestone?.completionCriterion==='semantic'&&progress.milestone.judgment==='in_progress'
+        ?progress.milestone:null;
+      const paired=progress.pairedResultSequence??0;
+      if(semantic&&sameScope&&entry.semanticMilestoneId===semantic.id&&
+        entry.semanticReviewReservedMilestoneId!==semantic.id&&
+        paired>(entry.pairedResultSequence??paired)){
+        // Bound extra paid reviews to one per semantic milestone. A paired
+        // result is review evidence, not proof of stage or turn completion.
+        if(this.markEvent(entry,this.time(),'important_event',state.revision??null)){
+          entry.semanticReviewEventSequence=(entry.semanticReviewEventSequence??0)+1;
+          entry.semanticReviewReservedMilestoneId=semantic.id;
+        }
+      }
+      if(semantic)entry.semanticMilestoneId=semantic.id;else delete entry.semanticMilestoneId;
+      entry.pairedResultSequence=paired;
+    }else{
+      delete entry.semanticMilestoneId;delete entry.pairedResultSequence;
     }
     if(entry.goalIdentity===undefined){
       entry.goalIdentity=state.goalIdentity;entry.predictionIdentity=state.predictionIdentity;
@@ -518,6 +582,7 @@ export class ObserverScheduler {
     }
     if(entry.goalIdentity!==state.goalIdentity){
       delete entry.seenCriticalEvidence;
+      delete entry.semanticReviewReservedMilestoneId;
       entry.timerFailures=0;
       entry.sourceActiveSeconds=state.view.activeSeconds;entry.sourceClockAvailable=state.sourceAvailable;
       entry.predictionExcludedSeconds=0;
@@ -551,6 +616,13 @@ export class ObserverScheduler {
   }
   private syncSourceClock(entry:Entry,state:NonNullable<ReturnType<PassiveGoals['scheduling']>>):void {
     const active=state.view.activeSeconds;
+    if(state.view.timeBasis===ETA_TIME_BASIS){
+      // Missing observer input is not a pause of the underlying task.
+      entry.sourceActiveSeconds=active;entry.sourceClockAvailable=state.sourceAvailable;
+      entry.predictionExcludedSeconds=0;
+      if(entry.flight)entry.flight.excludedActiveSeconds=0;
+      return;
+    }
     // Availability is sampled: conservatively exclude the interval if either
     // endpoint is unavailable. Shift raw-coordinate anchors, never the HUD clock.
     const excluded=(state.sourceAvailable===false||entry.sourceClockAvailable===false)
@@ -754,6 +826,8 @@ export class ObserverScheduler {
       worker.updateRetentionState?.(this.retentionState(key,state));
       delete entry.lastSkip;
       const flight: Flight = {key, ticket: request.ticket, controller: new AbortController(), worker,
+        ...(request.input.objectiveTargetId?{objectiveTargetId:request.input.objectiveTargetId}:{}),
+        ...(view.timeBasis?{timeBasis:view.timeBasis}:{}),
         eventCutoff:entry.eventSequence,
         profile:createRequestProfile(this.options.monotonicNow,worker.subscribeContextPhase?'sourceMs':'unattributedMs'),
         requestId:++this.requestSequence,requestedAt:now,observedActiveSeconds:request.input.activeSeconds,
@@ -842,7 +916,9 @@ export class ObserverScheduler {
       && result?.status === 'interpreted' && (!mustDisable || safeUnknownUsage);
     const settledAt=this.time();
     const accepted = this.options.goals.settle(flight.ticket,
-      eligible ? result!.interpretation : null, settledAt);
+      eligible ? result!.interpretation : null, settledAt,
+      {...this.measurementIdentity(flight.key,flight.turnKey),requestId:flight.requestId,
+        correlationId:requestCorrelation(flight.controller.signal)});
     const hostRejection=accepted?undefined:this.options.goals.rejectionReason(flight.ticket);
     const rejectionReason=(staleCritical?'critical_event_after_snapshot':this.schedulerRejectionReason(flight,state)) ??
       (eligible&&result?.status==='interpreted'?hostRejection:undefined);
@@ -912,7 +988,13 @@ export class ObserverScheduler {
       (classification.diagnostic==='unknown_response'||(classification.diagnostic==='rejected_result'&&result?.status==='interpreted')))
       entry.bootstrapRecoveryEligible=true;
     this.recordResult(entry,flight,result,accepted,settledAt,live,rejectionReason);
-    this.releaseRetention(entry,flight,accepted,live);
+    // Forecast freshness is not native-session health. Retain only this narrow
+    // host rejection; the worker still verifies terminal completion, ownership,
+    // authorization and resource limits before keeping the process alive.
+    const expiredSessionEligible=eligible&&sameGoal&&hostRejection==='estimate_expired_on_arrival'&&
+      result?.rejectionReason===undefined&&result?.interpretation?.status!=='completed'&&
+      live?.view.runtime==='running'&&live.view.status!=='completed';
+    this.releaseRetention(entry,flight,accepted||expiredSessionEligible,live);
     this.notify();
   }
   private classifyResult(result:ObserverResult|null,accepted:boolean,rejectionReason?:ResultRejectionReason):{diagnostic?:ResultDiagnostic;rejectionReason?:ResultRejectionReason} {
@@ -968,6 +1050,8 @@ export class ObserverScheduler {
       triggerReason:flight.triggerReason,lastRequestActiveSeconds:flight.lastRequestActiveSeconds,
       eligibleActiveSeconds:flight.eligibleActiveSeconds,
       accepted,status:result?.status??'process_error',
+      ...(this.options.goals.pendingMilestoneDecision(flight.ticket)?{pendingMilestoneDecision:this.options.goals.pendingMilestoneDecision(flight.ticket)!}:{}),
+      ...(accepted&&this.options.goals.progressSettlement(flight.ticket)?{progressSettlement:this.options.goals.progressSettlement(flight.ticket)!}:{}),
       ...(result?.status==='admission_denied'?{admissionReason:normalizeAdmissionReason(result.admissionReason)}:{}),
       ...(result?.interpretation?{relation:result.interpretation.relation}:{}),
       estimate:result?.interpretation?.estimate?{...result.interpretation.estimate}:null,
@@ -1016,7 +1100,9 @@ export class ObserverScheduler {
     const sourceHealth:NonNullable<ObserverDiagnostics['sourceHealth']>=health===undefined?'unavailable':
       health==='loading'||health==='ready'||health==='missing'?health:'error';
     const schedulingReason=schedulingReasons.includes(entry?.lastSkip as SchedulingReason)?entry!.lastSkip as SchedulingReason:undefined;
-    const routing={schedulerRegistered:entry!==undefined,sourceHealth,...(schedulingReason?{schedulingReason}:{})};
+    const turnKey=this.options.goals.currentTurnKey(key);
+    const routing={schedulerRegistered:entry!==undefined,sourceHealth,...(schedulingReason?{schedulingReason}:{}),
+      ...(turnKey?{measurementIdentity:this.measurementIdentity(key,turnKey)}:{})};
     const contextState=entry?.contextState&&entry.contextStateTurnKey===this.options.goals.currentTurnKey(key)
       ?entry.contextState:undefined;
     const quality=entry?.qualityTurnKey===this.options.goals.currentTurnKey(key)&&entry?.missingImages!==undefined?

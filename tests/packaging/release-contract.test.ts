@@ -100,7 +100,9 @@ describe("Windows release source contract", () => {
     const diagnostic = await text("scripts/diagnose-packaged-mcp.mjs");
     expect(smoke).toContain('readFile(resolve(root, "package.json"), "utf8")');
     expect(smoke).toContain('mkdtemp(join(tmpdir(), "hud-packaged-artifact-")');
-    expect(smoke).toContain('cp(resolve(root, "release/win-unpacked"), isolatedInstallDirectory, { recursive: true })');
+    expect(smoke).toContain('process.env.CODEX_PROGRESS_HUD_SMOKE_PACKAGE_DIR === undefined');
+    expect(smoke).toContain('resolve(root, "release/win-unpacked")');
+    expect(smoke).toContain('cp(sourceInstallDirectory, isolatedInstallDirectory, { recursive: true })');
     expect(smoke).toContain('resolve(isolatedInstallDirectory, "resources/app.asar/dist/main.js")');
     expect(smoke).toContain("APPDATA: dataDirectory");
     expect(smoke).toContain('ELECTRON_RUN_AS_NODE: "1"');

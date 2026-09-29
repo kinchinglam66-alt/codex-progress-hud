@@ -6,8 +6,9 @@ import {createProgressServer} from '../../src/server/http-server.js';
 import {CompanionHttpClient} from '../../src/mcp/report-client.js';
 import {normalizeHookInput} from '../../src/hooks/schema.js';
 import type {HudSnapshot} from '../../src/server/task-store.js';
+import {ETA_TIME_BASIS} from '../../src/core/eta-time-basis.js';
 
-it('restores the persisted native turn through two real servers without another inference',async()=>{
+it('restores wall elapsed across two real servers without reusing an unverified pre-restart forecast',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'hud-checkpoint-http-'));
   const root=join(directory,'sessions'),day=join(root,'2026','09','12'),tokenPath=join(directory,'auth.token');
   const id='01a0766f-e48a-70e0-b8a8-4abb83140175',turn='current';
@@ -41,7 +42,8 @@ it('restores the persisted native turn through two real servers without another 
     mono=550; // The native reader coalesces its first disk read by 500 ms.
     await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0],{timeout:3000}).toMatchObject({goal:{recoveryState:'restored'}});
     const view=((await client.status()) as HudSnapshot).rows![0]!.goal!;
-    expect(view.activeSeconds).toBe(120);expect(view.prediction?.errorPercent).toBe(30);
+    expect(view.timeBasis).toBe(ETA_TIME_BASIS);
+    expect(view.activeSeconds).toBe(720.5);expect(view.prediction).toBeNull();
     expect(view.timingUncertain).toBe(true);expect(calls).toBe(1);
     expect(view.recoveryGapSeconds).toBe(600);
   }finally{await server.close();await rm(directory,{recursive:true,force:true});}

@@ -2,6 +2,9 @@ import {z} from 'zod';
 import {completionOutlookSchema,turnEvidenceSchema} from './completion-outlook.js';
 import {estimateConditionsSchema} from './estimate-conditions.js';
 import {nextMilestoneSchema,progressReviewSchema,progressStateSchema} from './progress-state.js';
+import {pendingMilestoneSchema,pendingMilestoneReviewSchema} from './pending-milestone.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-contract.js';
+import {TASK_OBJECTIVE_TARGET} from '../core/task-objective.js';
 
 const seconds = z.number().finite().nonnegative().max(31_536_000);
 const ordinal = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -57,6 +60,7 @@ const workSchema=z.object({composition:z.enum(['serial','unknown']),
   changeReason:z.enum(['routine','scope_change','failure','unknown']),
   parts:z.array(workPartSchema).min(1).max(8)}).strict();
 export const observerResponseSchema = z.object({
+  pendingMilestoneReview:pendingMilestoneReviewSchema.nullable().optional(),
   completionOutlook:completionOutlookSchema.nullable().optional(),
   estimateConditions:estimateConditionsSchema.nullable().optional(),
   relation: z.enum(['continue', 'replace', 'unknown']),
@@ -87,6 +91,7 @@ const observationSchema = z.object({
   omittedCategories: z.array(z.enum(['user', 'assistant', 'tool', 'summary'])).max(4)
 }).strict();
 export const observerInputSchema = z.object({
+  pendingMilestone:pendingMilestoneSchema.optional(),
   turnEvidence:turnEvidenceSchema.optional(),
   executionObservations:z.object({schemaVersion:z.literal(1),snapshotAtMs:ordinal,throughOrdinal:ordinal,
     samples:z.array(z.object({startOrdinal:ordinal,endOrdinal:ordinal,startedAtMs:ordinal,endedAtMs:ordinal,
@@ -120,6 +125,9 @@ export const observerInputSchema = z.object({
   imageContextPending:z.boolean().optional(),
   progressState:progressStateSchema.optional(),
   goalSummary: z.string().min(1).max(2048).nullable(),
+  timeBasis:z.literal(ETA_TIME_BASIS).optional(),
+  predictionTarget:z.literal(TASK_OBJECTIVE_TARGET).optional(),
+  objectiveTargetId:z.string().regex(/^objective_[a-f0-9]{64}$/).optional(),
   activeSeconds: seconds,
   nativeTiming:z.object({requestActiveSeconds:seconds}).strict().optional(),
   runtime: z.enum(['running', 'waiting', 'paused']),
@@ -142,6 +150,7 @@ export const observerInputSchema = z.object({
   representation:representationSchema.optional(),
   historySummary:historySummarySchema.optional(),
 }).strict()
+  .refine(value=>(value.predictionTarget!==undefined)===(value.objectiveTargetId!==undefined))
   .refine(value=>!value.nativeTiming||value.nativeTiming.requestActiveSeconds<=value.activeSeconds)
   .refine(value => !value.packingLoss || (value.packingLoss.retainedMessages === value.messages.length &&
     value.packingLoss.clippedMessages === value.messages.filter(m=>m.truncated).length &&

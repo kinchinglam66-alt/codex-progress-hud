@@ -48,14 +48,24 @@ it.each([null,9,Number.NaN,25])('compares milestone prediction only with a valid
  applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
  observeProgress(s,[start,end],()=>mapped);
  expect(s.lastObservedMilestone?.actualRemainingActiveSeconds).toBe(mapped===25?15:null);
+ expect(s.lastObservedMilestone?.forecastErrorSeconds).toBe(mapped===25?85:null);
  expect(s.lastObservedMilestone?.limitation).toBe(mapped===25?'current_runtime_segment':'active_clock_mapping_unavailable');
+});
+it('retains a signed miss instead of turning an overrun into a zero or a wall-clock comparison',()=>{
+ const s=state();observeProgress(s,[start]);
+ applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
+ observeProgress(s,[start,end],()=>145);
+ expect(s.lastObservedMilestone?.actualRemainingActiveSeconds).toBe(135);
+ expect(s.lastObservedMilestone?.forecastErrorSeconds).toBe(-35);
+ expect(s.lastObservedMilestone?.operationWallSeconds).toBe(2);
+ expect(progressStateSchema.safeParse({...s,lastObservedMilestone:{...s.lastObservedMilestone,forecastErrorSeconds:2}}).success).toBe(false);
 });
 it('retains observed operation duration and previous prediction without fabricating active remaining time',()=>{
  const s=state();observeProgress(s,[start]);
  applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
  observeProgress(s,[start,end]);
  expect(s.lastObservedMilestone).toMatchObject({operationWallSeconds:2,actualRemainingActiveSeconds:null,
-  prediction:{remainingSeconds:100,observedActiveSeconds:10},limitation:'active_clock_mapping_unavailable'});
+  forecastErrorSeconds:null,prediction:{remainingSeconds:100,observedActiveSeconds:10},limitation:'active_clock_mapping_unavailable'});
  const previous=structuredClone(s.lastObservedMilestone);
  applyProgress(s,semantic,null,total,20);
  expect(s.lastObservedMilestone).toEqual(previous);
@@ -73,6 +83,33 @@ it('binds a running operation with missing future counterpart and confirms its e
  applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
  expect(observeProgress(s,[start,end])).toBe(true);expect(s.milestone?.judgment).toBe('observed_complete');
  expect(s.observedEventSequence).toBe(1);expect(observeProgress(s,[end,start,end])).toBe(false);expect(s.observedEventSequence).toBe(1);
+ expect(s.pairedResultSequence).toBe(1);
+});
+it('counts a paired result for semantic review without inventing milestone completion',()=>{
+ const s=state();applyProgress(s,semantic,null,total,10);
+ observeProgress(s,[start,end]);
+ expect(s.pairedResultSequence).toBe(1);
+ expect(s.observedEventSequence).toBe(0);
+ expect(s.milestone?.judgment).toBe('in_progress');
+ observeProgress(s,[start,end]);expect(s.pairedResultSequence).toBe(1);
+ expect(s.milestoneApplication?.outcome).toBe('accepted');
+});
+it('does not recount evicted operations when a long native prefix is scanned again',()=>{
+ const s=state();applyProgress(s,semantic,null,total,10);
+ const messages=Array.from({length:41},(_,i)=>[
+  {kind:'tool',text:`command ${i}`,event:{kind:'tool_start',ordinal:i*2,pairOrdinal:i,atMs:i*2000}},
+  {kind:'tool',text:`result ${i}`,event:{kind:'tool_result',ordinal:i*2+1,pairOrdinal:i,atMs:i*2000+1000}},
+ ]).flat();
+ observeProgress(s,messages.slice(0,80));expect(s.pairedResultSequence).toBe(40);
+ observeProgress(s,messages.slice(0,80));expect(s.pairedResultSequence).toBe(40);
+ observeProgress(s,messages);expect(s.pairedResultSequence).toBe(41);
+ expect(s.operations).toHaveLength(32);
+});
+it('seeds legacy checkpoints without inventing a new result event',()=>{
+ const s=state();delete s.pairedResultOrdinal;delete s.pairedResultSequence;
+ observeProgress(s,[start,end]);expect(s.pairedResultSequence).toBeUndefined();
+ expect(s.pairedResultOrdinal).toBe(9);
+ observeProgress(s,[start,end]);expect(s.pairedResultSequence).toBeUndefined();
 });
 it('never confirms a milestone from assistant prose or missing result pairing',()=>{
  const s=state();observeProgress(s,[start]);applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:s.operations[0]!.operationRef},null,total,10);
@@ -97,6 +134,7 @@ it('separates turns and source epochs and does not expose native identities in i
 it('discards inconsistent milestone without losing valid total',()=>{
  const s=state();expect(applyProgress(s,{...semantic,estimate:{remainingSeconds:400,errorPercent:50}},null,total,10)).toBe('invalid_milestone');
  expect(s.previousTurnEstimate).toEqual({...total,observedActiveSeconds:10});expect(s.milestone).toBeNull();
+ expect(s.milestoneApplication?.outcome).toBe('inconsistent_estimate');
 });
 it('rejects unknown operation refs and ignores forged evidence',()=>{
  const s=state();expect(applyProgress(s,{...semantic,completionCriterion:'operation_end',operationRef:'op_'+'a'.repeat(32)},null,total,10)).toBe('invalid_milestone');

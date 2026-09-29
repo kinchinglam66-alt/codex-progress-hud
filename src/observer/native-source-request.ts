@@ -1,6 +1,7 @@
 import type {NativeSourceSnapshot} from './native-source-snapshot.js';
 import type {NativeTurnBoundary} from './native-turn-boundary.js';
 import type {HistorySnapshot} from './history-snapshot.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-contract.js';
 
 /** Internal worker-owned destination. Never populated from chat or HTTP data. */
 export interface NativeSourceDestination {
@@ -29,4 +30,4 @@ export interface BoundNativeTurnSource extends NativeTurnSource {
 }
 
 /** Local scalar state sampled after preparation; no history or source paths. */
-export interface NativeObservationSample {activeSeconds:number;runtime:'running';requestActiveSeconds:number}
+export interface NativeObservationSample {activeSeconds:number;runtime:'running';requestActiveSeconds:number;timeBasis?:typeof ETA_TIME_BASIS}

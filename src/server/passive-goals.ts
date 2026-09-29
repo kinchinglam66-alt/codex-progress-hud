@@ -1,4 +1,8 @@
 import type {HookEnvelope} from '../hooks/schema.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-contract.js';
+import {EtaLiveClock} from '../core/eta-live-clock.js';
+import {TASK_OBJECTIVE_TARGET,objectiveState,type ObjectiveState,type ObjectiveEvidence,type AttentionEvidence} from '../core/task-objective.js';
+import {projectPredictionSource,type PredictionSource} from '../estimation/prediction-source.js';
 import {estimateUncertain} from '../estimation/completion-outlook.js';
 import {assessEstimateCondition,type EstimateConditionAssessment} from '../estimation/estimate-conditions.js';
 import type {PassiveContextStore} from './passive-context-store.js';
@@ -9,6 +13,7 @@ import type {PaceInterval, WorkBreakdown} from '../estimation/pace-correction.js
 import {freezePaceRequest} from '../estimation/pace-request-snapshot.js';
 import {createHash} from 'node:crypto';
 import {applyProgress,createProgressState,observeProgress,progressScope,type ProgressState} from '../estimation/progress-state.js';
+import {retainPendingMilestone,reviewPendingMilestone,type PendingMilestone,type PendingReviewOutcome,type PendingMilestoneTelemetry} from '../estimation/pending-milestone.js';
 import type {ResultRejectionReason} from '../core/observer-diagnostics.js';
 import type {GoalCheckpointRecord} from './goal-checkpoint.js';
 import type {MilestoneCheckpointRecord} from './milestone-checkpoint.js';
@@ -18,11 +23,25 @@ import type {ResearchBoundary,ResearchOwner} from '../estimation/residual/teleme
 
 type Runtime = 'running'|'waiting'|'paused'|'interrupted'|'failed'|'stopped';
 type Status = Runtime|'completed'|'unknown';
+function objectiveId(sessionKey:string,turnKey:string):string {
+  return 'objective_'+createHash('sha256').update(JSON.stringify([TASK_OBJECTIVE_TARGET,sessionKey,turnKey])).digest('hex');
+}
 export interface SourceTurnTakeover {turnKey:string;startedAtMs:number;identity:string;taskHandle?:string;previousTurnKey?:string}
 export interface PassiveGoalView {
+  predictionTarget?:typeof TASK_OBJECTIVE_TARGET;
+  objectiveTargetId?:string;
+  executionOutcome?:'completed'|'interrupted'|'failed';
+  objectiveState?:ObjectiveState;
+  attentionRequired?:boolean;
+  attentionWorkContinuing?:boolean;
+  timeBasis?:typeof ETA_TIME_BASIS;
+  blockingUnknown?:boolean;
+  humanBlocked?:boolean;
+  predictionSource?:PredictionSource;
   estimateUncertain?:boolean;
   estimateCondition?:EstimateConditionAssessment|undefined;
-  progressState?:{scope:string;observedEventSequence:number;reviewApplication?:ProgressState['reviewApplication'];milestone:Pick<NonNullable<ProgressState['milestone']>,'id'|'definition'|'prediction'|'judgment'>|null};
+  progressState?:{scope:string;observedEventSequence:number;reviewApplication?:ProgressState['reviewApplication'];
+    milestone:Pick<NonNullable<ProgressState['milestone']>,'id'|'definition'|'prediction'|'judgment'>|null};
   progressFloor?: number;
   recoveryState?: 'pending'|'restored';
   recoveryGapSeconds?: number|null;
@@ -37,10 +56,12 @@ export interface PassiveGoalView {
   changeReason?:'routine'|'scope_change'|'failure'|'unknown';
 }
 interface Goal {
+  wallClock?:EtaLiveClock;
   estimateUncertain?:boolean;
   estimateCondition?:EstimateConditionAssessment|undefined;
   progressState?:ProgressState;
   progressScanRevision?:number;
+  progressScanResultFingerprint?:string;
   progressFloor?: number;
   recoveryPending?: boolean;
   recovered?: boolean;
@@ -87,12 +108,21 @@ export interface GoalContextSource {
   openHistory?(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>;
   health?(key:string):'loading'|'ready'|'error'|'missing';
   execution?(key:string,turnKey:string):{
-    state:'running'|'waiting'|'interrupted'|'failed'|'unknown';outcome?:'completed'|'interrupted'|'failed';boundaryMs?:number;identity:string;researchReliable?:boolean
+    state:'running'|'waiting'|'interrupted'|'failed'|'unknown';outcome?:'completed'|'interrupted'|'failed';boundaryMs?:number;identity:string;researchReliable?:boolean;
+    /** Only independently verified adapter facts; never model/text inference. */
+    humanBlock?:{humanActionRequired:true;wholeTurnBlocked:true;relevantWorkRunning:false;evidenceRef:string};
+    startedAtMs?:number;
+    /** Signed monotonic projection; may predate this process's origin. */
+    wallClockBoundaryMs?:number;
+    blockingEvidenceComplete?:boolean;
+    objectiveEvidence?:ObjectiveEvidence;
+    attention?:AttentionEvidence;
   }|null;
   takeover?(key:string,turnKey:string):SourceTurnTakeover|null;
   epoch(key:string):number|null;
   inspect?(key:string,turnKey:string,query:GoalContextQuery):{
-    ready:boolean;revision:number;userFingerprint?:string;contentFingerprint?:string;currentActionId:string|null;finalAvailable:boolean
+    ready:boolean;revision:number;userFingerprint?:string;contentFingerprint?:string;
+    pairedResultFingerprint?:string;currentActionId:string|null;finalAvailable:boolean
   }|null;
   read(key:string,turnKey:string,query:GoalContextQuery):{
     researchFingerprint?:string;
@@ -106,8 +136,20 @@ interface Ticket {researchFingerprint?:string;sessionKey: string; goal: Goal; go
 interface SettledPace {sessionKey:string;goal:Goal;goalIdentity:object;measurementScope:object;epoch:number;sourceEpoch?:number;sourceMeasurementEpoch?:number;intervals:ReadonlyMap<string,readonly PaceInterval[]>}
 export interface OpenHistoryResult {snapshot:HistorySnapshot;currentTurnId:string}
 
+/** Private scheduling/measurement metadata; never included in the public HUD snapshot. */
+export interface ProgressDiagnostic {
+  scope:string;observedEventSequence:number;pairedResultSequence?:number;
+  milestone:{id:string;judgment:NonNullable<ProgressState['milestone']>['judgment'];
+    completionCriterion:NonNullable<ProgressState['milestone']>['completionCriterion'];operationRef:string|null;
+    prediction:NonNullable<ProgressState['milestone']>['prediction']}|null;
+  reviewApplication?:ProgressState['reviewApplication'];milestoneApplication?:ProgressState['milestoneApplication'];
+  reviewEvidenceRefs?:string[];lastObservedMilestone?:{milestoneId:string;operationRef:string;evidenceRef:string;
+    sourceEndedAtMs:number;actualRemainingActiveSeconds:number|null;forecastErrorSeconds?:number|null};
+}
+
 export interface PassiveGoalScheduling {
   view: PassiveGoalView;
+  progressDiagnostic?:ProgressDiagnostic;
   goalIdentity: object;
   predictionIdentity: object|null;
   sourceAvailable: boolean;
@@ -123,26 +165,38 @@ export interface PassiveGoalScheduling {
  * observe consumes only already-authenticated, accepted router deliveries.
  */
 export class PassiveGoals {
+  private readonly predictionSources=new WeakMap<object,PredictionSource>();
   private readonly goals = new Map<string, Goal>();
   private readonly recovery = new Map<string, GoalCheckpointRecord>();
   private readonly milestoneRecovery=new Map<string,MilestoneCheckpointRecord>();
   private recoveryWallNowMs: number|undefined;
   private readonly ended = new Set<string>();
   private tickets = new WeakMap<object, Ticket>();
-  private progressTickets=new WeakMap<object,{scope:string;sequence:number}>();
+  private progressTickets=new WeakMap<object,{scope:string;sequence:number;state:ProgressState;candidate?:PendingMilestone}>();
+  private pendingMilestones=new WeakMap<Goal,PendingMilestone>();
+  private pendingDecisions=new WeakMap<object,Readonly<{retained:boolean;reviewOutcome:PendingReviewOutcome;
+    retainedCandidate?:PendingMilestoneTelemetry;
+    candidateId?:string;assessment?:'in_progress'|'inferred_complete'|'superseded'|'unknown';
+    evidenceRefs?:readonly string[];snapshotActiveSeconds?:number;sourceRevision?:number}>>();
   private rejectionReasons = new WeakMap<object, ResultRejectionReason>();
   private settledAnchors = new WeakMap<object, number>();
+  private progressSettlements = new WeakMap<object, Readonly<{
+    responseKind:'provided'|'explicit_null'|'omitted';
+    outcome:'aged_numeric_only'|'unknown_relation'|'progress_applied';
+  }>>();
   private settledPace = new WeakMap<object, SettledPace>();
   private readonly paceMeasurements = new PaceMeasurements();
   private progressFor(sessionKey:string,goal:Goal):ProgressState {
     // Native turn/source identity survives pause and bootstrap. Ticket epochs do not.
     // Generation and estimateRevision are independently verified on checkpoint restore.
     const scope=progressScope(sessionKey,goal.turnKey,goal.sourceEpoch??null,0);
-    if(goal.progressState?.scope!==scope){goal.progressState=createProgressState(scope);delete goal.progressScanRevision;}
+    if(goal.progressState?.scope!==scope){goal.progressState=createProgressState(scope);delete goal.progressScanRevision;delete goal.progressScanResultFingerprint;}
     return goal.progressState;
   }
   constructor(private readonly contexts: PassiveContextStore,private readonly source?:GoalContextSource,
-    private readonly onResearchBoundary?:(event:ResearchBoundary)=>void) {}
+    private readonly onResearchBoundary?:(event:ResearchBoundary)=>void,
+    private readonly timeBasis?:typeof ETA_TIME_BASIS,
+    private readonly predictionTarget?:typeof TASK_OBJECTIVE_TARGET) {}
 
   private researchBoundary(sessionKey:string,goal:Goal,nowMs:number):void {
     if(!this.onResearchBoundary||!this.source?.execution)return;
@@ -199,6 +253,7 @@ export class PassiveGoals {
       }
       this.progress(goal,nowMs);
       records.set(sessionKey,{sessionKey,turnKey:goal.turnKey,generation:goal.generation,
+        ...(this.timeBasis?{timeBasis:this.timeBasis}:{}),
         estimateRevision:goal.estimateRevision,savedAtMs:wallNowMs,activeSeconds:this.active(goal,nowMs),
         runtime:goal.runtime as GoalCheckpointRecord['runtime'],status:goal.status as GoalCheckpointRecord['status'],
         prediction:goal.prediction?{...goal.prediction}:null,progressFloor:goal.progressFloor??0,
@@ -220,6 +275,11 @@ export class PassiveGoals {
     const saved=this.recovery.get(sessionKey);
     if(!saved)return;
     if(saved.turnKey!==goal.turnKey){this.recovery.delete(sessionKey);return;}
+    if(this.timeBasis&&saved.timeBasis!==this.timeBasis){
+      // Legacy active time cannot restore a wall-time anchor or prediction.
+      this.recovery.delete(sessionKey);this.milestoneRecovery.delete(sessionKey);
+      goal.timingUncertain=true;if(goal.wallClock)goal.wallClock.uncertain=true;return;
+    }
     goal.elapsed=saved.activeSeconds;goal.since=nowMs;goal.candidateBase=0;
     goal.generation=saved.generation;goal.estimateRevision=saved.estimateRevision;
     goal.prediction=saved.prediction?{...saved.prediction}:null;
@@ -229,6 +289,12 @@ export class PassiveGoals {
     // This is the unobserved checkpoint-to-load interval, not proven work or downtime.
     const gap=this.recoveryWallNowMs===undefined?NaN:(this.recoveryWallNowMs-saved.savedAtMs)/1000;
     goal.recoveryGapSeconds=Number.isFinite(gap)&&gap>=0&&gap<=31_536_000?gap:null;
+    if(this.timeBasis){
+      goal.wallClock=new EtaLiveClock(nowMs-(goal.recoveryGapSeconds??0)*1000,saved.activeSeconds);
+      goal.wallClock.uncertain=true;
+      // Missing downtime evidence cannot justify a frozen or restarted prediction.
+      goal.prediction=null;goal.predictionIdentity=null;this.milestoneRecovery.delete(sessionKey);
+    }
   }
 
   private finishRecovery(sessionKey:string,goal:Goal,nowMs:number):boolean {
@@ -245,8 +311,17 @@ export class PassiveGoals {
     goal.runtime=saved.runtime==='paused'&&!evidence.outcome?'paused':evidence.state;
     goal.sourceStopped=evidence.state!=='running';
     goal.status=evidence.outcome??(goal.runtime==='running'?'unknown':goal.runtime);
+    if(evidence.outcome&&goal.wallClock){
+      const boundary=evidence.wallClockBoundaryMs;
+      goal.wallClock.end(Number.isSafeInteger(boundary)?Math.max(goal.wallClock.startedAt,Math.min(nowMs,boundary!)):nowMs);
+    }
     if(evidence.outcome)goal.terminalSince=nowMs;
     goal.executionIdentity=evidence.identity;
+    if(goal.wallClock&&Number.isSafeInteger(evidence.startedAtMs)&&evidence.startedAtMs!<=nowMs&&
+      goal.wallClock.earlierStart(evidence.startedAtMs!)){
+      goal.prediction=null;goal.predictionIdentity=null;delete goal.progressState;
+      this.pendingMilestones.delete(goal);this.invalidate(goal);
+    }
     const sourceEpoch=this.source.epoch(sessionKey);
     if(sourceEpoch!==null)goal.sourceEpoch=sourceEpoch;
     const milestone=this.milestoneRecovery.get(sessionKey);this.milestoneRecovery.delete(sessionKey);
@@ -290,7 +365,8 @@ export class PassiveGoals {
       if(measurementEpoch!==null)goal.measurementEpoch=measurementEpoch;
       let epochChanged=false;
       if(goal.sourceEpoch!==undefined&&goal.sourceEpoch!==epoch){
-        delete goal.progressState;delete goal.progressScanRevision;
+        this.pendingMilestones.delete(goal);
+        delete goal.progressState;delete goal.progressScanRevision;delete goal.progressScanResultFingerprint;
         this.invalidate(goal);goal.identity={};goal.summary=null;goal.prediction=null;goal.predictionIdentity=null;goal.status='unknown';goal.relationPending=true;
         delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;goal.estimateRevision++;
         this.rotateMeasurementScope(goal);epochChanged=true;
@@ -326,6 +402,7 @@ export class PassiveGoals {
     return Number.isSafeInteger(now) && now >= (goal?.lastObservedAt ?? 0);
   }
   private active(goal: Goal, now: number): number {
+    if(goal.wallClock)return goal.wallClock.elapsed(now);
     return goal.elapsed + (goal.runtime === 'running' ? (now - goal.since) / 1000 : 0);
   }
   private observeMilestone(goal:Goal,progress:ProgressState,messages:ObserverInput['messages'],nowMs:number):void {
@@ -343,6 +420,7 @@ export class PassiveGoals {
   }
   private transition(goal: Goal, runtime: Runtime, now: number): void {
     if (runtime === goal.runtime) return;
+    if(runtime==='interrupted'||runtime==='failed'||runtime==='stopped')this.pendingMilestones.delete(goal);
     this.progress(goal,now);
     goal.elapsed = this.active(goal, now);
     goal.since = now;
@@ -352,12 +430,14 @@ export class PassiveGoals {
   }
 
   private startTurn(goal:Goal,turnKey:string,nowMs:number):void {
-    delete goal.progressState;delete goal.progressScanRevision;
+    this.pendingMilestones.delete(goal);
+    delete goal.progressState;delete goal.progressScanRevision;delete goal.progressScanResultFingerprint;
     goal.generation++;
     goal.turnGenerationStarted=true;
     delete goal.recoveryPending;delete goal.recovered;delete goal.recoveryGapSeconds;goal.progressFloor=0;
     delete goal.terminalHook;delete goal.sourceStopped;delete goal.executionIdentity;delete goal.runtimeUncertain;delete goal.terminalSince;
     goal.turnKey=turnKey;goal.elapsed=0;goal.since=nowMs;goal.candidateBase=0;
+    if(this.timeBasis)goal.wallClock=new EtaLiveClock(nowMs);
     goal.relationPending=true;goal.summary=null;delete goal.summaryThroughSequence;delete goal.contextFloorTurnKey;
     goal.prediction=null;goal.predictionIdentity=null;goal.identity={};goal.status='unknown';goal.runtime='running';
     goal.timingUncertain=false;goal.lastObservedAt=nowMs;this.invalidate(goal);this.rotateMeasurementScope(goal);
@@ -387,10 +467,14 @@ export class PassiveGoals {
         this.contexts.remove(inactive[0]);
       }
       goal = {turnKey: envelope.turnKey, generation: 0, estimateRevision: 0, epoch: 0, summary: null,
+        ...(this.timeBasis?{wallClock:new EtaLiveClock(nowMs)}:{}),
         relationPending: true, elapsed: 0, since: nowMs, candidateBase: 0,
         runtime: 'running', status: 'unknown', prediction: null, identity: {}, predictionIdentity: null,
         measurementScope: {}, lastObservedAt: nowMs};
       this.goals.set(envelope.sessionKey, goal);
+      if(goal.wallClock&&hook!=='UserPromptSubmit'){
+        goal.timingUncertain=true;goal.wallClock.uncertain=true;
+      }
       this.beginRecovery(envelope.sessionKey,goal,nowMs);
       if(goal.recoveryPending)return;
     }
@@ -401,9 +485,11 @@ export class PassiveGoals {
     } else if (goal.turnKey === envelope.turnKey) {
       if (hook === 'Stop' || hook === 'Interrupt') {goal.terminalHook = true;delete goal.runtimeUncertain;}
       if (hook === 'Interrupt') {
+        goal.wallClock?.end(nowMs);
         this.transition(goal, 'interrupted', nowMs);
         goal.status = 'interrupted'; goal.prediction = null;
       } else if (goal.runtime !== 'interrupted' && goal.runtime !== 'failed' && goal.runtime !== 'paused' && goal.runtime !== 'stopped') {
+        if(hook==='Stop')goal.wallClock?.blocking('unknown',nowMs);
         this.transition(goal, hook === 'Stop' ? 'waiting' : 'running', nowMs);
         goal.status = hook === 'Stop' || goal.relationPending ? 'unknown' : 'running';
       }
@@ -427,6 +513,8 @@ export class PassiveGoals {
     }
     if (state === 'running') {delete goal.terminalHook;delete goal.sourceStopped;}
     delete goal.runtimeUncertain;
+    if(state==='interrupted'||state==='failed')goal.wallClock?.end(nowMs);
+    else if(state==='waiting')goal.wallClock?.blocking('unknown',nowMs);
     this.transition(goal, state, nowMs);
     goal.status = state;
     if (state === 'interrupted' || state === 'failed' || state === 'stopped') {goal.prediction = null; goal.predictionIdentity = null;}
@@ -451,7 +539,10 @@ export class PassiveGoals {
     if(this.source.takeover){
       try{
         const takeover=this.source.takeover(sessionKey,goal.turnKey);
-        if(takeover){const previousTurnKey=goal.turnKey;this.recovery.delete(sessionKey);this.startTurn(goal,takeover.turnKey,nowMs);return {...takeover,previousTurnKey};}
+        if(takeover){const previousTurnKey=goal.turnKey;this.recovery.delete(sessionKey);this.startTurn(goal,takeover.turnKey,nowMs);
+          if(Number.isSafeInteger(takeover.startedAtMs)&&takeover.startedAtMs>=0&&takeover.startedAtMs<=nowMs)
+            goal.wallClock?.earlierStart(takeover.startedAtMs);
+          return {...takeover,previousTurnKey};}
       }catch{/* source evidence is advisory until a verified snapshot is available */}
     }
     if(!this.finishRecovery(sessionKey,goal,nowMs))return null;
@@ -466,19 +557,37 @@ export class PassiveGoals {
     if(goal.terminalHook&&evidence?.outcome===undefined)return null;
     if(!evidence||goal.executionIdentity===evidence.identity)return null;
     goal.executionIdentity=evidence.identity;
+    if(goal.wallClock&&Number.isSafeInteger(evidence.startedAtMs)&&evidence.startedAtMs!<=nowMs&&
+      goal.wallClock.earlierStart(evidence.startedAtMs!)){
+      goal.prediction=null;goal.predictionIdentity=null;delete goal.progressState;
+      this.pendingMilestones.delete(goal);this.invalidate(goal);
+    }
     const priorRuntime=goal.runtime,priorUncertain=goal.runtimeUncertain;
     const uncertain=evidence.state==='unknown';
-    const boundary=evidence.boundaryMs;
-    const at=goal.runtimeUncertain&&evidence.state==='running'?nowMs:
-      Number.isSafeInteger(boundary)?Math.max(goal.since,Math.min(nowMs,boundary!)):
+    const boundary=goal.wallClock?evidence.wallClockBoundaryMs:evidence.boundaryMs;
+    const missingWallBoundary=!!goal.wallClock&&!Number.isSafeInteger(boundary);
+    // Legacy boundaries are zero-clamped and cannot prove a new-clock endpoint.
+    // Preserve native outcome authority, but label observation-time fallback unknown.
+    if(missingWallBoundary)goal.timingUncertain=true;
+    const at=missingWallBoundary?nowMs:goal.runtimeUncertain&&evidence.state==='running'?nowMs:
+      Number.isSafeInteger(boundary)?Math.max(goal.wallClock?.startedAt??goal.since,Math.min(nowMs,boundary!)):
         uncertain?goal.lastObservedAt:nowMs;
     goal.sourceStopped=evidence.state!=='running';
+    if(goal.wallClock){
+      if(evidence.outcome)goal.wallClock.end(at);
+      else {
+        const proof=evidence.humanBlock;
+        const confirmed=proof?.humanActionRequired===true&&proof.wholeTurnBlocked===true&&
+          proof.relevantWorkRunning===false&&evidence.attention?.relevantWorkRunning!==true&&typeof proof.evidenceRef==='string'&&proof.evidenceRef.length>0;
+        goal.wallClock.blocking(confirmed?'confirmed_human':evidence.state==='running'&&evidence.blockingEvidenceComplete!==false?'none':'unknown',Math.max(goal.lastObservedAt,at));
+      }
+    }
     if(uncertain){goal.timingUncertain=true;goal.runtimeUncertain=true;}
     else delete goal.runtimeUncertain;
     this.transition(goal,uncertain?'waiting':evidence.state as Runtime,at);
     // Host quiescence is not semantic "waiting for user" or goal completion.
     if(uncertain)goal.status='unknown';
-    else if(evidence.outcome==='completed')goal.status='completed';
+    else if(evidence.outcome==='completed'){goal.status='completed';this.pendingMilestones.delete(goal);}
     else if(evidence.state==='interrupted'||evidence.state==='failed')goal.status=evidence.state;
     else if(priorRuntime!==goal.runtime||priorUncertain)goal.status='unknown';
     if (goal.status === 'completed' || goal.status === 'failed' || goal.status === 'interrupted') goal.terminalSince = nowMs;
@@ -524,10 +633,13 @@ export class PassiveGoals {
     const activeSeconds=current.input.activeSeconds;
     if(!Number.isFinite(activeSeconds)||activeSeconds<captured.activeSeconds||activeSeconds>31_536_000)return input;
     const progress=this.progressFor(captured.sessionKey,captured.goal);this.observeMilestone(captured.goal,progress,current.input.messages,nowMs);
-    this.progressTickets.set(ticket,{scope:progress.scope,sequence:progress.observedEventSequence});
+    const candidate=this.pendingFor(captured.goal,progress.scope);
+    this.progressTickets.set(ticket,{scope:progress.scope,sequence:progress.observedEventSequence,state:structuredClone(progress),...(candidate?{candidate:structuredClone(candidate)}:{})});
     captured.sourceRevision=revision;
     captured.activeSeconds=activeSeconds;
-    return {...input,activeSeconds,...(current.input.observation?{observation:current.input.observation}:{}),progressState:structuredClone(progress)};
+    const updated={...input,activeSeconds,...(current.input.observation?{observation:current.input.observation}:{}),progressState:structuredClone(progress)};
+    delete updated.pendingMilestone;
+    return candidate?{...updated,pendingMilestone:structuredClone(candidate)}:updated;
   }
 
   async openHistory(ticket:object,signal:AbortSignal):Promise<OpenHistoryResult|null> {
@@ -593,7 +705,7 @@ export class PassiveGoals {
     if(activeSeconds<requestActiveSeconds)return null;
     this.nativeTickets.set(ticket,true);
     captured.activeSeconds=activeSeconds;
-    return {activeSeconds,runtime:'running',requestActiveSeconds};
+    return {activeSeconds,runtime:'running',requestActiveSeconds,...(this.timeBasis?{timeBasis:this.timeBasis}:{})};
   }
 
   request(sessionKey: string, nowMs: number): {ticket: object; input: ObserverInput}|null {
@@ -611,9 +723,13 @@ export class PassiveGoals {
       runtime: goal.runtime, messages, truncated: context?.truncated ?? false};
     const progressState=this.progressFor(sessionKey,goal);
     this.observeMilestone(goal,progressState,baseInput.messages,nowMs);
-    const frozen=freezePaceRequest({...baseInput,progressState:structuredClone(progressState)},this.paceMeasurements.snapshot(goal.measurementScope));
+    const candidate=this.pendingFor(goal,progressState.scope);
+    const input:ObserverInput={...baseInput,...(this.timeBasis?{timeBasis:this.timeBasis}:{}),
+      ...(this.predictionTarget?{predictionTarget:this.predictionTarget,objectiveTargetId:objectiveId(sessionKey,goal.turnKey)}:{}),progressState:structuredClone(progressState)};
+    delete input.pendingMilestone;
+    const frozen=freezePaceRequest({...input,...(candidate?{pendingMilestone:structuredClone(candidate)}:{})},this.paceMeasurements.snapshot(goal.measurementScope));
     const ticket = Object.freeze({});
-    this.progressTickets.set(ticket,{scope:progressState.scope,sequence:progressState.observedEventSequence});
+    this.progressTickets.set(ticket,{scope:progressState.scope,sequence:progressState.observedEventSequence,state:structuredClone(progressState),...(candidate?{candidate:structuredClone(candidate)}:{})});
     goal.pending = ticket;
     this.tickets.set(ticket, {sessionKey, goal, goalIdentity:goal.identity, measurementScope:goal.measurementScope, epoch: goal.epoch, activeSeconds, requestedAt: nowMs,
       paceLookup:frozen.intervals,
@@ -629,33 +745,67 @@ export class PassiveGoals {
     if(goal.recoveryPending)return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,sourceAvailable:false,ready:false,finalAvailable:false};
     if(this.source){
       const selected=this.sourceContext(sessionKey,goal,nowMs,true);
-      if(selected&&goal.progressState?.milestone?.completionCriterion==='operation_end'&&goal.progressScanRevision!==selected.revision){
-        const detailed=this.sourceContext(sessionKey,goal,nowMs);
-        if(detailed)this.observeMilestone(goal,this.progressFor(sessionKey,goal),detailed.input.messages,nowMs);
-        goal.progressScanRevision=selected.revision;
+      // A semantic milestone is not locally complete when a tool ends, but a
+      // newly paired result is evidence worth reviewing at the next ETA call.
+      if(selected&&goal.progressState?.milestone?.judgment==='in_progress'&&goal.progressScanRevision!==selected.revision){
+        if(selected.pairedResultFingerprint!==undefined&&goal.progressScanResultFingerprint===selected.pairedResultFingerprint)
+          goal.progressScanRevision=selected.revision;
+        else {
+          const detailed=this.sourceContext(sessionKey,goal,nowMs);
+          if(detailed){
+            this.observeMilestone(goal,this.progressFor(sessionKey,goal),detailed.input.messages,nowMs);
+            goal.progressScanRevision=selected.revision;
+            if(selected.pairedResultFingerprint===undefined)delete goal.progressScanResultFingerprint;
+            else goal.progressScanResultFingerprint=selected.pairedResultFingerprint;
+          }
+        }
       }
       view=this.view(sessionKey,nowMs)!;
       // Revisions, action IDs and user-identity fences also advance for
       // bookkeeping. Only a current-turn text fingerprint qualifies here.
       const contentIdentity=selected?.contentFingerprint===undefined?undefined:
         `source:${goal.turnKey}:${selected.contentFingerprint}`;
+      const progressDiagnostic=this.progressDiagnostic(sessionKey);
       return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,sourceAvailable:selected!==null,ready:selected?.ready??false,
         finalAvailable:selected?.finalAvailable??false,revision:selected?.revision??0,
-        currentActionId:selected?.currentActionId??null,...(contentIdentity===undefined?{}:{contentIdentity})};
+        currentActionId:selected?.currentActionId??null,...(contentIdentity===undefined?{}:{contentIdentity}),
+        ...(progressDiagnostic?{progressDiagnostic}:{})};
     }
     const messages = this.contexts.read(sessionKey)?.entries.filter(entry => entry.turnKey === goal.turnKey) ?? [];
     const hasUser = messages.some(entry => entry.content.kind === 'user');
     // Match request(): a current user message is enough for an initial estimate.
     // Whether its meaning supplies an ETA basis belongs to the observer model.
     const contentIdentity=this.contextContentIdentity(sessionKey,goal.turnKey);
+    const progressDiagnostic=this.progressDiagnostic(sessionKey);
     return {view,goalIdentity:goal.identity,predictionIdentity:goal.predictionIdentity,
       sourceAvailable:true,
       ready: messages.length > 0 && (goal.summary !== null || hasUser),
       ...(contentIdentity===null?{}:{contentIdentity}),
+      ...(progressDiagnostic?{progressDiagnostic}:{}),
       finalAvailable: messages.some(entry => entry.content.kind === 'assistant')};
   }
 
-  settle(ticket: object, response: unknown, nowMs: number): boolean {
+  progressDiagnostic(sessionKey:string):ProgressDiagnostic|undefined {
+    const progress=this.goals.get(sessionKey)?.progressState;
+    if(!progress)return undefined;
+    const milestone=progress.milestone;
+    return {scope:progress.scope,observedEventSequence:progress.observedEventSequence,
+      ...(progress.pairedResultSequence===undefined?{}:{pairedResultSequence:progress.pairedResultSequence}),
+      milestone:milestone?{id:milestone.id,judgment:milestone.judgment,completionCriterion:milestone.completionCriterion,
+        operationRef:milestone.operationRef,prediction:milestone.prediction?{...milestone.prediction}:null}:null,
+      ...(progress.reviewApplication?{reviewApplication:{...progress.reviewApplication}}:{}),
+      ...(progress.milestoneApplication?{milestoneApplication:{...progress.milestoneApplication}}:{}),
+      ...(progress.reviewApplication?.outcome==='applied'&&progress.review?
+        {reviewEvidenceRefs:[...progress.review.evidenceRefs]}:{}),
+      ...(progress.lastObservedMilestone?{lastObservedMilestone:{milestoneId:progress.lastObservedMilestone.milestoneId,
+        operationRef:progress.lastObservedMilestone.operationRef,evidenceRef:progress.lastObservedMilestone.evidenceRef,
+        sourceEndedAtMs:progress.lastObservedMilestone.sourceEndedAtMs,
+        actualRemainingActiveSeconds:progress.lastObservedMilestone.actualRemainingActiveSeconds,
+        ...(progress.lastObservedMilestone.forecastErrorSeconds===undefined?{}:
+          {forecastErrorSeconds:progress.lastObservedMilestone.forecastErrorSeconds})}}:{})};
+  }
+
+  settle(ticket: object, response: unknown, nowMs: number, source?:PredictionSource): boolean {
     const captured = this.tickets.get(ticket);
     if (!captured) {
       if (!this.rejectionReasons.has(ticket)) this.rejectionReasons.set(ticket,'ticket_missing');
@@ -696,32 +846,52 @@ export class PassiveGoals {
       progressTicket.sequence!==goal.progressState.observedEventSequence))return this.reject(ticket,'critical_event_after_snapshot');
     if (!parsed.success) return this.reject(ticket,'schema_invalid');
     const result = parsed.data;
+    // A blocker-report duration is not a forecast of achieving the task objective.
+    if(this.predictionTarget&&result.estimate!==null&&result.estimateConditions?.selectedPath==='report_blocker')
+      return this.reject(ticket,'prediction_target_mismatch');
     // Age against the actual sampled active clock, excluding pauses/waits.
     // Never re-anchor an already expired number to its arrival time.
-    if(result.estimate!==null&&result.estimate.remainingSeconds<=Math.max(0,this.active(goal,nowMs)-captured.activeSeconds))
+    if(result.estimate!==null&&result.estimate.remainingSeconds<=Math.max(0,this.active(goal,nowMs)-captured.activeSeconds)){
+      // A numeric deadline can expire while a snapshot-bound historical review
+      // remains useful. Keep only that review, never a new forecast or milestone.
+      if(goal.runtime==='running'&&goal.status!=='completed'&&result.status!=='completed')
+        this.settlePendingMilestone(ticket,captured,result,false);
       return this.reject(ticket,'estimate_expired_on_arrival');
+    }
     this.progress(goal,nowMs);
     if(aged){
       // A same-instruction numeric snapshot can age without becoming a new goal.
       // Do not apply its relation, summary, semantic state or summary watermark.
       // Preserve the same rejection boundary, but distinguish why no snapshot
       // can be applied. Semantic states take precedence over their null estimate.
-      if(result.relation==='unknown')return this.reject(ticket,'aged_response_unknown_relation');
+      if(result.relation==='unknown'){
+        if(goal.runtime==='running')this.settlePendingMilestone(ticket,captured,result,false);
+        return this.reject(ticket,'aged_response_unknown_relation');
+      }
       if(result.status==='completed')return this.reject(ticket,'aged_response_completed');
-      if(result.estimate===null)return this.reject(ticket,'aged_response_no_estimate');
+      if(result.estimate===null){
+        if(goal.runtime==='running')this.settlePendingMilestone(ticket,captured,result,false);
+        return this.reject(ticket,'aged_response_no_estimate');
+      }
       if(goal.runtime!=='running')return this.reject(ticket,'aged_response_not_running');
       goal.prediction={...result.estimate,observedActiveSeconds:captured.activeSeconds};
       goal.estimateUncertain=estimateUncertain(result);
       goal.estimateCondition=assessEstimateCondition(result);
       delete goal.changeReason;
       goal.predictionIdentity={};
+      const predictionSource=projectPredictionSource(source);
+      if(predictionSource)this.predictionSources.set(goal.predictionIdentity,predictionSource);
       goal.estimateRevision++;goal.lastObservedAt=nowMs;
       // Aged responses can refresh the numeric turn ETA only, never milestone semantics.
+      this.recordProgressSettlement(ticket,result.nextMilestone,'aged_numeric_only');
+      this.settlePendingMilestone(ticket,captured,result,true);
       this.settledAnchors.set(ticket,captured.activeSeconds);
       this.acceptSettledPace(ticket,captured,goal);
       return true;
     }
     if (result.relation === 'unknown') {
+      this.settlePendingMilestone(ticket,captured,result,false);
+      this.recordProgressSettlement(ticket,result.nextMilestone,'unknown_relation');
       goal.estimateRevision++;
       goal.status = 'unknown';
       // An inconclusive refresh is not evidence that the established goal
@@ -739,7 +909,7 @@ export class PassiveGoals {
       goal.relationPending && result.summary !== null;
     if ((result.relation === 'continue' && goal.summary === null && !bootstrap) ||
         (result.relation === 'replace' && !goal.relationPending) ||
-        (result.status === 'completed' && (goal.runtime !== 'waiting'||goal.runtimeUncertain))) {
+        (result.status === 'completed' && (this.timeBasis!==undefined||goal.runtime !== 'waiting'||goal.runtimeUncertain))) {
       const reason:ResultRejectionReason=result.relation==='continue'&&goal.summary===null&&!bootstrap?
         'continue_without_summary':result.relation==='replace'&&!goal.relationPending?
         'replace_without_pending_relation':'completed_runtime_mismatch';
@@ -775,10 +945,15 @@ export class PassiveGoals {
       goal.estimateCondition=assessEstimateCondition(result);
       goal.changeReason=result.estimate===null?undefined:result.work?.changeReason;
       goal.predictionIdentity = result.estimate === null ? null : {};
+      const predictionSource=projectPredictionSource(source);
+      if(goal.predictionIdentity&&predictionSource)this.predictionSources.set(goal.predictionIdentity,predictionSource);
     }
     goal.estimateRevision++;
     goal.lastObservedAt = nowMs;
     applyProgress(this.progressFor(captured.sessionKey,goal),result.status==='completed'?null:result.nextMilestone,result.progressReview,result.estimate,anchor);
+    this.settlePendingMilestone(ticket,captured,result,false);
+    if(result.status==='completed')this.pendingMilestones.delete(goal);
+    this.recordProgressSettlement(ticket,result.nextMilestone,'progress_applied');
     this.settledAnchors.set(ticket,anchor);
     this.acceptSettledPace(ticket,captured,goal);
     if(result.status==='completed'){goal.terminalSince=nowMs;this.rotateMeasurementScope(goal);}
@@ -818,12 +993,61 @@ export class PassiveGoals {
 
   /** Safe diagnostic for the last settlement attempt represented by an opaque ticket. */
   rejectionReason(ticket:object):ResultRejectionReason|undefined {return this.rejectionReasons.get(ticket);}
+  private recordProgressSettlement(ticket:object,next:unknown,outcome:'aged_numeric_only'|'unknown_relation'|'progress_applied'):void {
+    this.progressSettlements.set(ticket,Object.freeze({responseKind:next===undefined?'omitted':next===null?'explicit_null':'provided',outcome}));
+  }
+  progressSettlement(ticket:object) {return this.progressSettlements.get(ticket);}
+  pendingMilestoneDecision(ticket:object) {return this.pendingDecisions.get(ticket);}
+  private pendingFor(goal:Goal,scope:string):PendingMilestone|undefined {
+    const candidate=this.pendingMilestones.get(goal);
+    if(candidate?.scope!==scope){this.pendingMilestones.delete(goal);return undefined;}
+    return candidate;
+  }
+  private settlePendingMilestone(ticket:object,captured:Ticket,result:import('../estimation/observer-contract.js').ObserverResponse,aged:boolean):void {
+    const proof=this.progressTickets.get(ticket);if(!proof)return;
+    if(!aged&&!proof.candidate)return;
+    const outcome=reviewPendingMilestone(proof.candidate,result.pendingMilestoneReview,proof.state);
+    if(outcome==='reviewed'&&['inferred_complete','superseded'].includes(result.pendingMilestoneReview!.assessment)&&
+      this.pendingMilestones.get(captured.goal)?.id===proof.candidate?.id)this.pendingMilestones.delete(captured.goal);
+    let retained=false,retainedCandidate:PendingMilestoneTelemetry|undefined;
+    if(aged){
+      // Store only a historical forecast from the exact request snapshot. Never
+      // install it into progressState.milestone or synthesize a critical event.
+      const candidate=retainPendingMilestone(result.nextMilestone,proof.state,captured.activeSeconds,captured.sourceRevision,
+        proof.state.pairedResultOrdinal!==undefined&&proof.state.pairedResultOrdinal>=0?proof.state.pairedResultOrdinal:null,
+        result.estimate?.remainingSeconds??null);
+      if(candidate){this.pendingMilestones.set(captured.goal,candidate);retained=true;
+        retainedCandidate={id:candidate.id,observedActiveSeconds:candidate.observedActiveSeconds,sourceRevision:candidate.sourceRevision,
+          completionCriterion:candidate.forecast.completionCriterion,estimate:structuredClone(candidate.forecast.estimate)};}
+    }
+    this.pendingDecisions.set(ticket,Object.freeze({retained,reviewOutcome:outcome,
+      ...(retainedCandidate?{retainedCandidate}:{}),
+      ...(outcome==='reviewed'?{candidateId:proof.candidate!.id,assessment:result.pendingMilestoneReview!.assessment,
+        evidenceRefs:Object.freeze([...result.pendingMilestoneReview!.evidenceRefs]),snapshotActiveSeconds:captured.activeSeconds,
+        ...(captured.sourceRevision===undefined?{}:{sourceRevision:captured.sourceRevision})}:{})}));
+  }
 
   view(sessionKey: string, nowMs: number): PassiveGoalView|null {
     const goal = this.goals.get(sessionKey);
     if (!goal || !this.clock(nowMs, goal)) return null;
     this.progress(goal,nowMs);
-    return {generation: goal.generation, estimateRevision: goal.estimateRevision, status: goal.status, runtime: goal.runtime,
+    let evidence:ReturnType<NonNullable<GoalContextSource['execution']>>=null;
+    try{if(this.predictionTarget)evidence=this.source?.execution?.(sessionKey,goal.turnKey)??null;}catch{/* Unavailable evidence is not proof of achievement or no pending attention. */}
+    const outcome=goal.status==='completed'?'completed':goal.runtime==='failed'?'failed':goal.runtime==='interrupted'?'interrupted':undefined;
+    const targetId=objectiveId(sessionKey,goal.turnKey);
+    const objective=this.predictionTarget?objectiveState(targetId,outcome,evidence?.objectiveEvidence):undefined;
+    const attention=evidence?.attention;
+    const attentionRequired=attention?.required===true&&!!attention.evidenceRef?.trim();
+    return {generation: goal.generation, estimateRevision: goal.estimateRevision,
+      status:objective==='completed'||objective==='unverified'?'completed':objective==='interrupted'?'interrupted':goal.status, runtime: goal.runtime,
+      ...(objective?{predictionTarget:TASK_OBJECTIVE_TARGET,objectiveTargetId:targetId,objectiveState:objective,
+        ...(outcome?{executionOutcome:outcome}:{}),
+        ...(outcome?{attentionRequired:false}:goal.wallClock?.humanBlocked===true?{attentionRequired:true,attentionWorkContinuing:false}:
+          attention?.evidenceRef?.trim()?{attentionRequired,
+            ...(typeof attention.relevantWorkRunning==='boolean'?{attentionWorkContinuing:attentionRequired&&attention.relevantWorkRunning}:{})}:{} )}:{}),
+      ...(this.timeBasis?{timeBasis:this.timeBasis,blockingUnknown:goal.wallClock?.unknownBlocking??true,humanBlocked:goal.wallClock?.humanBlocked??false}:{}),
+      ...(goal.prediction&&goal.predictionIdentity&&this.predictionSources.has(goal.predictionIdentity)?
+        {predictionSource:{...this.predictionSources.get(goal.predictionIdentity)!}}:{}),
       ...(goal.progressState?{progressState:{scope:goal.progressState.scope,observedEventSequence:goal.progressState.observedEventSequence,
         ...(goal.progressState.reviewApplication?{reviewApplication:{...goal.progressState.reviewApplication}}:{}),
         milestone:goal.progressState.milestone?{id:goal.progressState.milestone.id,definition:goal.progressState.milestone.definition,
@@ -831,8 +1055,8 @@ export class PassiveGoals {
       ...(goal.progressFloor===undefined?{}:{progressFloor:goal.progressFloor}),
       ...(goal.recoveryPending?{recoveryState:'pending' as const}:goal.recovered?{recoveryState:'restored' as const}:{}),
       ...(goal.recoveryGapSeconds===undefined?{}:{recoveryGapSeconds:goal.recoveryGapSeconds}),
-      ...(goal.timingUncertain?{timingUncertain:true}:{}),...(goal.runtimeUncertain?{runtimeUncertain:true}:{}),
-      activeSeconds: this.active(goal, nowMs), prediction: goal.prediction && {...goal.prediction},
+      ...(goal.timingUncertain||goal.wallClock?.uncertain?{timingUncertain:true}:{}),...(goal.runtimeUncertain?{runtimeUncertain:true}:{}),
+      activeSeconds: this.active(goal, nowMs), prediction: objective&&objective!=='ongoing'?null:goal.prediction && {...goal.prediction},
       ...(goal.prediction&&goal.estimateUncertain?{estimateUncertain:true}:{}),
       ...(goal.prediction?{estimateCondition:goal.estimateCondition?{...goal.estimateCondition}:
         {selectedPath:'unknown' as const,displayPath:'unknown' as const,issue:'missing_conditions' as const}}:{}),
@@ -849,7 +1073,12 @@ export class PassiveGoals {
     this.ended.add(sessionKey);
     if (this.ended.size > 4096) this.ended.delete(this.ended.values().next().value!);
   }
-  activeTimeKnown(sessionKey:string):boolean {return this.goals.has(sessionKey)&&this.source===undefined;}
+  activeTimeKnown(sessionKey:string):boolean {
+    const goal=this.goals.get(sessionKey);
+    return !!goal&&this.source===undefined&&!goal.wallClock?.uncertain;
+  }
+  clockBasis():typeof ETA_TIME_BASIS|undefined {return this.timeBasis;}
+  predictionEndpoint():typeof TASK_OBJECTIVE_TARGET|undefined {return this.predictionTarget;}
   clear(): void {
     this.milestoneRecovery.clear();
     this.recovery.clear();
@@ -858,4 +1087,11 @@ export class PassiveGoals {
   }
 
   private reject(ticket:object,reason:ResultRejectionReason):false {this.rejectionReasons.set(ticket,reason);return false;}
+}
+
+/** Shared production composition for the desktop and pinned evaluation driver.
+ * The raw constructor remains available only for explicit legacy compatibility. */
+export function createProductionPassiveGoals(contexts:PassiveContextStore,source?:GoalContextSource,
+  onResearchBoundary?:(event:ResearchBoundary)=>void):PassiveGoals {
+  return new PassiveGoals(contexts,source,onResearchBoundary,ETA_TIME_BASIS,TASK_OBJECTIVE_TARGET);
 }

@@ -4,6 +4,11 @@ import {z} from 'zod';
 import {currentRequestCorrelation} from './request-correlation.js';
 import {identityPreparationCodes} from './identity-preparation-error.js';
 import type {RawTokens} from './observer-persistent-session.js';
+import type {HistoryCapacityDetail} from './history-capacity-error.js';
+
+const capacityDetail=z.object({kind:z.enum(['checkpoint_window','attachment_manifest','source_budget_exhausted']),
+ observedBytes:z.number().int().positive().safe(),limitBytes:z.number().int().positive().safe()}).strict()
+ .refine(value=>value.observedBytes>value.limitBytes);
 
 const token=z.object({totalTokens:z.number().int().nonnegative().safe(),inputTokens:z.number().int().nonnegative().safe(),
   outputTokens:z.number().int().nonnegative().safe(),cachedInputTokens:z.number().int().nonnegative().safe(),
@@ -53,7 +58,7 @@ export function preparationErrorCode(error:unknown):typeof preparationCodes[numb
  return 'PREPARATION_UNKNOWN';
 }
 export interface PersistentReceiptJournal {
- preparationFailed?(value:{ownerUuid:string;sourceKey:string;generation:number;stage:PersistentPreparationStage;code:string}):Promise<void>;
+ preparationFailed?(value:{ownerUuid:string;sourceKey:string;generation:number;stage:PersistentPreparationStage;code:string;capacity?:Readonly<HistoryCapacityDetail>|undefined}):Promise<void>;
  ownerStarted(value:{ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;pid:number;creationIdentity:string;binding?:PersistentReceiptBinding}):Promise<void>;
   operationStarted(value:{operationId:string;admissionId:string;ownerUuid:string;sourceKey:string;sourceEpoch?:string|null;generation:number;operationKind?:PersistentOperationKind}):Promise<void>;
  usageSnapshot(value:{operationId:string;sourceKey:string;sourceEpoch?:string|null;generation:number;total:RawTokens;last:RawTokens;observedAt:number;completenessReason:string}):Promise<void>;
@@ -85,7 +90,8 @@ export function createPersistentReceiptJournal(directory:string):PersistentRecei
  return {
    preparationFailed:async value=>{
      await append(base('preparation_failure',{ownerUuid:ownerUuid.parse(value.ownerUuid),sourceKey:sourceKey.parse(value.sourceKey),
-       generation:z.number().int().nonnegative().safe().parse(value.generation),stage:z.enum(preparationStages).parse(value.stage),code:z.enum(preparationCodes).parse(value.code)}));
+       generation:z.number().int().nonnegative().safe().parse(value.generation),stage:z.enum(preparationStages).parse(value.stage),code:z.enum(preparationCodes).parse(value.code),
+       ...(value.code==='context_too_large'&&value.capacity!==undefined?{capacity:capacityDetail.parse(value.capacity)}:{})}));
    },
    ownerStarted:async value=>{
      const source=sourceKey.parse(value.sourceKey),epoch=sourceEpoch.parse(value.sourceEpoch??null);

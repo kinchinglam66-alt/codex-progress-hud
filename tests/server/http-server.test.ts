@@ -20,6 +20,9 @@ async function startServer(options: { withUi?: boolean; withGenerationGuard?: bo
   if (uiDirectory !== undefined) {
     await mkdir(uiDirectory);
     await mkdir(join(uiDirectory, "api"));
+    await mkdir(join(directory, "core"));
+    await writeFile(join(directory, "core", "eta-time-basis.js"), 'export const ETA_TIME_BASIS="test-basis";');
+    await writeFile(join(uiDirectory, "eta-clock-policy.js"), 'export const etaClockTicks=()=>true;');
     await writeFile(join(uiDirectory, "index.html"), "<h1>HUD</h1>");
     await writeFile(join(uiDirectory, "styles.css"), "body { color: white; }");
     await writeFile(join(uiDirectory, "renderer.js"), [
@@ -188,6 +191,12 @@ describe("local progress HTTP service", () => {
 
   it("serves the complete renderer module graph from an exact static allowlist", async () => {
     const { baseUrl } = await startServer({ withUi: true });
+    for(const route of ['/eta-clock-policy.js','/core/eta-time-basis.js']){
+      const response=await fetch(`${baseUrl}${route}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
+      expect(await response.text()).toContain('export const');
+    }
     const pending = ["/renderer.js"];
     const loaded = new Map<string, string>();
 

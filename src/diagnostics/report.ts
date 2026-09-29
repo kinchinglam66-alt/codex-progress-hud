@@ -36,7 +36,7 @@ export interface DiagnosticReportInput {
   hooks?: { expected: boolean; trusted?: boolean; activitySeen: boolean; lastEventAt?: number };
   lease?: { active: boolean; count: number };
   compatibility?: { compatible: boolean; incompatibleClientSeen: boolean };
-  tracking?: { taskCount: number; selectedStatus?: TaskStatus; lateAttached: boolean };
+  tracking?: { taskCount: number; selectedStatus?: TaskStatus; lateAttached: boolean; scope?: "lease" };
   operationalEvents?: Array<{ code: OperationalEventCode; at: string }>;
 }
 
@@ -170,8 +170,8 @@ function snapshotInput(input: DiagnosticReportInput): Omit<DiagnosticReportInput
   const compatibility = compatibilityInput === undefined ? undefined : { compatible: compatibilityInput.compatible, incompatibleClientSeen: compatibilityInput.incompatibleClientSeen };
   if (compatibility !== undefined && (typeof compatibility.compatible !== "boolean" || typeof compatibility.incompatibleClientSeen !== "boolean")) throw new TypeError("compatibility diagnostics must be booleans");
   const trackingInput = input.tracking;
-  const tracking = trackingInput === undefined ? undefined : { taskCount: safeInteger(trackingInput.taskCount, "task count", 0, 1_000), ...(trackingInput.selectedStatus === undefined ? {} : { selectedStatus: trackingInput.selectedStatus }), lateAttached: trackingInput.lateAttached };
-  if (tracking !== undefined && (typeof tracking.lateAttached !== "boolean" || (tracking.selectedStatus !== undefined && !TASK_STATUSES.has(tracking.selectedStatus)))) throw new TypeError("tracking diagnostics are invalid");
+  const tracking = trackingInput === undefined ? undefined : { taskCount: safeInteger(trackingInput.taskCount, "task count", 0, 1_000), ...(trackingInput.selectedStatus === undefined ? {} : { selectedStatus: trackingInput.selectedStatus }), lateAttached: trackingInput.lateAttached, ...(trackingInput.scope === undefined ? {} : { scope: trackingInput.scope }) };
+  if (tracking !== undefined && (typeof tracking.lateAttached !== "boolean" || (tracking.selectedStatus !== undefined && !TASK_STATUSES.has(tracking.selectedStatus)) || (tracking.scope !== undefined && tracking.scope !== "lease"))) throw new TypeError("tracking diagnostics are invalid");
   const operationalEventsInput = input.operationalEvents;
   const operationalEvents = operationalEventsInput === undefined ? undefined : (() => {
     if (!Array.isArray(operationalEventsInput) || operationalEventsInput.length > 20) throw new TypeError("operational events must be bounded");
@@ -241,7 +241,7 @@ function formatSnapshot(snapshot: Omit<DiagnosticReportInput, "directory">): str
     `- MCP lease: ${leaseConclusion}`,
     `- Companion process: ${companionConclusion}`,
     `- Protocol compatibility: ${compatibilityDetail}`,
-    `- Tracking: ${trackingConclusion}`,
+    `- Tracking${snapshot.tracking?.scope === "lease" ? " (current MCP lease only)" : ""}: ${trackingConclusion}`,
     "",
     "## Versions",
     "",

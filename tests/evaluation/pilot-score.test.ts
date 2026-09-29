@@ -1,8 +1,12 @@
 import {it,expect} from 'vitest';
 import {scorePilotGoal} from '../../src/evaluation/pilot-score.js';
+import {ETA_TIME_BASIS} from '../../src/core/eta-time-basis.js';
 const label={session:'s',key:'k',generation:1,outcome:'completed',confirmedBy:'user',completedActiveSeconds:3600};
 const records=[{session:'s',key:'k',generation:1,kind:'result',accepted:true,status:'interpreted',at:125000,requestedAt:120000,
   observedActiveSeconds:600,activeSeconds:605,estimate:{remainingSeconds:2400,errorPercent:30},usage:null}];
+it('never silently scores versioned wall-clock rows using legacy active-time labels',()=>{
+  expect(scorePilotGoal(records.map(r=>({...r,timeBasis:ETA_TIME_BASIS})),label)).toMatchObject({attempts:0,predictions:0});
+});
 it('scores against independently labelled active work, not wall time or model completion',()=>{
   const score=scorePilotGoal(records,label);
   expect(score.points[0]).toMatchObject({actualRemainingSeconds:3000,absoluteErrorSeconds:600,relativeError:0.2,covered:true,latencyMs:5000,phase:'early'});

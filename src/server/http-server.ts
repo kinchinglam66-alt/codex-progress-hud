@@ -27,7 +27,7 @@ import { terminalEventBlocked } from "../core/reducer.js";
 import { createHmac } from 'node:crypto';
 import { createConversationNames } from './conversation-names.js';
 import { PassiveContextStore } from './passive-context-store.js';
-import { PassiveGoals } from './passive-goals.js';
+import { PassiveGoals, createProductionPassiveGoals } from './passive-goals.js';
 import { ObserverScheduler, type ObserverWorker, type ObserverWorkerSource, type ObserverObservation } from '../estimation/observer-scheduler.js';
 import {parseEstimateTimeoutMs} from '../estimation/request-timeout.js';
 import {ScopedSnapshots} from './scoped-snapshots.js';
@@ -203,6 +203,8 @@ async function serveUi(
     "/view-model.js": { file: "view-model.js", type: "text/javascript; charset=utf-8" },
     "/display-clock.js": { file: "display-clock.js", type: "text/javascript; charset=utf-8" },
     "/eta-transition.js": { file: "eta-transition.js", type: "text/javascript; charset=utf-8" },
+    "/eta-clock-policy.js": { file: "eta-clock-policy.js", type: "text/javascript; charset=utf-8" },
+    "/core/eta-time-basis.js": { file: "../core/eta-time-basis.js", type: "text/javascript; charset=utf-8" },
     "/countdown.js": { file: "countdown.js", type: "text/javascript; charset=utf-8" },
     "/core/observer-diagnostics.js": { file: "../core/observer-diagnostics.js", type: "text/javascript; charset=utf-8" },
     "/task-mutations.js": { file: "task-mutations.js", type: "text/javascript; charset=utf-8" },
@@ -365,7 +367,7 @@ export function createProgressServer(options: ProgressServerOptions) {
         }
         passiveObserver?.changed(key,takeover===null?'activity':'prompt');store.refreshPresentation();
       }}});
-  const passiveGoals = options.passiveGoals ?? new PassiveGoals(passiveContexts,selectedSource?.goals,
+  const passiveGoals = options.passiveGoals ?? createProductionPassiveGoals(passiveContexts,selectedSource?.goals,
     options.residualResearch?event=>options.residualResearch!.boundary(event):undefined);
   const pruneSources=()=>{
     const at=passiveObserver?.presentationTime() ?? goalNow();selectedSource?.prune(key=>{

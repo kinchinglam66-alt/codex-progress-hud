@@ -59,9 +59,13 @@ export function createConversationSource(options:OwnerOptions & {
       options.turnKeyFor(binding.hostId,record.turnId)===query.contextFloorTurnKey);
     const records=snapshot.records.slice(floor<0?start:floor,end).filter(record=>record.turnId!==null);
     const current=snapshot.records.slice(start,end).filter(record=>matches(record.turnId)),actions=new Map<string,boolean>();
+    const startedActions=new Set<string>(),pairedResultHash=createHash('sha256');
     for(const record of current){
-      if(record.kind==='tool_start'&&record.actionId)actions.set(record.actionId,true);
-      if(record.kind==='tool_result'&&record.actionId)actions.delete(record.actionId);
+      if(record.kind==='tool_start'&&record.actionId){actions.set(record.actionId,true);startedActions.add(record.actionId);}
+      if(record.kind==='tool_result'&&record.actionId){
+        actions.delete(record.actionId);
+        if(startedActions.has(record.actionId))pairedResultHash.update(JSON.stringify([record.id,record.text]));
+      }
     }
     const finalAvailable=current.some(record=>record.kind==='assistant'&&record.assistantPhase==='final');
     // Content identity intentionally excludes record ids, timestamps, runtime
@@ -76,6 +80,7 @@ export function createConversationSource(options:OwnerOptions & {
     const userFingerprint=snapshot.instructionFingerprint;
     const nextTurn=snapshot.records[end];
     return {snapshot,hostId:binding.hostId,turnKey:binding.turnKey,currentEpoch,floor,records,current,
+      pairedResultFingerprint:pairedResultHash.digest('hex'),
       currentTurnId:current[0]?.turnId??null,actions,finalAvailable,userFingerprint,contentFingerprint,nextTurn};
   };
   const paceContinuity=(selected:NonNullable<ReturnType<typeof select>>,evidence:ReturnType<typeof parsePaceEvidence>):PaceContinuity=>{
@@ -201,13 +206,23 @@ export function createConversationSource(options:OwnerOptions & {
     const boundaryMs=previous?.identity===identity?previous.boundaryMs:
       Math.max(0,Math.floor(now-Math.max(0,options.wallNow()-record.atMs)));
     executionCache.set(key,{identity,boundaryMs,trustedAt:now});
+    const startRecord=selected.current.find(r=>r.kind==='runtime'&&r.runtime==='running');
+    const startedAtMs=reliable&&snapshot.historyComplete&&startRecord&&Number.isSafeInteger(startRecord.atMs)&&
+      startRecord.atMs>=0&&startRecord.atMs<=wall?Math.floor(now-(wall-startRecord.atMs)):undefined;
     return {state,identity,boundaryMs,
+      // Rollout history does not attest every pending approval, its reviewer,
+      // or whether all relevant background work stopped. Never certify silence.
+      blockingEvidenceComplete:false,
+      ...(startedAtMs===undefined?{}:{startedAtMs}),
+      ...(reliable&&snapshot.historyComplete&&record.kind==='runtime'&&Number.isSafeInteger(record.atMs)&&record.atMs>=0&&record.atMs<=wall?
+        {wallClockBoundaryMs:Math.floor(now-(wall-record.atMs))}:{}),
       researchReliable:reliable&&snapshot.historyComplete&&record.kind==='runtime'&&snapshot.health==='ready'&&!snapshot.partialLine&&
         Number.isSafeInteger(record.atMs)&&record.atMs>=0&&record.atMs<=options.wallNow(),
       ...(outcome===undefined?{}:{outcome})};
   },takeover,openHistory,openNativeSource,openNativeTurn,inspect(key,turnKey,query){
     const selected=select(key,turnKey,query);if(!selected)return null;
      return {revision:selected.snapshot.revision,userFingerprint:selected.userFingerprint,contentFingerprint:selected.contentFingerprint,
+       pairedResultFingerprint:selected.pairedResultFingerprint,
        currentActionId:[...selected.actions.keys()].at(-1)??null,
       finalAvailable:selected.finalAvailable,
       ready:selected.records.some(record=>(!!record.text||(record.imageCount??0)>0)&&(record.kind==='user'||

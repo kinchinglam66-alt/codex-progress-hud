@@ -13,6 +13,8 @@ const forecastSchema=z.object({schemaVersion:z.literal(1),predictionId:z.number(
   calibration:z.literal('uncalibrated'),measurement:forecastMeasurementSchema.optional(),
   versions:z.object({input:z.string(),prompt:z.string(),model:z.string(),algorithm:z.string()}).strict()}).strict();
 const resultSchema=z.object({session:z.string(),key:z.string(),generation:z.number().int().nonnegative(),kind:z.literal('result'),
+  // Explicitly versioned wall-clock records must use the wall-clock scorer.
+  timeBasis:z.never().optional(),
   accepted:z.boolean(),status:z.string(),at:z.number().finite().nonnegative(),requestedAt:z.number().finite().nonnegative(),
   observedActiveSeconds:seconds,activeSeconds:seconds,
   activeTimeKnown:z.boolean().optional(),timingUncertain:z.boolean().optional(),

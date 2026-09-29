@@ -6,6 +6,7 @@ import {createObserverProviderHost, type ProviderWorkerOwner, type ObserverProvi
 import type {ObserverWorker} from '../../src/estimation/observer-scheduler.js';
 import {AccountInspectionFailure} from '../../src/estimation/account-inspection-failure.js';
 import {createObserverAccountSettings} from '../../src/desktop/observer-account-settings.js';
+import {requestCorrelation} from '../../src/estimation/request-correlation.js';
 
 const apiDraft = {
   selected: 'api' as const,
@@ -31,6 +32,33 @@ function deferred<T>() {
 }
 
 describe('desktop observer provider composition', () => {
+  it.each(['prepareContext','nativeSourceDestination','prepareNativeContext','prepareNativeTurnContext','prepareNativeHistoryFallback'] as const)(
+    'preserves flight correlation through %s and dispatch',async method=>{
+    const directory=await mkdtemp(join(tmpdir(),'observer-flight-correlation-'));
+    const seen:AbortSignal[]=[],delegate=worker('correlation');
+    Object.assign(delegate,{[method]:async(...args:any[])=>{
+      seen.push(args[method==='nativeSourceDestination'?0:2]);return {};
+    }});
+    delegate.observe=vi.fn(async(_input,signal)=>{
+      seen.push(signal);return {status:'disabled' as const,interpretation:null,usage:null};
+    });
+    const owned:ProviderWorkerOwner={workers:[delegate],workerSource:{acquire:()=>delegate,release:async()=>{},all:()=>[delegate]},close:async()=>{},inspect:async()=>({label:'fixture',fingerprint:'fixture'})};
+    const host=await createObserverProviderHost({dataDirectory:directory,consentProtection:{protect:v=>v,unprotect:v=>v},openSubscription:async()=>owned,autoStartSubscription:true});
+    try{
+      await host.start(new AbortController().signal);
+      const lease=host.workerSource!.acquire('key'),flight=new AbortController();
+      for(let i=0;i<2;i++){
+        if(method==='nativeSourceDestination')await lease.nativeSourceDestination!(flight.signal);
+        else await (lease[method] as (...args:any[])=>Promise<unknown>)({}, {},flight.signal,'key',1,1);
+      }
+      await lease.observe({} as Parameters<ObserverWorker['observe']>[0],flight.signal,'key',1);
+      expect(seen).toHaveLength(3);
+      expect(seen[0]).not.toBe(flight.signal);expect(seen[0]).not.toBe(seen[1]);
+      expect(seen[2]).toBe(flight.signal);
+      expect(seen.map(requestCorrelation)).toEqual(Array(3).fill(requestCorrelation(flight.signal)));
+      expect(seen.every(signal=>!signal.aborted)).toBe(true);
+    }finally{await host.close();await rm(directory,{recursive:true,force:true});}
+  });
   it.each(['valid','missing','expired','cancelled'] as const)('uses owner startup account metadata safely (%s)',async mode=>{
     const directory=await mkdtemp(join(tmpdir(),'observer-startup-handoff-')),controller=new AbortController();
     const metadata={label:'synthetic',observedAt:0,expiresAt:mode==='expired'?0:1000};
@@ -66,6 +94,7 @@ describe('desktop observer provider composition', () => {
       const invoke=()=>method==='nativeSourceDestination'?lease.nativeSourceDestination!(controller.signal):
         (lease[method] as (...args:any[])=>Promise<unknown>)({},source,controller.signal,'key',1,1);
       const request=invoke(),rejected=expect(request).rejects.toThrow('CONTEXT_PROVIDER_CHANGED');
+      expect(requestCorrelation(received!)).toBe(requestCorrelation(controller.signal));
       if(change==='disable')host.disable();
       else if(change==='cancel')controller.abort();
       else await host.activateProvider({...host.status(),selected:'subscription'});

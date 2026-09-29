@@ -19,11 +19,20 @@ const operationSchema=z.object({operationRef:ref,evidenceRef:ref,state:z.enum(['
 const milestoneOutcomeSchema=z.object({milestoneId:ref,operationRef:ref,evidenceRef:ref,
   prediction:prediction.nullable(),sourceStartedAtMs:z.number().int().nonnegative(),sourceEndedAtMs:z.number().int().nonnegative(),
   operationWallSeconds:seconds,actualRemainingActiveSeconds:seconds.nullable(),
+  // Signed forecast error at the original active-clock anchor: positive means
+  // the milestone took less active time than predicted. Null is not zero.
+  forecastErrorSeconds:z.number().finite().min(-31_536_000).max(31_536_000).nullable().optional(),
   limitation:z.enum(['active_clock_mapping_unavailable','current_runtime_segment'])}).strict().refine(v=>
     (v.limitation==='active_clock_mapping_unavailable')===(v.actualRemainingActiveSeconds===null)&&v.sourceEndedAtMs>=v.sourceStartedAtMs&&
-    Math.abs(v.operationWallSeconds-(v.sourceEndedAtMs-v.sourceStartedAtMs)/1000)<0.000001);
+    Math.abs(v.operationWallSeconds-(v.sourceEndedAtMs-v.sourceStartedAtMs)/1000)<0.000001&&
+    (v.forecastErrorSeconds===undefined||
+      (v.forecastErrorSeconds===null? v.actualRemainingActiveSeconds===null||v.prediction===null:
+        v.prediction!==null&&v.actualRemainingActiveSeconds!==null&&
+        Math.abs(v.forecastErrorSeconds-(v.prediction.remainingSeconds-v.actualRemainingActiveSeconds))<0.000001)));
 export const progressStateSchema=z.object({
   version:z.literal(1),scope:ref,revision:z.number().int().nonnegative(),observedEventSequence:z.number().int().nonnegative(),
+  pairedResultSequence:z.number().int().nonnegative().optional(),
+  pairedResultOrdinal:z.number().int().min(-1).optional(),
   milestone:z.object({id:ref,definition:z.string().max(512),completionCriterion:z.enum(['operation_end','semantic']),criterion:z.string().max(512),operationRef:ref.nullable(),
     prediction:prediction.nullable(),trackingStartedActiveSeconds:seconds,
     judgment:z.enum(['in_progress','observed_complete','inferred_complete','unknown']),evidenceRefs:z.array(ref).max(8),
@@ -31,20 +40,34 @@ export const progressStateSchema=z.object({
   previousTurnEstimate:prediction.nullable(),review:progressReviewSchema.nullable(),operations:z.array(operationSchema).max(32),
   lastObservedMilestone:milestoneOutcomeSchema.optional(),
   reviewApplication:z.object({revision:z.number().int().nonnegative(),outcome:z.enum(['applied','not_provided','milestone_mismatch','evidence_not_in_scope'])}).strict().optional(),
+  milestoneApplication:z.object({revision:z.number().int().nonnegative(),outcome:z.enum(['accepted','hidden','not_provided','invalid_operation','inconsistent_estimate'])}).strict().optional(),
 }).strict();
 export type ProgressState=z.infer<typeof progressStateSchema>;
 export type NextMilestone=z.infer<typeof nextMilestoneSchema>;
 export type ProgressReview=z.infer<typeof progressReviewSchema>;
-export const milestoneTelemetrySchema=z.object({id:ref,judgment:z.enum(['in_progress','observed_complete','inferred_complete','unknown']),prediction:prediction.nullable()}).strict();
+export const milestoneTelemetrySchema=z.object({id:ref,judgment:z.enum(['in_progress','observed_complete','inferred_complete','unknown']),prediction:prediction.nullable(),
+  completionCriterion:z.enum(['operation_end','semantic']).optional(),operationRef:ref.nullable().optional()}).strict();
 type Message={kind:string;text:string;scope?:string|undefined;event?:{ordinal:number;kind:string;atMs:number;pairOrdinal?:number|undefined;counterpartMissing?:boolean|undefined}|undefined};
 const digest=(prefix:string,value:unknown)=>`${prefix}_${createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,32)}`;
 export const progressScope=(session:string,turn:string,epoch:number|null,generation:number)=>digest('scope',[session,turn,epoch,generation]);
 export function createProgressState(scope:string):ProgressState {
-  return {version:1,scope,revision:0,observedEventSequence:0,milestone:null,previousTurnEstimate:null,review:null,operations:[]};
+  return {version:1,scope,revision:0,observedEventSequence:0,pairedResultSequence:0,pairedResultOrdinal:-1,
+    milestone:null,previousTurnEstimate:null,review:null,operations:[]};
 }
 /** Only locally paired source events can confirm operation_end; assistant prose never does. */
 export function observeProgress(state:ProgressState,messages:readonly Message[],activeAt?:(atMs:number)=>number|null):boolean {
   const starts=new Map(messages.filter(m=>m.scope!=='background'&&m.event?.kind==='tool_start'&&m.event.pairOrdinal!==undefined).map(m=>[m.event!.pairOrdinal,m]));
+  if(state.pairedResultOrdinal===undefined){
+    // Legacy checkpoints lack a durable result watermark. Seed from their
+    // existing prefix rather than turning old results into fresh triggers.
+    let high=-1;
+    for(const message of messages){
+      const event=message.event;
+      if(message.scope!=='background'&&event?.kind==='tool_result'&&!event.counterpartMissing&&
+        event.pairOrdinal!==undefined&&starts.has(event.pairOrdinal))high=Math.max(high,event.ordinal);
+    }
+    state.pairedResultOrdinal=high;
+  }
   let changed=false;
   for(const message of messages){
     const event=message.event;if(!event||message.scope==='background'||(event.kind==='tool_result'&&event.counterpartMissing))continue;
@@ -59,6 +82,10 @@ export function observeProgress(state:ProgressState,messages:readonly Message[],
     if(old?.state==='ended'||old?.state===status)continue;
     const operation={operationRef,evidenceRef,state:status as 'running'|'ended',description:start.text.slice(0,512)};
     if(old)Object.assign(old,operation);else state.operations.push(operation);
+    if(status==='ended'&&event.ordinal>state.pairedResultOrdinal){
+      state.pairedResultOrdinal=event.ordinal;
+      state.pairedResultSequence=Math.min(Number.MAX_SAFE_INTEGER,(state.pairedResultSequence??0)+1);
+    }
     const milestone=state.milestone;
     if(status==='ended'&&milestone?.completionCriterion==='operation_end'&&milestone.operationRef===operationRef&&milestone.judgment!=='observed_complete'){
       milestone.judgment='observed_complete';milestone.evidenceRefs=[evidenceRef];state.observedEventSequence++;changed=true;
@@ -69,7 +96,9 @@ export function observeProgress(state:ProgressState,messages:readonly Message[],
       const outcome=milestoneOutcomeSchema.safeParse({milestoneId:milestone.id,operationRef,evidenceRef,
         prediction:milestone.prediction?{...milestone.prediction}:null,sourceStartedAtMs:start.event.atMs,
         sourceEndedAtMs:event.atMs,operationWallSeconds:(event.atMs-start.event.atMs)/1000,
-        actualRemainingActiveSeconds:actual,limitation:actual===null?'active_clock_mapping_unavailable':'current_runtime_segment'});
+        actualRemainingActiveSeconds:actual,
+        forecastErrorSeconds:actual===null||!milestone.prediction?null:milestone.prediction.remainingSeconds-actual,
+        limitation:actual===null?'active_clock_mapping_unavailable':'current_runtime_segment'});
       // Persist across the next milestone, but never convert a wall duration
       // into remaining active time at the earlier forecast anchor.
       if(outcome.success)state.lastObservedMilestone=outcome.data;
@@ -95,10 +124,15 @@ export function applyProgress(state:ProgressState,next:NextMilestone|null|undefi
       state.milestone.judgment=review.assessment;state.milestone.evidenceRefs=[...review.evidenceRefs];
     }}
   }
-  if(next===undefined)return reviewError; // Legacy response keeps state; explicit null hides the subline.
-  if(next===null){state.milestone=null;return reviewError;}
-  if((next.completionCriterion==='operation_end'&&(!next.operationRef||!state.operations.some(o=>o.operationRef===next.operationRef&&o.state==='running')))||
-     (next.estimate&&turnEstimate&&next.estimate.remainingSeconds>turnEstimate.remainingSeconds))return 'invalid_milestone';
+  if(next===undefined){state.milestoneApplication={revision:state.revision,outcome:'not_provided'};return reviewError;} // Legacy response keeps state.
+  if(next===null){state.milestone=null;state.milestoneApplication={revision:state.revision,outcome:'hidden'};return reviewError;}
+  if(next.completionCriterion==='operation_end'&&(!next.operationRef||!state.operations.some(o=>o.operationRef===next.operationRef&&o.state==='running'))){
+    state.milestoneApplication={revision:state.revision,outcome:'invalid_operation'};return 'invalid_milestone';
+  }
+  if(next.estimate&&turnEstimate&&next.estimate.remainingSeconds>turnEstimate.remainingSeconds){
+    state.milestoneApplication={revision:state.revision,outcome:'inconsistent_estimate'};return 'invalid_milestone';
+  }
+  state.milestoneApplication={revision:state.revision,outcome:'accepted'};
   const same=state.milestone&&state.milestone.definition===next.definition&&state.milestone.criterion===next.criterion&&
     state.milestone.operationRef===next.operationRef&&state.milestone.completionCriterion===next.completionCriterion&&
     !['observed_complete','inferred_complete'].includes(state.milestone.judgment);

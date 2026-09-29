@@ -3,9 +3,23 @@ import {createHudDisplayClock, startDisplayTicker} from '../../src/ui/display-cl
 import type {HudSnapshot} from '../../src/server/task-store.js';
 import {TaskStore} from '../../src/server/task-store.js';
 import {buildConversationViews} from '../../src/ui/view-model.js';
+import {ETA_TIME_BASIS} from '../../src/core/eta-time-basis.js';
 const snapshot = (revision: number): HudSnapshot => ({revision, tasks: [], rows: [], selected: null,
   selectedTaskId: null, selectionMode: 'follow_activity', compatibility: {incompatibleClientSeen: false}});
 afterEach(() => vi.useRealTimers());
+it('wall clock continues through unknown approval/system wait but freezes confirmed full human block',()=>{
+  let now=0;const clock=createHudDisplayClock(()=>now),frame=predictionFrame(1,1,100);
+  Object.assign(frame.rows![0]!.goal!,{timeBasis:ETA_TIME_BASIS,runtime:'waiting',blockingUnknown:true});
+  clock.accept(frame,true);now=30000;
+  expect(clock.read()?.displayedSeconds.get('a')).toBe(70);
+  const view=buildConversationViews(frame.rows!,30)[0]!;
+  expect(view.statusLabel).toContain('阻塞性质未知');expect(view.etaLabel).toContain('00:01:10');
+  const paused=structuredClone(frame);paused.revision=2;
+  Object.assign(paused.rows![0]!.goal!,{humanBlocked:true,blockingUnknown:false,activeSeconds:30});
+  clock.accept(paused,false);now=90000;
+  expect(clock.read()?.displayedSeconds.get('a')).toBe(70);
+  expect(buildConversationViews(paused.rows!,60)[0]!.etaLabel).toContain('等待你操作');
+});
 it('transitions only small revisions, preserving raw prediction and uncertainty',()=>{
   let now=0;const clock=createHudDisplayClock(()=>now);
   clock.accept(predictionFrame(1,1,100),true);

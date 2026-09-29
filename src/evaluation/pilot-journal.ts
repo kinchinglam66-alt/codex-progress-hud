@@ -1,10 +1,14 @@
 import type {ObserverObservation} from '../estimation/observer-scheduler.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-contract.js';
+import {TASK_OBJECTIVE_TARGET} from '../core/task-objective.js';
 import {projectRequestProfile} from '../estimation/request-profile.js';
 import {projectRequestCorrelation} from '../estimation/request-correlation.js';
+import {projectMeasurementIdentity} from '../estimation/prediction-source.js';
 import {projectWireMetrics} from '../estimation/observation-wire.js';
 import {estimateConditionAssessmentSchema} from '../estimation/estimate-conditions.js';
 import {observerCallStages} from '../estimation/observer-provider.js';
 import {milestoneTelemetrySchema} from '../estimation/progress-state.js';
+import {pendingMilestoneTelemetrySchema} from '../estimation/pending-milestone.js';
 import {makeForecastRecord} from '../estimation/forecast-record.js';
 import {createHmac,randomUUID} from 'node:crypto';
 import {mkdir,open,type FileHandle} from 'node:fs/promises';
@@ -18,6 +22,7 @@ const resultRejectionReasonCodes=new Set(resultRejectionReasons);
 const stageCodes=new Set(observerCallStages);
 const contextStateCodes=new Set(observerContextStates);
 const activeAnchor=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=31_536_000?value:undefined;
+const opaqueRef=(value:unknown)=>typeof value==='string'&&/^[a-z]+_[a-f0-9]{32}$/u.test(value);
 function contextMetrics(value:unknown){
   if(!value||typeof value!=='object')return undefined;
   const data=value as Record<string,unknown>;
@@ -54,17 +59,58 @@ export function createPilotJournal(directory:string,options:{now?:()=>number;ope
       if(closing || (failed&&!canRetry()) || pending>=128){dropped++;return;}
       let forecast:ReturnType<typeof makeForecastRecord>|undefined;
       const milestone=milestoneTelemetrySchema.safeParse(value.milestone);
+      const retainedCandidate=pendingMilestoneTelemetrySchema.safeParse(value.pendingMilestoneDecision?.retainedCandidate);
       const condition=estimateConditionAssessmentSchema.safeParse(value.estimateCondition);
+      const reviewEvidenceRefs=Array.isArray(value.reviewEvidenceRefs)&&value.reviewEvidenceRefs.length<=8&&
+        value.reviewEvidenceRefs.every(opaqueRef)?value.reviewEvidenceRefs:undefined;
+      const observed=value.lastObservedMilestone;
+      const observedMilestone=observed&&opaqueRef(observed.milestoneId)&&opaqueRef(observed.operationRef)&&
+        opaqueRef(observed.evidenceRef)&&Number.isSafeInteger(observed.sourceEndedAtMs)&&observed.sourceEndedAtMs>=0&&
+        (observed.actualRemainingActiveSeconds===null||activeAnchor(observed.actualRemainingActiveSeconds)!==undefined)?observed:undefined;
       try {if(value.forecast)forecast=makeForecastRecord(value.forecast);} catch { /* Invalid research metadata is omitted. */ }
       // Explicit field projection prevents accidental future context/identity logging.
       const row={schemaVersion:1,session,recordedAt:Date.now(),kind:value.kind,at:value.at,
+        ...(value.predictionTarget===TASK_OBJECTIVE_TARGET?{predictionTarget:TASK_OBJECTIVE_TARGET}:{}),
+        ...(typeof value.objectiveTargetId==='string'&&/^objective_[a-f0-9]{64}$/.test(value.objectiveTargetId)?{objectiveTargetId:value.objectiveTargetId}:{}),
+        ...(value.timeBasis===ETA_TIME_BASIS?{timeBasis:ETA_TIME_BASIS,
+          ...(typeof value.blockingUnknown==='boolean'?{blockingUnknown:value.blockingUnknown}:{}),
+          ...(typeof value.humanBlocked==='boolean'?{humanBlocked:value.humanBlocked}:{})}:{}),
         correlationId:projectRequestCorrelation(value.correlationId),
+        measurementIdentity:projectMeasurementIdentity(value.measurementIdentity),
         wireMetrics:projectWireMetrics(value.wireMetrics),
         ...(condition.success?{estimateCondition:condition.data}:{}),
+        ...(value.kind==='result'&&(value.accepted===true||
+          (value.accepted===false&&value.pendingMilestoneDecision?.retained===false&&
+            ['aged_response_no_estimate','aged_response_unknown_relation','estimate_expired_on_arrival'].includes(value.rejectionReason??'')))&&typeof value.pendingMilestoneDecision?.retained==='boolean'&&
+          ['reviewed','not_provided','candidate_mismatch','evidence_not_in_snapshot','insufficient_evidence'].includes(value.pendingMilestoneDecision.reviewOutcome)?
+          {pendingMilestoneDecision:{retained:value.pendingMilestoneDecision.retained,reviewOutcome:value.pendingMilestoneDecision.reviewOutcome,
+            ...(value.pendingMilestoneDecision.retained&&retainedCandidate.success?{retainedCandidate:retainedCandidate.data}:{}),
+            ...(value.pendingMilestoneDecision.reviewOutcome==='reviewed'&&opaqueRef(value.pendingMilestoneDecision.candidateId)&&
+              ['in_progress','inferred_complete','superseded','unknown'].includes(value.pendingMilestoneDecision.assessment??'')&&
+              Array.isArray(value.pendingMilestoneDecision.evidenceRefs)&&value.pendingMilestoneDecision.evidenceRefs.length<=8&&value.pendingMilestoneDecision.evidenceRefs.every(opaqueRef)&&
+              activeAnchor(value.pendingMilestoneDecision.snapshotActiveSeconds)!==undefined?
+              {candidateId:value.pendingMilestoneDecision.candidateId,assessment:value.pendingMilestoneDecision.assessment,
+                evidenceRefs:[...value.pendingMilestoneDecision.evidenceRefs],snapshotActiveSeconds:value.pendingMilestoneDecision.snapshotActiveSeconds,
+                sourceRevision:activeAnchor(value.pendingMilestoneDecision.sourceRevision)}:{})}}:{}),
+        ...(value.kind==='result'&&value.accepted===true&&
+          ['provided','explicit_null','omitted'].includes(value.progressSettlement?.responseKind??'')&&
+          ['aged_numeric_only','unknown_relation','progress_applied'].includes(value.progressSettlement?.outcome??'')?
+          {progressSettlement:{responseKind:value.progressSettlement!.responseKind,outcome:value.progressSettlement!.outcome}}:{}),
         ...(typeof value.estimateUncertain==='boolean'?{estimateUncertain:value.estimateUncertain}:{}),
         ...(['deliver_result','report_blocker','uncertain'].includes(value.completionPath??'')?{completionPath:value.completionPath}:{}),
         ...(value.kind==='result'&&value.status==='admission_denied'?{admissionReason:normalizeAdmissionReason(value.admissionReason)}:{}),
-        ...(milestone.success?{milestone:milestone.data}:{}),eventCutoff:activeAnchor(value.eventCutoff),pendingCriticalEvents:activeAnchor(value.pendingCriticalEvents),
+        ...(milestone.success?{milestone:milestone.data}:{}),
+        pairedResultSequence:activeAnchor(value.pairedResultSequence),observedEventSequence:activeAnchor(value.observedEventSequence),
+        semanticReviewEventSequence:activeAnchor(value.semanticReviewEventSequence),
+        ...(['applied','not_provided','milestone_mismatch','evidence_not_in_scope'].includes(value.reviewOutcome??'')?{reviewOutcome:value.reviewOutcome}:{}),
+        ...(reviewEvidenceRefs?{reviewEvidenceRefs}:{}),
+        ...(observedMilestone?{lastObservedMilestone:{milestoneId:observedMilestone.milestoneId,
+          operationRef:observedMilestone.operationRef,evidenceRef:observedMilestone.evidenceRef,
+          sourceEndedAtMs:observedMilestone.sourceEndedAtMs,
+          actualRemainingActiveSeconds:observedMilestone.actualRemainingActiveSeconds}}:{}),
+        ...(['accepted','hidden','not_provided','invalid_operation','inconsistent_estimate'].includes(value.milestoneApplicationOutcome??'')?
+          {milestoneApplicationOutcome:value.milestoneApplicationOutcome}:{}),
+        eventCutoff:activeAnchor(value.eventCutoff),pendingCriticalEvents:activeAnchor(value.pendingCriticalEvents),
         key:createHmac('sha256',salt).update(value.key).digest('hex'),generation:value.generation,
         activeSeconds:value.activeSeconds,activeTimeKnown:value.activeTimeKnown,runtime:value.runtime,version:value.version,
         timingUncertain:typeof value.timingUncertain==='boolean'?value.timingUncertain:undefined,

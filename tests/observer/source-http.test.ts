@@ -63,13 +63,14 @@ it.each([false,true])('dispatches from a persisted source and retains it through
     ].join('\n')+'\n');
     now=30000;
     await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.task.id,{timeout:3000}).toBe(next.taskHandle);
-    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:0});
+    // New wall clock starts at the native 21s boundary, not discovery at 30s.
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:9});
     // The new turn resets local scope immediately, while shared admission
     // cooldown still protects provider/accounting budgets.
     now=80000;
     await expect.poll(()=>calls.length,{timeout:3000}).toBe(2);
     await expect.poll(async()=>((await client.status()) as HudSnapshot).rows?.[0]?.task.id,{timeout:3000}).toBe(next.taskHandle);
-    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:50});
+    expect(((await client.status()) as HudSnapshot).rows?.[0]?.goal).toMatchObject({runtime:'running',activeSeconds:59});
     const oldLate=normalizeHookInput('PostToolUse',{session_id:id,turn_id:turn,tool_use_id:'late-old'},0,token).envelope;
     oldLate.hostThreadId=id;
     oldLate.content={kind:'tool',text:'late old activity',truncated:false};

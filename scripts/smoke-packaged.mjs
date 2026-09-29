@@ -27,7 +27,10 @@ const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"),
 // fails at runtime.
 const packageDirectory = await mkdtemp(join(tmpdir(), "hud-packaged-artifact-"));
 const isolatedInstallDirectory = join(packageDirectory, "win-unpacked");
-await cp(resolve(root, "release/win-unpacked"), isolatedInstallDirectory, { recursive: true });
+const sourceInstallDirectory = process.env.CODEX_PROGRESS_HUD_SMOKE_PACKAGE_DIR === undefined
+  ? resolve(root, "release/win-unpacked")
+  : resolve(process.env.CODEX_PROGRESS_HUD_SMOKE_PACKAGE_DIR);
+await cp(sourceInstallDirectory, isolatedInstallDirectory, { recursive: true });
 const executable = resolve(isolatedInstallDirectory, "Codex Progress HUD.exe");
 const requestedDataDirectory = process.env.CODEX_PROGRESS_HUD_SMOKE_DATA_DIR;
 const dataDirectory = requestedDataDirectory === undefined

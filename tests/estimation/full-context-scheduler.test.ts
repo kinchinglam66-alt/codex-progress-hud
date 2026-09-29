@@ -366,7 +366,13 @@ it('captures the full-context prefix without changing production ETA when resear
   await ordinary.start();await withResearch.start();
   expect(captures).toBe(1);
   expect(withResearch.counts()).toEqual(ordinary.counts());
-  expect(withResearch.goals.view(withResearch.envelope.sessionKey,16000)).toEqual(ordinary.goals.view(ordinary.envelope.sessionKey,16000));
+  const {predictionSource:researchSource,...researchView}=withResearch.goals.view(withResearch.envelope.sessionKey,16000)!;
+  const {predictionSource:ordinarySource,...ordinaryView}=ordinary.goals.view(ordinary.envelope.sessionKey,16000)!;
+  // Independent schedulers intentionally have different diagnostic identities.
+  // All predictive and timing fields must still be identical.
+  expect(researchSource).toBeDefined();expect(ordinarySource).toBeDefined();
+  expect(researchSource!.instanceId).not.toBe(ordinarySource!.instanceId);
+  expect(researchView).toEqual(ordinaryView);
   await ordinary.scheduler.close();await withResearch.scheduler.close();
 });
 

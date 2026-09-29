@@ -799,6 +799,30 @@ describe("companion lifecycle manager", () => {
     expect(reportWriter.mock.calls[0]![0].compatibility).toBeUndefined();
   });
 
+  it("does not mistake a lease-scoped empty snapshot for global Hook inactivity", async () => {
+    const reportWriter = vi.fn(async (_input: any) => ({ path: "unused" }));
+    const fixture = await harness({ desiredState: "on", online: true, reportWriter });
+    fixture.client.currentLease.mockReturnValue({ id: "lease_safe", ownerNonce: "owner-safe", expiresAt: 60_000 });
+    fixture.client.status.mockResolvedValueOnce({
+      revision: 0, selectedTaskId: null, selectionMode: "follow_activity", tasks: [], selected: null,
+      compatibility: { incompatibleClientSeen: false }
+    } as any);
+    await fixture.manager.diagnose();
+    const input = reportWriter.mock.calls[0]![0];
+    expect(input.hooks).toBeUndefined();
+    expect(input.tracking).toEqual({ taskCount: 0, lateAttached: false, scope: "lease" });
+  });
+
+  it("leaves Hook activity and task count unknown when the snapshot read fails", async () => {
+    const reportWriter = vi.fn(async (_input: any) => ({ path: "unused" }));
+    const fixture = await harness({ desiredState: "on", online: true, reportWriter });
+    fixture.client.status.mockRejectedValueOnce(new HudClientError("REQUEST_TIMEOUT", "snapshot unavailable"));
+    await fixture.manager.diagnose();
+    const input = reportWriter.mock.calls[0]![0];
+    expect(input.hooks).toBeUndefined();
+    expect(input.tracking).toBeUndefined();
+  });
+
   it("recovers a crash once and rate-limits another recovery across calls", async () => {
     const { manager, launcher, logger, setOnline } = await harness({
       desiredState: "on",
@@ -854,10 +878,9 @@ describe("companion lifecycle manager", () => {
       endpoint: { host: "127.0.0.1", port: 17837 },
       runtimeAgeMs: undefined,
       errors: [{ code: "VERSION_MISMATCH", occurredAt: "1970-01-01T00:00:00.000Z" }],
-      hooks: { expected: true, activitySeen: true, lastEventAt: 1234 },
       lease: { active: true, count: 1 },
       compatibility: { compatible: true, incompatibleClientSeen: true },
-      tracking: { taskCount: 1, selectedStatus: "quiescent", lateAttached: true },
+      tracking: { taskCount: 1, selectedStatus: "quiescent", lateAttached: true, scope: "lease" },
       operationalEvents: [{ code: "protocol_mismatch", at: "1970-01-01T00:00:00.000Z" }]
     });
   });

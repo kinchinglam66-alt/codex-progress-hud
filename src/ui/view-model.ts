@@ -2,6 +2,8 @@ import type { HudSnapshot } from "../server/task-store.js";
 import type { TaskStatus } from "../core/types.js";
 import type { ConversationRow } from "../server/conversation-projection.js";
 import {projectCountdown} from './countdown.js';
+import {etaClockTicks} from './eta-clock-policy.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-basis.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics,type ObserverContextState} from '../core/observer-diagnostics.js';
 
 const contextLabels:Record<ObserverContextState,string>={history_loading:'正在读取完整对话',context_preparing:'正在准备完整上下文',
@@ -54,7 +56,7 @@ function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number
 
 export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = [],displayedSeconds:ReadonlyMap<string,number>=new Map()) {
   return rows.filter(row => row.goal === undefined ||
-    (row.goal.status !== 'completed' && row.goal.runtime !== 'stopped')).map(row => {
+    ((row.goal.objectiveState?!['completed','unverified'].includes(row.goal.objectiveState):row.goal.status !== 'completed') && row.goal.runtime !== 'stopped')).map(row => {
     const view = row.goal === undefined ? buildHudView({
       revision: 0, selectedTaskId: row.task.id, selectionMode: "follow_activity",
       tasks: [], selected: { task: row.task, eta: row.eta },
@@ -81,7 +83,7 @@ function milestoneLabel(goal:NonNullable<ConversationRow['goal']>,elapsedSeconds
   if(!milestone||['stopped','failed','interrupted'].includes(goal.runtime)||goal.status==='completed')return '';
   if(milestone.judgment==='observed_complete')return `下一里程碑：${milestone.definition} · 已观察到结束，等待重估`;
   if(milestone.judgment==='inferred_complete')return `下一里程碑：${milestone.definition} · 推断完成，待核实`;
-  const active=goal.activeSeconds+(goal.runtime==='running'&&!goal.runtimeUncertain&&Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
+  const active=goal.activeSeconds+(etaClockTicks(goal)&&Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0);
   const countdown=projectCountdown({prediction:milestone.prediction,activeSeconds:active,state:goal.runtime==='running'?'running':goal.runtime==='paused'?'paused':'waiting'});
   return `下一里程碑：${milestone.definition} · ${countdown.status==='unknown'?'时间未知':countdown.status==='overdue'?'超出估时，等待重估':countdown.timeText}`;
 }
@@ -103,7 +105,7 @@ export function createConversationViewProjector() {
       }
       if(Number.isFinite(goal.progressFloor)&&goal.progressFloor!>0&&goal.progressFloor!<=99)
         peak.percent=Math.max(peak.percent??0,Math.floor(goal.progressFloor!));
-      const running=goal.runtime==='running';
+      const running=etaClockTicks(goal);
       const delta=running&&Number.isFinite(elapsedSeconds)?Math.max(0,elapsedSeconds):0;
       const active=goal.activeSeconds+delta;
       // An existing paused/waiting/terminal display cannot jump due to a late estimate.
@@ -125,9 +127,14 @@ export function createConversationViewProjector() {
 
 function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsedSeconds: number,observer?:ObserverDiagnostics,displayedSeconds?:number):
   Pick<HudView, 'statusLabel'|'tone'|'progressMode'|'progressPercent'|'etaLabel'> {
-  const running = goal.runtime === 'running';
+  if(goal.objectiveState==='completed'||goal.objectiveState==='unverified')return {statusLabel:'任务已完成',tone:'success',progressMode:'complete',progressPercent:100,etaLabel:'本轮执行已结束'};
+  if(goal.objectiveState==='interrupted')return {statusLabel:'任务已中断',tone:'danger',progressMode:'paused',progressPercent:null,etaLabel:'执行已终止 · 不按目标完成耗时评分'};
+  const running = etaClockTicks(goal);
   const terminal = goal.runtime === 'interrupted' || goal.runtime === 'failed';
-  const statusLabel = goal.runtimeUncertain ? '本轮状态待确认'
+  const statusLabel = goal.humanBlocked ? '等待你操作 · 本轮完全阻塞'
+    : goal.attentionRequired ? goal.attentionWorkContinuing?'需要你处理 · 相关工作仍在继续':'需要你处理 · 是否完全阻塞待核实'
+    : goal.blockingUnknown ? '阻塞性质未知 · 等待时间继续计入'
+    : goal.runtimeUncertain ? '本轮状态待确认'
     : goal.runtime === 'interrupted' ? '本轮已中断'
     : goal.runtime === 'failed' ? '本轮失败'
     : goal.runtime === 'paused' ? '本轮跟踪已暂停'
@@ -152,13 +159,14 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
   };
   const condition=goal.estimateCondition;
   const conditionLabel=condition?.displayPath==='report_blocker'?' · 条件估时：若报告阻塞结束'
-    :condition?.displayPath==='continue_work'?' · 条件估时：若继续实施至本轮结束'
+    :condition?.displayPath==='continue_work'?goal.predictionTarget?' · 条件估时：若继续实施至目标完成':' · 条件估时：若继续实施至本轮结束'
     :condition&&['missing_conditions','unknown_path'].includes(condition.issue)?' · 粗略估时／适用条件未明'
     :condition?' · 粗略估时／条件不一致':'';
-  const etaLabel = terminal ? '工作计时已停止'
+  const etaLabel = terminal ? goal.timeBasis===ETA_TIME_BASIS?'本轮已中断 · 不按正常完成评分':'工作计时已停止'
+    : goal.humanBlocked ? '等待你操作 · 估时已暂停'
     : countdown.status === 'unknown' ? goal.runtime==='paused'?'工作计时已暂停':observer?observerLabel(observer):'剩余时间未知'
     : countdown.status === 'overdue' ? overdueLabel()+conditionLabel
-    : `${display.timeText} · 上次估时误差 ${countdown.uncertaintyText}${conditionLabel}${goal.estimateUncertain?' · 粗略估时／结束方式未明':''}`;
+    : `${display.timeText}${goal.predictionTarget?' · 距本轮任务目标完成':goal.timeBasis===ETA_TIME_BASIS?' · 距本轮最终回复':''} · 上次估时误差 ${countdown.uncertaintyText}${conditionLabel}${goal.estimateUncertain?' · 粗略估时／结束方式未明':''}${goal.timeBasis===ETA_TIME_BASIS&&goal.timingUncertain?' · 计时依据不完整':''}`;
   return {statusLabel, tone: terminal ? 'danger' : running ? 'active' : 'waiting',
     progressMode: running ? 'indeterminate' : 'paused', progressPercent: null, etaLabel};
 }

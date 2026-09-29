@@ -2,6 +2,7 @@ import { link, mkdtemp, readFile, readdir, rm, symlink, writeFile, mkdir } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ETA_TIME_BASIS } from "../../src/core/eta-time-contract.js";
 import {
   createGoalCheckpointRepository,
   type GoalCheckpointRecord
@@ -69,6 +70,51 @@ describe("goal checkpoint repository", () => {
     });
     expect(persisted).not.toContain(directory);
     expect(persisted).not.toMatch(/summary|prompt|credential|password/i);
+  });
+
+  it("reads and re-saves legacy records without assigning a time basis", async () => {
+    const directory = await makeDirectory();
+    const path = await checkpointPath(directory);
+    const legacyRecord = record();
+    await writeFile(path, JSON.stringify({
+      schemaVersion: 1,
+      sourceIdentity: "source-a",
+      records: [legacyRecord]
+    }));
+    const source = repository(directory);
+
+    await expect(source.load()).resolves.toEqual([legacyRecord]);
+    await source.save(await source.load());
+
+    const persisted = JSON.parse(await readFile(path, "utf8")) as { records: Array<Record<string, unknown>> };
+    expect(persisted.records).toEqual([legacyRecord]);
+    expect(persisted.records[0]).not.toHaveProperty("timeBasis");
+    await expect(source.load()).resolves.toEqual([legacyRecord]);
+  });
+
+  it("round-trips records with the explicit time basis", async () => {
+    const directory = await makeDirectory();
+    const source = repository(directory);
+    const versionedRecord: GoalCheckpointRecord = { ...record(), timeBasis: ETA_TIME_BASIS };
+
+    await source.save([versionedRecord]);
+
+    await expect(source.load()).resolves.toEqual([versionedRecord]);
+    const persisted = JSON.parse(await readFile(await checkpointPath(directory), "utf8")) as {
+      schemaVersion: number;
+      records: GoalCheckpointRecord[];
+    };
+    expect(persisted.schemaVersion).toBe(1);
+    expect(persisted.records).toEqual([versionedRecord]);
+  });
+
+  it("rejects a record with an unsupported time basis", async () => {
+    const directory = await makeDirectory();
+    const source = repository(directory);
+
+    await expect(source.save([
+      { ...record(), timeBasis: "active-seconds-v0" } as unknown as GoalCheckpointRecord
+    ])).rejects.toThrow(/time basis/i);
   });
 
   it("returns no records for a different opaque source identity", async () => {

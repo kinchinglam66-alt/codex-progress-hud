@@ -1,4 +1,6 @@
 import {expect,it} from 'vitest';
+import {requestCorrelation} from '../../src/estimation/request-correlation.js';
+import {ETA_TIME_BASIS} from '../../src/core/eta-time-contract.js';
 import {nativePreservationInstructions} from '../../src/estimation/native-preservation.js';
 import {transitionComparisonNativeState} from '../../src/evaluation/native-comparison-transition.js';
 import {mkdtemp,mkdir,readFile,writeFile,readdir,unlink,rm} from 'node:fs/promises';
@@ -157,7 +159,7 @@ it('retains version evidence for a successful persistent forecast without leakin
   const prepared=await f.worker.prepareContext!(input,{snapshot:history([]),currentTurnId:'t'},signal,'source',0,0);
   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
   const evidence=f.worker.provenance!()!;
-  expect(evidence).toMatchObject({input:'observer-input-facts-v7',model:'gpt-5.6-luna-medium',algorithm:'milestone-events-v4'});
+  expect(evidence).toMatchObject({input:'observer-input-facts-v7',model:'gpt-5.6-luna-medium',algorithm:'milestone-events-v5'});
   expect(evidence.prompt).toMatch(/^[a-f0-9]{64}$/);
   evidence.model='changed';expect(f.worker.provenance!()!.model).toBe('gpt-5.6-luna-medium');
   await f.worker.release!();expect(f.worker.provenance!()!.prompt).toBe(evidence.prompt);
@@ -443,7 +445,7 @@ it('rejects an image changed during inference but retains its actual token usage
      if(stage==='provider_returned')writeFileSync(path,Buffer.concat([imageBytes,Buffer.from([1])]));
    });
    expect(result.status).not.toBe('interpreted');expect(result.interpretation).toBeNull();
-   expect(result.rejectionReason).toBe('provider_source_invalid');
+   expect(result.rejectionReason).toBe('provider_attachment_invalid');
    expect(result.usage).toMatchObject({inputTokens:100,outputTokens:10});
    expect(f.accounting.snapshot().knownTokens).toBe(110);
  }finally{await f.worker.close();await f.accounting.close();}
@@ -682,6 +684,75 @@ function pairedSource(revision:number,onCopy:()=>void=()=>{},first=false){return
   supplement:history(Array.from({length:revision},(_,i)=>({id:`record-${i}`,kind:'user' as const,text:`CURRENT-${i}`,turnId:'current',atMs:i}))),
   validate:async(s:AbortSignal)=>{s.throwIfAborted();},close:async()=>{},
   openBase:async()=>{onCopy();return {kind:'native' as const,sourceThreadId:'original',sourceTurnId:'previous',sourceEpoch:1,revision,byteLength:100,path:'C:/protected/base',close:async()=>{}};}};}
+
+it('binds each retained process usage receipt to its own request correlation',async()=>{
+ const f=await retainedNativeFixture();
+ try{
+  const expected:string[]=[];
+  for(let revision=1;revision<=3;revision++){
+   const signal=new AbortController().signal;expected.push(requestCorrelation(signal));
+   const prepared=await f.worker.prepareNativeTurnContext!(input,pairedSource(revision),signal,'source',0,0);
+   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+   await f.release();
+  }
+  expect(f.processes()).toBe(1);
+  const rows=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  const usage=rows.filter(row=>row.kind==='usage_snapshot');
+  expect(usage.map(row=>row.correlationId)).toEqual(expected);
+  for(const row of usage){
+   const operation=rows.filter(item=>item.kind==='operation'&&item.operationId===row.operationId);
+   expect(operation.length).toBeGreaterThanOrEqual(2);
+   expect(operation.every(item=>item.correlationId===row.correlationId)).toBe(true);
+  }
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it('keeps a sampled wall-clock basis through current-turn supplement import and dispatch',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const prepared=await f.worker.prepareNativeTurnContext!({...input,timeBasis:ETA_TIME_BASIS},pairedSource(1),signal,'source',0,0,
+   ()=>({activeSeconds:40,runtime:'running',requestActiveSeconds:10,timeBasis:ETA_TIME_BASIS}));
+  expect(prepared.input).toMatchObject({activeSeconds:40,timeBasis:ETA_TIME_BASIS,nativeTiming:{requestActiveSeconds:10}});
+  expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+  expect(JSON.parse((f.modelInputs.at(-1) as any).input.at(-1).text).currentObservation.timeBasis).toBe(ETA_TIME_BASIS);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it.each(['history_fallback','native_turn','full_context'] as const)('preserves a marked input when %s has no fresh sample',async(route)=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal,markedInput={...input,timeBasis:ETA_TIME_BASIS};
+ try{
+  const prepared=route==='history_fallback'
+   ?await f.worker.prepareNativeHistoryFallback!(markedInput,{snapshot:history([{id:'u',kind:'user',turnId:'current',atMs:1,text:'source'}]),
+     currentTurnId:'current',validate:async()=>{}},signal,'source',0,0)
+   :route==='native_turn'
+    ?await f.worker.prepareNativeTurnContext!(markedInput,pairedSource(1),signal,'source',0,0)
+    :await f.worker.prepareNativeContext!(markedInput,{snapshot:{kind:'native',sourceThreadId:'original',sourceTurnId:'current',
+      sourceEpoch:1,revision:1,byteLength:100,path:'C:/protected/snapshot',close:async()=>{}},currentTurnId:'current'},signal,'source',0,0);
+  expect(prepared.input.timeBasis).toBe(ETA_TIME_BASIS);
+  expect(f.modelInputs).toHaveLength(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it.each(['history_fallback','native_turn','full_context'] as const)(
+ 'rejects a mismatched wall-clock marker before inference for %s (both marker directions)',async(route)=>{
+  for(const inputMarked of [false,true]){
+   const f=await retainedNativeFixture(),signal=new AbortController().signal;
+   const packet=inputMarked?{...input,timeBasis:ETA_TIME_BASIS}:input;
+   const sample={activeSeconds:40,runtime:'running' as const,requestActiveSeconds:10,
+    ...(!inputMarked?{timeBasis:ETA_TIME_BASIS}:{})};
+   try{
+    const prepare=()=>route==='history_fallback'
+     ?f.worker.prepareNativeHistoryFallback!(packet,{snapshot:history([{id:'u',kind:'user',turnId:'current',atMs:1,text:'source'}]),
+       currentTurnId:'current',validate:async()=>{}},signal,'source',0,0,()=>sample)
+     :route==='native_turn'
+      ?f.worker.prepareNativeTurnContext!(packet,pairedSource(1),signal,'source',0,0,()=>sample)
+      :f.worker.prepareNativeContext!(packet,{snapshot:{kind:'native',sourceThreadId:'original',sourceTurnId:'current',
+        sourceEpoch:1,revision:1,byteLength:100,path:'C:/protected/snapshot',close:async()=>{}},currentTurnId:'current'},signal,'source',0,0,()=>sample);
+    await expect(prepare()).rejects.toThrow('NATIVE_TIME_BASIS_MISMATCH');
+    expect(f.modelInputs).toHaveLength(0);
+   }finally{await f.worker.close();await f.accounting.close();}
+  }
+ });
 
 it.each(['source_revalidation','observation_refresh','input_validation'] as const)('attributes post-import rejection to %s without admitting inference',async stage=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
@@ -1091,6 +1162,24 @@ it('rejects a paired source that changes after preparation without dispatching E
  }finally{await f.worker.close();}
 });
 
+it.each([
+ ['source_closed','provider_source_closed'],
+ ['source_cancelled','provider_source_cancelled'],
+ ['source_identity_mismatch','provider_source_identity_mismatch'],
+ ['SOURCE_HISTORY_BINDING_CHANGED','provider_source_binding_changed'],
+ ['PRIVATE_UNKNOWN_CODE','provider_source_invalid']
+])('retains terminal usage while classifying post-inference source failure %s',async(code,reason)=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal,source=pairedSource(1);let valid=true;
+ source.validate=async()=>{if(!valid)throw Object.assign(Error('PRIVATE_SOURCE_PATH_AND_TEXT'),{code});};
+ try{
+  const prepared=await f.worker.prepareNativeTurnContext!(input,source,signal,'source',0,0);
+  const result=await f.worker.observe(prepared.input,signal,'source',0,stage=>{if(stage==='provider_returned')valid=false;});
+  expect(result).toMatchObject({status:'process_error',interpretation:null,rejectionReason:reason,usage:{inputTokens:100,outputTokens:10}});
+  expect(f.accounting.snapshot().knownTokens).toBe(110);
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+ }finally{await f.worker.close();}
+});
+
 it('never runs a second ETA on the same prepared child, even before release',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
  try{
@@ -1161,6 +1250,59 @@ it('imports a checkpoint and a large complete suffix without running compression
  }finally{await f.worker.close();await f.accounting.close();}
 });
 
+it.each(['append','image','large','rewrite','checkpoint','epoch','turn','revision','account','expired','resource'] as const)('checkpoint fallback reuse validates %s before retaining history',async(change)=>{
+ const f=await retainedNativeFixture(undefined,{reuseNativeTurnSession:true}),signal=new AbortController().signal;
+ const checkpoint=(text:string)=>parseCodexCheckpoint({type:'compacted',payload:{replacement_history:[
+  {type:'compaction',encrypted_content:'opaque-checkpoint'},
+  {type:'message',role:'user',content:[{type:'input_text',text}]}]}})!;
+ try{
+  const firstRecord={id:'all',kind:'user' as const,atMs:0,turnId:'current',text:'COMPLETE-HISTORY'};
+  if(change==='large')firstRecord.text+='x'.repeat(100000);
+  const records:ConversationRecord[]=[firstRecord];
+  if(change==='image')records.push({id:'image',kind:'user',atMs:0,turnId:'current',contentParts:[
+   {type:'input_image',imageUrl:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII='}]});
+  const snapshot=history(records);snapshot.checkpoint=checkpoint('BASE');
+  const first=await f.worker.prepareNativeHistoryFallback!(input,{snapshot,currentTurnId:'current',validate:async()=>{}},signal,'source',0,0,undefined,{checkpointOnly:true});
+  expect((await f.worker.observe(first.input,signal,'source',0)).status).toBe('interpreted');
+  const firstOwner=f.lastProcess();await f.release();expect(f.worker.status().nativeLifecycle?.retained).toBe(true);
+  const firstImports=f.imports.length;
+  if(change==='account')f.changeBinding();
+  if(change==='expired')f.advance(400000);
+  if(change==='resource')f.setBytes(64*1024*1024);
+  const next=history([...(change==='rewrite'?[{...firstRecord,text:'CHANGED'}]:records),
+   {id:'new',kind:'assistant',atMs:1,turnId:'current',text:'LATEST'}],change==='epoch'?1:0);
+  next.checkpoint=checkpoint(change==='checkpoint'?'NEW-BASE':'BASE');
+  if(change==='revision')next.revision=0;
+  const second=await f.worker.prepareNativeHistoryFallback!(input,{snapshot:next,currentTurnId:change==='turn'?'next':'current',validate:async()=>{}},signal,'source',0,0,undefined,{checkpointOnly:true});
+  const shouldReuse=['append','image','large'].includes(change);
+  expect(f.lastProcess()===firstOwner).toBe(shouldReuse);
+  expect(firstOwner?.status().closed).toBe(!shouldReuse);
+  if(shouldReuse){
+   const delta=JSON.stringify(f.imports.slice(firstImports));
+   expect(delta).toContain('LATEST');expect(delta).not.toContain('COMPLETE-HISTORY');
+   expect(delta).not.toContain('opaque-checkpoint');
+  }
+  expect((await f.worker.observe(second.input,signal,'source',0)).status).toBe(change==='resource'?'process_error':'interpreted');
+  expect(f.modelInputs).toHaveLength(change==='resource'?1:2);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('rebuilds even a healthy retained owner when preparing verified fallback history again',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const snapshot=history([{id:'all',kind:'user',atMs:0,turnId:'current',text:'COMPLETE-HISTORY'}]);
+  const verified={snapshot,currentTurnId:'current',validate:async()=>{}};
+  const first=await f.worker.prepareNativeHistoryFallback!(input,verified,signal,'source',0,0);
+  expect((await f.worker.observe(first.input,signal,'source',0)).status).toBe('interpreted');
+  const firstOwner=f.lastProcess();
+  await f.release();
+  expect(f.worker.status().nativeLifecycle?.retained).toBe(true);
+  expect(firstOwner?.status().closed).toBe(false);
+  const second=await f.worker.prepareNativeHistoryFallback!(input,verified,signal,'source',0,0);
+  expect(firstOwner?.status().closed).toBe(true);
+  expect(f.lastProcess()).not.toBe(firstOwner);
+  expect((await f.worker.observe(second.input,signal,'source',0)).status).toBe('interpreted');
+ }finally{await f.worker.close();await f.accounting.close();}
+});
 it('prepares verified fallback history in a clean accounted session, never a failed native child',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;let valid=true;
  try{
@@ -1277,11 +1419,12 @@ it('uses native fork preparation with existing accounting and cleans only after 
   path:'C:/protected/snapshot',close:async()=>{expect(f.lastProcess()!.status().closed).toBe(true);lifecycle.push('snapshot-close');}};
  try{
   let samples=0;
-  const prepared=await f.worker.prepareNativeContext!(input,{snapshot,currentTurnId:'current'},signal,'source',0,0,()=>{
+  const prepared=await f.worker.prepareNativeContext!({...input,timeBasis:ETA_TIME_BASIS},{snapshot,currentTurnId:'current'},signal,'source',0,0,()=>{
    expect(lifecycle).toEqual(['fork:t']);samples++;
-   return {activeSeconds:40,runtime:'running',requestActiveSeconds:10};
+   return {activeSeconds:40,runtime:'running',requestActiveSeconds:10,timeBasis:ETA_TIME_BASIS};
   });
-  expect(samples).toBe(1);expect(prepared.input).toMatchObject({activeSeconds:40,nativeTiming:{requestActiveSeconds:10}});
+  expect(samples).toBe(1);expect(prepared.input).toMatchObject({activeSeconds:40,timeBasis:ETA_TIME_BASIS,nativeTiming:{requestActiveSeconds:10}});
+  expect(prepared.input.messages[0]!.text).toContain('final reply is fully delivered');
   expect(f.imports).toEqual([]);expect(f.accounting.snapshot().starts).toBe(0);
   expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
   expect(f.accounting.snapshot()).toMatchObject({starts:1,knownTokens:110});
@@ -1554,6 +1697,12 @@ it('stops before dispatch when the trusted encoded source-byte budget is exhaust
  const f=await fixture(false,{script:compactionScript,bootstrapBatchByteCapacity:1024,historyBudget:{...controlledBudget(),maxSourceBytes:1000}});
  try{
    await expect(f.worker.prepareContext!(input,{snapshot:history([{id:'large',turnId:'t',kind:'user',atMs:1,text:'history '.repeat(180)}]),currentTurnId:'t'},new AbortController().signal,'source',0,0)).rejects.toThrow('context_too_large:source_budget_exhausted');
+   const rows=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+   const failure=rows.find(row=>row.kind==='preparation_failure');
+   expect(failure).toMatchObject({stage:'history_import',code:'context_too_large',capacity:{kind:'source_budget_exhausted',limitBytes:1000}});
+   expect(failure.capacity.observedBytes).toBeGreaterThan(1000);
+   expect(rows.some(row=>row.kind==='operation')).toBe(false);
+   expect(rows.at(-1)).toMatchObject({kind:'process_exit',processExitState:'closed'});
    expect(f.notifications.some((value:any)=>value.method==='item/started'&&value.params?.item?.type==='contextCompaction')).toBe(false);
  }finally{await f.worker.close();await f.accounting.close();}
 });

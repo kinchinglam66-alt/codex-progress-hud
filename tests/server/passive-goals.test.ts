@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {PassiveGoals, type GoalContextSource} from '../../src/server/passive-goals.js';
 import {PassiveContextStore} from '../../src/server/passive-context-store.js';
 import {normalizeHookInput, type HookName} from '../../src/hooks/schema.js';
+import {randomUUID} from 'node:crypto';
 
 const key = 'protected-goal-owner-test-token-1234567890';
 type ExecutionEvidence=NonNullable<ReturnType<NonNullable<GoalContextSource['execution']>>>;
@@ -32,6 +33,47 @@ const answer = (relation: 'replace'|'continue' = 'replace') => ({relation, statu
   summary: 'PRIVATE current goal', estimate: {remainingSeconds: 3600, errorPercent: 30}});
 
 describe('passive goal interpretation owner', () => {
+  it('binds provenance only to accepted numeric predictions, retaining old source through null refresh',()=>{
+    const f=fixture(),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    const source={instanceId:randomUUID(),turnRef:'a'.repeat(64),correlationId:randomUUID(),requestId:1};
+    expect(f.goals.settle(first.ticket,answer(),2000,source)).toBe(true);
+    expect(f.goals.view(session,2000)?.predictionSource).toEqual(source);
+    const second=f.request(3000);
+    expect(JSON.stringify(second.input)).not.toContain(source.correlationId);
+    expect(JSON.stringify(second.input)).not.toContain(source.turnRef);
+    const other={...source,correlationId:randomUUID(),requestId:2};
+    expect(f.goals.settle(second.ticket,{...answer('continue'),estimate:null},4000,other)).toBe(true);
+    expect(f.goals.view(session,4000)?.predictionSource).toEqual(source);
+    const copy=f.goals.view(session,4000)!.predictionSource!;copy.requestId=99;
+    expect(f.goals.view(session,4000)?.predictionSource?.requestId).toBe(1);
+    const stale=f.request(5000);f.hook('UserPromptSubmit',6000,'two');
+    expect(f.goals.settle(stale.ticket,answer('continue'),7000,other)).toBe(false);
+    expect(f.goals.view(session,7000)?.predictionSource).toBeUndefined();
+  });
+  it('skips full semantic scans on unrelated source revisions but observes a changed paired result',()=>{
+    let revision=1,fingerprint='empty',reads=0,withResult=false;
+    const user={kind:'user' as const,text:'run tests',truncated:false};
+    const start={kind:'tool' as const,text:'command',truncated:false,
+      event:{kind:'tool_start' as const,ordinal:1,pairOrdinal:0,atMs:1000,counterpartMissing:true}};
+    const end={kind:'tool' as const,text:'done',truncated:false,
+      event:{kind:'tool_result' as const,ordinal:2,pairOrdinal:0,atMs:4000}};
+    const source:GoalContextSource={epoch:()=>0,
+      inspect:()=>({ready:true,revision,userFingerprint:'same',pairedResultFingerprint:fingerprint,
+        currentActionId:null,finalAvailable:false}),
+      read:(_k,_t,q)=>{reads++;return {epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+        input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,
+          messages:withResult?[user,start,end]:[user,start]}};}};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
+    expect(f.goals.settle(first.ticket,{...answer(),nextMilestone:{definition:'analyze test results',
+      completionCriterion:'semantic',criterion:'results analyzed',operationRef:null,
+      estimate:{remainingSeconds:100,errorPercent:50}}},2000)).toBe(true);
+    f.goals.scheduling(session,2000);const scanned=reads;
+    revision=2;f.goals.scheduling(session,3000);expect(reads).toBe(scanned);
+    revision=3;fingerprint='one-paired-result';withResult=true;
+    f.goals.scheduling(session,5000);expect(reads).toBe(scanned+1);
+    expect(f.goals.progressDiagnostic(session)).toMatchObject({pairedResultSequence:1,
+      observedEventSequence:0,milestone:{judgment:'in_progress'}});
+  });
   it('exposes rejected review diagnostics while retaining numeric ETA and native runtime',()=>{
     const f=fixture(),session=f.hook('UserPromptSubmit',0),first=f.request(1000);
     const nextMilestone={definition:'stage',completionCriterion:'semantic',criterion:'checked',operationRef:null,estimate:{remainingSeconds:100,errorPercent:50}};
@@ -71,6 +113,8 @@ describe('passive goal interpretation owner', () => {
     revision=2;
     const second=f.request(121000);
     expect(second.input.progressState?.lastObservedMilestone?.actualRemainingActiveSeconds).toBe(expected);
+    expect(second.input.progressState?.lastObservedMilestone?.forecastErrorSeconds).toBe(expected===null?null:100-expected);
+    expect(f.goals.progressDiagnostic(session)?.lastObservedMilestone?.forecastErrorSeconds).toBe(expected===null?null:100-expected);
     expect(second.input.progressState?.lastObservedMilestone?.operationWallSeconds).toBe((endAt-500)/1000);
     expect(second.input.activeSeconds).toBe(31);
   });
@@ -103,6 +147,142 @@ describe('passive goal interpretation owner', () => {
     expect(f.goals.rejectionReason(second.ticket)).toBe('critical_event_after_snapshot');
     expect(f.goals.view(session,5000)?.progressState?.milestone?.judgment).toBe('observed_complete');
     expect(JSON.stringify(f.goals.view(session,5000))).not.toContain('PRIVATE command');
+  });
+  it('accepts an aged numeric ETA without installing its first semantic milestone',()=>{
+    let revision=1;
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:[{kind:'user',text:'inspect and repair',truncated:false}]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),request=f.request(1000);
+    revision=2;
+    expect(f.goals.settle(request.ticket,{...answer(),nextMilestone:{definition:'inspection findings',completionCriterion:'semantic',criterion:'findings available',operationRef:null,estimate:{remainingSeconds:100,errorPercent:30}}},3000)).toBe(true);
+    expect(f.goals.view(session,3000)?.prediction).not.toBeNull();
+    expect(f.goals.view(session,3000)?.progressState?.milestone).toBeNull();
+    expect(f.goals.progressDiagnostic(session)?.milestoneApplication).toBeUndefined();
+    expect(f.goals.progressSettlement(request.ticket)).toEqual({responseKind:'provided',outcome:'aged_numeric_only'});
+  });
+  it.each([undefined,null])('distinguishes absent milestone inputs without reusing a prior ticket diagnostic: %s',nextMilestone=>{
+    const f=fixture();f.hook('UserPromptSubmit',0);const request=f.request(1000);
+    expect(f.goals.progressSettlement(request.ticket)).toBeUndefined();
+    expect(f.goals.settle(request.ticket,{...answer(),nextMilestone},2000)).toBe(true);
+    expect(f.goals.progressSettlement(request.ticket)).toEqual({responseKind:nextMilestone===null?'explicit_null':'omitted',outcome:'progress_applied'});
+    const next=f.request(3000);
+    expect(f.goals.progressSettlement(next.ticket)).toBeUndefined();
+    expect(f.goals.settle(next.ticket,null,4000)).toBe(false);
+    expect(f.goals.progressSettlement(next.ticket)).toBeUndefined();
+  });
+  it.each(['valid','null','expired'])('carries an aged milestone into the next natural request and reviews it historically without completing the task (numeric=%s)',numeric=>{
+    let revision=1;
+    const user={kind:'user' as const,text:'inspect and repair',truncated:false,event:{kind:'user' as const,ordinal:0,atMs:0}};
+    const start={kind:'tool' as const,text:'inspect',truncated:false,event:{kind:'tool_start' as const,ordinal:1,pairOrdinal:1,atMs:1000}};
+    const end={kind:'tool' as const,text:'found issue',truncated:false,event:{kind:'tool_result' as const,ordinal:2,pairOrdinal:1,atMs:3000}};
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:revision===1?[user,start]:[user,start,end]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),first=f.request(1000);revision=2;
+    expect(f.goals.settle(first.ticket,{...answer(),nextMilestone:{definition:'inspection findings',completionCriterion:'semantic',criterion:'finding',operationRef:null,estimate:{remainingSeconds:100,errorPercent:30}}},4000)).toBe(true);
+    expect(f.goals.pendingMilestoneDecision(first.ticket)).toMatchObject({retained:true,reviewOutcome:'not_provided',retainedCandidate:{observedActiveSeconds:1,sourceRevision:1,estimate:{remainingSeconds:100,errorPercent:30}}});
+    const second=f.request(5000),candidate=second.input.pendingMilestone!;
+    expect(candidate.observedActiveSeconds).toBe(1);expect(candidate.sourceRevision).toBe(1);
+    expect(second.input.progressState?.milestone).toBeNull();expect(second.input.progressState?.observedEventSequence).toBe(0);
+    const evidenceRef=second.input.progressState!.operations.find(o=>o.state==='ended')!.evidenceRef;
+    revision=3;
+    const previous=f.goals.view(session,5000)!.prediction;
+    expect(f.goals.settle(second.ticket,{...answer('continue'),estimate:numeric==='null'?null:numeric==='expired'?{remainingSeconds:1,errorPercent:30}:answer().estimate,pendingMilestoneReview:{candidateId:candidate.id,assessment:'inferred_complete',evidenceRefs:[evidenceRef]}},6000)).toBe(numeric==='valid');
+    if(numeric==='expired'){
+      expect(f.goals.rejectionReason(second.ticket)).toBe('estimate_expired_on_arrival');
+      expect(f.goals.view(session,6000)!.prediction).toEqual(previous);
+      expect(f.goals.progressSettlement(second.ticket)).toBeUndefined();
+    }
+    expect(f.goals.pendingMilestoneDecision(second.ticket)).toMatchObject({retained:false,reviewOutcome:'reviewed',assessment:'inferred_complete',snapshotActiveSeconds:5,sourceRevision:2});
+    expect(f.goals.view(session,6000)?.runtime).toBe('running');expect(f.goals.view(session,6000)?.progressState?.milestone).toBeNull();
+    expect(f.request(7000).input.pendingMilestone).toBeUndefined();
+  });
+  it.each(['valid','bad_evidence','wrong_candidate','no_candidate','new_turn','source_reset','paused','native_complete','model_complete','duplicate'])('fences expired historical review: %s',mode=>{
+    let revision=1,epoch=0;
+    let execution:ExecutionEvidence={state:'running',identity:'initial'};
+    const user={kind:'user' as const,text:'inspect',truncated:false,event:{kind:'user' as const,ordinal:0,atMs:0}};
+    const start={kind:'tool' as const,text:'test',truncated:false,event:{kind:'tool_start' as const,ordinal:1,pairOrdinal:1,atMs:1000}};
+    const end={kind:'tool' as const,text:'result',truncated:false,event:{kind:'tool_result' as const,ordinal:2,pairOrdinal:1,atMs:2500}};
+    const source:GoalContextSource={epoch:()=>epoch,execution:()=>execution,read:(_k,_t,q)=>({epoch,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:revision===1?[user,start]:[user,start,end]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),first=f.request(1000);revision=2;
+    f.goals.settle(first.ticket,{...answer(),nextMilestone:mode==='no_candidate'?null:{definition:'inspect',completionCriterion:'semantic',criterion:'result',operationRef:null,estimate:null}},3000);
+    const second=f.request(4000),candidateId=second.input.pendingMilestone?.id??'pc_'+'a'.repeat(32);
+    const evidence=second.input.progressState!.operations.find(o=>o.state==='ended')!.evidenceRef;
+    const response={...answer('continue'),status:mode==='model_complete'?'completed':'running',estimate:{remainingSeconds:1,errorPercent:30},
+      nextMilestone:{definition:'must not retain',completionCriterion:'semantic',criterion:'new',operationRef:null,estimate:null},
+      pendingMilestoneReview:{candidateId:mode==='wrong_candidate'?'pc_'+'b'.repeat(32):candidateId,assessment:'inferred_complete',evidenceRefs:[mode==='bad_evidence'?'ev_'+'c'.repeat(32):evidence]}};
+    if(mode==='new_turn')f.hook('UserPromptSubmit',4500,'two');
+    if(mode==='source_reset')epoch++;
+    if(mode==='paused')f.goals.runtime(session,f.contexts.read(session)!.entries[0]!.turnKey,'paused',5500);
+    if(mode==='native_complete'){execution={state:'waiting',outcome:'completed',boundaryMs:5500,identity:'done'};f.goals.reconcileSource(session,5500);}
+    const before=f.goals.view(session,6000)!;
+    expect(f.goals.settle(second.ticket,response,6000)).toBe(false);
+    const decision=f.goals.pendingMilestoneDecision(second.ticket);
+    if(['valid','duplicate'].includes(mode))expect(decision).toMatchObject({retained:false,reviewOutcome:'reviewed',candidateId,snapshotActiveSeconds:4});
+    else if(mode==='bad_evidence')expect(decision).toMatchObject({retained:false,reviewOutcome:'evidence_not_in_snapshot'});
+    else if(mode==='wrong_candidate')expect(decision).toMatchObject({retained:false,reviewOutcome:'candidate_mismatch'});
+    else expect(decision).toBeUndefined();
+    const after=f.goals.view(session,6000)!;
+    expect(after.prediction).toEqual(before.prediction);expect(after.runtime).toBe(before.runtime);expect(after.status).toBe(before.status);
+    expect(f.goals.progressSettlement(second.ticket)).toBeUndefined();
+    if(mode==='duplicate'){expect(f.goals.settle(second.ticket,response,6100)).toBe(false);expect(f.goals.pendingMilestoneDecision(second.ticket)).toEqual(decision);}
+    if(['valid','duplicate','bad_evidence','wrong_candidate','no_candidate','model_complete'].includes(mode)){
+      const next=f.request(7000).input.pendingMilestone;
+      expect(next?.forecast.definition).not.toBe('must not retain');
+      if(['bad_evidence','wrong_candidate','model_complete'].includes(mode))expect(next?.id).toBe(candidateId);
+      else expect(next).toBeUndefined();
+    }
+  });
+  it('preserves historical forecast identity and anchor across same-turn pause/resume',()=>{
+    let revision=1;
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:[{kind:'user',text:'inspect',truncated:false}]}})};
+    const f=fixture(source),session=f.hook('UserPromptSubmit',0),first=f.request(1000);revision=2;
+    f.goals.settle(first.ticket,{...answer(),nextMilestone:{definition:'finding',completionCriterion:'semantic',criterion:'finding',operationRef:null,estimate:null}},2000);
+    const id=f.goals.pendingMilestoneDecision(first.ticket)?.retainedCandidate?.id;
+    const turn=f.contexts.read(session)!.entries[0]!.turnKey;
+    f.goals.runtime(session,turn,'paused',3000);f.goals.runtime(session,turn,'running',103000);
+    const request=f.request(104000);
+    expect(request.input.pendingMilestone).toMatchObject({id,observedActiveSeconds:1,sourceRevision:1});
+    expect(request.input.activeSeconds).toBe(4);expect(request.input.progressState?.milestone).toBeNull();
+  });
+  it.each(['new_turn','source_reset','native_completion'])('clears a pending historical candidate on %s',boundary=>{
+    let revision=1,epoch=0;
+    let evidence:ExecutionEvidence={state:'running',identity:'initial'};
+    const source:GoalContextSource={epoch:()=>epoch,execution:()=>evidence,read:(_k,_t,q)=>({epoch,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:[{kind:'user',text:'inspect',truncated:false}]}})};
+    const f=fixture(source);const session=f.hook('UserPromptSubmit',0);const first=f.request(1000);revision=2;
+    f.goals.settle(first.ticket,{...answer(),nextMilestone:{definition:'finding',completionCriterion:'semantic',criterion:'finding',operationRef:null,estimate:null}},2000);
+    expect(f.goals.pendingMilestoneDecision(first.ticket)?.retained).toBe(true);
+    if(boundary==='source_reset')epoch++;
+    else if(boundary==='native_completion'){
+      evidence={state:'waiting',outcome:'completed',boundaryMs:3000,identity:'completed'};
+      f.goals.reconcileSource(session,3000);
+      expect(f.goals.view(session,3000)?.status).toBe('completed');
+      evidence={state:'running',boundaryMs:3500,identity:'late-running'};
+      f.goals.reconcileSource(session,3500);
+    }else f.hook('UserPromptSubmit',3000,'two');
+    expect(f.request(4000).input.pendingMilestone).toBeUndefined();
+  });
+  it.each(['null','unknown'])('does not invent a historical receipt without a candidate for aged %s',kind=>{
+    let revision=1;
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:[{kind:'user',text:'inspect',truncated:false}]}})};
+    const f=fixture(source);f.hook('UserPromptSubmit',0);const request=f.request(1000);revision=2;
+    expect(f.goals.settle(request.ticket,{...answer(),estimate:null,...(kind==='unknown'?{relation:'unknown'}:{})},2000)).toBe(false);
+    expect(f.goals.pendingMilestoneDecision(request.ticket)).toBeUndefined();
+  });
+  it('does not retain a rejected or duplicate late candidate across turns',()=>{
+    let revision=1;
+    const source:GoalContextSource={epoch:()=>0,read:(_k,_t,q)=>({epoch:0,revision,userFingerprint:'same',currentActionId:null,finalAvailable:false,
+      input:{goalSummary:q.goalSummary,activeSeconds:q.activeSeconds,runtime:q.runtime,truncated:false,messages:[{kind:'user',text:'inspect',truncated:false}]}})};
+    const f=fixture(source);f.hook('UserPromptSubmit',0);const first=f.request(1000);revision=2;
+    const result={...answer(),nextMilestone:{definition:'finding',completionCriterion:'semantic',criterion:'finding',operationRef:null,estimate:null}};
+    f.hook('UserPromptSubmit',2000,'two');
+    expect(f.goals.settle(first.ticket,result,3000)).toBe(false);
+    expect(f.goals.settle(first.ticket,result,3100)).toBe(false);
+    expect(f.goals.pendingMilestoneDecision(first.ticket)).toBeUndefined();
+    expect(f.request(4000).input.pendingMilestone).toBeUndefined();
   });
   it('consumes locally proven milestone evidence at an exact preparation snapshot',()=>{
     let revision=1;

@@ -1,11 +1,12 @@
 import type {HudSnapshot} from '../server/task-store.js';
 import {transitionValue,type Transition} from './eta-transition.js';
 import {projectCountdown} from './countdown.js';
+import {etaClockTicks} from './eta-clock-policy.js';
 type Row=NonNullable<HudSnapshot['rows']>[number];
 function remaining(row:Row,elapsed:number):number|null {
   const goal=row.goal;
   if(!goal||goal.status==='completed'||goal.runtime==='stopped'||goal.runtime==='failed'||goal.runtime==='interrupted')return null;
-  const active=goal.activeSeconds+(goal.runtime==='running'?elapsed:0);
+  const active=goal.activeSeconds+(etaClockTicks(goal)?elapsed:0);
   if(projectCountdown({prediction:goal.prediction,activeSeconds:active,state:goal.runtime==='running'?'running':'waiting'}).status==='unknown')return null;
   return Math.max(0,goal.prediction!.remainingSeconds-(active-goal.prediction!.observedActiveSeconds));
 }
@@ -25,7 +26,7 @@ export function createHudDisplayClock(now: () => number = () => performance.now(
       elapsedSeconds = Math.max(elapsedSeconds, (at - receivedAt) / 1000, 0);
       for(const row of snapshot?.rows??[]){
         const entry=transitions.get(row.conversationKey);
-        if(entry&&row.goal?.runtime==='running')entry.active+=delta;
+        if(entry&&row.goal&&etaClockTicks(row.goal))entry.active+=delta;
       }
     }
     lastAdvance=at;
@@ -44,7 +45,7 @@ export function createHudDisplayClock(now: () => number = () => performance.now(
       for(const row of frame.rows??[]){
         const old=oldRows.get(row.conversationKey),goal=row.goal;
         const target=remaining(row,0);
-        const same=!first&&old?.task.id===row.task.id&&old?.goal&&goal&&old.goal.generation===goal.generation;
+        const same=!first&&old?.task.id===row.task.id&&old?.goal&&goal&&old.goal.generation===goal.generation&&old.goal.timeBasis===goal.timeBasis;
         let entry=transitions.get(row.conversationKey);
         if(!entry||!same){entry={active:0,transition:null};transitions.set(row.conversationKey,entry);}
         if(target===null||!same){entry.transition=null;continue;}

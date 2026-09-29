@@ -1385,8 +1385,10 @@ export function createCompanionManager(
         }
       }
       const selectedTask = taskSnapshot?.selected?.task;
-      const hookActivity = taskSnapshot?.hooks ?? { activitySeen: false };
       const currentLease = dependencies.client.currentLease?.();
+      // MCP snapshots are lease-scoped and intentionally omit global Hook
+      // activity. Absence there cannot be reported as global inactivity.
+      const hookActivity = currentLease === undefined ? taskSnapshot?.hooks : undefined;
       const incompatibleClientSeen = snapshot.health?.capabilities?.incompatibleClientSeen
         ?? taskSnapshot?.compatibility.incompatibleClientSeen
         ?? snapshot.observedState === "incompatible";
@@ -1415,23 +1417,24 @@ export function createCompanionManager(
           ? {}
           : { runtimeAgeMs: Math.max(0, now() - Date.parse(runtime.startedAt)) }),
         errors: [...recentErrors],
-        hooks: {
+        ...(hookActivity === undefined ? {} : { hooks: {
           expected: true,
           activitySeen: hookActivity.activitySeen,
           ...(hookActivity.lastEventAt === undefined
             ? {}
             : { lastEventAt: hookActivity.lastEventAt })
-        },
+        } }),
         lease: { active: currentLease !== undefined, count: currentLease === undefined ? 0 : 1 },
         ...(snapshot.observedState === "unresponsive" ? {} : {compatibility: {
           compatible: snapshot.observedState !== "incompatible",
           incompatibleClientSeen
         }}),
-        tracking: {
+        ...(taskSnapshot === undefined ? {} : { tracking: {
           taskCount: taskSnapshot?.tasks.length ?? 0,
           ...(selectedTask?.status === undefined ? {} : { selectedStatus: selectedTask.status }),
-          lateAttached: selectedTask?.trackingOrigin === "late_attach"
-        },
+          lateAttached: selectedTask?.trackingOrigin === "late_attach",
+          ...(currentLease === undefined ? {} : { scope: "lease" as const })
+        } }),
         operationalEvents: [...recentOperationalEvents],
         ...(snapshot.health?.windowDiagnostics === undefined ? {} : { windowDiagnostics: snapshot.health.windowDiagnostics })
       };

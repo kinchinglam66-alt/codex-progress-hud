@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { ETA_TIME_BASIS } from "../core/eta-time-contract.js";
 import { LifecycleStateTimeoutError, withLifecycleStateLock } from "../lifecycle/state-lock.js";
 import type { CountdownPrediction } from "../ui/countdown.js";
 
@@ -16,7 +17,7 @@ const CHECKPOINT_LOCK_FILE = ".goal-checkpoint.lock";
 const CHECKPOINT_LOCK_TIMEOUT_MS = 500;
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
-const RECORD_KEYS = [
+const REQUIRED_RECORD_KEYS = [
   "sessionKey",
   "turnKey",
   "generation",
@@ -29,6 +30,7 @@ const RECORD_KEYS = [
   "progressFloor",
   "timingUncertain"
 ] as const;
+const OPTIONAL_RECORD_KEYS = ["timeBasis"] as const;
 const PREDICTION_KEYS = ["remainingSeconds", "errorPercent", "observedActiveSeconds"] as const;
 
 export interface GoalCheckpointRecord {
@@ -43,6 +45,7 @@ export interface GoalCheckpointRecord {
   prediction: CountdownPrediction | null;
   progressFloor: number;
   timingUncertain: boolean;
+  timeBasis?: typeof ETA_TIME_BASIS;
 }
 
 export interface GoalCheckpointRepository {
@@ -138,7 +141,12 @@ function validatePrediction(value: unknown, activeSeconds: number): CountdownPre
 
 function validateRecord(value: unknown): GoalCheckpointRecord {
   if (!isRecord(value)) throw checkpointError("record is invalid");
-  hasExactKeys(value, RECORD_KEYS, "record");
+  const actualKeys = Object.keys(value);
+  const allowedKeys = new Set<string>([...REQUIRED_RECORD_KEYS, ...OPTIONAL_RECORD_KEYS]);
+  if (REQUIRED_RECORD_KEYS.some(key => !Object.hasOwn(value, key))
+    || actualKeys.some(key => !allowedKeys.has(key))) {
+    throw checkpointError("contains invalid record fields");
+  }
 
   const sessionKey = opaqueString(value.sessionKey, "session key");
   const turnKey = opaqueString(value.turnKey, "turn key");
@@ -161,6 +169,9 @@ function validateRecord(value: unknown): GoalCheckpointRecord {
   if (typeof value.timingUncertain !== "boolean") {
     throw checkpointError("timing uncertainty is invalid");
   }
+  if (Object.hasOwn(value, "timeBasis") && value.timeBasis !== ETA_TIME_BASIS) {
+    throw checkpointError("time basis is invalid");
+  }
 
   return {
     sessionKey,
@@ -173,7 +184,8 @@ function validateRecord(value: unknown): GoalCheckpointRecord {
     status,
     prediction: validatePrediction(value.prediction, activeSeconds),
     progressFloor,
-    timingUncertain: value.timingUncertain
+    timingUncertain: value.timingUncertain,
+    ...(Object.hasOwn(value, "timeBasis") ? { timeBasis: ETA_TIME_BASIS } : {})
   };
 }
 

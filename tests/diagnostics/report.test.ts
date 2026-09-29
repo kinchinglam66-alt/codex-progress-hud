@@ -107,6 +107,21 @@ describe("diagnostic report", () => {
     expect(markdown).not.toContain("untrusted");
   });
 
+  it("labels lease-only tracking without implying global Hook inactivity", () => {
+    const markdown = renderDiagnosticReport({
+      ...validInput("unused"),
+      lease: { active: true, count: 1 },
+      tracking: { taskCount: 0, lateAttached: false, scope: "lease" }
+    });
+    expect(markdown).toContain("Hook trust/activity: not reported");
+    expect(markdown).toContain("Tracking (current MCP lease only): 0 task(s)");
+    expect(markdown).not.toContain("no activity");
+    expect(() => renderDiagnosticReport({
+      ...validInput("unused"),
+      tracking: { taskCount: 0, lateAttached: false, scope: "global" }
+    } as any)).toThrow();
+  });
+
   it("keeps diagnostic output content-free even when runtime inputs contain secrets", async () => {
     const directory = await mkdtemp(join(tmpdir(), "hud-diagnostic-content-free-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));

@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
-import {withRequestCorrelation} from './request-correlation.js';
+import {captureCheckpointReuseProof,checkpointPrefixReusable,type CheckpointReuseProof} from './checkpoint-reuse-proof.js';
+import {withRequestCorrelation,bindRequestCorrelation} from './request-correlation.js';
 import {observerInputSchema,isInferenceEligible} from './observer-contract.js';
 import type {ObserverInput} from './observer-contract.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
@@ -18,14 +19,16 @@ import {authenticateMainAccountSession} from './main-account-session-auth.js';
 import {createPersistentObserverSession, type PersistentCompactionResult, type PersistentSessionError, type PersistentContextCapacityPolicy,type PersistentSourcePart,type PersistentSourceRecord} from './observer-persistent-session.js';
 import {resolveImageAttachment} from '../observer/image-attachment.js';
 import {createPersistentReceiptJournal,preparationErrorCode,type PersistentPreparationStage,type PersistentReceiptBinding,type PersistentReceiptJournal} from './observer-persistent-receipt.js';
-import {normalizeAdmissionReason} from '../core/observer-diagnostics.js';
-import type {NativeSourceDestination,OpenNativeSourceResult,BoundNativeTurnSource} from '../observer/native-source-request.js';
+import {historyCapacityError,historyCapacityDetail} from './history-capacity-error.js';
+import {normalizeAdmissionReason,sourceRejectionReason,type ResultRejectionReason} from '../core/observer-diagnostics.js';
+import type {NativeSourceDestination,OpenNativeSourceResult,BoundNativeTurnSource,NativeObservationSample} from '../observer/native-source-request.js';
 import {createNativeTurnBaseOwner} from './native-turn-base.js';
 import {createNativeTurnTiming,type NativeTurnTiming} from './native-turn-timing.js';
 import type {SessionAccountReuse,SessionAccountProof} from './session-account-reuse.js';
 import type {SessionPreparationPolicy} from './account-attestation-cache.js';
 import type {MainAccountSessionTransport} from './main-account-session-transport.js';
 import {nativeRetentionValid,nativeProcessRetentionValid,type NativeRetentionPermit,type NativeRetentionState,type NativeLifecycleDiagnostic,type NativeRetirementReason} from './native-owner-retention.js';
+import {ETA_TIME_BASIS} from '../core/eta-time-contract.js';
 
 export interface NativeWorkerResources {
  destination(signal:AbortSignal,role?:'request'|'base'):Promise<NativeSourceDestination>;
@@ -74,6 +77,11 @@ export interface PersistentHistoryBudget {
   retainedSummaryReserveBytes:number;
 }
 const empty=(status:ObserverResult['status']):ObserverResult=>({status,interpretation:null,usage:null});
+function applyNativeObservationSample(input:ObserverInput,sample:NativeObservationSample):ObserverInput {
+ if(input.timeBasis!==sample.timeBasis)throw Error('NATIVE_TIME_BASIS_MISMATCH');
+ return {...input,activeSeconds:sample.activeSeconds,runtime:sample.runtime,
+  nativeTiming:{requestActiveSeconds:sample.requestActiveSeconds}};
+}
 
 /** Each source owns one process, each model operation a separate admission.
  * Invocation records remain in settling/pending while their process lives:
@@ -106,6 +114,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
  let nativeBase=createNativeTurnBaseOwner(),nativeBaseRoot:string|undefined,nativeTurnPrepared=false;
  let nativeProcessSource:string|undefined;
  let nativeSessionRevision:number|undefined;
+ let checkpointReuseProof:CheckpointReuseProof|null=null;
  // First-turn sessions are ephemeral: process custody is journalled, no raw
  // snapshot/fork manifest exists. Count their requests and imported byte bounds.
  let ephemeralRequests=0,ephemeralImportedBytes=0;
@@ -169,6 +178,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    sourceKey=key;generation=g;
  };
  async function reset(reason:NativeRetirementReason='request_end'){
+   checkpointReuseProof=null;
    if(options.nativeContext&&(nativeResourcesOpen||owner))retirementReason=reason;
    revokeIdle();nativeRequestAcquired=false;nativeTerminal=false;
    invalidateReuse();unsubscribeAccount?.();unsubscribeAccount=undefined;validateAcceptance=undefined;
@@ -239,8 +249,9 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
    opened.rpc.notify('initialized',{});check(signal);
    return opened;
  }
- async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:BoundNativeTurnSource,historyFallback=false,checkpointOnly=false){
+ async function ensure(signal:AbortSignal,nativeSource?:OpenNativeSourceResult,captureReuse=false,nativeTurn?:BoundNativeTurnSource,historyFallback=false,checkpointOnly=false,reuseFallback=false){
    check(signal);
+   if(nativeTurn||nativeSource)checkpointReuseProof=null;
    phase('accountProcessMs');
    invalidateReuse();
    if(owner&&(owner.status().closed||session?.status().uncertain))await reset('process_unhealthy');
@@ -276,6 +287,10 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
     if(!lease||!await lease.validate(acceptanceSignal)||!prepared.validateAcceptance)return false;
     return await prepared.validateAcceptance(acceptanceSignal)&&!lease.signal.aborted&&!acceptanceSignal.aborted;
    }:prepared.validateAcceptance;
+   if(reuseFallback&&session&&checkpointReuseProof){
+    if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();
+    phase('forkImportMs');return session;
+   }
    if(session&&!nativeSource&&!nativeTurn&&!historyFallback){if(captureReuse)preparedReuse=prepared.reuse;else prepared.reuse?.invalidate();phase('forkImportMs');return session;}
    if(options.nativeContext&&!nativeSource&&!nativeTurn&&!historyFallback)throw Error('NATIVE_CONTEXT_NOT_PREPARED');
    if(nativeTurn){
@@ -413,7 +428,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
                const image=await resolveImageAttachment(part,{signal:combined,maxEncodedBytes});
                if(part.type==='local_image'){
                  manifestBytes+=Buffer.byteLength(part.path)+128;
-                 if(manifestBytes>(budget?.maxSourceBytes??16*1024*1024))throw Error('context_too_large:attachment_manifest');
+                 if(manifestBytes>(budget?.maxSourceBytes??16*1024*1024))throw historyCapacityError('attachment_manifest',manifestBytes,budget?.maxSourceBytes??16*1024*1024);
                  manifest.push({path:part.path,digest:image.state==='missing'?null:image.digest,maxEncodedBytes});
                }
                if(image.state==='missing'){
@@ -432,7 +447,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
             if(turn!==null&&turn!==undefined&&!turns.has(turn))turns.set(turn,turns.size);
             const text=JSON.stringify({sourceTurn:turn===null||turn===undefined?null:turns.get(turn),...data});
             const encodedSourceBytes=Buffer.byteLength(text,'utf8')+(content===undefined?0:Buffer.byteLength(JSON.stringify(content),'utf8'));
-            if(budget!==undefined&&sourceBytes+encodedSourceBytes>budget.maxSourceBytes)throw Error('context_too_large:source_budget_exhausted');
+            if(budget!==undefined&&sourceBytes+encodedSourceBytes>budget.maxSourceBytes)throw historyCapacityError('source_budget_exhausted',sourceBytes+encodedSourceBytes,budget.maxSourceBytes);
             const record={ordinal:item.ordinal,text,...(content===undefined?{}:{content})};
             if(completeSnapshot){
              if(sourceBytes+encodedSourceBytes+64*(count+1)>(options.nativeRequestByteLimit??16*1024*1024))throw Error('NATIVE_REQUEST_TOO_LARGE');
@@ -565,12 +580,12 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       catch(error){receiptFailure=true;throw error;}
       check(signal);await view.updateInvocation!(id,{phase:'dispatching'});check(signal);
       await nativeTurnValidation?.(signal);check(signal);
-      const persistEvidence=async(evidence:Parameters<NonNullable<Parameters<typeof live.compact>[1]>>[0])=>{
+      const persistEvidence=bindRequestCorrelation(async(evidence:Parameters<NonNullable<Parameters<typeof live.compact>[1]>>[0])=>{
         try{
           if(evidence.kind==='snapshot')await journal!.usageSnapshot({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence,completenessReason:'compaction_observed'});
           else await journal!.usageGap({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence});
         }catch(error){receiptFailure=true;throw error;}
-      };
+      });
       phase('compactionMs');
       admittedModelWindow=true;
       const result=await live.compact(signal,persistEvidence,()=>{dispatched=true;onDispatch();}).finally(()=>{admittedModelWindow=false;});
@@ -685,21 +700,35 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       let preparationStage:PersistentPreparationStage='session_setup';
       try{
        check(combined);if(nativeTurnPrepared)throw Error('NATIVE_REQUEST_NOT_RELEASED');
+       if(nativeTurnPrepared)throw Error('NATIVE_REQUEST_NOT_RELEASED');
        if(policy?.checkpointOnly)await assertCheckpointWindow(history.snapshot,combined);
        await timing.measure('source_validation',()=>history.validate(combined),'fallback');check(combined);
-       await reset();requestRevision++;bind(key,g);nativeRequestAcquired=true;nativeResourcesOpen=true;nativeOwnerState=retentionState;
+       const nextProof=policy?.checkpointOnly&&options.reuseNativeTurnSession
+        ?await captureCheckpointReuseProof(history,key,g,combined):null;
+       const reusable=!!session&&retentionState?.running===true&&retentionState.conversationKey===key&&retentionState.generation===g&&
+        checkpointPrefixReusable(checkpointReuseProof,nextProof,session.status().acceptedThroughOrdinal);
+       if(reusable)await acquireNative();else await reset();
+       // acquireNative may revoke an expired/unknown-resource owner. Reuse is
+       // bound to the still-owned session, never just to a matching snapshot.
+       const reuseFallback=reusable&&!!session&&checkpointReuseProof!==null;
+       requestRevision++;bind(key,g);nativeRequestAcquired=true;nativeResourcesOpen=true;nativeOwnerState=retentionState;
        sourceEpoch=JSON.stringify([history.snapshot.identity,history.snapshot.sourceEpoch,history.snapshot.revision]);
-       const live=await ensure(combined,undefined,true,undefined,true,policy?.checkpointOnly===true);
+       const previousSession=session;
+       const live=await ensure(combined,undefined,true,undefined,true,policy?.checkpointOnly===true,reuseFallback);
+       if(reuseFallback&&live===previousSession)ephemeralRequests++;
        nativeTurnPrepared=true;nativeTurnValidation=s=>timing.measure('source_validation',()=>history.validate(s),'fallback');
+       const previousBytes=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes;
        const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;},policy?.checkpointOnly===true,policy?.checkpointOnly!==true),'fallback');
-       ephemeralImportedBytes+=live.status().importedEncodedBytes;
+       ephemeralImportedBytes+=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes-previousBytes;
        preparationStage='source_revalidation';await nativeTurnValidation(combined);check(combined);
        preparationStage='observation_refresh';
-       const fresh=sample?.(),preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};
+       const fresh=sample?.();
+       const preparedInput=fresh?applyNativeObservationSample(imported.input,fresh):imported.input;
        preparationStage='input_validation';if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
+       checkpointReuseProof=nextProof;
        rememberPrepared(preparedInput,key,g);return {...imported,input:preparedInput};
       }catch(error){
-       try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(error)});}catch{}
+       try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(error),capacity:historyCapacityDetail(error)});}catch{}
        await reset();throw error;
       }
      }));
@@ -724,11 +753,11 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        if(options.reuseNativeTurnSession)nativeSessionRevision=source.revision;
        preparationStage='observation_refresh';
        const fresh=sample?.();
-       const preparedInput={...imported.input,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds}}:{})};
+       const preparedInput=fresh?applyNativeObservationSample(imported.input,fresh):imported.input;
        preparationStage='input_validation';if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
        rememberPrepared(preparedInput,key,g);return {...imported,input:preparedInput};
       }catch(error){
-       try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(error)});}catch{}
+       try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(error),capacity:historyCapacityDetail(error)});}catch{}
        await reset();throw error;
       }
      }));
@@ -754,11 +783,15 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
           // Only lightweight current-clock/observation data is added. Native
           // history already resides in the fork; no invented record counts.
           const {representation:_representation,historySummary:_historySummary,packingLoss:_packingLoss,...current}=input;
-          const preparedInput={...current,...(fresh?{activeSeconds:fresh.activeSeconds,runtime:fresh.runtime,
-            nativeTiming:{requestActiveSeconds:fresh.requestActiveSeconds},
+          const currentClock=fresh?applyNativeObservationSample(current,fresh):current;
+          const preparedInput={...currentClock,...(fresh?{
             ...(current.observation?{observation:{...current.observation,currentAction:null}}:{})}:{}),
             imageContextPending:false,messages:[{kind:'user' as const,truncated:false,
-            text:'Estimate remaining active work from currentObservation.activeSeconds until the current source turn ends. Native history is a fixed earlier snapshot; nativeTiming.requestActiveSeconds identifies the earlier request clock, not live synchronization. Use the supplemental active clock without assuming more work completed. Do not execute the task.'}]};
+            text:currentClock.predictionTarget
+             ?'Estimate remaining time to achieve the agreed current-turn task objective, including relevant verification and delivery. An approval or blocker report is not objective achievement. Keep the marked elapsed-time basis; do not assume task success or execute work. Return null if duration to achievement is not defensible.'
+             :currentClock.timeBasis===ETA_TIME_BASIS
+             ?'Estimate wall time until the current source turn final reply is fully delivered using the marked timeBasis in currentObservation. Include tools, downloads, queues, retries and automatic review; exclude only confirmed full human blocks. Do not judge native terminal state, control the timer, or treat interruption as success. Native history is a fixed earlier snapshot; use the refreshed clock without assuming more work completed. Do not execute the task.'
+             :'Estimate remaining active work from currentObservation.activeSeconds until the current source turn ends. Native history is a fixed earlier snapshot; nativeTiming.requestActiveSeconds identifies the earlier request clock, not live synchronization. Use the supplemental active clock without assuming more work completed. Do not execute the task.'}]};
           if(!observerInputSchema.safeParse(preparedInput).success)throw Error('INVALID_OBSERVER_INPUT');
           rememberPrepared(preparedInput,key,g);
           return {input:preparedInput,sourceBytes:source.snapshot.byteLength,sourceRevision:source.snapshot.revision};
@@ -786,7 +819,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        }catch(e){
          // Diagnostic metadata is best effort; never skip process cleanup or
          // replace the original failure if the diagnostic journal is unavailable.
-         try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(e)});}catch{}
+         try{await journal?.preparationFailed?.({ownerUuid:processOwnerUuid,sourceKey:key,generation:g,stage:preparationStage,code:preparationErrorCode(e),capacity:historyCapacityDetail(e)});}catch{}
          await reset();throw e;
        }finally{await history.snapshot.close();}
      });
@@ -859,12 +892,12 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          check(combined);
          if(preparedOwner&&!matchesOwner(preparedOwner))throw Error('SOURCE_PREPARATION_STALE');
          reportObserverStage(onStage,'dispatch');phase('inferenceMs');
-         const persistEvidence=async(evidence:Parameters<NonNullable<Parameters<typeof live.estimate>[2]>>[0])=>{
+         const persistEvidence=bindRequestCorrelation(async(evidence:Parameters<NonNullable<Parameters<typeof live.estimate>[2]>>[0])=>{
            try{
              if(evidence.kind==='snapshot')await journal!.usageSnapshot({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence,completenessReason:'observed'});
              else await journal!.usageGap({operationId:operationId!,sourceKey:key,sourceEpoch:sourceEpoch??null,generation:g,...evidence});
            }catch(error){receiptFailure=true;throw error;}
-         };
+         });
          // Stage listeners are synchronous but can cancel/invalidate. Nothing
          // asynchronous may run between this final fence and the model method.
          if(mainAccountLease&&!await mainAccountLease.validate(combined))throw Error('MAIN_ACCOUNT_CHANGED');
@@ -879,8 +912,15 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          phase('deliveryMs');
          reportObserverStage(onStage,'provider_returned');
          // Once a terminal response exists, cancellation must not erase its usage.
-         const imageSourceValid=!combined.aborted&&await attachmentsUnchanged(combined).catch(()=>false)&&
-          (preparedOwner?.validateSource?await preparedOwner.validateSource(combined).then(()=>true,()=>false):true);
+         let sourceRejection:ResultRejectionReason|undefined;
+         let imageSourceValid=false;
+         if(!combined.aborted){
+          if(!await attachmentsUnchanged(combined).catch(()=>false))sourceRejection='provider_attachment_invalid';
+          else {
+           try{await preparedOwner?.validateSource?.(combined);imageSourceValid=true;}
+           catch(error){sourceRejection=sourceRejectionReason(error);}
+          }
+         }
          // Dispatch reuse expires quickly; result acceptance instead validates
          // the captured account binding. Missing/failed guards fail closed,
          // without throwing away the terminal response or its token evidence.
@@ -915,7 +955,7 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
          if(accepted)resultProvenance=provenance;
          if((!imageSourceValid||!accountValid)&&!cancellationCleaned)await reset();
          const rejectionReason=accepted?undefined:combined.aborted||result.cancelled?'scheduler_aborted':
-           !accountValid?'provider_account_invalid':!imageSourceValid?'provider_source_invalid':
+           !accountValid?'provider_account_invalid':!imageSourceValid?(sourceRejection??'provider_source_invalid'):
            !authorized()?'provider_authorization_revoked':'provider_interpretation_missing';
          return {status:result.cancelled?'aborted':accepted?'interpreted':'process_error',interpretation:accepted?result.interpretation:null,usage:result.usage,wireMetrics:live.status().wireMetrics,
            ...(rejectionReason?{rejectionReason}:{})} as ObserverResult;

@@ -1,9 +1,11 @@
 import {expect,it} from 'vitest';
 import {readFileSync} from 'node:fs';
 import {nativePreservationInstructions} from '../../src/estimation/native-preservation.js';
+import {milestoneSelectionInstructions} from '../../src/estimation/milestone-selection.js';
 import {createPersistentObserverSession,type SessionRpc} from '../../src/estimation/observer-persistent-session.js';
 import type {ObserverInput} from '../../src/estimation/observer-contract.js';
 import {parseCodexCheckpoint} from '../../src/observer/codex-checkpoint.js';
+import {ETA_TIME_BASIS} from '../../src/core/eta-time-contract.js';
 import {createProgressState,progressScope,applyProgress,observeProgress} from '../../src/estimation/progress-state.js';
 const input:ObserverInput={goalSummary:'current goal',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'goal',truncated:false}],truncated:false};
 const answer={relation:'continue',status:'running',summary:'current goal',estimate:{remainingSeconds:90,errorPercent:20}};
@@ -33,6 +35,10 @@ it.each([false,true])('sends request-bound review enums in real turn/start param
  if(prepared)session.prepareEstimate(packet,signal);
  await session.estimate(packet,signal);
  const sent=f.calls.find(c=>c.method==='turn/start')!.params;
+ expect(f.calls.find(c=>c.method==='thread/start')!.params.developerInstructions).toContain(milestoneSelectionInstructions);
+ expect(sent.outputSchema.properties.nextMilestone).toEqual(schema.properties.nextMilestone);
+ expect(sent.outputSchema.properties.nextMilestone.properties.selection).toBeUndefined();
+ expect(sent.outputSchema.properties.progressReview.type).toBe('object');
  expect(sent.outputSchema.properties.progressReview.properties.evidenceRefs.items.enum).toEqual([state.operations[0]!.evidenceRef]);
  expect(sent.outputSchema.properties.progressReview.properties.milestoneId.enum).toEqual([state.milestone!.id]);
  expect(schema.properties.progressReview.properties.evidenceRefs.items.enum).toBeUndefined();
@@ -68,6 +74,16 @@ it('transmits execution observations unchanged in the actual turn request',async
  await session.start();await session.estimate({...input,executionObservations:facts},new AbortController().signal);
  const request=f.calls.find(c=>c.method==='turn/start')!;
  expect(JSON.parse(request.params.input.at(-1).text).currentObservation.executionObservations).toEqual(facts);
+});
+it('carries the optional wall-clock basis through the native observation request',async()=>{
+ const f=fixture(),session=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});
+ await session.start();
+ await session.estimate({...input,timeBasis:ETA_TIME_BASIS,nativeTiming:{requestActiveSeconds:8}},new AbortController().signal);
+ const wire=JSON.parse(f.calls.find(c=>c.method==='turn/start')!.params.input.at(-1).text).currentObservation;
+ expect(wire).toMatchObject({timeBasis:ETA_TIME_BASIS,activeSeconds:10,nativeTiming:{requestActiveSeconds:8}});
+ const policy=f.calls.find(c=>c.method==='thread/start')!.params.developerInstructions as string;
+ expect(policy).toContain('currentObservation.timeBasis');expect(policy).toContain('final reply is fully delivered');
+ expect(policy).toContain('Do not deduct an unresolved approval');expect(policy).toContain('Interruption is not success');
 });
 it('separates review and outlook reference namespaces in both prompt paths and schema',async()=>{
  const f=fixture(),session=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{}});

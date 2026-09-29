@@ -5,11 +5,11 @@ import {normalizeHookInput} from '../../src/hooks/schema.js';
 import type {OpenNativeSourceResult,BoundNativeTurnSource} from '../../src/observer/native-source-request.js';
 
 const destination={destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}};
-function fixture(){
+function fixture(userFingerprint?:string){
  let epoch=1,closed=0,opens=0;
  let resolve!:(value:OpenNativeSourceResult)=>void;
  const contexts=new PassiveContextStore();
- const source:GoalContextSource={epoch:()=>epoch,read:()=>({epoch,revision:1,currentActionId:null,finalAvailable:false,
+ const source:GoalContextSource={epoch:()=>epoch,read:()=>({epoch,revision:1,currentActionId:null,finalAvailable:false,...(userFingerprint===undefined?{}:{userFingerprint}),
   input:{goalSummary:null,activeSeconds:0,runtime:'running',truncated:false,messages:[{kind:'user',text:'synthetic task',truncated:false}]}}),
   openHistory:async()=>{throw Error('PARSED_HISTORY_FORBIDDEN');},
   openNativeSource:async(_key,_turn,_signal,target)=>{
@@ -69,4 +69,18 @@ it.each(['epoch','pause'] as const)('rejects a native clock supplement after %s 
  f.resolve();await pending;
  if(change==='epoch')f.changeEpoch();else f.pause();
  expect(f.goals.refreshNativeObservation(f.request.ticket,21000)).toBeNull();
+});
+
+it.each(['same-user','changed-user','missing-user','not-ready'] as const)(
+ 'refreshes a newer source revision only with ready unchanged user evidence: %s',async change=>{
+ const f=fixture('synthetic-user-a');
+ const pending=f.goals.openNativeSource(f.request.ticket,new AbortController().signal,destination);
+ f.resolve();await pending;
+ f.source.inspect=()=>({revision:2,currentActionId:null,finalAvailable:false,ready:change!=='not-ready',
+  ...(change==='missing-user'?{}:{userFingerprint:change==='changed-user'?'synthetic-user-b':'synthetic-user-a'})});
+ const sample=f.goals.refreshNativeObservation(f.request.ticket,21000);
+ if(change==='same-user'){
+  expect(sample).toEqual({activeSeconds:21,runtime:'running',requestActiveSeconds:1});
+  expect(f.goals.refreshNativeObservation(f.request.ticket,22000)).toBeNull();
+ }else expect(sample).toBeNull();
 });

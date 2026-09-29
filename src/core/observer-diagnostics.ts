@@ -23,6 +23,7 @@ export const resultRejectionReasons = [
   'source_revision_changed',
   'source_identity_changed',
   'schema_invalid',
+  'prediction_target_mismatch',
   'preparation_failed',
   'aged_response_invalid',
   'aged_response_no_estimate',
@@ -41,10 +42,27 @@ export const resultRejectionReasons = [
   'worker_unavailable',
   'provider_account_invalid',
   'provider_source_invalid',
+  'provider_attachment_invalid',
+  'provider_source_closed',
+  'provider_source_cancelled',
+  'provider_source_identity_mismatch',
+  'provider_source_binding_changed',
   'provider_authorization_revoked',
   'provider_interpretation_missing',
 ] as const;
 export type ResultRejectionReason = typeof resultRejectionReasons[number];
+
+/** Preserve only allowlisted source categories, never exception text or paths. */
+export function sourceRejectionReason(error:unknown):ResultRejectionReason {
+  const code=error!==null&&typeof error==='object'?Reflect.get(error,'code'):undefined;
+  switch(code){
+    case 'source_closed':return 'provider_source_closed';
+    case 'source_cancelled':return 'provider_source_cancelled';
+    case 'source_identity_mismatch':return 'provider_source_identity_mismatch';
+    case 'SOURCE_HISTORY_BINDING_CHANGED':return 'provider_source_binding_changed';
+    default:return error instanceof Error&&error.name==='AbortError'?'provider_source_cancelled':'provider_source_invalid';
+  }
+}
 
 export const schedulingReasons=['invalid_clock','invalid_counter','context_missing','request_in_flight',
   'no_new_information','no_active_progress','global_concurrency_limit','hourly_limit','runtime_ineligible',
@@ -76,6 +94,7 @@ export type ObserverContextState=typeof observerContextStates[number];
 
 /** Public static metadata only: never prompt text, account identifiers or provider errors. */
 export interface ObserverDiagnostics {
+  measurementIdentity?:import('../estimation/prediction-source.js').MeasurementIdentity;
   pendingCriticalEvents?:number;
   reviewIntervalSeconds?:number;
   eventCoalescingRemainingSeconds?:number;
