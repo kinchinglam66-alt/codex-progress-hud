@@ -9,6 +9,14 @@ function event(hook: HookName, turn = 'a', at = 100, overrides: Partial<HookEnve
 }
 
 describe('turn-scoped routing', () => {
+  it('preflights late attachment without reserving identity and rejects full or owned routers',()=>{
+    const router=createTurnRouter({maxTurns:1}),native=event('PostToolUse');
+    expect(router.canLateAttach(native)).toBe(true);
+    expect(router.hasIdentity(native.taskHandle)).toBe(false);
+    expect(router.route(native,100)).toMatchObject({kind:'apply',follow:true});
+    expect(router.canLateAttach(native)).toBe(false);
+    expect(router.canLateAttach(event('PostToolUse','b',100,{sessionKey:'other'}))).toBe(false);
+  });
   it('rejects same-turn activity after Stop even when received later', () => {
     const router=createTurnRouter();
     router.route(event('UserPromptSubmit','a',100),100);

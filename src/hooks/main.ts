@@ -3,9 +3,10 @@ import { defaultTokenPath } from "../server/paths.js";
 import { normalizeHookInput, type HookResult } from "./adapter.js";
 import { createDefaultHookClient, HookDeliveryError, type HookEventClient } from "./client.js";
 import { HudClientError } from "../mcp/report-client.js";
-import type { HookEnvelope, HookName } from "./schema.js";
+import { hookNames, type HookEnvelope, type HookName } from "./schema.js";
 import { hookInputSchema } from './schema.js';
 import { extractPassiveContent } from './passive-content.js';
+import { performance } from "node:perf_hooks";
 
 export const MAX_HOOK_INPUT_BYTES = 64 * 1024;
 export const MAX_HOOK_STDERR_BYTES = 2 * 1024;
@@ -31,6 +32,9 @@ export interface HookRuntimeDependencies {
 
 class HookInputTooLargeError extends Error {}
 class HookTimeoutError extends Error {}
+
+type HookStage = "input" | "token" | "normalize" | "delivery";
+interface HookDiagnosticContext { stage: HookStage; startedAt: number; }
 
 async function readBoundedJson(source: HookInputSource, signal: AbortSignal): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -93,9 +97,22 @@ function failureCategory(error: unknown): string {
   return "hud_unavailable";
 }
 
-function writeBoundedStderr(write: (value: string) => void, category: string): void {
-  const value = `Codex Progress HUD Hook skipped: ${category}\n`.slice(0, MAX_HOOK_STDERR_BYTES);
+function writeBoundedStderr(
+  write: (value: string) => void,
+  hookName: HookName,
+  context: HookDiagnosticContext,
+  category: string
+): void {
+  const hook = (hookNames as readonly string[]).includes(hookName) ? hookName : "unknown";
+  const elapsedMs = Math.min(MAX_HOOK_TIMEOUT_MS, Math.max(0, Math.round(performance.now() - context.startedAt)));
+  const fields = JSON.stringify({ hook, stage: context.stage, elapsedMs, category });
+  const value = `Codex Progress HUD Hook skipped: ${category} ${fields}\n`.slice(0, MAX_HOOK_STDERR_BYTES);
   try { write(value); } catch { /* diagnostics cannot affect the Hook protocol */ }
+}
+
+function enterStage(context: HookDiagnosticContext, stage: HookStage): void {
+  context.stage = stage;
+  context.startedAt = performance.now();
 }
 
 function deliveryFailureCategory(error: unknown): string {
@@ -121,27 +138,32 @@ async function executeHookEvent(
   dependencies: HookRuntimeDependencies,
   client: HookEventClient,
   deadlineMs: number,
-  controller: AbortController
+  controller: AbortController,
+  diagnostic: HookDiagnosticContext
 ): Promise<HookResult> {
+  enterStage(diagnostic, "input");
   const input = await withDeadline(
     readBoundedJson(dependencies.stdin ?? process.stdin, controller.signal),
     deadlineMs,
     controller.signal,
     controller
   );
+  enterStage(diagnostic, "token");
   const hmacKey = dependencies.hmacKey ?? await withDeadline(
     (dependencies.readToken ?? (() => loadOrCreateToken(defaultTokenPath())))(),
     deadlineMs,
     controller.signal,
     controller
   );
+  enterStage(diagnostic, "normalize");
   const normalized = normalizeHookInput(hookName, input, (dependencies.now ?? Date.now)(), hmacKey);
   const content = normalized.envelope.turnKey === undefined ? null : extractPassiveContent(hookName, input);
   if (content !== null && content.text.length > 0) normalized.envelope.content = content;
-  const envelope: HookEnvelope = normalized.envelope.turnKey !== undefined &&
-    (hookName === 'UserPromptSubmit' || hookName === 'PostToolUse')
+  const envelope: HookEnvelope = (hookName==='SessionStart'||hookName==='UserPromptSubmit'||
+    (normalized.envelope.turnKey!==undefined&&hookName==='PostToolUse'))
     ? {...normalized.envelope,hostThreadId:hookInputSchema.parse(input).session_id}
     : normalized.envelope;
+  enterStage(diagnostic, "delivery");
   try {
     await withDeadline(
       (dependencies.postHook ?? ((envelope, options) => client.post(envelope, options)))
@@ -157,6 +179,8 @@ async function executeHookEvent(
     // Delivery failures must not block execution or inject instructions into it.
     writeBoundedStderr(
       dependencies.writeStderr ?? ((value: string) => process.stderr.write(value)),
+      hookName,
+      diagnostic,
       deliveryFailureCategory(error)
     );
   }
@@ -171,6 +195,7 @@ export async function runHookEvent(
   const writeStderr = dependencies.writeStderr ?? ((value: string) => process.stderr.write(value));
   const controller = new AbortController();
   const deadlineMs = Date.now() + boundedTimeout(dependencies.timeoutMs);
+  const diagnostic: HookDiagnosticContext = { stage: "input", startedAt: performance.now() };
   let result: HookResult = hookName === "Interrupt" ? {} : { continue: true };
   try {
     result = await executeHookEvent(
@@ -178,10 +203,11 @@ export async function runHookEvent(
       dependencies,
       createDefaultHookClient(),
       deadlineMs,
-      controller
+      controller,
+      diagnostic
     );
   } catch (error) {
-    writeBoundedStderr(writeStderr, failureCategory(error));
+    writeBoundedStderr(writeStderr, hookName, diagnostic, failureCategory(error));
   }
   try { writeStdout(`${JSON.stringify(result)}\n`); } catch { /* fail-open */ }
 }

@@ -8,7 +8,7 @@ import type {NativeSourceDestination,OpenNativeSourceResult,BoundNativeTurnSourc
 import {createPrefixFingerprint} from '../estimation/residual/fingerprint.js';
 
 type OwnerOptions=Parameters<typeof createContextOwner>[0];
-interface Binding {hostId:string;turnKey:string;epoch:number;sourceEpoch:number}
+interface Binding {hostId:string;turnKey:string;epoch:number;sourceEpoch:number;attachedWallMs:number}
 
 /** One selected source per authenticated attachment. Raw identities stay local. */
 export function createConversationSource(options:OwnerOptions & {
@@ -122,21 +122,89 @@ export function createConversationSource(options:OwnerOptions & {
   const measurementEpoch=(key:string):number|null=>bindings.has(key)?observeHealth(key):null;
   const executionCache=new Map<string,{identity:string;boundaryMs:number;trustedAt:number}>();
   const researchBridges=new Map<string,{epoch:number;offset:number;reliable:boolean}>();
+  const discoveries=new Map<string,{due:number;controller?:AbortController;result?:{turnId:string;startedAtMs:number}}>();
+  const inactiveDiscoveries=new Set<string>();
+  const cancelDiscovery=(key:string)=>{discoveries.get(key)?.controller?.abort();discoveries.delete(key);};
+  const discoverMissingTurns=()=>{
+    const discover=options.source.discoverRunningTurn;if(!discover)return;
+    for(const [key,binding] of bindings){
+      if(inactiveDiscoveries.has(key))continue;
+      const snapshot=owner.snapshot(key);
+      if(snapshot?.health==='ready'&&snapshot.historyComplete&&!snapshot.partialLine&&snapshot.records.some(record=>
+        record.turnId!==null&&options.turnKeyFor(binding.hostId,record.turnId)===binding.turnKey))continue;
+      const previous=discoveries.get(key),now=options.now();
+      if(previous?.controller||previous?.result||(previous&&previous.due>now))continue;
+      const controller=new AbortController(),entry:{due:number;controller?:AbortController;result?:{turnId:string;startedAtMs:number}}={due:now+5000,controller};
+      discoveries.set(key,entry);
+      const boundTurn=binding.turnKey;
+      const timer=setTimeout(()=>controller.abort(),15000);timer.unref?.();
+      void discover.call(options.source,binding.hostId,controller.signal).then(async result=>{
+        if(controller.signal.aborted||discoveries.get(key)!==entry||bindings.get(key)!==binding||binding.turnKey!==boundTurn)return;
+        if(!result||!await result.confirm(controller.signal))return;
+        if(controller.signal.aborted||discoveries.get(key)!==entry||bindings.get(key)!==binding||binding.turnKey!==boundTurn)return;
+        const latest=owner.snapshot(key);
+        if(latest?.health==='ready'&&latest.historyComplete&&!latest.partialLine&&latest.records.some(record=>
+          record.turnId!==null&&options.turnKeyFor(binding.hostId,record.turnId)===boundTurn))return;
+        // A fresh native lifecycle scan attests the actual open turn, even if
+        // it began before this process. It is a new native identity, not an
+        // alias granting the unobserved Hook access to that turn's context.
+        if(result&&options.turnKeyFor(binding.hostId,result.turnId)!==boundTurn&&Number.isSafeInteger(result.startedAtMs)&&result.startedAtMs>=0&&result.startedAtMs<=options.wallNow()){
+          // The proof can only be consumed synchronously at this notification.
+          // A paused/deferred consumer must request fresh evidence on a later tick.
+          entry.result=result;
+          try{options.onChange?.(key);}finally{delete entry.result;}
+        }
+      }).catch(()=>{/* No evidence is not permission to change ownership. */}).finally(()=>{
+        clearTimeout(timer);delete entry.controller;entry.due=options.now()+5000;
+      });
+    }
+  };
   const takeover=(key:string,turnKey:string)=>{
     const binding=bindings.get(key),snapshot=owner.snapshot(key);
+    const discovered=discoveries.get(key)?.result;
+    if(binding&&binding.turnKey===turnKey&&discovered){
+      cancelDiscovery(key);
+      const nextTurnKey=options.turnKeyFor(binding.hostId,discovered.turnId),wall=options.wallNow();
+      if(nextTurnKey===turnKey||discovered.startedAtMs>wall)return null;
+      binding.turnKey=nextTurnKey;binding.epoch=allocate();executionCache.delete(key);invalidateScopes(key);
+      // Discovery authorizes identity only. Context still has to be loaded and
+      // validated under the new binding before any inference is eligible.
+      owner.attach(key,binding.hostId,nextTurnKey);
+      return {turnKey:nextTurnKey,startedAtMs:Math.floor(options.now()-(wall-discovered.startedAtMs)),
+        identity:`discovered:${binding.epoch}:${nextTurnKey}:${discovered.startedAtMs}`,
+        ...(options.taskHandleFor===undefined?{}:{taskHandle:options.taskHandleFor(binding.hostId,discovered.turnId)})};
+    }
     if(!binding||binding.turnKey!==turnKey||!snapshot||snapshot.health!=='ready'||
       !snapshot.historyComplete||snapshot.partialLine)return null;
     const selected=select(key,turnKey,{goalSummary:null,activeSeconds:0,runtime:'running',previousEstimate:null});
-    if(!selected?.nextTurn||selected.nextTurn.kind!=='runtime'||selected.nextTurn.runtime!=='running')return null;
-    const previousRuntime=selected.current.filter(record=>record.kind==='runtime').at(-1);
-    if(!previousRuntime||previousRuntime.runtime==='running'||selected.nextTurn.atMs<previousRuntime.atMs)return null;
-    const nextTurnId=selected.nextTurn.turnId;
+    let next=selected?.nextTurn;
+    if(selected){
+      if(!next||next.kind!=='runtime'||next.runtime!=='running')return null;
+      const previousRuntime=selected.current.filter(record=>record.kind==='runtime').at(-1);
+      if(!previousRuntime||next.atMs<previousRuntime.atMs)return null;
+      // A fully attributed native start can replace the prior open turn even
+      // when its terminal event was lost. Do not invent an old completion.
+      if(previousRuntime.runtime==='running'&&(next.turnId===null||next.sourceTurnId!==next.turnId))return null;
+    }else{
+      // An unmatched Hook is not native identity evidence. Recover only from a
+      // later, explicit native start in a complete source, never from text or
+      // an older turn that happened to be running when the Hook arrived.
+      const latest=snapshot.records.filter(record=>record.kind==='runtime').at(-1);
+      if(!latest||latest.runtime!=='running'||latest.turnId===null||
+        latest.sourceTurnId!==latest.turnId||latest.atMs<=binding.attachedWallMs)return null;
+      if(snapshot.records.slice(snapshot.records.indexOf(latest)+1).some(record=>
+        record.turnId!==null&&record.turnId!==latest.turnId))return null;
+      next=latest;
+    }
+    const wall=options.wallNow(),monotonic=options.now();
+    if(!Number.isSafeInteger(next.atMs)||next.atMs>wall||next.atMs<0)return null;
+    const nextTurnId=next.turnId;
     if(nextTurnId===null)return null;
     const nextTurnKey=options.turnKeyFor(binding.hostId,nextTurnId);
-    const identity=`${selected.currentEpoch}:${snapshot.revision}:${selected.nextTurn.id}:${nextTurnKey}`;
+    const identity=`${epoch(key)}:${snapshot.revision}:${next.id}:${nextTurnKey}`;
     binding.turnKey=nextTurnKey;binding.epoch=allocate();executionCache.delete(key);invalidateScopes(key);
     owner.attach(key,binding.hostId,nextTurnKey);
-    return {turnKey:nextTurnKey,startedAtMs:selected.nextTurn.atMs,identity,
+    return {turnKey:nextTurnKey,startedAtMs:Math.floor(monotonic-(wall-next.atMs)),identity,
       ...(options.taskHandleFor===undefined?{}:{taskHandle:options.taskHandleFor(binding.hostId,nextTurnId)})};
   };
   const openHistory=async(key:string,turnKey:string,signal:AbortSignal):Promise<{snapshot:HistorySnapshot;currentTurnId:string}|null>=>{
@@ -246,25 +314,32 @@ export function createConversationSource(options:OwnerOptions & {
   return {
     goals,
     attach(key:string,hostId:string,turnKey:string):void {
+      inactiveDiscoveries.delete(key);
       const existing=bindings.get(key);
+      if(existing&&(existing.hostId!==hostId||existing.turnKey!==turnKey))cancelDiscovery(key);
       if(existing&&existing.hostId!==hostId)invalidateScopes(key);
       owner.attach(key,hostId,turnKey);
-      if(!existing||existing.hostId!==hostId)bindings.set(key,{hostId,turnKey,epoch:allocate(),sourceEpoch:0});
-      else existing.turnKey=turnKey;
+      if(!existing||existing.hostId!==hostId)bindings.set(key,{hostId,turnKey,epoch:allocate(),sourceEpoch:0,attachedWallMs:options.wallNow()});
+      else if(existing.turnKey!==turnKey){existing.turnKey=turnKey;existing.attachedWallMs=options.wallNow();}
     },
-    changed:owner.changed,setActive:owner.setActive,tick:owner.tick,snapshot:owner.snapshot,openHistory,openNativeSource,openNativeTurn,
+    changed:owner.changed,setActive(key:string,active:boolean){
+      if(active)inactiveDiscoveries.delete(key);else{inactiveDiscoveries.add(key);cancelDiscovery(key);}
+      owner.setActive(key,active);
+    },tick(){owner.tick();discoverMissingTurns();},snapshot:owner.snapshot,openHistory,openNativeSource,openNativeTurn,
     turnKey(key:string):string|null {return bindings.get(key)?.turnKey??null;},
     stop(key:string):void {
       const binding=bindings.get(key);if(!binding)return;
+      cancelDiscovery(key);
+      inactiveDiscoveries.add(key);
       executionCache.delete(key);researchBridges.delete(key);
       owner.remove(key);invalidateScopes(key);owner.attach(key,binding.hostId,binding.turnKey);owner.setActive(key,false);
       binding.epoch=allocate();binding.sourceEpoch=0;
     },
-    remove(key:string):void {owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);researchBridges.delete(key);},
+    remove(key:string):void {cancelDiscovery(key);inactiveDiscoveries.delete(key);owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);researchBridges.delete(key);},
     prune(retain:(key:string)=>boolean):void {
-      for(const key of bindings.keys())if(!retain(key)){owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);researchBridges.delete(key);}
+      for(const key of bindings.keys())if(!retain(key)){cancelDiscovery(key);inactiveDiscoveries.delete(key);owner.remove(key);bindings.delete(key);invalidateScopes(key);measurementEpochs.delete(key);executionCache.delete(key);researchBridges.delete(key);}
     },
     measurementEpoch,
-    async close():Promise<void>{bindings.clear();scopesByKey.clear();measurementEpochs.clear();executionCache.clear();researchBridges.clear();await owner.close();}
+    async close():Promise<void>{for(const key of discoveries.keys())cancelDiscovery(key);inactiveDiscoveries.clear();bindings.clear();scopesByKey.clear();measurementEpochs.clear();executionCache.clear();researchBridges.clear();await owner.close();}
   };
 }

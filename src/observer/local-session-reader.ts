@@ -2,7 +2,7 @@ import {createHash,type Hash} from "node:crypto";
 import {lstat, open, opendir, realpath, type FileHandle} from "node:fs/promises";
 import type {Dirent, Stats} from "node:fs";
 import {isAbsolute, relative, resolve} from "node:path";
-import type {ConversationRecord, ReadBatch, RuntimeOutcome, RuntimeState} from "./conversation-record.js";
+import type {ConversationRecord, ReadBatch, RuntimeOutcome, RuntimeState,RunningTurnDiscovery} from "./conversation-record.js";
 import {parseCodexCheckpoint, type NativeCodexCheckpoint} from "./codex-checkpoint.js";
 import {createHistorySnapshot, type HistoryGap, type HistorySnapshot, type HistorySnapshotPage} from "./history-snapshot.js";
 import {createNativeSourceSnapshot,type NativeSourceSnapshot} from './native-source-snapshot.js';
@@ -35,7 +35,8 @@ export type LocalSessionSourceErrorCode =
   | "source_oversize"
   | "source_malformed"
   | "source_terminal_unsupported"
-  | "source_checkpoint_unsupported";
+  | "source_checkpoint_unsupported"
+  | "source_paginated_text_required";
 
 export class LocalSessionSourceError extends Error {
   readonly code: LocalSessionSourceErrorCode;
@@ -127,6 +128,7 @@ interface PassResult {
 }
 
 interface SnapshotState {
+  nativeAttributionDigest?:string;
   checkpointRange?: {start:number;end:number;digest:string};
   currentTurnId?:string;
   path: string;
@@ -1243,10 +1245,13 @@ async function readSnapshotPage(
         seenOrder: state.seenOrder,
         activeTurnId: state.activeTurnId,
         historyTruncated: false,
-        options: state.currentTurnId===undefined?SNAPSHOT_PARSE_OPTIONS:{...SNAPSHOT_PARSE_OPTIONS,inferTurnId:true},
+        options: state.currentTurnId===undefined&&state.nativeAttributionDigest===undefined?SNAPSHOT_PARSE_OPTIONS:{...SNAPSHOT_PARSE_OPTIONS,inferTurnId:true},
         gaps: state.gaps
       };
       const parsed = parseLine(context, bytes);
+      if(state.nativeAttributionDigest!==undefined&&context.activeTurnId!==null&&parsed.some(record=>
+        record.kind!=='runtime'&&record.sourceScope!=='conversation'&&record.turnId!==context.activeTurnId))
+        state.gaps.add('unattributed_record');
       state.activeTurnId = context.activeTurnId;
       records.push(...parsed);
       if(state.currentTurnId!==undefined&&parsed.some(record=>record.sourceScope!=='conversation'&&record.turnId!==state.currentTurnId)){
@@ -1313,6 +1318,8 @@ async function readSnapshotPage(
       throw new LocalSessionSourceError("source_identity_mismatch");
     }
     const validateCheckpoint=async()=>{
+      if(state.nativeAttributionDigest!==undefined&&await completePrefixValidation(file!,state.watermark,signal)!==state.nativeAttributionDigest)
+        throw new LocalSessionSourceError('source_identity_mismatch');
       const range=state.checkpointRange;
       if(range&&await completePrefixValidation(file!,range.end,signal,range.start)!==range.digest){
         throw new LocalSessionSourceError('source_identity_mismatch');
@@ -1367,6 +1374,7 @@ function snapshotIdentity(threadId: string, path: string, identity: FileIdentity
 
 export function createLocalSessionReader({root}: {root: string}): {
   read(threadId: string, signal: AbortSignal, matchesTurn?:(turnId:string)=>boolean): Promise<ReadBatch>;
+  discoverRunningTurn(threadId:string,signal:AbortSignal):Promise<RunningTurnDiscovery|null>;
   snapshot(threadId: string, signal: AbortSignal): Promise<HistorySnapshot>;
   openNativeTurn(threadId:string,signal:AbortSignal):Promise<NativeTurnSource>;
   nativeSnapshot(threadId:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<NativeSourceSnapshot>;
@@ -1525,7 +1533,13 @@ export function createLocalSessionReader({root}: {root: string}): {
       try{
         const before=await file.stat();
         if(!sameIdentity(candidate.identity,identityOf(before))||before.size<boundary.watermark)throw new LocalSessionSourceError('source_identity_mismatch');
-        assertSessionIdentity(await firstLine(file,combined),threadId);
+        const metadataLine=await firstLine(file,combined);
+        assertSessionIdentity(metadataLine,threadId);
+        // The qualified legacy copier cannot inherit paginated native storage.
+        // Select the verified text path during acquisition, before any worker
+        // process/account/model operation. Unknown versions stay fail-closed.
+        const metadata=payloadObject(payloadObject(JSON.parse(metadataLine.toString('utf8'))).payload);
+        const requiresText=boundary.completed!==null&&metadata.cli_version==='0.159.0'&&metadata.history_mode==='paginated';
         if(await completePrefixValidation(file,boundary.watermark,combined)!==digest){
           // Ensure the next UI read resets/rebuilds, even when only an early
           // byte outside its rolling validation window changed.
@@ -1535,6 +1549,7 @@ export function createLocalSessionReader({root}: {root: string}): {
         const after=await file.stat();
         if(!sameIdentity(candidate.identity,identityOf(after))||after.size<boundary.watermark)throw new LocalSessionSourceError('source_identity_mismatch');
         checkCancelled(combined);assertBound();
+        if(requiresText)throw new LocalSessionSourceError('source_paginated_text_required');
       }finally{await file.close();}
     };
     await validate(signal);
@@ -1604,7 +1619,17 @@ export function createLocalSessionReader({root}: {root: string}): {
       if (!sameIdentity(candidate.identity, identityOf(stats))) {
         throw new LocalSessionSourceError("source_identity_mismatch");
       }
-      assertSessionIdentity(await firstLine(file, signal), threadId);
+      const metadataLine=await firstLine(file,signal);
+      assertSessionIdentity(metadataLine,threadId);
+      const metadata=payloadObject(payloadObject(JSON.parse(metadataLine.toString('utf8'))).payload);
+      const observed=cursors.get(threadId),native=observed?.native,boundary=native?.index.snapshot();
+      let nativeAttributionDigest:string|undefined;
+      if(metadata.cli_version==='0.159.0'&&metadata.history_mode==='paginated'&&observed&&native&&!native.invalid&&boundary&&
+        boundary.completed!==null&&boundary.currentTurnId===observed.activeTurnId&&boundary.watermark===observed.offset&&
+        observed.offset===stats.size&&stats.size<=8*1024*1024&&samePath(observed.path,candidate.path)&&sameIdentity(observed.identity,identityOf(stats))){
+        if(await completePrefixValidation(file,stats.size,signal)!==native.digest)throw new LocalSessionSourceError('source_identity_mismatch');
+        nativeAttributionDigest=native.digest;
+      }
       const identity = identityOf(stats);
       const checkpointScan = await scanLatestCheckpoint(file, stats.size, signal);
       const checkpoint = checkpointScan.checkpoint;
@@ -1647,6 +1672,7 @@ export function createLocalSessionReader({root}: {root: string}): {
             path: candidate.path,
             identity,
             ...(checkpointScan.checkpointRange?{checkpointRange:checkpointScan.checkpointRange}:{}),
+            ...(nativeAttributionDigest===undefined?{}:{nativeAttributionDigest}),
             watermark: stats.size,
             nextOffset: startOffset,
             validation: startValidation,
@@ -1831,6 +1857,61 @@ export function createLocalSessionReader({root}: {root: string}): {
 
   return {
     read,
+    discoverRunningTurn(threadId,signal){
+      const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);
+      const operation=(async()=>{
+        if(closed)throw new LocalSessionSourceError('source_closed');
+        checkCancelled(combined);
+        if(!UUID.test(threadId))throw new LocalSessionSourceError('source_invalid_thread');
+        if(nativeFlights.size>=4)throw new LocalSessionSourceError('source_limit');
+        const candidate=await discover(threadId,combined);
+        const file=await open(candidate.path,'r');
+        try{
+          const before=await file.stat();
+          if(!sameIdentity(candidate.identity,identityOf(before)))throw new LocalSessionSourceError('source_identity_mismatch');
+          assertSessionIdentity(await firstLine(file,combined),threadId);
+          if(before.size===0)return null;
+          const tail=Buffer.alloc(1);await file.read(tail,0,1,before.size-1);
+          // A partial event may be the terminal event. Never scan past it.
+          if(tail[0]!==0x0a)throw new LocalSessionSourceError('source_unobserved');
+          const found=await scanReverseLines(file,before.size,combined,bytes=>{
+            let raw:unknown;
+            try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+            catch{throw new LocalSessionSourceError('source_malformed');}
+            const row=checkpointObject(raw),payload=checkpointObject(row?.payload);
+            if(!row||typeof row.type!=='string')throw new LocalSessionSourceError('source_malformed');
+            const atMs=timestampMs(row.timestamp);
+            for(const value of [row,payload])if(value&&['thread_id','threadId'].some(key=>
+              Object.hasOwn(value,key)&&value[key]!==threadId))throw new LocalSessionSourceError('source_identity_mismatch');
+            if(row.type==='compacted')return {running:null};
+            const lifecycle=['task_started','task_complete','task_failed','turn_aborted','turn_started','turn_completed','turn_failed','turn_interrupted'];
+            if(lifecycle.includes(row.type))return {running:null};
+            if(row.type!=='event_msg'||!lifecycle.includes(String(payload?.type)))return null;
+            const turnId=turnIdFrom(payload!,null,false);
+            if(turnId===null)throw new LocalSessionSourceError('source_malformed');
+            return {running:payload!.type==='task_started'?{turnId,startedAtMs:atMs}:null};
+          });
+          const after=await file.stat(),pathStats=await lstat(candidate.path);
+          checkCancelled(combined);
+          if(closed||!sameIdentity(candidate.identity,identityOf(pathStats))||
+            !sameIdentity(identityOf(before),identityOf(after))||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ctimeMs!==after.ctimeMs)
+            throw new LocalSessionSourceError('source_identity_mismatch');
+          assertSessionIdentity(await firstLine(file,combined),threadId);
+          if(!found?.running)return null;
+          return {...found.running,confirm:async(confirmSignal:AbortSignal)=>{
+            checkCancelled(confirmSignal);
+            if(closed)return false;
+            const current=await lstat(candidate.path);
+            checkCancelled(confirmSignal);
+            return !closed&&sameIdentity(candidate.identity,identityOf(current))&&current.size===before.size&&
+              current.mtimeMs===before.mtimeMs&&current.ctimeMs===before.ctimeMs;
+          }};
+        }finally{await file.close();}
+      })();
+      nativeFlights.set(controller,threadId);nativeOperations.add(operation);
+      void operation.finally(()=>{nativeFlights.delete(controller);nativeOperations.delete(operation);}).catch(()=>undefined);
+      return operation;
+    },
     snapshot: snapshotOne,
     openNativeTurn(threadId,signal){
       const controller=new AbortController(),combined=AbortSignal.any([signal,controller.signal]);

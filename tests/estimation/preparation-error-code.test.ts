@@ -55,3 +55,20 @@ it('persists a structured custody failure without its private message',async()=>
   expect(raw).not.toContain('PRIVATE_PATH');
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+it('retains only the exact bounded source profile error code',()=>{
+ expect(preparationErrorCode(Object.assign(Error('private path and metadata'),{code:'source_profile_unsupported'})))
+  .toBe('source_profile_unsupported');
+ expect(preparationErrorCode(Error('source_profile_unsupported'))).toBe('source_profile_unsupported');
+ expect(preparationErrorCode(Object.assign(Error('private'),{code:'source_profile_unsupported: private'})))
+  .toBe('PREPARATION_UNKNOWN');
+ expect(preparationErrorCode(Error('source_profile_unsupported: private'))).toBe('PREPARATION_UNKNOWN');
+});
+
+it('does not execute error code accessors or accept inherited codes',()=>{
+ let reads=0;const error=Error('private');
+ Object.defineProperty(error,'code',{get(){reads++;return 'source_profile_unsupported';}});
+ expect(preparationErrorCode(error)).toBe('PREPARATION_UNKNOWN');expect(reads).toBe(0);
+ const inherited=Error('private');Object.setPrototypeOf(inherited,Object.assign(Object.create(Error.prototype),{code:'source_profile_unsupported'}));
+ expect(preparationErrorCode(inherited)).toBe('PREPARATION_UNKNOWN');
+});

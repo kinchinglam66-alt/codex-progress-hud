@@ -9,6 +9,20 @@ export interface VerifiedHistoryFallback {
  validate(signal:AbortSignal):Promise<void>;
 }
 
+export type VerifiedHistoryPolicy={checkpointOnly:true}|{completeWindow:true};
+
+/** Complete projection fallback: no truncation, no automatic compaction. */
+export async function assertCompleteHistoryWindow(snapshot:HistorySnapshot,signal:AbortSignal):Promise<void>{
+ signal.throwIfAborted();
+ let bytes=snapshot.checkpoint?.encodedBytes??0;
+ const checkSize=()=>{if(bytes>8*1024*1024)throw historyCapacityError('checkpoint_window',bytes,8*1024*1024);};
+ checkSize();
+ for await(const item of snapshot.records(signal)){
+  signal.throwIfAborted();bytes+=Buffer.byteLength(JSON.stringify(item),'utf8');checkSize();
+ }
+ if(!snapshot.coverage.complete||snapshot.coverage.gaps.length)throw Error('history_incomplete');
+}
+
 /** A bounded effective model window, never permission to replay lifetime history. */
 export async function assertCheckpointWindow(snapshot:HistorySnapshot,signal:AbortSignal):Promise<void>{
  signal.throwIfAborted();

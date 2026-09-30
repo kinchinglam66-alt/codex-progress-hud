@@ -53,3 +53,10 @@ export interface ReadBatch {
   partialLine: boolean;
   historyTruncated?: boolean;
 }
+
+/** Identity-only lifecycle discovery; context still requires its own validation. */
+export interface RunningTurnDiscovery {
+  turnId:string;
+  startedAtMs:number;
+  confirm(signal:AbortSignal):Promise<boolean>;
+}

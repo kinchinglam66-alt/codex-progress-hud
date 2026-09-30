@@ -97,6 +97,13 @@ function runtime(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function readHookDiagnostic(stderr: string[]): Record<string, unknown> {
+  const value = stderr.join("");
+  const jsonStart = value.indexOf("{");
+  if (jsonStart < 0) throw new Error("missing structured Hook diagnostic");
+  return JSON.parse(value.slice(jsonStart)) as Record<string, unknown>;
+}
+
 describe("Hook command runtime", () => {
   it('sends filtered task text only on the private scoped envelope', async () => {
     const fixture = runtime({stdin: Readable.from([JSON.stringify({
@@ -181,7 +188,46 @@ describe("Hook command runtime", () => {
     expect(JSON.parse(fixture.stdout[0]!)).toEqual({continue: true});
     expect(fixture.stderr.join("")).not.toContain("private path");
     expect(fixture.stderr.join("")).toContain("delivery_unavailable");
+    expect(readHookDiagnostic(fixture.stderr)).toMatchObject({
+      hook: "SessionStart", stage: "delivery", category: "delivery_unavailable"
+    });
     expect(fixture.stderr.join("").length).toBeLessThanOrEqual(2_048);
+  });
+
+  it("identifies the failing Hook stage and bounds its elapsed time", async () => {
+    const promptInput = JSON.stringify({...input, hook_event_name: "UserPromptSubmit"});
+    const inputFailure = runtime({ stdin: Readable.from(["not-json"]) });
+    await runHookEvent("UserPromptSubmit", inputFailure.dependencies);
+    expect(readHookDiagnostic(inputFailure.stderr)).toMatchObject({
+      hook: "UserPromptSubmit", stage: "input", category: "invalid_input"
+    });
+
+    const tokenFailure = runtime({
+      stdin: Readable.from([promptInput]),
+      readToken: async () => { throw new Error("private token and account path"); }
+    });
+    await runHookEvent("UserPromptSubmit", tokenFailure.dependencies);
+    expect(readHookDiagnostic(tokenFailure.stderr)).toMatchObject({
+      hook: "UserPromptSubmit", stage: "token", category: "hud_unavailable"
+    });
+    expect(tokenFailure.stderr.join("")).not.toMatch(/private token|account path/u);
+
+    const deliveryFailure = runtime({
+      stdin: Readable.from([promptInput]),
+      postHook: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new HudClientError("OFFLINE", "private prompt, token, and native ID");
+      }
+    });
+    await runHookEvent("UserPromptSubmit", deliveryFailure.dependencies);
+    const diagnostic = readHookDiagnostic(deliveryFailure.stderr);
+    expect(diagnostic).toMatchObject({
+      hook: "UserPromptSubmit", stage: "delivery", category: "delivery_offline"
+    });
+    expect(diagnostic.elapsedMs).toEqual(expect.any(Number));
+    expect(diagnostic.elapsedMs as number).toBeGreaterThanOrEqual(10);
+    expect(diagnostic.elapsedMs as number).toBeLessThanOrEqual(3_000);
+    expect(deliveryFailure.stderr.join("")).not.toMatch(/private prompt|token|native ID/u);
   });
 
   it.each([
@@ -194,7 +240,11 @@ describe("Hook command runtime", () => {
       postHook: async () => { throw new HudClientError(code, "private-prompt-and-token"); }
     });
     await runHookEvent("SessionStart", fixture.dependencies);
-    expect(fixture.stderr).toEqual([`Codex Progress HUD Hook skipped: ${category}\n`]);
+    expect(fixture.stderr).toHaveLength(1);
+    expect(fixture.stderr[0]).toContain(`Codex Progress HUD Hook skipped: ${category} `);
+    expect(readHookDiagnostic(fixture.stderr)).toMatchObject({
+      hook: "SessionStart", stage: "delivery", category
+    });
     expect(JSON.parse(fixture.stdout[0]!)).toEqual({continue: true});
     expect(fixture.stderr.join("")).not.toContain("private-prompt-and-token");
   });
@@ -217,7 +267,11 @@ describe("Hook command runtime", () => {
   ])("allowlists manager diagnostic %s", async (code, category) => {
     const fixture = runtime({ postHook: async () => { throw new HookDeliveryError(code!); } });
     await runHookEvent("SessionStart", fixture.dependencies);
-    expect(fixture.stderr).toEqual([`Codex Progress HUD Hook skipped: ${category}\n`]);
+    expect(fixture.stderr).toHaveLength(1);
+    expect(fixture.stderr[0]).toContain(`Codex Progress HUD Hook skipped: ${category} `);
+    expect(readHookDiagnostic(fixture.stderr)).toMatchObject({
+      hook: "SessionStart", stage: "delivery", category
+    });
     expect(fixture.stdout).toHaveLength(1);
     expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({ continue: true });
   });

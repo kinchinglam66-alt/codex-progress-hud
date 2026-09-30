@@ -27,6 +27,7 @@ export function createTurnRouter(options: { maxTurns?: number; retentionMs?: num
   takeover(sessionKey:string, previousTurnKey:string, turnKey:string, taskHandle:string, observedAt:number): void
   observeTerminal(taskHandle: string, observedAt: number): void
   hasIdentity(taskHandle: string): boolean
+  canLateAttach(envelope: HookEnvelope): boolean
 } {
   const maxTurns = options.maxTurns ?? 2048;
   const retentionMs = options.retentionMs ?? 15 * 60 * 1000;
@@ -39,6 +40,12 @@ export function createTurnRouter(options: { maxTurns?: number; retentionMs?: num
   const superseded = new Map<string, Set<string>>();
   return {
     hasIdentity(taskHandle) { return records.has(taskHandle); },
+    canLateAttach(envelope) {
+      return envelope.hook==='PostToolUse'&&envelope.turnKey!==undefined&&
+        !current.has(envelope.sessionKey)&&!records.has(envelope.taskHandle)&&records.size<maxTurns&&
+        !superseded.get(envelope.sessionKey)?.has(envelope.turnKey)&&
+        ![...records.values()].some(record=>record.sessionKey===envelope.sessionKey&&record.turnKey===envelope.turnKey);
+    },
     takeover(sessionKey, previousTurnKey, turnKey, taskHandle, observedAt) {
       if (!Number.isSafeInteger(observedAt) || observedAt < 0 || !sessionKey || !previousTurnKey || !turnKey || !taskHandle) {
         throw new RangeError('invalid takeover');

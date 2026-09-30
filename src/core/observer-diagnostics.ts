@@ -86,7 +86,7 @@ export function workerAcquisitionReason(error:unknown):SchedulingReason {
 }
 
 export const observerContextStates=['history_loading','context_preparing','context_full','context_compressed',
-  'context_native','native_context_failed','estimate_timeout',
+  'context_native','native_context_failed','source_profile_unsupported','estimate_timeout',
   'context_images_missing',
   'image_context_unsupported',
   'history_incomplete','capacity_unknown','context_too_large','compression_failed'] as const;

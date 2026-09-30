@@ -1,10 +1,11 @@
-import type {ConversationRecord,ReadBatch} from './conversation-record.js';
+import type {ConversationRecord,ReadBatch,RunningTurnDiscovery} from './conversation-record.js';
 import type {HistorySnapshot} from './history-snapshot.js';
 import type {NativeSourceSnapshot} from './native-source-snapshot.js';
 import type {NativeSourceDestination,NativeTurnSource,BoundNativeTurnSource} from './native-source-request.js';
 import {createHash} from 'node:crypto';
 
 interface Source {
+  discoverRunningTurn?(id:string,signal:AbortSignal):Promise<RunningTurnDiscovery|null>;
   read(id:string,signal:AbortSignal,matchesTurn?:(turnId:string)=>boolean):Promise<ReadBatch>;
   snapshot?(id:string,signal:AbortSignal):Promise<HistorySnapshot>;
   nativeSnapshot?(id:string,signal:AbortSignal,destination:NativeSourceDestination):Promise<NativeSourceSnapshot>;

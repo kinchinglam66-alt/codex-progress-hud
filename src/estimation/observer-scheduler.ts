@@ -8,7 +8,7 @@ import type {PassiveContextStore} from '../server/passive-context-store.js';
 import type {PassiveGoals} from '../server/passive-goals.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
 import type {VerifiedHistoryFallback} from '../observer/verified-history-fallback.js';
-import {assertCheckpointWindow,verifyHistoryFallback} from '../observer/verified-history-fallback.js';
+import {assertCheckpointWindow,assertCompleteHistoryWindow,verifyHistoryFallback,type VerifiedHistoryPolicy} from '../observer/verified-history-fallback.js';
 import type {NativeSourceDestination,OpenNativeSourceResult,NativeObservationSample,BoundNativeTurnSource} from '../observer/native-source-request.js';
 import type {ContextPreparationMetrics, PreparedContext} from './prepared-context.js';
 import {decideTrigger, EVENT_STABILITY_SECONDS, ordinaryRequestIntervalSeconds, type TriggerReason} from './long-task-policy.js';
@@ -22,6 +22,7 @@ import {captureHistoryFeatures} from './residual/capture.js';
 import {createRequestProfile,type RequestProfile,type RequestProfilePhase} from './request-profile.js';
 import {workerAcquisitionReason} from '../core/observer-diagnostics.js';
 import {requestCorrelation} from './request-correlation.js';
+import {preparationErrorCode} from './observer-persistent-receipt.js';
 import {createMeasurementIdentity,type MeasurementIdentity} from './prediction-source.js';
 import {validateCompletionOutlook,estimateUncertain} from './completion-outlook.js';
 import {assessEstimateCondition,type EstimateConditionAssessment} from './estimate-conditions.js';
@@ -29,7 +30,7 @@ export interface ObserverWorker {
   /** Passive per-flight timing; the returned function detaches only this listener. */
   subscribeContextPhase?(listener:(phase:RequestProfilePhase)=>void):()=>void;
   prepareNativeHistoryFallback?(input:ObserverInput,history:VerifiedHistoryFallback,signal:AbortSignal,
-    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample,policy?:{checkpointOnly:true}):Promise<PreparedContext>;
+    conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample,policy?:VerifiedHistoryPolicy):Promise<PreparedContext>;
   prepareNativeTurnContext?(input:ObserverInput,source:BoundNativeTurnSource,signal:AbortSignal,
     conversationKey:string,turnGeneration:number,observedAtMs:number,sample?:()=>NativeObservationSample):Promise<PreparedContext>;
   nativeSourceDestination?(signal:AbortSignal):Promise<NativeSourceDestination>;
@@ -299,6 +300,7 @@ export class ObserverScheduler {
     if(ownsEntry)this.notify();
   }
   private preparationFailureState(flight:Flight,error:unknown):ObserverContextState {
+    if(preparationErrorCode(error)==='source_profile_unsupported')return 'source_profile_unsupported';
     const code=error instanceof Error?error.message:'';
     if(code==='capacity_unknown')return 'capacity_unknown';
     if(code==='context_too_large'||code.startsWith('context_too_large:'))return 'context_too_large';
@@ -308,15 +310,26 @@ export class ObserverScheduler {
     if(flight.contextState==='history_loading')return 'history_incomplete';
     return 'compression_failed';
   }
-  private failPreparation(entry:Entry,flight:Flight):void {
+  private failPreparation(entry:Entry,flight:Flight,error?:unknown):void {
     this.checkDeadline(flight);
+    // A host cancellation is not a failed context import. Preserve timeouts and
+    // actual preparation failures, but never leave a cancelled phase in the UI.
+    // Do not infer cancellation from exception text or invent dispatch/usage proof.
+    const cancelled=flight.controller.signal.aborted&&!flight.timedOut;
+    if(cancelled){
+      if(entry.flight===flight&&entry.contextStateTurnKey===flight.turnKey){
+        delete entry.contextState;delete entry.contextStateTurnKey;
+      }
+      delete flight.contextState;
+    }else if(error!==undefined)this.contextState(flight,this.preparationFailureState(flight,error));
     const settledAt=this.time();
     try {this.options.goals.settle(flight.ticket,null,settledAt);}catch{/* opaque ticket cleanup is best effort */}
     this.flights.delete(flight.key);
     if(entry.flight===flight)delete entry.flight;
     // Null settlement releases the ticket; its schema rejection is not the
     // cause of a preparation failure (no model response was produced).
-    this.recordResult(entry,flight,null,false,settledAt,null,this.schedulerRejectionReason(flight,this.workerState(flight.worker))??'preparation_failed');
+    this.recordResult(entry,flight,cancelled?{status:'aborted',interpretation:null,usage:null}:null,
+      false,settledAt,null,this.schedulerRejectionReason(flight,this.workerState(flight.worker))??'preparation_failed');
     this.releaseRetention(entry,flight,false,null);
     this.notify();
   }
@@ -374,12 +387,14 @@ export class ObserverScheduler {
         this.contextState(flight,'context_native');
       }catch(error){
         // Recovery is only for source acquisition, never a retry after a worker
-        // or provider failure. Require an already-existing complete checkpoint.
-        const code=error!==null&&typeof error==='object'?Reflect.get(error,'code'):undefined;
+        // or provider failure. The explicitly recognized paginated source uses
+        // a bounded full projection; all older recovery reasons require a checkpoint.
+        const code=error!==null&&typeof error==='object'?Object.getOwnPropertyDescriptor(error,'code')?.value:undefined;
+        const completeWindow=code==='source_paginated_text_required';
         const recover=paired===null&&flight.worker.prepareNativeHistoryFallback&&
-          ['source_unobserved','source_limit','source_checkpoint_unsupported'].includes(String(code));
+          ['source_unobserved','source_limit','source_checkpoint_unsupported','source_paginated_text_required'].includes(String(code));
         if(paired)await closePaired();
-        if(!recover){this.contextState(flight,this.preparationFailureState(flight,error));this.failPreparation(entry,flight);return;}
+        if(!recover){this.failPreparation(entry,flight,error);return;}
         try{
           const signal=flight.controller.signal;
           const checkTicket=async(s:AbortSignal)=>{
@@ -390,7 +405,8 @@ export class ObserverScheduler {
           const opened=await this.options.goals.openNativeHistoryFallback(flight.ticket,signal);
           if(!opened)throw Error('CHECKPOINT_REQUIRED');
           checkpointHistory=opened.snapshot;
-          await assertCheckpointWindow(opened.snapshot,signal);
+          if(completeWindow)await assertCompleteHistoryWindow(opened.snapshot,signal);
+          else await assertCheckpointWindow(opened.snapshot,signal);
           const verified=await verifyHistoryFallback(opened,signal,checkTicket);
           input=this.coverProgressSnapshot(entry,flight,input,opened.snapshot.revision);
           this.contextState(flight,'context_preparing');let sampled=false;
@@ -398,13 +414,13 @@ export class ObserverScheduler {
             if(sampled||signal.aborted||this.disabled)throw Error('NATIVE_CONTEXT_STALE');
             const fresh=this.options.goals.refreshNativeObservation(flight.ticket,this.time());if(!fresh)throw Error('NATIVE_CONTEXT_STALE');
             sampled=true;flight.observedActiveSeconds=fresh.activeSeconds;flight.excludedActiveSeconds=0;return fresh;
-          },{checkpointOnly:true});
+          },completeWindow?{completeWindow:true}:{checkpointOnly:true});
           if(!value||!sampled||!isInferenceEligible(value.representation))throw Error('history_incomplete');
           prepared=value.input;flight.researchFailure='incomplete_scan';
           this.contextState(flight,'context_full');
         }catch(failure){
           await closePaired();
-          this.contextState(flight,this.preparationFailureState(flight,failure));this.failPreparation(entry,flight);return;
+          this.failPreparation(entry,flight,failure);return;
         }
       }
     }else if(flight.worker.prepareNativeContext||flight.worker.nativeSourceDestination){
@@ -438,8 +454,7 @@ export class ObserverScheduler {
         this.contextState(flight,'context_native');
       }catch(error){
         if(opened&&!handedToWorker)try{await opened.snapshot.close();}catch{/* Resource owner retains recovery evidence. */}
-        this.contextState(flight,this.preparationFailureState(flight,error));
-        this.failPreparation(entry,flight);return;
+        this.failPreparation(entry,flight,error);return;
       }
     }else if(flight.worker.prepareContext){
       this.contextState(flight,'history_loading');
@@ -486,8 +501,7 @@ export class ObserverScheduler {
           throw error;
         }
       }catch(error){
-        this.contextState(flight,this.preparationFailureState(flight,error));
-        this.failPreparation(entry,flight);
+        this.failPreparation(entry,flight,error);
         return;
       }
     }

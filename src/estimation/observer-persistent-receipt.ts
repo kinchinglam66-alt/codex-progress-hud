@@ -42,7 +42,7 @@ const preparationCodes=[...identityPreparationCodes,'PREPARATION_UNKNOWN','CHECK
  'SESSION_UNAVAILABLE','SESSION_SUPPLEMENT_PENDING_OR_SUBMITTED','SESSION_BATCH_CAPACITY_TOO_SMALL',
  'source_cancelled','source_closed','source_invalid_thread','source_unobserved','source_not_found','source_unavailable',
  'source_unsafe_path','source_ambiguous','source_identity_mismatch','source_limit','source_oversize','source_malformed',
- 'source_terminal_unsupported','source_checkpoint_unsupported',
+ 'source_terminal_unsupported','source_checkpoint_unsupported','source_profile_unsupported','source_paginated_text_required',
  'capacity_unknown','context_too_large','ABORTED'] as const;
 export function preparationErrorCode(error:unknown):typeof preparationCodes[number]{
  if(error instanceof Error){

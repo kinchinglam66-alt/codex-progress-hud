@@ -16,6 +16,35 @@ const THREAD_V7 = "01a0766f-e48a-70e0-b8a8-4abb83140175";
 const PARENT_THREAD = "33333333-3333-7333-8333-333333333333";
 const CHILD_THREAD = "44444444-4444-7444-8444-444444444444";
 const cleanups: Array<() => Promise<void>> = [];
+it.each(['terminal','new-start','rewrite'] as const)('rejects a previously discovered turn after %s',async change=>{
+  const original=meta(THREAD_A)+taskStarted('native');
+  const f=await fixture(THREAD_A,original),reader=createLocalSessionReader({root:f.root});
+  try{
+    const proof=await reader.discoverRunningTurn(THREAD_A,signal());expect(proof).not.toBeNull();
+    expect(await proof!.confirm(signal())).toBe(true);
+    if(change==='rewrite')await writeFile(f.file,original.replace('native','otherx'));
+    else await appendFile(f.file,change==='terminal'?line('event_msg',{type:'task_complete',turn_id:'native'}):taskStarted('new'));
+    expect(await proof!.confirm(signal())).toBe(false);
+  }finally{await reader.close();}
+});
+it('discovers an explicit running turn without an existing projection cursor in a large history',async()=>{
+  const f=await fixture(THREAD_A,meta(THREAD_A)+line('response_item',{type:'message',role:'assistant',content:[{type:'output_text',text:'x'.repeat(9*1024*1024)}]})+taskStarted('native'));
+  const reader=createLocalSessionReader({root:f.root});
+  try{
+    await expect(reader.read(THREAD_A,signal(),id=>id==='missing')).rejects.toMatchObject({code:'source_unobserved'});
+    expect(await reader.discoverRunningTurn(THREAD_A,signal())).toMatchObject({turnId:'native'});
+  }finally{await reader.close();}
+});
+it.each(['task_complete','task_failed','turn_aborted','turn_started','turn_completed','turn_failed','turn_interrupted'])('does not discover a running turn past %s',async type=>{
+  const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('native')+line('event_msg',{type,turn_id:'native'}));
+  const reader=createLocalSessionReader({root:f.root});
+  try{expect(await reader.discoverRunningTurn(THREAD_A,signal())).toBeNull();}finally{await reader.close();}
+});
+it.each(['{"type":','invalid\n'])('does not discover past an incomplete or malformed tail %j',async tail=>{
+  const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('native')+tail);
+  const reader=createLocalSessionReader({root:f.root});
+  try{await expect(reader.discoverRunningTurn(THREAD_A,signal())).rejects.toThrow();}finally{await reader.close();}
+});
 it.each([{secs:2,nanos:500000000},{secs:-1,nanos:0},{secs:1,nanos:1000000000}])('retains only valid reported duration without inventing a start: %j',async duration=>{
  const f=await fixture(THREAD_A,meta(THREAD_A)+taskStarted('turn')+line('event_msg',{
   type:'item_completed',turn_id:'turn',item:{type:'CommandExecution',id:'reported',command:['echo','data'],cwd:'/app',duration,aggregated_output:'done'}},1_700_000_004_000));

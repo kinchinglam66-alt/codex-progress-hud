@@ -217,8 +217,9 @@ it('does not treat an unchanged text fingerprint as proof of unchanged completio
 
 it('inspects eligibility without taking an inference-time snapshot',async()=>{
   const f=setup();f.source.attach('key','host','opaque-current');f.time(500);f.source.tick();await f.flush();
+  const beforeInspect=f.wallReads();
   for(let n=0;n<10;n++)expect(f.source.goals.inspect?.('key','opaque-current',query)).toMatchObject({ready:true,currentActionId:'call'});
-  expect(f.wallReads()).toBe(0);f.source.goals.read('key','opaque-current',query);expect(f.wallReads()).toBe(1);
+  expect(f.wallReads()).toBe(beforeInspect);f.source.goals.read('key','opaque-current',query);expect(f.wallReads()).toBe(beforeInspect+1);
   await f.source.close();
 });
 it('requires the authenticated current turn and never imports a later turn',async()=>{

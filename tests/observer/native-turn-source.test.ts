@@ -35,6 +35,56 @@ async function records(snapshot:HistorySnapshot){
   const result=[];for await(const item of snapshot.records(signal))result.push(item.record);return result;
 }
 
+it('routes a recognized paginated completed base to text before allocation and preserves the full projection',async()=>{
+ const f=await fixture();
+ try{
+  await writeFile(f.path,f.data.replace('"cli_version":"0.153.4"','"cli_version":"0.159.0","history_mode":"paginated"'));
+  await f.reader.read(id,signal);
+  await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:'source_paginated_text_required'});
+  const snapshot=await f.reader.snapshot(id,signal);
+  try{const rows=await records(snapshot);expect(snapshot.coverage).toEqual({complete:true,gaps:[]});
+   expect(rows.some(row=>row.text?.includes('old fact'))).toBe(true);
+   expect(rows.some(row=>row.text==='current task')).toBe(true);
+  }finally{await snapshot.close();}
+ }finally{await f.reader.close();}
+});
+
+it('rejects inner attribution to an older turn after a paginated native start',async()=>{
+ const f=await fixture();let snapshot;
+ try{
+  const conflict=line('response_item',{type:'message',turn_id:'six',role:'assistant',content:[{type:'output_text',text:'foreign turn'}]});
+  await writeFile(f.path,f.data.replace('"cli_version":"0.153.4"','"cli_version":"0.159.0","history_mode":"paginated"')+conflict);
+  await f.reader.read(id,signal);snapshot=await f.reader.snapshot(id,signal);await records(snapshot);
+  expect(snapshot.coverage.complete).toBe(false);expect(snapshot.coverage.gaps).toContain('unattributed_record');
+ }finally{await snapshot?.close();await f.reader.close();}
+});
+
+it('rejects a paginated full prefix rewritten after snapshot traversal begins',async()=>{
+ const f=await fixture();let snapshot;
+ try{
+  const data=f.data.replace('"cli_version":"0.153.4"','"cli_version":"0.159.0","history_mode":"paginated"')+
+   Array.from({length:6},(_,n)=>line('response_item',{type:'function_call_output',call_id:`large-${n}`,output:'x'.repeat(900000)})).join('');
+  await writeFile(f.path,data);for(let n=0;n<4;n++){if((await f.reader.read(id,signal)).caughtUp)break;}
+  await expect(f.reader.openNativeTurn(id,signal)).rejects.toMatchObject({code:'source_paginated_text_required'});
+  snapshot=await f.reader.snapshot(id,signal);const iterator=snapshot.records(signal)[Symbol.asyncIterator]();
+  expect((await iterator.next()).done).toBe(false);
+  await writeFile(f.path,data.slice(0,100000)+ 'y'+data.slice(100001));
+  // A page can already contain the full fixed window. Revalidation must still
+  // reject a rewrite outside the rolling cursor/prefix checks before inference.
+  await iterator.return?.();
+  await expect(records(snapshot)).rejects.toMatchObject({code:'source_identity_mismatch'});
+ }finally{await snapshot?.close();await f.reader.close();}
+});
+
+it('keeps an empty first-turn base native even for the recognized paginated envelope',async()=>{
+ const f=await fixture(true);let view;
+ try{
+  await writeFile(f.path,f.data.replace('"cli_version":"0.153.4"','"cli_version":"0.159.0","history_mode":"paginated"'));
+  await f.reader.read(id,signal);view=await f.reader.openNativeTurn(id,signal);
+  expect(view.boundary.completed).toBeNull();expect(await view.openBase(f.target,signal)).toBeNull();
+ }finally{await view?.close();await f.reader.close();}
+});
+
 it.each([2,5])('preserves native context when the UI skips a %i MiB tool event',async mib=>{
  const f=await fixture();let view,base;
  const output='tool evidence '+'.'.repeat(mib*1024*1024);

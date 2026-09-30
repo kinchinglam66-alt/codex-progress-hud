@@ -7,7 +7,7 @@ import {ETA_TIME_BASIS} from '../core/eta-time-basis.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics,type ObserverContextState} from '../core/observer-diagnostics.js';
 
 const contextLabels:Record<ObserverContextState,string>={history_loading:'正在读取完整对话',context_preparing:'正在准备完整上下文',
-  context_native:'已继承原生上下文',native_context_failed:'原生上下文准备失败',estimate_timeout:'估时超时（30秒），等待后续更新',
+  context_native:'已继承原生上下文',native_context_failed:'原生上下文准备失败',source_profile_unsupported:'当前对话格式与估时运行时不兼容',estimate_timeout:'估时超时（30秒），等待后续更新',
   context_images_missing:'部分历史图片缺失',
   image_context_unsupported:'当前估时路径不支持图片上下文',
   context_full:'已使用完整可读上下文',context_compressed:'早期历史已压缩',history_incomplete:'部分历史不可读，估时依据不完整',
@@ -26,6 +26,10 @@ const admissionLabels:Record<AdmissionReason,string>={
   unsafe_unknown:'上次估时未安全结算，请在设置中恢复',local_policy:'本地估时暂受限，请查看设置中的恢复状态',
 };
 function observerLabel(observer:ObserverDiagnostics):string{
+  // A ready source can temporarily lack the selected turn's usable projection.
+  // This is a synchronization gate, not a model judgment about task evidence.
+  if(observer.state==='insufficient_context'&&observer.schedulingReason==='context_missing')
+    return '本轮上下文尚未就绪，等待同步';
   if((observer.pendingCriticalEvents??0)>0&&['ready','estimating','rejected_result'].includes(observer.state))return '新进展已到达，等待更新估时';
   if(observer.state==='pending'){
     switch(observer.schedulingReason){

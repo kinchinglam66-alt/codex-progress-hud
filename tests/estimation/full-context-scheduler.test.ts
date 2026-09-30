@@ -212,6 +212,37 @@ it('never falls back after entering a native worker even when its failure resemb
  finally{f.scheduler.disable();await f.source.close();}
 });
 
+it('preserves a bounded incompatible source profile without legacy fallback or inference',async()=>{
+ const f=fixture({paired:true});let fallback=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Object.assign(Error('private diagnostic omitted'),{code:'source_profile_unsupported'});};
+ f.worker.prepareNativeHistoryFallback=async()=>{fallback++;return f.preparedContext();};
+ try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);expect(f.closed.value).toBe(1);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('source_profile_unsupported');
+  expect(f.observations.find(row=>row.kind==='result')).toMatchObject({status:'process_error',rejectionReason:'preparation_failed',usage:null});}
+ finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('uses a complete verified projection for recognized paginated acquisition without requiring a checkpoint',async()=>{
+ const f=fixture({paired:true,pairError:'source_paginated_text_required'});let native=0,fallback=0;
+ f.worker.prepareNativeTurnContext=async()=>{native++;throw Error('UNREACHABLE');};
+ f.worker.prepareNativeHistoryFallback=async(input,history,signal,_key,_generation,_at,sample,policy)=>{
+  fallback++;expect(policy).toEqual({completeWindow:true});expect(history.snapshot.checkpoint).toBeUndefined();
+  await history.validate(signal);const fresh=sample!();return {...f.preparedContext(),input:{...input,...fresh}};
+ };
+ try{await f.start();expect(native).toBe(0);expect(fallback).toBe(1);expect(f.counts().observed).toBe(1);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('context_full');expect(f.closed.value).toBe(1);
+ }finally{f.scheduler.disable();await f.source.close();}
+});
+
+it('does not select full projection for an unknown source profile',async()=>{
+ const f=fixture({paired:true,pairError:'source_profile_unsupported'});let fallback=0;
+ f.worker.prepareNativeTurnContext=async()=>{throw Error('UNREACHABLE');};
+ f.worker.prepareNativeHistoryFallback=async()=>{fallback++;return f.preparedContext();};
+ try{await f.start();expect(fallback).toBe(0);expect(f.counts().observed).toBe(0);
+  expect(f.scheduler.diagnostics(f.envelope.sessionKey).contextState).toBe('source_profile_unsupported');
+ }finally{f.scheduler.disable();await f.source.close();}
+});
+
 it('uses a verified checkpoint window when a large native rollout cannot be acquired',async()=>{
  const f=fixture({paired:true,pairError:'source_unobserved',checkpoint:true});let prepared=0;
  f.worker.prepareNativeTurnContext=async()=>{throw Error('NATIVE_WORKER_MUST_NOT_START');};
@@ -520,6 +551,30 @@ it("rejects preparation after a new authenticated turn without observing it", as
   await f.flush();
   expect(f.counts().observed).toBe(0);
   await f.scheduler.close();
+});
+
+it.each([false,true])('does not report a cancelled preparation as a context failure (native=%s)',async(native)=>{
+  const f=fixture({deferPreparation:true});
+  if(native)f.worker.prepareNativeTurnContext=async()=>{throw Error('unused');};
+  // Hold acquisition so cancellation occurs before any model dispatch.
+  const original=f.goals.openNativeTurn.bind(f.goals);
+  let rejectNative!:(error:Error)=>void;
+  if(native)f.goals.openNativeTurn=async()=>new Promise((_resolve,reject)=>{rejectNative=reject;});
+  try{
+    await f.start();
+    f.time(17000);
+    const stop=normalizeHookInput('Stop',{session_id:'session',turn_id:'first'},17000,token).envelope;
+    f.goals.observe(stop,true,17000);f.scheduler.changed(stop.sessionKey,'runtime');f.scheduler.tick();
+    if(native)rejectNative(Error('source_cancelled'));else f.rejectPreparation(Error('IDENTITY_CANCELLED'));
+    await f.flush();
+    expect(f.counts().observed).toBe(0);
+    expect(f.scheduler.diagnostics(stop.sessionKey).contextState).toBeUndefined();
+    expect(f.observations.filter(row=>row.kind==='result')).toEqual([expect.objectContaining({
+      status:'aborted',rejectionReason:'scheduler_aborted',accepted:false,usage:null
+    })]);
+    expect(f.observations.filter(row=>row.kind==='stage').some(row=>
+      row.contextState==='native_context_failed'||row.contextState==='compression_failed')).toBe(false);
+  }finally{f.goals.openNativeTurn=original;await f.scheduler.close();await f.source.close();}
 });
 
 it("does not persist a stale preparation failure onto the next goal", async () => {

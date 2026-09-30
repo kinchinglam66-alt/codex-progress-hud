@@ -443,6 +443,10 @@ export class PassiveGoals {
     goal.timingUncertain=false;goal.lastObservedAt=nowMs;this.invalidate(goal);this.rotateMeasurementScope(goal);
   }
 
+  canAdmitRecovery(sessionKey:string,nowMs:number):boolean {
+    return this.clock(nowMs)&&!this.ended.has(sessionKey)&&!this.goals.has(sessionKey)&&this.goals.size<32;
+  }
+
   observe(envelope: HookEnvelope, follow: boolean, nowMs: number): void {
     let goal = this.goals.get(envelope.sessionKey);
     if (!this.clock(nowMs, goal) || !follow || envelope.turnKey === undefined ||
@@ -540,7 +544,7 @@ export class PassiveGoals {
       try{
         const takeover=this.source.takeover(sessionKey,goal.turnKey);
         if(takeover){const previousTurnKey=goal.turnKey;this.recovery.delete(sessionKey);this.startTurn(goal,takeover.turnKey,nowMs);
-          if(Number.isSafeInteger(takeover.startedAtMs)&&takeover.startedAtMs>=0&&takeover.startedAtMs<=nowMs)
+          if(Number.isSafeInteger(takeover.startedAtMs)&&takeover.startedAtMs<=nowMs)
             goal.wallClock?.earlierStart(takeover.startedAtMs);
           return {...takeover,previousTurnKey};}
       }catch{/* source evidence is advisory until a verified snapshot is available */}

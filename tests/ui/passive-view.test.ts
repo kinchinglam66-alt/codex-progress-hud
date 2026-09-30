@@ -102,6 +102,30 @@ it.each([
   const value=row({prediction:null});value.observer={state,estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
   expect(buildConversationViews([value])[0]?.etaLabel).toBe(label);
 });
+it('distinguishes missing current-turn context from model uncertainty',()=>{
+  const value=row({prediction:null});
+  value.observer={state:'insufficient_context',schedulingReason:'context_missing',sourceHealth:'ready',
+    estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
+  expect(buildConversationViews([value])[0]?.etaLabel).toBe('本轮上下文尚未就绪，等待同步');
+  value.observer={...value.observer,state:'unknown_response'};
+  expect(buildConversationViews([value])[0]?.etaLabel).toBe('估时返回不确定结果');
+});
+it.each(['insufficient_context','unknown_response','rejected_result','estimating'] as const)(
+  'does not replace a valid same-turn countdown with %s',(state)=>{
+    const value=row();value.observer={state,schedulingReason:'context_missing',
+      estimateAgeSeconds:120,callsLastHour:2,retryPending:false};
+    expect(buildConversationViews([value],60)[0]?.etaLabel).toBe('24:59:00 · 上次估时误差 ±30%');
+  });
+it('explains source profile incompatibility without replacing a valid countdown',()=>{
+ const value=row({prediction:null});
+ value.observer={state:'process_error',contextState:'source_profile_unsupported',estimateAgeSeconds:null,callsLastHour:1,retryPending:false};
+ expect(buildConversationViews([value])[0]?.etaLabel).toBe('当前对话格式与估时运行时不兼容');
+ value.goal!.prediction={remainingSeconds:90000,observedActiveSeconds:value.goal!.activeSeconds,errorPercent:30};
+ const view=buildConversationViews([value],60)[0]!;
+ expect(view.etaLabel).toBe('24:59:00 · 上次估时误差 ±30%');
+ expect(view.diagnosticLabel).toContain('当前对话格式与估时运行时不兼容');
+});
+
 it('keeps valid ETA and separately shows freshness and static diagnostics',()=>{
   const value=row();value.observer={state:'call_failed',estimateAgeSeconds:120,callsLastHour:2,retryPending:true};
   const view=buildConversationViews([value],60)[0]!;

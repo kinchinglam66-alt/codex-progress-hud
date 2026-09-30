@@ -20,6 +20,29 @@ function setup(){
   return {goals,contexts,envelope,available:()=>{available=true;},reset:()=>{epoch++;},advance:()=>{revision++;}};
 }
 const answer={relation:'replace',status:'running',summary:'sleep',estimate:{remainingSeconds:90,errorPercent:20}};
+it('rejects a late old estimate after an explicit native next start without inventing prior completion',async()=>{
+  let now=0;
+  const old=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'old'},0,'native-rebind-ticket-fence-test-key').envelope;
+  const next=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'next'},0,'native-rebind-ticket-fence-test-key').envelope;
+  let batch:ReadBatch={records:[{id:'start',turnId:'old',sourceTurnId:'old',atMs:0,kind:'runtime',runtime:'running'},
+    {id:'old-user',turnId:'old',atMs:0,kind:'user',text:'Old work'}],caughtUp:true,partialLine:false,reset:false};
+  const source=createConversationSource({source:{read:async()=>batch,remove(){},async close(){}},now:()=>now,wallNow:()=>now,
+    turnKeyFor:(_host,turn)=>turn==='old'?old.turnKey!:next.turnKey!});
+  const goals=new PassiveGoals(new PassiveContextStore(),source.goals);
+  goals.observe(old,true,0);source.attach(old.sessionKey,'host',old.turnKey!);
+  try{
+    now=1000;source.tick();await new Promise(resolve=>setImmediate(resolve));
+    const request=goals.request(old.sessionKey,now);expect(request).not.toBeNull();
+    batch={...batch,records:[{id:'next-start',turnId:'next',sourceTurnId:'next',atMs:2000,kind:'runtime',runtime:'running'},
+      {id:'next-user',turnId:'next',atMs:2001,kind:'user',text:'Next work'}]};
+    now=7000;source.tick();await new Promise(resolve=>setImmediate(resolve));
+    expect(goals.reconcileSource(old.sessionKey,now)).toMatchObject({turnKey:next.turnKey,previousTurnKey:old.turnKey});
+    expect(goals.settle(request!.ticket,answer,now+1)).toBe(false);
+    expect(goals.view(old.sessionKey,now+1)?.prediction).toBeNull();
+    const current=goals.request(old.sessionKey,now+2);
+    expect(current?.input.messages).toEqual(expect.arrayContaining([expect.objectContaining({text:'Next work',scope:'current'})]));
+  }finally{await source.close();}
+});
 it.each(['output','duplicate','new-user','same-id-edit','rewrite'] as const)('preserves instruction fences independently of projection eviction: %s',async(change)=>{
   let now=0;
   const envelope=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'turn'},0,

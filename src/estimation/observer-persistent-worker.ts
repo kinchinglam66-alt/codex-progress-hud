@@ -4,7 +4,7 @@ import {withRequestCorrelation,bindRequestCorrelation} from './request-correlati
 import {observerInputSchema,isInferenceEligible} from './observer-contract.js';
 import type {ObserverInput} from './observer-contract.js';
 import type {HistorySnapshot} from '../observer/history-snapshot.js';
-import {assertCheckpointWindow} from '../observer/verified-history-fallback.js';
+import {assertCheckpointWindow,assertCompleteHistoryWindow} from '../observer/verified-history-fallback.js';
 import type {ObserverWorker} from './observer-scheduler.js';
 import type {ForecastVersions} from './forecast-record.js';
 import type {ObserverResult} from './observer-provider.js';
@@ -701,9 +701,13 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       try{
        check(combined);if(nativeTurnPrepared)throw Error('NATIVE_REQUEST_NOT_RELEASED');
        if(nativeTurnPrepared)throw Error('NATIVE_REQUEST_NOT_RELEASED');
-       if(policy?.checkpointOnly)await assertCheckpointWindow(history.snapshot,combined);
+       const checkpointOnly=policy!==undefined&&'checkpointOnly' in policy&&policy.checkpointOnly===true;
+       const completeWindow=policy!==undefined&&'completeWindow' in policy&&policy.completeWindow===true;
+       const boundedWindow=checkpointOnly||completeWindow;
+       if(checkpointOnly)await assertCheckpointWindow(history.snapshot,combined);
+       if(completeWindow)await assertCompleteHistoryWindow(history.snapshot,combined);
        await timing.measure('source_validation',()=>history.validate(combined),'fallback');check(combined);
-       const nextProof=policy?.checkpointOnly&&options.reuseNativeTurnSession
+       const nextProof=checkpointOnly&&options.reuseNativeTurnSession
         ?await captureCheckpointReuseProof(history,key,g,combined):null;
        const reusable=!!session&&retentionState?.running===true&&retentionState.conversationKey===key&&retentionState.generation===g&&
         checkpointPrefixReusable(checkpointReuseProof,nextProof,session.status().acceptedThroughOrdinal);
@@ -714,11 +718,11 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
        requestRevision++;bind(key,g);nativeRequestAcquired=true;nativeResourcesOpen=true;nativeOwnerState=retentionState;
        sourceEpoch=JSON.stringify([history.snapshot.identity,history.snapshot.sourceEpoch,history.snapshot.revision]);
        const previousSession=session;
-       const live=await ensure(combined,undefined,true,undefined,true,policy?.checkpointOnly===true,reuseFallback);
+       const live=await ensure(combined,undefined,true,undefined,true,boundedWindow,reuseFallback);
        if(reuseFallback&&live===previousSession)ephemeralRequests++;
        nativeTurnPrepared=true;nativeTurnValidation=s=>timing.measure('source_validation',()=>history.validate(s),'fallback');
        const previousBytes=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes;
-       const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;},policy?.checkpointOnly===true,policy?.checkpointOnly!==true),'fallback');
+       const imported=await timing.measure('supplement_import',()=>importHistory(input,history,live,combined,key,g,value=>{preparationStage=value;},boundedWindow,!boundedWindow),'fallback');
        ephemeralImportedBytes+=live.status().importedEncodedBytes+live.status().stagedEncodedBytes+live.status().acceptedInlineEncodedBytes-previousBytes;
        preparationStage='source_revalidation';await nativeTurnValidation(combined);check(combined);
        preparationStage='observation_refresh';

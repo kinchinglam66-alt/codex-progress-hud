@@ -6,7 +6,7 @@ import { readWindowDiagnostics } from "../diagnostics/window-state.js";
 import { type ProgressEnvelope } from "../core/schema.js";
 import {controlEnvelopeSchema} from './control-schema.js';
 import { RELEASE_CAPABILITIES, acceptsClientProtocol } from "../generated/capabilities.js";
-import { parseHookEnvelope, type HookEnvelope } from "../hooks/schema.js";
+import { parseHookEnvelope, normalizeHookInput, type HookEnvelope } from "../hooks/schema.js";
 
 export type ObserverHookEvent = 'prompt'|'activity'|'final'|'failure';
 
@@ -32,6 +32,7 @@ import { ObserverScheduler, type ObserverWorker, type ObserverWorkerSource, type
 import {parseEstimateTimeoutMs} from '../estimation/request-timeout.js';
 import {ScopedSnapshots} from './scoped-snapshots.js';
 import {createLocalSessionReader} from '../observer/local-session-reader.js';
+import {createSessionStartRecovery} from '../observer/session-start-recovery.js';
 import {createConversationSource} from '../observer/conversation-source.js';
 import {createGoalCheckpointRepository,type GoalCheckpointRepository} from './goal-checkpoint.js';
 import {createMilestoneCheckpointRepository} from './milestone-checkpoint.js';
@@ -348,8 +349,10 @@ export function createProgressServer(options: ProgressServerOptions) {
   if(options.observerSessionsRoot!==undefined&&options.passiveGoals!==undefined)throw Error('CONFLICTING_OBSERVER_SOURCE');
   let sourceToken:string|undefined;
   const workerSource = options.observerWorkerSource;
-  const selectedSource=options.observerSessionsRoot===undefined||(options.observerWorkers===undefined&&workerSource===undefined)?undefined:
-    createConversationSource({source:createLocalSessionReader({root:options.observerSessionsRoot}),now:goalNow,wallNow:now,
+  const sessionReader=options.observerSessionsRoot===undefined||(options.observerWorkers===undefined&&workerSource===undefined)?undefined:
+    createLocalSessionReader({root:options.observerSessionsRoot});
+  const selectedSource=sessionReader===undefined?undefined:
+    createConversationSource({source:sessionReader,now:goalNow,wallNow:now,
       turnKeyFor:(hostId,turnId)=>{
         if(sourceToken===undefined)throw Error('SOURCE_IDENTITY_UNAVAILABLE');
         return `turn_${createHmac('sha256',sourceToken).update(`${hostId}\u0000${turnId}`).digest('base64url')}`;
@@ -369,6 +372,30 @@ export function createProgressServer(options: ProgressServerOptions) {
       }}});
   const passiveGoals = options.passiveGoals ?? createProductionPassiveGoals(passiveContexts,selectedSource?.goals,
     options.residualResearch?event=>options.residualResearch!.boundary(event):undefined);
+  const sessionRecovery=sessionReader===undefined?undefined:createSessionStartRecovery({now:goalNow,wallNow:now,
+    discover:(hostId,signal)=>sessionReader.discoverRunningTurn(hostId,signal),
+    activate:async(key,hostId,result,generation,signal)=>{
+      const activate=async(authorizedSignal:AbortSignal)=>{
+        if(shuttingDown||authorizedSignal.aborted||signal.aborted||sourceToken===undefined||passiveGoals.currentTurnKey(key)!==undefined)return;
+        const envelope=normalizeHookInput('PostToolUse',{session_id:hostId,turn_id:result.turnId},now(),sourceToken).envelope;
+        const at=goalNow();
+        if(envelope.sessionKey!==key||!store.canAdmit(envelope.taskHandle)||
+          !turnRouter.canLateAttach(envelope)||!passiveGoals.canAdmitRecovery(key,at))return;
+        // Reserve the fallible source before publishing any router/task identity.
+        try{selectedSource?.attach(key,hostId,envelope.turnKey!);}
+        catch{selectedSource?.remove(key);return;}
+        passiveGoals.observe({...envelope,receivedAt:at},true,at);
+        if(passiveGoals.currentTurnKey(key)!==envelope.turnKey){selectedSource?.remove(key);return;}
+        const route=turnRouter.route(envelope,now());
+        if(route.kind!=='apply'||!route.follow){passiveGoals.end(key);selectedSource?.remove(key);return;}
+        store.apply({taskId:envelope.taskHandle,event:{type:'session_attached',origin:'late_attach'}},now(),
+          {conversationKey:key,turnKey:route.turnKey,isCurrentTurn:true});
+        if(names.register(key,hostId)){knownConversations.add(key);refreshNames();}
+        passiveObserver?.changed(key,'prompt');store.refreshPresentation();
+      };
+      if(options.runIfGeneration){if(generation!==undefined)await options.runIfGeneration(generation,'on',activate,signal);}
+      else await activate(signal);
+    }});
   const pruneSources=()=>{
     const at=passiveObserver?.presentationTime() ?? goalNow();selectedSource?.prune(key=>{
       const retain=passiveGoals.retainSource(key,at);if(!retain)try{options.residualResearch?.forget(key);}catch{}return retain;
@@ -883,8 +910,9 @@ export function createProgressServer(options: ProgressServerOptions) {
           }
           const route = turnRouter.route(envelope, now());
           if (route.kind === 'apply') {
-            const ownedTurn = passiveGoals.currentTurnKey(route.sessionKey);
-            const follow = route.follow || (ownedTurn !== undefined && ownedTurn === route.turnKey);
+              const ownedTurn = passiveGoals.currentTurnKey(route.sessionKey);
+              const follow = route.follow || (ownedTurn !== undefined && ownedTurn === route.turnKey);
+              if(follow)sessionRecovery?.cancel(route.sessionKey);
             const metadata = { conversationKey: route.sessionKey, turnKey: route.turnKey, isCurrentTurn: follow };
             // Publish the goal and its current turn together. Reclaim ownership
             // before ingesting a fresh prompt so a full context store retains it.
@@ -912,7 +940,13 @@ export function createProgressServer(options: ProgressServerOptions) {
               refreshNames();
             }
             if (route.orderingUncertain) store.observeTurnTracking({ orderingUncertain: true });
+          } else if ((route.kind==='session'&&!route.ended || route.kind==='degraded'&&route.reason==='turn_identity_unavailable'&&envelope.hook==='UserPromptSubmit')&&
+            envelope.hostThreadId!==undefined&&!isMcpRequest(request)) {
+            // A session hint is not a turn. Observe only this authenticated
+            // thread, and publish only after fresh native start confirmation.
+            sessionRecovery?.watch(envelope.sessionKey,envelope.hostThreadId,requestGeneration(request));
           } else if (route.kind === 'session' && route.ended) {
+            sessionRecovery?.cancel(route.sessionKey);
             passiveContexts.ingest(envelope, now());
             // Lifecycle deletion is unconditional, even if the event fence is full.
             passiveContexts.remove(route.sessionKey);
@@ -1234,7 +1268,7 @@ export function createProgressServer(options: ProgressServerOptions) {
       }
       if (passiveObserver) {
         if(selectedSource){
-          sourceTimer=setInterval(()=>{try{selectedSource.tick();}catch{/* source errors do not authorize model retries */}},250);
+          sourceTimer=setInterval(()=>{try{sessionRecovery?.tick();selectedSource.tick();}catch{/* source errors do not authorize model retries */}},250);
           sourceTimer.unref();
         }
         observerTimer = setInterval(() => {
@@ -1246,6 +1280,7 @@ export function createProgressServer(options: ProgressServerOptions) {
     },
     async close(): Promise<void> {
       shuttingDown = true;
+      sessionRecovery?.close();
       clearTimeout(checkpointTimer);clearInterval(checkpointInterval);
       store.off('changed',scheduleCheckpoint);
       clearInterval(observerTimer);

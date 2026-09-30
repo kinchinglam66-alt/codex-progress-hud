@@ -1226,6 +1226,32 @@ it.each(['before-prepare','before-observe'] as const)('denies checkpoint recover
  }finally{await snapshot?.close();await reader.close();await f.worker.close();await f.accounting.close();}
 });
 
+it('imports a complete paginated projection into a clean session without compaction or native forks',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const snapshot=history([{id:'old',kind:'user',atMs:0,turnId:'previous',text:'COMPLETE-OLD-FACT'},
+   {id:'now',kind:'user',atMs:1,turnId:'current',text:'COMPLETE-CURRENT-FACT'}]);
+  const prepared=await f.worker.prepareNativeHistoryFallback!(input,{snapshot,currentTurnId:'current',validate:async()=>{}},
+   signal,'source',0,0,undefined,{completeWindow:true});
+  expect(prepared.representation).toMatchObject({sourceComplete:true,confirmedCompactions:0});
+  expect(f.forks).toEqual([]);expect(f.accounting.snapshot().starts).toBe(0);
+  expect(JSON.stringify(f.imports)).toContain('COMPLETE-OLD-FACT');
+  expect(JSON.stringify(f.imports)).toContain('COMPLETE-CURRENT-FACT');
+  expect((await f.worker.observe(prepared.input,signal,'source',0)).status).toBe('interpreted');
+  expect(f.accounting.snapshot()).toMatchObject({starts:1,knownTokens:110,unknown:0});
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
+it('rejects incomplete full projection before creating a process',async()=>{
+ const f=await retainedNativeFixture(),signal=new AbortController().signal;
+ try{
+  const snapshot=history([{id:'all',kind:'user',atMs:0,turnId:'current',text:'INCOMPLETE'}]);snapshot.coverage.complete=false;
+  await expect(f.worker.prepareNativeHistoryFallback!(input,{snapshot,currentTurnId:'current',validate:async()=>{}},
+   signal,'source',0,0,undefined,{completeWindow:true})).rejects.toThrow('history_incomplete');
+  expect(f.processes()).toBe(0);expect(f.accounting.snapshot().starts).toBe(0);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+
 it('imports a checkpoint and a large complete suffix without running compression',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
  try{
