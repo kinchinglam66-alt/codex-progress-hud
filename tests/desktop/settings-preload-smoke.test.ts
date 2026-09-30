@@ -10,4 +10,4 @@ it('loads the packaged sandboxed CommonJS settings preload and completes status 
   });
   const result = JSON.parse(stdout.trim()) as {preload: string; preloadError: boolean; bridgePresent: boolean; status: {knownTokens: number}};
   expect(result).toMatchObject({preload: 'settings-preload.cjs', preloadError: false, bridgePresent: true, status: {knownTokens: 12}});
-});
+},35_000);

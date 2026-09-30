@@ -22,13 +22,13 @@ it.each(['goal','source'] as const)('does not partially publish recovered identi
   for(let n=0;n<32;n++){
    const host=`11111111-1111-4111-8111-${String(n).padStart(12,'0')}`;
    const envelope=normalizeHookInput('UserPromptSubmit',{session_id:host,turn_id:'old'},wall,token).envelope;
-   await client.submitHook({...envelope,hostThreadId:host},{revision:(await client.status() as HudSnapshot).revision});
+   await submitFixtureHook(client,{...envelope,hostThreadId:host});
   }
   const frame=(type:string,payload:unknown)=>JSON.stringify({timestamp:new Date(wall).toISOString(),type,payload})+'\n';
   const file=join(day,`rollout-2026-09-12T00-00-00-${id}.jsonl`);
   await writeFile(file,frame('session_meta',{id}));
   const session=normalizeHookInput('SessionStart',{session_id:id,source:'startup'},wall,token).envelope;
-  await client.submitHook({...session,hostThreadId:id},{revision:(await client.status() as HudSnapshot).revision});
+  await submitFixtureHook(client,{...session,hostThreadId:id});
   mono=2000;wall=base+1000;
   await appendFile(file,frame('event_msg',{type:'task_started',turn_id:'native'}));
   const native=normalizeHookInput('UserPromptSubmit',{session_id:id,turn_id:'native'},wall,token).envelope;
@@ -43,9 +43,21 @@ import {appendFile,mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createProgressServer} from '../../src/server/http-server.js';
-import {CompanionHttpClient} from '../../src/mcp/report-client.js';
-import {normalizeHookInput} from '../../src/hooks/schema.js';
+import {CompanionHttpClient,HudClientError} from '../../src/mcp/report-client.js';
+import {normalizeHookInput,type HookEnvelope} from '../../src/hooks/schema.js';
 import type {HudSnapshot} from '../../src/server/task-store.js';
+
+async function submitFixtureHook(client:CompanionHttpClient,envelope:HookEnvelope,generation?:number){
+ // Source ticks may update presentation between status and the mutation.
+ // Retry only a rejected stale revision, with the same event identity; never
+ // swallow other errors or retry an accepted event/model operation.
+ for(let attempt=0;attempt<5;attempt++){
+  try{return await client.submitHook(envelope,{revision:(await client.status() as HudSnapshot).revision,
+    ...(generation===undefined?{}:{generation})});}
+  catch(error){if(!(error instanceof HudClientError)||error.code!=='STALE_REVISION'||attempt===4)throw error;}
+ }
+ throw Error('Unreachable fixture retry');
+}
 
 it.each(['running','revoked','turn_completed','turn_failed','turn_interrupted'] as const)('handles fresh SessionStart discovery: %s',async condition=>{
  const directory=await mkdtemp(join(tmpdir(),'hud-first-turn-http-'));
@@ -65,7 +77,7 @@ it.each(['running','revoked','turn_completed','turn_failed','turn_interrupted'] 
   await writeFile(file,frame('session_meta',{id}));await server.listen();
   const token=(await readFile(tokenPath,'utf8')).trim(),client=new CompanionHttpClient(server.address().url,tokenPath);
   const session=normalizeHookInput('SessionStart',{session_id:id,source:'startup'},wall,token).envelope;
-  await client.submitHook({...session,hostThreadId:id},{revision:(await client.status() as HudSnapshot).revision,generation:7});
+  await submitFixtureHook(client,{...session,hostThreadId:id},7);
   expect((await client.status() as HudSnapshot).tasks).toHaveLength(0);
   mono=2000;wall=base+1000;
   if(condition==='revoked')enabled=false;
@@ -101,7 +113,7 @@ it.each([false,true])('recovers a missing Hook binding in a large native file (p
     await server.listen();
     const token=(await readFile(tokenPath,'utf8')).trim(),client=new CompanionHttpClient(server.address().url,tokenPath);
     const missing=normalizeHookInput('UserPromptSubmit',{session_id:id,turn_id:'missing'},wall,token).envelope;
-    await client.submitHook({...missing,hostThreadId:id},{revision:(await client.status() as HudSnapshot).revision});
+    await submitFixtureHook(client,{...missing,hostThreadId:id});
     mono=2000;wall=base+1000;
     await appendFile(file,(preexisting?'':frame('event_msg',{type:'task_started',turn_id:'native'}))+
       frame('response_item',{type:'message',id:'u',role:'user',content:[{type:'input_text',text:'Native task'}]}));
