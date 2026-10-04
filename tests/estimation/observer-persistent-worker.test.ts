@@ -26,6 +26,11 @@ import type {HistorySnapshot} from '../../src/observer/history-snapshot.js';
 import type {ConversationRecord} from '../../src/observer/conversation-record.js';
 import type {BoundNativeTurnSource} from '../../src/observer/native-source-request.js';
 const input:ObserverInput={goalSummary:'current',runtime:'running',activeSeconds:10,messages:[{kind:'user',text:'current',truncated:false}],truncated:false};
+// These integration cases launch several native image-reader helpers. On Windows
+// each helper compiles its guarded reader through PowerShell and has a 30s bound.
+// Keep a finite case budget for hosted runners without changing production
+// deadlines, bypassing native checks, or relaxing the assertions below.
+const imageIntegrationTimeoutMs=process.platform==='win32'?60_000:5_000;
 const cancellationCases=(['interrupted','failed','completed'] as const).flatMap(status=>[false,true].flatMap(known=>
  (status==='interrupted'?['external','internal','deadline','cleanup','record']:['external']).map(source=>({status,known,source}))));
 it.each(cancellationCases)('classifies cancelled ETAs using terminal status: $status known=$known source=$source',async({status:terminalStatus,known,source})=>{
@@ -401,7 +406,7 @@ it('carries actual local post-checkpoint image bytes from source to RPC without 
    const receipt=await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8');
    expect(receipt).not.toContain(path);expect(receipt).not.toContain(imageBytes.toString('base64'));
  }finally{await reader.close();await f.worker.close();await f.accounting.close();}
-});
+},imageIntegrationTimeoutMs);
 it('preserves missing-image quality across compaction replay and a new turn until rebuilt',async()=>{
  const f=await fixture(false,{script:compactionScript,bootstrapBatchByteCapacity:1024,historyBudget:controlledBudget()}),signal=new AbortController().signal;
  const path=join(f.receipts,'restored.png');
@@ -423,7 +428,7 @@ it('preserves missing-image quality across compaction replay and a new turn unti
    const rebuilt=await f.worker.prepareContext!(input,{snapshot:history(records),currentTurnId:'next'},signal,'source',1,0);
    expect(rebuilt.representation).toMatchObject({sourceComplete:true,missingImages:0});
  }finally{await f.worker.close();await f.accounting.close();}
-});
+},imageIntegrationTimeoutMs);
 it('rejects changed same-path images before admitting a forecast',async()=>{
  const f=await fixture(),signal=new AbortController().signal,path=join(f.receipts,'image.png');
  await mkdir(f.receipts,{recursive:true});await writeFile(path,imageBytes);
@@ -433,7 +438,7 @@ it('rejects changed same-path images before admitting a forecast',async()=>{
    expect((await f.worker.observe(prepared.input,signal,'source',0)).status).not.toBe('interpreted');
    expect(f.accounting.snapshot().starts).toBe(0);
  }finally{await f.worker.close();await f.accounting.close();}
-});
+},imageIntegrationTimeoutMs);
 it('rejects an image changed during inference but retains its actual token usage',async()=>{
  const f=await fixture(),signal=new AbortController().signal,path=join(f.receipts,'image.png');
  await mkdir(f.receipts,{recursive:true});await writeFile(path,imageBytes);
@@ -449,7 +454,7 @@ it('rejects an image changed during inference but retains its actual token usage
    expect(result.usage).toMatchObject({inputTokens:100,outputTokens:10});
    expect(f.accounting.snapshot().knownTokens).toBe(110);
  }finally{await f.worker.close();await f.accounting.close();}
-});
+},imageIntegrationTimeoutMs);
 it('blocks unresolved image projections at the worker admission boundary',async()=>{
  const f=await fixture();try{
    expect((await f.worker.observe({...input,imageContextPending:true},new AbortController().signal,'source',0)).status).toBe('invalid_input');
@@ -465,7 +470,7 @@ it('settles known usage when cancellation wins after an image forecast returns',
    expect(result.interpretation).toBeNull();expect(result.usage).toMatchObject({inputTokens:100,outputTokens:10});
    expect(f.accounting.snapshot().knownTokens).toBe(110);
  }finally{await f.worker.close();await f.accounting.close();}
-});
+},imageIntegrationTimeoutMs);
 it('retains native owner across fresh forks and retires immediately after the third terminal',async()=>{
  const f=await retainedNativeFixture(),signal=new AbortController().signal;
  try{
