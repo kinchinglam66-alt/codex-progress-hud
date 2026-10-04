@@ -5,11 +5,11 @@ import {normalizeHookInput} from '../../src/hooks/schema.js';
 import type {OpenNativeSourceResult,BoundNativeTurnSource} from '../../src/observer/native-source-request.js';
 
 const destination={destinationDirectory:'C:/owned',maxSourceBytes:10000,verifyDestination:async()=>{}};
-function fixture(userFingerprint?:string){
- let epoch=1,closed=0,opens=0;
+function fixture(userFingerprint?:string,withMeasurement=false){
+ let epoch=1,measurementEpoch=1,closed=0,opens=0;
  let resolve!:(value:OpenNativeSourceResult)=>void;
  const contexts=new PassiveContextStore();
- const source:GoalContextSource={epoch:()=>epoch,read:()=>({epoch,revision:1,currentActionId:null,finalAvailable:false,...(userFingerprint===undefined?{}:{userFingerprint}),
+ const source:GoalContextSource={epoch:()=>epoch,...(withMeasurement?{measurementEpoch:()=>measurementEpoch}:{}),read:()=>({epoch,revision:1,currentActionId:null,finalAvailable:false,...(userFingerprint===undefined?{}:{userFingerprint}),
   input:{goalSummary:null,activeSeconds:0,runtime:'running',truncated:false,messages:[{kind:'user',text:'synthetic task',truncated:false}]}}),
   openHistory:async()=>{throw Error('PARSED_HISTORY_FORBIDDEN');},
   openNativeSource:async(_key,_turn,_signal,target)=>{
@@ -22,9 +22,77 @@ function fixture(userFingerprint?:string){
  const request=goals.request(envelope.sessionKey,1000)!;
  const result:OpenNativeSourceResult={currentTurnId:'one',snapshot:{kind:'native',sourceThreadId:'source',sourceEpoch:1,revision:1,
   path:'C:/owned/native',byteLength:100,close:async()=>{closed++;}}};
- return {goals,source,envelope,request,result,resolve:()=>resolve(result),changeEpoch:()=>{epoch++;},
+ return {goals,contexts,source,envelope,request,result,resolve:()=>resolve(result),changeEpoch:()=>{epoch++;},changeMeasurement:()=>{measurementEpoch++;},
   counts:()=>({closed,opens}),pause:()=>goals.runtime(envelope.sessionKey,envelope.turnKey!,'paused',1100)};
 }
+
+function pairedSource(validate=async()=>{}):BoundNativeTurnSource {
+ return {identity:'source',sourceEpoch:1,revision:1,currentTurnId:'one',turnKey:'one',baseKey:'base',
+  boundary:{currentTurnId:'one',currentStartOffset:0,watermark:100,completed:null},
+  supplement:{identity:'source',sourceEpoch:1,revision:1,coverage:{complete:true,gaps:[]},async *records(){},close:async()=>{}},
+  validate,openBase:async()=>null,close:async()=>{}};
+}
+const numericAnswer={relation:'replace',status:'running',summary:'task',estimate:{remainingSeconds:60,errorPercent:30}};
+
+it('raw validation re-attests a display/pace epoch change without weakening turn or file identity',async()=>{
+ const f=fixture('same-user',true),signal=new AbortController().signal;
+ let validations=0;f.source.openNativeTurn=async()=>pairedSource(async()=>{validations++;});
+ const capture=await f.goals.openNativeTurn(f.request.ticket,signal);
+ await capture!.validate(signal);f.changeMeasurement();
+ expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(false);
+ await capture!.validate(signal);
+ expect(validations).toBe(2);expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(true);
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(true);
+});
+
+it.each(['without-validation','changed-again'] as const)('does not accept projection changes %s',async mode=>{
+ const f=fixture('same-user',true),signal=new AbortController().signal;
+ f.source.openNativeTurn=async()=>pairedSource();const capture=await f.goals.openNativeTurn(f.request.ticket,signal);
+ f.changeMeasurement();if(mode==='changed-again'){await capture!.validate(signal);f.changeMeasurement();}
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+ expect(f.goals.rejectionReason(f.request.ticket)).toBe('measurement_epoch_changed');
+});
+
+it('parsed-only requests remain fenced by projection measurement epoch',()=>{
+ const f=fixture('same-user',true);f.changeMeasurement();
+ expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(false);
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+ expect(f.goals.rejectionReason(f.request.ticket)).toBe('measurement_epoch_changed');
+});
+
+it.each([false,true])('missing measurement provenance is not equality with missing native proof: native=%s',async native=>{
+ const f=fixture('same-user',true);
+ if(native){f.source.openNativeTurn=async()=>pairedSource();await f.goals.openNativeTurn(f.request.ticket,new AbortController().signal);}
+ delete f.source.measurementEpoch;
+ expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(false);
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+ expect(f.goals.rejectionReason(f.request.ticket)).toBe('measurement_epoch_changed');
+});
+
+it('cannot replace an aborted acquisition signal with a fresh validation signal',async()=>{
+ const f=fixture('same-user',true),acquisition=new AbortController();let validations=0;
+ f.source.openNativeTurn=async()=>pairedSource(async()=>{validations++;});
+ const capture=await f.goals.openNativeTurn(f.request.ticket,acquisition.signal);
+ await capture!.validate(new AbortController().signal);f.changeMeasurement();acquisition.abort();
+ await expect(capture!.validate(new AbortController().signal)).rejects.toMatchObject({name:'AbortError'});
+ expect(validations).toBe(1);expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+});
+
+it('failed revalidation revokes the prior native proof even if projection epoch has not changed again',async()=>{
+ const f=fixture('same-user',true),signal=new AbortController().signal;let invalid=false;
+ f.source.openNativeTurn=async()=>pairedSource(async()=>{if(invalid)throw Object.assign(Error('bad bytes'),{code:'source_identity_mismatch'});});
+ const capture=await f.goals.openNativeTurn(f.request.ticket,signal);f.changeMeasurement();await capture!.validate(signal);invalid=true;
+ await expect(capture!.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+});
+
+it.each(['source','pause','abort','foreign-turn'] as const)('raw proof cannot cross %s boundary',async boundary=>{
+ const f=fixture('same-user',true),controller=new AbortController();f.source.openNativeTurn=async()=>pairedSource();
+ const capture=await f.goals.openNativeTurn(f.request.ticket,controller.signal);f.changeMeasurement();
+ if(boundary==='source')f.changeEpoch();else if(boundary==='pause')f.pause();else if(boundary==='abort')controller.abort();
+ else {const e=normalizeHookInput('UserPromptSubmit',{session_id:'session',turn_id:'two'},1500,'protected-native-source-key-1234567890').envelope;e.content={kind:'user',text:'different task',truncated:false};f.contexts.ingest(e,1500);f.goals.observe(e,true,1500);}
+ await expect(capture!.validate(controller.signal)).rejects.toBeDefined();expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+});
 
 it('opens native input only for a current opaque goal ticket',async()=>{
  const f=fixture();

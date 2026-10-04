@@ -8,5 +8,6 @@ export function createDesktopPersistentWorker(identity:Parameters<typeof createO
   mode:'completed-turn',reuseNativeGuard:true,retainNativeGuard:true});
  if(!nativeContext)throw Error('NATIVE_CONTEXT_UNAVAILABLE');
  return createPersistentObserverWorker({...options,nativeContext,nativeInstructions:instructions,
+  estimateTimeoutMs:options.estimateTimeoutMs??0,
   completedTurnContext:true,reuseNativeTurnSession:true,inlineCurrentTurnSupplement:true});
 }

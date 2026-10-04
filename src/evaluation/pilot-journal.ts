@@ -34,26 +34,31 @@ function contextMetrics(value:unknown){
 
 /** Local research metadata only. Bounded asynchronous I/O never gates model work.
  * Missing terminal summary means an unclean recording shutdown, not completion. */
-export function createPilotJournal(directory:string,options:{now?:()=>number;openFile?:typeof open}={}){
+export function createPilotJournal(directory:string,options:{now?:()=>number;openFile?:typeof open;onHealth?:(health:PilotJournalHealth)=>void}={}){
   const now=options.now??Date.now,openFile=options.openFile??open;
   const session=randomUUID(),salt=randomUUID();
   let file:FileHandle|undefined,tail=Promise.resolve(),closing:Promise<void>|undefined;
   let written=0,dropped=0,failed=false,pending=0,bytes=0;
-  let failures=0,retryAt=0,created=false;
+  let failures=0,consecutiveFailures=0,retryAt=0,created=false;
   let lastError:'EACCES'|'EPERM'|'ENOSPC'|'EIO'|'EBUSY'|'EEXIST'|'unknown'|null=null;
   const pendingRequests=new Set<number>();
-  const status=()=>({written,dropped,failed,failures,lastError,retryAt:failed&&failures<=3&&lastError!=='EEXIST'?retryAt:null});
+  const status=():PilotJournalHealth=>({written,dropped,failed,failures,lastError,retryAt:failed&&lastError!=='EEXIST'?retryAt:null});
+  const reportHealth=()=>{try{options.onHealth?.(status());}catch{/* Diagnostic failure never gates recording or inference. */}};
   async function handle(){
     if(!file){await mkdir(directory,{recursive:true});file=await openFile(resolve(directory,`pilot-${session}.jsonl`),created?'a':'wx',0o600);created=true;}
     return file;
   }
   async function fail(error:unknown){
-    failed=true;failures++;retryAt=now()+30_000;dropped++;
+    failed=true;failures++;consecutiveFailures++;dropped++;
+    // Event-driven, rate-bounded recovery: a prolonged disk/permission outage
+    // must not permanently disable this journal after the fourth attempt.
+    // No timer, retained record replay or model retry is introduced.
+    retryAt=now()+Math.min(300_000,30_000*2**Math.min(consecutiveFailures-1,4));
     const code=(error as NodeJS.ErrnoException|null)?.code;
     lastError=['EACCES','EPERM','ENOSPC','EIO','EBUSY','EEXIST'].includes(code??'')?code as Exclude<typeof lastError,null|'unknown'>:'unknown';
-    const previous=file;file=undefined;await previous?.close().catch(()=>undefined);
+    const previous=file;file=undefined;await previous?.close().catch(()=>undefined);reportHealth();
   }
-  const canRetry=()=>failed&&failures<=3&&lastError!=='EEXIST'&&now()>=retryAt;
+  const canRetry=()=>failed&&lastError!=='EEXIST'&&now()>=retryAt;
   return {
     record(value:ObserverObservation):void {
       if(closing || (failed&&!canRetry()) || pending>=128){dropped++;return;}
@@ -69,11 +74,12 @@ export function createPilotJournal(directory:string,options:{now?:()=>number;ope
         (observed.actualRemainingActiveSeconds===null||activeAnchor(observed.actualRemainingActiveSeconds)!==undefined)?observed:undefined;
       try {if(value.forecast)forecast=makeForecastRecord(value.forecast);} catch { /* Invalid research metadata is omitted. */ }
       // Explicit field projection prevents accidental future context/identity logging.
-      const row={schemaVersion:1,session,recordedAt:Date.now(),kind:value.kind,at:value.at,
+      const row={schemaVersion:1,session,recordedAt:now(),kind:value.kind,at:value.at,
         ...(value.predictionTarget===TASK_OBJECTIVE_TARGET?{predictionTarget:TASK_OBJECTIVE_TARGET}:{}),
         ...(typeof value.objectiveTargetId==='string'&&/^objective_[a-f0-9]{64}$/.test(value.objectiveTargetId)?{objectiveTargetId:value.objectiveTargetId}:{}),
         ...(value.timeBasis===ETA_TIME_BASIS?{timeBasis:ETA_TIME_BASIS,
           ...(typeof value.blockingUnknown==='boolean'?{blockingUnknown:value.blockingUnknown}:{}),
+          ...(typeof value.blockingEvidenceIncomplete==='boolean'?{blockingEvidenceIncomplete:value.blockingEvidenceIncomplete}:{}),
           ...(typeof value.humanBlocked==='boolean'?{humanBlocked:value.humanBlocked}:{})}:{}),
         correlationId:projectRequestCorrelation(value.correlationId),
         measurementIdentity:projectMeasurementIdentity(value.measurementIdentity),
@@ -150,13 +156,14 @@ export function createPilotJournal(directory:string,options:{now?:()=>number;ope
         if(failed&&!canRetry()){dropped++;return;}
         try{
           const target=await handle();
-          if(failed){
+          const recovering=failed;
+          if(recovering){
             // Preserve any partial failed line. A leading newline separates it
             // from the explicit gap; never rewrite history or replay a result.
             await target.writeFile('\n'+JSON.stringify({schemaVersion:1,session,kind:'journal_gap',recordedAt:now(),failures,dropped,lastError})+'\n');
-            failed=false;
           }
-          await target.writeFile(line);written++;
+          await target.writeFile(line);written++;failed=false;consecutiveFailures=0;
+          if(recovering)reportHealth();
         }catch(error){await fail(error);}
       }).finally(()=>{pending--;});
     },
@@ -172,4 +179,10 @@ export function createPilotJournal(directory:string,options:{now?:()=>number;ope
       return closing;
     },
   };
+}
+
+export interface PilotJournalHealth {
+  written:number;dropped:number;failed:boolean;failures:number;
+  lastError:'EACCES'|'EPERM'|'ENOSPC'|'EIO'|'EBUSY'|'EEXIST'|'unknown'|null;
+  retryAt:number|null;
 }

@@ -51,6 +51,18 @@ async function flush(): Promise<void> {
 }
 
 afterEach(() => vi.useRealTimers());
+it('notifies closure once, isolates listener failures and supports unsubscribe and late registration',()=>{
+ const f=fixture(),removed=vi.fn(),survivor=vi.fn(),late=vi.fn();
+ f.rpc.subscribeClosed(removed)();f.rpc.subscribeClosed(()=>{throw Error('private detail');});f.rpc.subscribeClosed(survivor);
+ f.rpc.close('private failure detail');f.rpc.close();f.rpc.subscribeClosed(late);
+ expect(removed).not.toHaveBeenCalled();expect(survivor).toHaveBeenCalledExactlyOnceWith();expect(late).toHaveBeenCalledExactlyOnceWith();
+ expect(f.output.listenerCount('data')).toBe(0);
+});
+it.each(['end','error','close'] as const)('notifies transport closure on output %s even without pending RPCs',event=>{
+ const f=fixture(),notice=vi.fn();f.rpc.subscribeClosed(notice);
+ if(event==='error')f.output.emit(event,Error('synthetic disconnect'));else f.output.emit(event);
+ expect(f.rpc.closed()).toBe(true);expect(notice).toHaveBeenCalledExactlyOnceWith();
+});
 
 describe('observer app-server JSONL RPC transport', () => {
   it('writes numeric requests and correlates out-of-order responses', async () => {

@@ -134,7 +134,11 @@ export async function loadDesktopObserverPilot(options:{dataDirectory:string;res
     if(!/^https:\/\/auth\.openai\.com\/codex\/device$/u.test(event.url)||!/^[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8}){1,2}$/u.test(event.code))return;
     void options.dialog.showMessageBox({type:'question',title:'订阅设备登录',message:'请在浏览器完成订阅设备登录。',detail:`打开 ${event.url}，输入一次性代码 ${event.code}。此代码不会写入估时设置或日志。`,buttons:['知道了'],defaultId:0,cancelId:0,noLink:true});
   }});
-  const journal=createPilotJournal(resolve(options.dataDirectory,'pilot-observations'));
+  const journal=createPilotJournal(resolve(options.dataDirectory,'pilot-observations'),{
+    // Only bounded counters and allowlisted error categories, never the raw
+    // filesystem error, paths, context, account or task identifiers.
+    onHealth:health=>console.warn(health.failed?'HUD_PILOT_JOURNAL_FAILED':'HUD_PILOT_JOURNAL_RECOVERED',JSON.stringify(health)),
+  });
   const consentStore=createObserverConsentStore(resolve(options.dataDirectory,'observer-consent.json'),options.consentProtection);
   const runtimes=new Set<ReturnType<typeof createDesktopObserverRuntime>>();
   let attachedScheduler: Pick<ObserverScheduler,'prepareRecovery'|'restoreRecovery'>|undefined;

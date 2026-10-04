@@ -29,6 +29,8 @@ export interface ObserverAppServerRpc {
   call(method: string, params: unknown): Promise<unknown>;
   notify(method: string, params: unknown): void;
   subscribe(listener: (notification: AppServerNotification) => void): () => void;
+  /** Closure is not a remote terminal event; no private reason is exposed. */
+  subscribeClosed(listener: () => void): () => void;
   close(reason?: string): void;
   closed(): boolean;
 }
@@ -71,6 +73,7 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
   const {input, output} = options;
   const pending = new Map<number, PendingRequest>();
   const subscribers = new Set<(notification: AppServerNotification) => void>();
+  const closeSubscribers = new Set<() => void>();
   const outgoing: OutgoingFrame[] = [];
   let outgoingBytes=0;
   const activeWriteRejectors = new Set<(reason: Error) => void>();
@@ -111,6 +114,8 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
     for (const reject of activeWriteRejectors) reject(error);
     activeWriteRejectors.clear();
     subscribers.clear();
+    const listeners=[...closeSubscribers];closeSubscribers.clear();
+    for(const listener of listeners)try{listener();}catch{/* Diagnostics cannot prevent transport cleanup. */}
     input.removeListener('error', onInputError);
     output.removeListener('data', onData);
     output.removeListener('end', onEnd);
@@ -360,6 +365,11 @@ export function createObserverAppServerRpc(options: ObserverAppServerRpcOptions)
       if (isClosed) return () => undefined;
       subscribers.add(listener);
       return () => subscribers.delete(listener);
+    },
+    subscribeClosed(listener) {
+      if(isClosed){try{listener();}catch{}return () => undefined;}
+      closeSubscribers.add(listener);
+      return () => closeSubscribers.delete(listener);
     },
     close,
     closed: () => isClosed,

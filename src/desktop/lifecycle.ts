@@ -253,7 +253,9 @@ async function defaultDesktopDependencies(): Promise<DesktopDependencies> {
     ),
     createTrayController,
     createProgressServer: options => {
-      const names=createConversationNameService(process.env,{},resolve(process.resourcesPath,'..','observer-runtime'));
+      // Runtime downloads are owned by the data directory, not a sibling of
+      // the installed resources. Desktop updates can remove the old pin.
+      const names=createConversationNameService(process.env,{},resolve(dataDirectory,'observer-runtime'));
       return createProgressServer({...options,
         ...(options.observerWorkers||options.observerWorkerSource?{observerSessionsRoot:defaultCodexSessionsRoot()}:{}),
         readConversationName:names.read,closeConversationNames:names.close});

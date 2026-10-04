@@ -7,6 +7,30 @@ import {etaClockTicks} from '../../src/ui/eta-clock-policy.js';
 import {EtaLiveClock} from '../../src/core/eta-live-clock.js';
 
 const response={relation:'replace',status:'running',summary:'download and validate',estimate:{remainingSeconds:1800,errorPercent:30}};
+it('separates missing approval coverage from an observed ambiguous block without certifying scoring',()=>{
+ let evidence:NonNullable<ReturnType<NonNullable<GoalContextSource['execution']>>>={state:'running',identity:'one',wallClockBoundaryMs:0,blockingEvidenceComplete:false};
+ const f=fixture({epoch:()=>1,read:()=>null,execution:()=>evidence});
+ f.hook('UserPromptSubmit',0);f.goals.reconcileSource(f.key,1000);
+ expect(f.goals.view(f.key,5000)).toMatchObject({runtime:'running',activeSeconds:5,
+   blockingUnknown:false,blockingEvidenceIncomplete:true,humanBlocked:false,timingUncertain:true});
+ expect(f.goals.activeTimeKnown(f.key)).toBe(false);
+ evidence={...evidence,identity:'two',wallClockBoundaryMs:5000,
+   attention:{required:true,evidenceRef:'approval:2',relevantWorkRunning:undefined}};
+ f.goals.reconcileSource(f.key,5000);
+ expect(f.goals.view(f.key,6000)).toMatchObject({blockingUnknown:true,blockingEvidenceIncomplete:false,activeSeconds:6,humanBlocked:false});
+ evidence={...evidence,identity:'three',wallClockBoundaryMs:6000,
+   attention:{required:true,evidenceRef:'approval:3',relevantWorkRunning:true}};
+ f.goals.reconcileSource(f.key,6000);
+ expect(f.goals.view(f.key,7000)).toMatchObject({blockingUnknown:false,blockingEvidenceIncomplete:true,activeSeconds:7,humanBlocked:false});
+});
+it('uncovered clock intervals remain uncertain after coverage resumes and never deduct user time',()=>{
+ const c=new EtaLiveClock(0);c.blocking('uncovered',1000);
+ expect(c.unknownBlocking).toBe(false);expect(c.blockingEvidenceIncomplete).toBe(true);
+ expect(c.elapsed(5000)).toBe(5);expect(c.uncertain).toBe(true);
+ c.blocking('none',5000);expect(c.blockingEvidenceIncomplete).toBe(false);
+ expect(c.uncertain).toBe(true);expect(c.elapsed(6000)).toBe(6);
+ c.end(6000);expect(c.elapsed(10000)).toBe(6);
+});
 it('production factory selects wall delivery while raw legacy constructor stays unmarked',()=>{
  expect(createProductionPassiveGoals(new PassiveContextStore()).clockBasis()).toBe(ETA_TIME_BASIS);
  expect(new PassiveGoals(new PassiveContextStore()).clockBasis()).toBeUndefined();

@@ -7,7 +7,7 @@ import {ETA_TIME_BASIS} from '../core/eta-time-basis.js';
 import {normalizeAdmissionReason, type AdmissionReason, type ObserverDiagnostics,type ObserverContextState} from '../core/observer-diagnostics.js';
 
 const contextLabels:Record<ObserverContextState,string>={history_loading:'正在读取完整对话',context_preparing:'正在准备完整上下文',
-  context_native:'已继承原生上下文',native_context_failed:'原生上下文准备失败',source_profile_unsupported:'当前对话格式与估时运行时不兼容',estimate_timeout:'估时超时（30秒），等待后续更新',
+  context_native:'已继承原生上下文',native_context_failed:'原生上下文准备失败',source_profile_unsupported:'当前对话格式与估时运行时不兼容',estimate_timeout:'估时超时，等待后续更新',
   context_images_missing:'部分历史图片缺失',
   image_context_unsupported:'当前估时路径不支持图片上下文',
   context_full:'已使用完整可读上下文',context_compressed:'早期历史已压缩',history_incomplete:'部分历史不可读，估时依据不完整',
@@ -25,7 +25,19 @@ const admissionLabels:Record<AdmissionReason,string>={
   no_eligible_task:'暂无可估时的任务',half_open_busy:'正在进行恢复试探，请稍候',
   unsafe_unknown:'上次估时未安全结算，请在设置中恢复',local_policy:'本地估时暂受限，请查看设置中的恢复状态',
 };
+const supersededResults=new Set<ObserverDiagnostics['rejectionReason']>([
+  'scheduler_aborted','scheduler_stale','worker_stale','provider_source_cancelled',
+  'critical_event_after_snapshot','goal_replaced','epoch_changed','runtime_terminal',
+  'aged_response_not_running','estimate_expired_on_arrival',
+]);
+function isSupersededResult(observer:ObserverDiagnostics):boolean {
+  return ['rejected_result','process_error'].includes(observer.state)&&supersededResults.has(observer.rejectionReason);
+}
 function observerLabel(observer:ObserverDiagnostics):string{
+  if(observer.state==='rejected_result'&&observer.rejectionReason==='estimate_expired_on_arrival')
+    return '预测返回时已过期，等待下一次估时';
+  if(isSupersededResult(observer))return observer.schedulingReason==='runtime_ineligible'
+    ?'本轮已停止推进，旧估时已取消':'本轮进展已更新，等待下一次估时';
   // A ready source can temporarily lack the selected turn's usable projection.
   // This is a synchronization gate, not a model judgment about task evidence.
   if(observer.state==='insufficient_context'&&observer.schedulingReason==='context_missing')
@@ -59,7 +71,11 @@ function observerPresentation(observer:ObserverDiagnostics,elapsedSeconds:number
 }
 
 export function buildConversationViews(rows: readonly ConversationRow[], elapsedSeconds = 0, updatedKeys: readonly string[] = [],displayedSeconds:ReadonlyMap<string,number>=new Map()) {
-  return rows.filter(row => row.goal === undefined ||
+  // A snapshot must contain at most one row per authenticated conversation.
+  // Defensively collapse duplicate publications; never merge unrelated keys.
+  const unique=new Map<string,ConversationRow>();
+  for(const row of rows)unique.set(row.conversationKey,row);
+  return [...unique.values()].filter(row => row.goal === undefined ||
     ((row.goal.objectiveState?!['completed','unverified'].includes(row.goal.objectiveState):row.goal.status !== 'completed') && row.goal.runtime !== 'stopped')).map(row => {
     const view = row.goal === undefined ? buildHudView({
       revision: 0, selectedTaskId: row.task.id, selectionMode: "follow_activity",
@@ -68,7 +84,11 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
     }) : passivePresentation(row.goal, elapsedSeconds, row.observer,displayedSeconds.get(row.conversationKey));
     return {
       key: row.conversationKey, taskId: row.task.id,
-      executing:row.goal===undefined?row.task.status==='running':row.goal.runtime==='running'&&!row.goal.runtimeUncertain,
+      executing:row.goal===undefined?row.task.status==='running':row.goal.runtime==='running'&&!row.goal.runtimeUncertain&&!row.goal.humanBlocked,
+      activity:row.goal===undefined?(row.task.status==='running'?'running':'attention'):
+        row.goal.objectiveState==='interrupted'||['interrupted','failed'].includes(row.goal.runtime)?'interrupted':
+        row.goal.runtimeUncertain?'unconfirmed':row.goal.humanBlocked?'attention':row.goal.runtime==='running'?'running':
+        row.goal.attentionRequired?'attention':row.goal.runtime==='paused'?'paused':'unconfirmed',
       title: row.name.value ?? "聊天名称暂不可用",
       statusLabel: view.statusLabel, tone: view.tone,
       progressMode: view.progressMode, progressPercent: view.progressPercent,
@@ -77,7 +97,9 @@ export function buildConversationViews(rows: readonly ConversationRow[], elapsed
         (row.observer?.contextState==='context_images_missing'||(row.observer?.missingImages??0)>0?' · 部分历史图片缺失':''),
       nameFreshness: row.name.freshness,
       milestoneLabel:row.goal?milestoneLabel(row.goal,elapsedSeconds):'',
-      ...(row.observer?observerPresentation(row.observer,elapsedSeconds):{})
+      ...(row.observer?observerPresentation(row.observer,elapsedSeconds):{}),
+      ...(row.goal?.blockingEvidenceIncomplete?{diagnosticLabel:
+        `${row.observer?observerPresentation(row.observer,elapsedSeconds).diagnosticLabel+' · ':''}审批阻塞记录未覆盖；墙钟继续计入，计时不能可靠评分`}:{})
     };
   });
 }
@@ -142,8 +164,8 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
     : goal.runtime === 'interrupted' ? '本轮已中断'
     : goal.runtime === 'failed' ? '本轮失败'
     : goal.runtime === 'paused' ? '本轮跟踪已暂停'
-    : running ? (goal.status === 'unknown' ? '本轮执行中 · 状态待判断' : '本轮执行中')
-    : goal.status === 'waiting' ? '本轮等待用户' : '本轮等待中 · 状态待判断';
+    : running ? '本轮执行中'
+    : '本轮等待中 · 状态待判断';
   const delta = Number.isFinite(elapsedSeconds) ? Math.max(0, elapsedSeconds) : 0;
   const countdown = projectCountdown({prediction: goal.prediction,
     activeSeconds: goal.activeSeconds + (running ? delta : 0),
@@ -154,7 +176,7 @@ function passivePresentation(goal: NonNullable<ConversationRow['goal']>, elapsed
       activeSeconds:0,state:running?'running':'waiting'}):countdown;
   const overdueLabel = (): string => {
     if (!running) return '已超出预计时间 · 工作计时已暂停';
-    const action = observer?.state === 'estimating' ? '正在重新估时'
+    const action = observer&&isSupersededResult(observer)?'等待重新估时':observer?.state === 'estimating' ? '正在重新估时'
       : observer?.state === 'call_failed' || observer?.state === 'process_error' || observer?.state === 'unknown_response' || observer?.state === 'rejected_result' || observer?.state === 'setup_failed' || observer?.state === 'disabled'
         ? '估时暂不可用'
         : observer?.state === 'admission_blocked' ? observerLabel(observer)
@@ -179,8 +201,14 @@ export type ConversationView = ReturnType<typeof buildConversationViews>[number]
 
 export function conversationActivityLabel(views:readonly ConversationView[]):string {
   if(views.length===0)return '暂无进行中任务';
-  const running=views.filter(view=>view.executing).length,other=views.length-running;
-  return `${running===0?'暂无执行中任务':`${running} 个执行中`}${other===0?'':` · ${other} 个待处理`}`;
+  const unique=[...new Map(views.map(view=>[view.key,view])).values()];
+  const running=unique.filter(view=>view.executing).length;
+  const labels=[running===0?'暂无执行中任务':`${running} 个执行中`];
+  for(const [kind,label] of [['attention','待处理'],['unconfirmed','状态待确认'],['paused','已暂停'],['interrupted','已中断']] as const){
+    const count=unique.filter(view=>!view.executing&&view.activity===kind).length;
+    if(count)labels.push(`${count} 个${label}`);
+  }
+  return labels.join(' · ');
 }
 
 export type HudTone = "idle" | "active" | "waiting" | "warning" | "danger" | "success";

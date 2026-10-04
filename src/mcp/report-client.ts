@@ -190,6 +190,7 @@ const aggregateSnapshotSchema = z.object({
       attentionRequired:z.boolean().optional(),
       attentionWorkContinuing:z.boolean().optional(),
       blockingUnknown:z.boolean().optional(),
+      blockingEvidenceIncomplete:z.boolean().optional(),
       humanBlocked:z.boolean().optional(),
       timingUncertain: z.boolean().optional(),
       runtimeUncertain: z.boolean().optional(),
