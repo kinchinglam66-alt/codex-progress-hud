@@ -1,4 +1,5 @@
 import { exercisePassiveControls } from './passive-control-smoke.mjs';
+import { assertLeaseScopedDiagnosticReport } from './packaged-diagnostic-contract.mjs';
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -83,9 +84,7 @@ await runPackagedCleanup({
   const markdown = typeof diagnostic.reportPath === "string"
     ? await readFile(diagnostic.reportPath, "utf8")
     : diagnostic.reportMarkdown;
-  if (typeof markdown !== "string" || !markdown.includes("trust not confirmed")) {
-    throw new Error("packaged diagnostics did not preserve unknown Hook trust");
-  }
+  assertLeaseScopedDiagnosticReport(markdown);
   await exercisePassiveControls(client);
 
     await close();
