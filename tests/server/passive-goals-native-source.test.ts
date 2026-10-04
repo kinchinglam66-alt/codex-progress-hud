@@ -69,21 +69,55 @@ it.each([false,true])('missing measurement provenance is not equality with missi
  expect(f.goals.rejectionReason(f.request.ticket)).toBe('measurement_epoch_changed');
 });
 
-it('cannot replace an aborted acquisition signal with a fresh validation signal',async()=>{
+it.each([false,true])('cannot replace an aborted acquisition signal with a fresh validation signal: projectionChanged=%s',async projectionChanged=>{
  const f=fixture('same-user',true),acquisition=new AbortController();let validations=0;
  f.source.openNativeTurn=async()=>pairedSource(async()=>{validations++;});
  const capture=await f.goals.openNativeTurn(f.request.ticket,acquisition.signal);
- await capture!.validate(new AbortController().signal);f.changeMeasurement();acquisition.abort();
+ await capture!.validate(new AbortController().signal);if(projectionChanged)f.changeMeasurement();acquisition.abort();
  await expect(capture!.validate(new AbortController().signal)).rejects.toMatchObject({name:'AbortError'});
  expect(validations).toBe(1);expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
 });
 
-it('failed revalidation revokes the prior native proof even if projection epoch has not changed again',async()=>{
+it.each([false,true])('failed revalidation revokes the prior native proof: projectionChanged=%s',async projectionChanged=>{
  const f=fixture('same-user',true),signal=new AbortController().signal;let invalid=false;
  f.source.openNativeTurn=async()=>pairedSource(async()=>{if(invalid)throw Object.assign(Error('bad bytes'),{code:'source_identity_mismatch'});});
- const capture=await f.goals.openNativeTurn(f.request.ticket,signal);f.changeMeasurement();await capture!.validate(signal);invalid=true;
+ const capture=await f.goals.openNativeTurn(f.request.ticket,signal);if(projectionChanged)f.changeMeasurement();await capture!.validate(signal);invalid=true;
  await expect(capture!.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+ expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(false);
  expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+});
+
+it('first validation failure invalidates only its ticket and permits a fresh validated request',async()=>{
+ const f=fixture('same-user',true),signal=new AbortController().signal;let invalid=true;
+ f.source.openNativeTurn=async()=>pairedSource(async()=>{if(invalid)throw Object.assign(Error('bad bytes'),{code:'source_identity_mismatch'});});
+ const capture=await f.goals.openNativeTurn(f.request.ticket,signal);
+ await expect(capture!.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+ expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(false);
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+ expect(f.goals.rejectionReason(f.request.ticket)).toBe('source_not_ready');
+ invalid=false;
+ const fresh=f.goals.request(f.envelope.sessionKey,3000);expect(fresh).not.toBeNull();
+ const next=await f.goals.openNativeTurn(fresh!.ticket,signal);await next!.validate(signal);
+ expect(f.goals.isTicketValid(fresh!.ticket,4000)).toBe(true);
+ expect(f.goals.settle(fresh!.ticket,numericAnswer,4000)).toBe(true);
+ await capture!.close();await next!.close();
+});
+
+it.each([false,true])('older successful validation cannot resurrect a failed ticket: projectionChanged=%s',async projectionChanged=>{
+ const f=fixture('same-user',true),signal=new AbortController().signal;
+ let mode:'valid'|'pending'|'invalid'='valid',release!:()=>void;
+ f.source.openNativeTurn=async()=>pairedSource(async()=>{
+  if(mode==='invalid')throw Object.assign(Error('bad bytes'),{code:'source_identity_mismatch'});
+  if(mode==='pending')await new Promise<void>(resolve=>{release=resolve;});
+ });
+ const capture=await f.goals.openNativeTurn(f.request.ticket,signal);
+ if(projectionChanged)f.changeMeasurement();await capture!.validate(signal);
+ mode='pending';const older=capture!.validate(signal);
+ mode='invalid';await expect(capture!.validate(signal)).rejects.toMatchObject({code:'source_identity_mismatch'});
+ release();await expect(older).rejects.toMatchObject({code:'GOAL_TICKET_STALE'});
+ expect(f.goals.isTicketValid(f.request.ticket,2000)).toBe(false);
+ expect(f.goals.settle(f.request.ticket,numericAnswer,2000)).toBe(false);
+ await capture!.close();
 });
 
 it.each(['source','pause','abort','foreign-turn'] as const)('raw proof cannot cross %s boundary',async boundary=>{
