@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(import.meta.dirname, "../..");
 const text = (path: string) => readFile(resolve(root, path), "utf8");
+const immutableActionPin = /^softprops\/action-gh-release@[a-f0-9]{40}$/u;
 
 describe("Windows release source contract", () => {
   it("declares a per-user unsigned x64 application package", async () => {
@@ -138,13 +139,29 @@ describe("Windows release source contract", () => {
     expect(release).toContain("npm run verify:release");
     expect(ci).not.toMatch(/uses:\s+[^\s]+@v\d+/u);
     expect(release).not.toMatch(/uses:\s+[^\s]+@v\d+/u);
-    expect(release).toContain("softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228");
+    const releaseActions = [...release.matchAll(/^\s*-\s*uses:\s*(\S+)/gmu)].map(match => match[1]!);
+    expect(releaseActions.filter(action => action.startsWith("softprops/action-gh-release@"))).toHaveLength(1);
+    expect(releaseActions.find(action => action.startsWith("softprops/action-gh-release@"))).toMatch(immutableActionPin);
+    // Every external Action remains immutable, including after Dependabot updates.
+    for (const workflow of [ci, release]) {
+      const actions = [...workflow.matchAll(/^\s*-\s*uses:\s*(\S+)/gmu)].map(match => match[1]!);
+      expect(actions.length).toBeGreaterThan(0);
+      for (const action of actions) expect(action).toMatch(/^[\w.-]+\/[\w./-]+@[a-f0-9]{40}$/u);
+    }
     expect(release).toContain("npm ci --registry=https://registry.npmjs.org");
     expect(release).toContain("steps.artifacts.outputs.installer");
     expect(release).toContain("steps.artifacts.outputs.plugin");
     expect(release).not.toContain("Codex-Progress-HUD-Setup-0.2.0.exe");
     expect(release).not.toContain("codex-progress-hud-plugin-0.2.0.zip");
     expect(release).toContain("SHA256SUMS.txt");
+  });
+
+  it.each(["v3.0.3", "main", "3d0d988", "not-a-sha", "a".repeat(41)])("rejects mutable or incomplete release Action pins: %s", ref => {
+    expect(immutableActionPin.test(`softprops/action-gh-release@${ref}`)).toBe(false);
+  });
+
+  it("accepts a changed immutable release Action pin without coupling its version to the test", () => {
+    expect(immutableActionPin.test(`softprops/action-gh-release@${"a".repeat(40)}`)).toBe(true);
   });
 
   it("rebuilds the native launcher from reviewed source for releases", async () => {
