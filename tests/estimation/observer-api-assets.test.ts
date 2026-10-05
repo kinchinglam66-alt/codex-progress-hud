@@ -3,6 +3,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {afterEach, expect, it} from 'vitest';
 import {loadObserverApiAssets, loadObserverCompressionAssets} from '../../src/estimation/observer-api-assets.js';
+import {observerInstructionsMaxBytes} from '../../src/estimation/asset-pins.js';
 
 const roots: string[] = [];
 async function fixture(): Promise<string> {
@@ -19,6 +20,8 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 it('loads the same pinned observer assets without a subscription runtime or credentials', async () => {
   const value = await loadObserverApiAssets(await fixture());
   expect(value.instructions.length).toBeGreaterThan(100);
+  expect(Buffer.byteLength(value.instructions)).toBeGreaterThan(16_384);
+  expect(Buffer.byteLength(value.instructions)).toBeLessThanOrEqual(observerInstructionsMaxBytes);
   expect(value.schema).toHaveProperty('type', 'object');
   expect(Object.isFrozen(value)).toBe(true);
 });
@@ -36,8 +39,13 @@ it('rejects modified or oversized resources with a fixed diagnostic', async () =
   const root = await fixture();
   await writeFile(join(root, 'observer-assets', 'observer-instructions.md'), 'changed');
   await expect(loadObserverApiAssets(root)).rejects.toThrow('OBSERVER_API_ASSETS_UNAVAILABLE');
-  await writeFile(join(root, 'observer-assets', 'observer-instructions.md'), 'x'.repeat(16385));
+  await writeFile(join(root, 'observer-assets', 'observer-instructions.md'), 'x'.repeat(observerInstructionsMaxBytes+1));
   await expect(loadObserverApiAssets(root)).rejects.toThrow('OBSERVER_API_ASSETS_UNAVAILABLE');
+});
+it('does not extend schema capacity with the larger instruction bound',async()=>{
+ const root=await fixture();
+ await writeFile(join(root,'observer-assets','observer.schema.json'),'x'.repeat(16_385));
+ await expect(loadObserverApiAssets(root)).rejects.toThrow('OBSERVER_API_ASSETS_UNAVAILABLE');
 });
 
 it('rejects missing, relative, control-character and archive paths', async () => {
