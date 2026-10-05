@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { preflightCodex, preflightCodexRuntime, createRuntimePreflightCache } from "../../src/estimation/codex-preflight.js";
+import {observerAssetPins, observerInstructionsMaxBytes} from '../../src/estimation/asset-pins.js';
 // Copy exports so instrumentation can wrap open; all filesystem operations remain real.
 vi.mock('node:fs/promises',async importOriginal=>({...await importOriginal<typeof import('node:fs/promises')>()}));
 const roots:string[]=[];
@@ -137,6 +138,56 @@ it("rejects a workspace redirected through a directory link",async()=>{
 it("rejects oversized assets even when their hash matches",async()=>{
   const files=await fixture(),large="x".repeat(16385); await writeFile(files.instructionsPath,large);
   await expect(preflightCodex({...files,instructionsSha256:pin(large)},async()=>evidence)).rejects.toThrow("CODEX_PREFLIGHT_FAILED");
+});
+it('admits the actual release-pinned long observer prompt in both preflights and cached rechecks',async()=>{
+  const files=await fixture();
+  const prompt=await fs.readFile(new URL('../../src/estimation/assets/observer-instructions.md',import.meta.url));
+  expect(prompt.length).toBeGreaterThan(16384);
+  expect(prompt.length).toBeLessThanOrEqual(observerInstructionsMaxBytes);
+  expect(createHash('sha256').update(prompt).digest('hex')).toBe(observerAssetPins['observer-instructions.md']);
+  await writeFile(files.instructionsPath,prompt);
+  files.instructionsSha256=observerAssetPins['observer-instructions.md'];
+  const runtimeProbe=vi.fn(async()=>({version:evidence.version,features:evidence.features}));
+  await expect(preflightCodexRuntime(files,runtimeProbe)).resolves.toMatchObject({version:'0.153.3'});
+  await expect(preflightCodex(files,async()=>evidence)).resolves.toMatchObject({version:'0.153.3'});
+  const cache=createRuntimePreflightCache(files);
+  await cache.check(runtimeProbe);await cache.check(runtimeProbe);
+  expect(runtimeProbe).toHaveBeenCalledTimes(2);
+  // A cache hit still checks the complete prompt, including its >16 KiB tail.
+  const changed=Buffer.from(prompt);changed[changed.length-1]=changed[changed.length-1]!^1;
+  await writeFile(files.instructionsPath,changed);
+  await expect(cache.check(runtimeProbe)).rejects.toThrow('CODEX_PREFLIGHT_FAILED');
+  expect(runtimeProbe).toHaveBeenCalledTimes(2);
+});
+it('detects replacement of the long release-pinned prompt after runtime probing',async()=>{
+  const files=await fixture();
+  const prompt=await fs.readFile(new URL('../../src/estimation/assets/observer-instructions.md',import.meta.url));
+  await writeFile(files.instructionsPath,prompt);files.instructionsSha256=observerAssetPins['observer-instructions.md'];
+  await expect(preflightCodexRuntime(files,async()=>{
+    await writeFile(files.instructionsPath,Buffer.concat([prompt,Buffer.from('changed')]));
+    return {version:evidence.version,features:evidence.features};
+  })).rejects.toThrow('CODEX_PREFLIGHT_FAILED');
+});
+it.each(['schemaPath','compressionSchemaPath','compressionInstructionsPath'] as const)(
+  'retains the 16 KiB limit for %s even with matching hashes',async key=>{
+    const base=await fixture(),large='x'.repeat(16385);
+    const files={...base,compressionSchemaPath:join(base.cwd,'..','compression.json'),
+      compressionInstructionsPath:join(base.cwd,'..','compression.md'),
+      compressionSchemaSha256:pin('{}'),compressionInstructionsSha256:pin('summary')};
+    await writeFile(files.compressionSchemaPath,'{}');await writeFile(files.compressionInstructionsPath,'summary');
+    await writeFile(files[key],large);
+    const hashKey=key==='schemaPath'?'schemaSha256':key==='compressionSchemaPath'?'compressionSchemaSha256':'compressionInstructionsSha256';
+    files[hashKey]=pin(large);
+    const probe=vi.fn(async()=>({version:evidence.version,features:evidence.features}));
+    await expect(preflightCodexRuntime(files,probe)).rejects.toThrow('CODEX_PREFLIGHT_FAILED');
+    expect(probe).not.toHaveBeenCalled();
+  });
+it('rejects an oversized prompt bearing the release pin before any runtime probe',async()=>{
+  const files=await fixture();await writeFile(files.instructionsPath,'x'.repeat(observerInstructionsMaxBytes+1));
+  files.instructionsSha256=observerAssetPins['observer-instructions.md'];
+  const probe=vi.fn(async()=>({version:evidence.version,features:evidence.features}));
+  await expect(preflightCodexRuntime(files,probe)).rejects.toThrow('CODEX_PREFLIGHT_FAILED');
+  expect(probe).not.toHaveBeenCalled();
 });
 it("rejects conflicting duplicate capability evidence",async()=>{
   await expect(preflightCodex(await fixture(),async()=>({...evidence,features:evidence.features+"\nhooks\tremoved\tfalse"}))).rejects.toThrow("CODEX_PREFLIGHT_FAILED");
