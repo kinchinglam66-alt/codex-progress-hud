@@ -6,6 +6,7 @@ export class EtaLiveClock {
   private endedAt:number|null=null;
   private lastAt:number;
   unknownBlocking=false;
+  blockingEvidenceIncomplete=false;
   uncertain=false;
   constructor(private startAt:number,private baselineSeconds=0){
     if(!Number.isFinite(startAt)||!Number.isFinite(baselineSeconds)||baselineSeconds<0)throw Error('invalid_eta_clock');
@@ -18,7 +19,7 @@ export class EtaLiveClock {
     return this.baselineSeconds+Math.max(0,end-this.startAt-excludedMs-
       (this.blockedAt===null?0:Math.max(0,end-this.blockedAt)))/1000;
   }
-  blocking(kind:'none'|'unknown'|'confirmed_human',at:number):void {
+  blocking(kind:'none'|'unknown'|'uncovered'|'confirmed_human',at:number):void {
     if(!Number.isFinite(at)||at<this.lastAt)throw Error('eta_clock_reversed');
     if(this.endedAt!==null)return;
     this.lastAt=at;
@@ -27,11 +28,14 @@ export class EtaLiveClock {
     }
     if(kind==='confirmed_human'&&this.blockedAt===null)this.blockedAt=at;
     this.unknownBlocking=kind==='unknown';
-    if(this.unknownBlocking)this.uncertain=true;
+    // An adapter without approval coverage has not observed an actual block.
+    // Keep its reliability warning without inventing a current waiting state.
+    this.blockingEvidenceIncomplete=kind==='uncovered';
+    if(this.unknownBlocking||this.blockingEvidenceIncomplete)this.uncertain=true;
   }
   end(at:number):void {
     if(!Number.isFinite(at)||at<this.startAt)throw Error('eta_terminal_clock_reversed');
-    if(this.endedAt===null){this.endedAt=at;this.unknownBlocking=false;}
+    if(this.endedAt===null){this.endedAt=at;this.unknownBlocking=false;this.blockingEvidenceIncomplete=false;}
   }
   get humanBlocked(){return this.blockedAt!==null&&this.endedAt===null;}
   /** A verified native start can precede late attachment. Never move it forward. */

@@ -109,13 +109,95 @@ it('recovers a transient open failure with an explicit gap and bounded retries',
   }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
 });
 
-it('stops retrying persistent failures without creating an unbounded retry loop',async()=>{
+it('backs off persistent failures without polling or disabling future recovery',async()=>{
   let clock=0,attempts=0;
   const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-fail-'));
   const journal=createPilotJournal(directory,{now:()=>clock,openFile:async()=>{attempts++;throw Object.assign(Error('PRIVATE'),{code:'ENOSPC'});}});
   try{
-    for(let i=0;i<10;i++){clock=i*30000;journal.record({kind:'runtime',at:clock,key:'x',generation:1,activeSeconds:1,runtime:'running',version:1});await journal.flush();}
-    expect(attempts).toBe(4);expect(journal.status()).toMatchObject({failed:true,failures:4,retryAt:null,lastError:'ENOSPC'});
+    for(let i=0;i<1000;i++){clock=i*1000;journal.record({kind:'runtime',at:clock,key:'x',generation:1,activeSeconds:1,runtime:'running',version:1});await journal.flush();}
+    expect(attempts).toBe(6);expect(journal.status()).toMatchObject({failed:true,failures:6,retryAt:1050000,lastError:'ENOSPC'});
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('recovers after four failed writes, preserves the empty file and records the gap without replay',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-long-outage-'));
+  let clock=0,attempts=0;
+  const journal=createPilotJournal(directory,{now:()=>clock,openFile:async(...args)=>{
+    const handle=await open(...args);
+    if(attempts++<4)handle.writeFile=async()=>{throw Object.assign(Error('PRIVATE'),{code:'ENOSPC'});};
+    return handle;
+  }});
+  const row={kind:'runtime' as const,at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1};
+  try{
+    for(const at of [0,30000,90000,210000]){clock=at;journal.record({...row,at});await journal.flush();}
+    const names=await readdir(directory);expect(names).toHaveLength(1);
+    expect(await readFile(resolve(directory,names[0]!),'utf8')).toBe('');
+    clock=450000;journal.record({...row,at:clock});await journal.flush();await journal.close();
+    const raw=await readFile(resolve(directory,names[0]!),'utf8');
+    const rows=raw.trim().split('\n').map(line=>JSON.parse(line));
+    expect(rows.map(row=>row.kind)).toEqual(['journal_gap','runtime','journal_summary']);
+    expect(rows[0]).toMatchObject({failures:4,lastError:'ENOSPC'});
+    expect(rows[1].at).toBe(450000);expect(raw).not.toContain('PRIVATE');
+    expect(journal.status()).toMatchObject({failed:false,written:1,failures:4});
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('does not retry a file identity collision or append to an existing file',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-collision-'));
+  let clock=0,attempts=0;
+  const journal=createPilotJournal(directory,{now:()=>clock,openFile:async()=>{attempts++;throw Object.assign(Error('PRIVATE'),{code:'EEXIST'});}});
+  try{
+    for(let i=0;i<10;i++){clock=i*300000;journal.record({kind:'runtime',at:clock,key:'x',generation:1,activeSeconds:1,runtime:'running',version:1});await journal.flush();}
+    expect(attempts).toBe(1);expect(journal.status()).toMatchObject({failed:true,retryAt:null,lastError:'EEXIST'});
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('reports sanitized failure and recovery health without letting diagnostics interrupt writing',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-health-'));
+  let clock=0,attempts=0;const health:unknown[]=[];
+  const journal=createPilotJournal(directory,{now:()=>clock,onHealth:value=>{health.push(value);throw Error('PRIVATE_DIAGNOSTIC');},openFile:async(...args)=>{
+    if(attempts++===0)throw Object.assign(Error('PRIVATE_PATH'),{code:'PRIVATE_CODE'});
+    return open(...args);
+  }});
+  try{
+    const row={kind:'runtime' as const,at:1,key:'PRIVATE_TASK',generation:1,activeSeconds:1,runtime:'running',version:1};
+    journal.record(row);await journal.flush();clock=30000;journal.record(row);await journal.flush();
+    expect(health).toEqual([
+      {written:0,dropped:1,failed:true,failures:1,lastError:'unknown',retryAt:30000},
+      {written:1,dropped:1,failed:false,failures:1,lastError:'unknown',retryAt:null},
+    ]);
+    expect(JSON.stringify(health)).not.toContain('PRIVATE');
+    await journal.close();
+    const rows=(await readFile(resolve(directory,(await readdir(directory))[0]!),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+    expect(rows[1].recordedAt).toBe(30000);
+  }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
+});
+
+it('resets failure backoff after recovery but does not announce recovery when only the gap writes',async()=>{
+  const directory=await mkdtemp(resolve(tmpdir(),'hud-journal-gap-failure-'));
+  let clock=0,opens=0,failHealthy=false;const health:boolean[]=[];
+  const journal=createPilotJournal(directory,{now:()=>clock,onHealth:value=>health.push(value.failed),openFile:async(...args)=>{
+    const handle=await open(...args),write=handle.writeFile.bind(handle),index=opens++;
+    if(index===0)handle.writeFile=async()=>{throw Object.assign(Error('PRIVATE'),{code:'EIO'});};
+    if(index===1)handle.writeFile=async(...values)=>{
+      if(String(values[0]).includes('journal_gap'))return write(...values);
+      throw Object.assign(Error('PRIVATE'),{code:'EIO'});
+    };
+    if(index===2)handle.writeFile=async(...values)=>{
+      if(failHealthy)throw Object.assign(Error('PRIVATE'),{code:'EIO'});
+      return write(...values);
+    };
+    return handle;
+  }});
+  const row={kind:'runtime' as const,at:1,key:'private',generation:1,activeSeconds:1,runtime:'running',version:1};
+  try{
+    journal.record(row);await journal.flush();clock=30000;journal.record(row);await journal.flush();
+    expect(health).toEqual([true,true]);expect(journal.status()).toMatchObject({written:0,failed:true,retryAt:90000});
+    clock=90000;journal.record(row);await journal.flush();expect(health).toEqual([true,true,false]);
+    expect(journal.status()).toMatchObject({written:1,failed:false,failures:2});
+    failHealthy=true;journal.record(row);await journal.flush();
+    expect(health).toEqual([true,true,false,true]);
+    expect(journal.status()).toMatchObject({written:1,failed:true,failures:3,retryAt:120000});
   }finally{await journal.close();await rm(directory,{recursive:true,force:true});}
 });
 

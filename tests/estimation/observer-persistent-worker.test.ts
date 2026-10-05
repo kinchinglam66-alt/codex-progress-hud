@@ -1408,7 +1408,7 @@ const script=`let b='',n=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.ind
 const timeoutScript=`let b='';process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='turn/start'){emit({id:m.id,result:{turn:{id:'r1'}}});emit({method:'item/completed',params:{threadId:'t',turnId:'r1',item:{type:'agentMessage',text:JSON.stringify({relation:'continue',status:'running',summary:'current',estimate:{remainingSeconds:90,errorPercent:20}})}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
 const compactionScript=`let b='',n=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='thread/compact/start'){const id='c'+(++n);emit({id:m.id,result:{}});emit({method:'item/started',params:{threadId:'t',turnId:id,item:{type:'contextCompaction',id:'ci'}}});emit({method:'item/completed',params:{threadId:'t',turnId:id,item:{type:'contextCompaction',id:'ci'}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'completed'}}});}else if(m.method==='turn/start'){const id='r'+(++n);emit({id:m.id,result:{turn:{id}}});emit({method:'item/completed',params:{threadId:'t',turnId:id,item:{type:'agentMessage',text:JSON.stringify({relation:'continue',status:'running',summary:'current',estimate:{remainingSeconds:90,errorPercent:20}})}}});emit({method:'thread/tokenUsage/updated',params:{threadId:'t',turnId:id,tokenUsage:{total:{inputTokens:100*n,outputTokens:10*n,totalTokens:110*n,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0},last:{inputTokens:100,outputTokens:10,totalTokens:110,cachedInputTokens:0,cacheWriteInputTokens:0,reasoningOutputTokens:0}}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'completed'}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
 const failedCompactionScript=`let b='',n=0;process.stdin.on('data',c=>{b+=c;let i;while((i=b.indexOf('\\n'))>=0){const m=JSON.parse(b.slice(0,i));b=b.slice(i+1);const emit=v=>process.stdout.write(JSON.stringify(v)+'\\n');if(!m.id)continue;if(m.method==='thread/start')emit({id:m.id,result:{thread:{id:'t'}}});else if(m.method==='thread/compact/start'){const id='c'+(++n);emit({id:m.id,result:{}});emit({method:'item/started',params:{threadId:'t',turnId:id,item:{type:'contextCompaction',id:'ci'}}});emit({method:'turn/completed',params:{threadId:'t',turn:{id,status:'failed'}}});}else emit({id:m.id,result:{}});}});process.stdin.on('end',()=>process.exit(0));`;
-async function fixture(failSettlement=false,options:{afterProcessClose?:()=>void;inlineCurrentTurnSupplement?:boolean;nativeRequestByteLimit?:number;sessionEnvironment?:NodeJS.ProcessEnv;onNativeTurnTiming?:(event:import('../../src/estimation/native-turn-timing.js').NativeTurnTiming)=>void;scheduleIdle?:(callback:()=>void,delay:number)=>()=>void;monotonicNow?:()=>number;reuseFactory?:()=>TestReuse;invalidateSessionReuse?:()=>void;onContextPhase?:(phase:string)=>void;nativeContext?:unknown;script?:string;sessionTimeoutMs?:number;receiptFailure?:boolean;compactionReceiptFailure?:boolean;compactionCloseFailure?:boolean;abortOnUpdate?:()=>void;bootstrapBatchByteCapacity?:number;retainedSummaryReserveBytes?:number;retainedSummaryByteReserve?:number;historyBudget?:PersistentHistoryBudget}={}){
+async function fixture(failSettlement=false,options:{estimateTimeoutMs?:number;cancellationTimeoutMs?:number;afterProcessClose?:()=>void;inlineCurrentTurnSupplement?:boolean;nativeRequestByteLimit?:number;sessionEnvironment?:NodeJS.ProcessEnv;onNativeTurnTiming?:(event:import('../../src/estimation/native-turn-timing.js').NativeTurnTiming)=>void;scheduleIdle?:(callback:()=>void,delay:number)=>()=>void;monotonicNow?:()=>number;reuseFactory?:()=>TestReuse;invalidateSessionReuse?:()=>void;onContextPhase?:(phase:string)=>void;nativeContext?:unknown;script?:string;sessionTimeoutMs?:number;receiptFailure?:boolean;compactionReceiptFailure?:boolean;compactionCloseFailure?:boolean;abortOnUpdate?:()=>void;bootstrapBatchByteCapacity?:number;retainedSummaryReserveBytes?:number;retainedSummaryByteReserve?:number;historyBudget?:PersistentHistoryBudget}={}){
  let accountFingerprint='a'.repeat(64);
  const preparationPolicies:unknown[]=[];
  new Script(script);
@@ -1421,6 +1421,7 @@ async function fixture(failSettlement=false,options:{afterProcessClose?:()=>void
  const receiptJournalFactory=options.receiptFailure?()=>({...baseJournal,usageSnapshot:async()=>{throw Error('private journal detail');}}):options.compactionReceiptFailure?()=>({...baseJournal,operationTerminal:async()=>{throw Error('private journal detail');}}):undefined;
  const worker=createPersistentObserverWorker({...({nativeInstructions:'trusted full observer policy',onContextPhase:options.onContextPhase,nativeContext:options.nativeContext,accounting,authorize:()=>authorized,now:Date.now,outputSchema:{type:'object'},receiptDirectory:join(dir,'receipts'),sessionTimeoutMs:options.sessionTimeoutMs,bootstrapBatchByteCapacity:options.bootstrapBatchByteCapacity,retainedSummaryByteReserve:options.retainedSummaryByteReserve,historyBudget:options.historyBudget,receiptJournalFactory,
    completedTurnContext:true,reuseNativeTurnSession:Reflect.get(options,'reuseNativeTurnSession'),inlineCurrentTurnSupplement:options.inlineCurrentTurnSupplement,nativeRequestByteLimit:options.nativeRequestByteLimit,onNativeTurnTiming:options.onNativeTurnTiming,invalidateSessionReuse:options.invalidateSessionReuse,monotonicNow:options.monotonicNow,scheduleIdle:options.scheduleIdle,
+   estimateTimeoutMs:options.estimateTimeoutMs,cancellationTimeoutMs:options.cancellationTimeoutMs,
    prepareSession:async(_signal:AbortSignal,policy:unknown)=>{preparations++;preparationPolicies.push(policy);const expectedAccount=accountFingerprint;return {validateAcceptance:async()=>accountFingerprint===expectedAccount,reuse:options.reuseFactory?.(),invocation:{executable:process.execPath,cwd:process.cwd(),env:options.sessionEnvironment??process.env,args:['-e',options.script??script],input:''},binding:{accountFingerprint,routeFingerprint:'b'.repeat(64),assetsFingerprint:'c'.repeat(64)}};},
    processFactory:()=>{processes++;const p=createObserverSessionProcess({captureIdentity:async()=> '123'});lastProcess=p;const start=p.start;const close=p.close;return {...p,start:async(i:any)=>{const r=await start(i);r.rpc.subscribe(n=>notifications.push(n));const subscribe=r.rpc.subscribe;r.rpc.subscribe=listener=>{activeListeners++;const stop=subscribe(listener);let stopped=false;return()=>{if(!stopped){stopped=true;activeListeners--;stop();}};};const call=r.rpc.call;accountUpdated=async()=>{await call('test/account_updated',{});};r.rpc.call=(m,p)=>{if(m==='thread/inject_items')imports.push(p);if(m==='turn/start')modelInputs.push(p);return call(m,p);};return r;},close:async()=>{if(options.compactionCloseFailure&&preparations>1)throw Error('simulated close failure');await close();options.afterProcessClose?.();}};}} as any)});
  return {accounting,worker,notifications,imports,modelInputs,preparationPolicies,accountUpdated:()=>accountUpdated(),activeListeners:()=>activeListeners,changeBinding:()=>{accountFingerprint='d'.repeat(64);},settlementAttempts:()=>settlementAttempts,preparations:()=>preparations,processes:()=>processes,lastProcess:()=>lastProcess,receipts:join(dir,'receipts'),revoke:()=>{authorized=false;}};
@@ -1817,6 +1818,50 @@ it('keeps timed-out usage unresolved when cleanup confirmation fails',async()=>{
   expect((await f.worker.observe(input,new AbortController().signal,'source',0)).status).toBe('accounting_error');
   expect(f.accounting.snapshot()).toMatchObject({inFlight:1,unresolved:1,unknown:0,knownTokens:0});
   expect(f.worker.status().poisoned).toBe(true);
+ }finally{fail=false;await f.worker.close();await f.accounting.close();}
+});
+it('forwards the disabled estimate deadline without disabling confirmed terminal or usage checks',async()=>{
+ const delayed=timeoutScript.replace("}else emit({id:m.id,result:{}});",
+  "setTimeout(()=>emit({method:'turn/completed',params:{threadId:'t',turn:{id:'r1',status:'completed'}}}),80);}else emit({id:m.id,result:{}});");
+ const f=await fixture(false,{script:delayed,sessionTimeoutMs:10,estimateTimeoutMs:0});
+ try{
+  expect(await f.worker.observe(input,new AbortController().signal,'source',0)).toMatchObject({status:'interpreted',usage:null});
+  await f.worker.release!();await f.worker.close();
+  expect(f.accounting.snapshot()).toMatchObject({starts:1,inFlight:0,unresolved:0,unknown:1,knownTokens:0});
+  const lines=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(lines.some(line=>line.kind==='operation'&&line.terminalState==='completed'&&line.usageCompleteness==='missing')).toBe(true);
+  expect(f.lastProcess()?.status().closed).toBe(true);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it('settles a crashed unlimited-wait child as unknown only after confirmed process closure',async()=>{
+ const crashed=timeoutScript.replace("}else emit({id:m.id,result:{}});","setTimeout(()=>process.exit(0),20);}else emit({id:m.id,result:{}});");
+ const f=await fixture(false,{script:crashed,estimateTimeoutMs:0});
+ try{
+  expect(await f.worker.observe(input,new AbortController().signal,'source',0)).toMatchObject({status:'process_error',interpretation:null,usage:null});
+  expect(f.accounting.snapshot()).toMatchObject({starts:1,inFlight:0,unresolved:0,unknown:1,knownTokens:0});
+  const lines=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(lines.some(line=>line.kind==='operation'&&line.terminalState==='unconfirmed'&&line.usageCompleteness==='protocol_failed')).toBe(true);
+  expect(lines.some(line=>line.kind==='process_exit'&&line.processExitState==='closed')).toBe(true);
+  expect(f.lastProcess()?.status().closed).toBe(true);
+ }finally{await f.worker.close();await f.accounting.close();}
+});
+it.each([false,true])('reclaims unacknowledged unlimited-wait cancellation only after verified cleanup (cleanupFailure=%s)',async cleanupFailure=>{
+ let fail=cleanupFailure;
+ const f=await fixture(false,{script:timeoutScript,estimateTimeoutMs:0,cancellationTimeoutMs:30,
+  afterProcessClose:()=>{if(fail)throw Error('synthetic cleanup failure');}});
+ const controller=new AbortController();
+ try{
+  const pending=f.worker.observe(input,controller.signal,'source',0),started=Date.now();
+  while(!f.notifications.some((notice:any)=>notice.method==='item/completed')){
+   if(Date.now()-started>3000)throw Error('SYNTHETIC_DISPATCH_NOT_OBSERVED');
+   await new Promise(resolve=>setTimeout(resolve,5));
+  }
+  controller.abort();expect((await pending).status).toBe(cleanupFailure?'accounting_error':'process_error');
+  expect(f.accounting.snapshot()).toMatchObject({starts:1,inFlight:cleanupFailure?1:0,unresolved:cleanupFailure?1:0,unknown:cleanupFailure?0:1,knownTokens:0});
+  expect(f.worker.status().poisoned).toBe(cleanupFailure);
+  const lines=(await readFile(join(f.receipts,'persistent-session-receipts.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
+  expect(lines.some(line=>line.kind==='operation'&&line.terminalState==='unconfirmed'&&line.usageCompleteness==='timeout_unconfirmed')).toBe(true);
+  expect(lines.some(line=>line.kind==='operation'&&line.terminalState==='cancelled')).toBe(false);
  }finally{fail=false;await f.worker.close();await f.accounting.close();}
 });
 it('does not retry or erase a failed settlement after timed-out process cleanup',async()=>{

@@ -152,7 +152,8 @@ it('shows recovery guidance for an old pending call without claiming quota exhau
   expect(buildConversationViews([value])[0]?.etaLabel).toContain('恢复');
 });
 it.each(['waiting', 'paused'] as const)('freezes %s while another running row counts down', runtime => {
-  const views = buildConversationViews([row({runtime, status: runtime}), row()], 3600);
+  const running=row();running.conversationKey='other-running-chat';
+  const views = buildConversationViews([row({runtime, status: runtime}), running], 3600);
   expect(views[0]?.etaLabel).toBe('25:00:00 · 上次估时误差 ±30%');
   expect(views[0]?.progressMode).toBe('paused');
   expect(views[1]?.etaLabel).toBe('24:00:00 · 上次估时误差 ±30%');
@@ -165,7 +166,7 @@ it('shows overdue as pending update, never as task completion', () => {
 });
 it('keeps unknown and explicit interruptions distinct from completion', () => {
   const unknown = row({status: 'unknown', prediction: null});
-  expect(buildConversationViews([unknown])[0]).toMatchObject({etaLabel: '剩余时间未知', statusLabel: '本轮执行中 · 状态待判断'});
+  expect(buildConversationViews([unknown])[0]).toMatchObject({etaLabel: '剩余时间未知', statusLabel: '本轮执行中'});
   const interrupted = row({runtime: 'interrupted', status: 'interrupted', prediction: null});
   expect(buildConversationViews([interrupted])[0]).toMatchObject({statusLabel: '本轮已中断', etaLabel: '工作计时已停止'});
   const completed = row(); completed.goal!.status = 'completed';
@@ -173,7 +174,7 @@ it('keeps unknown and explicit interruptions distinct from completion', () => {
   expect(buildConversationViews([completed, stopped])).toEqual([]);
 });
 it.each([
-  ['failed','本轮失败'],['waiting','本轮等待用户'],['paused','本轮跟踪已暂停']
+  ['failed','本轮失败'],['waiting','本轮等待中 · 状态待判断'],['paused','本轮跟踪已暂停']
 ] as const)('labels %s as the current turn', (runtime,label)=>{
   expect(buildConversationViews([row({runtime,status:runtime})])[0]?.statusLabel).toBe(label);
 });

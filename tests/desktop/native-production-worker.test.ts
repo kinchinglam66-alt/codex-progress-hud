@@ -15,8 +15,13 @@ it('routes the installed subscription worker to completed-turn native inheritanc
  createDesktopPersistentWorker(identity,options,'trusted instructions');
  expect(calls.worker).toHaveBeenCalledWith(expect.objectContaining({nativeContext:resource,
   nativeInstructions:'trusted instructions',completedTurnContext:true,reuseNativeTurnSession:true,
-  inlineCurrentTurnSupplement:true,authorize:options.authorize}));
+  inlineCurrentTurnSupplement:true,estimateTimeoutMs:0,authorize:options.authorize}));
  expect(calls.guard).toHaveBeenCalledWith(expect.any(String),expect.any(String),{idleTimeoutMs:1860000});
+});
+it('preserves explicit model and cancellation deadlines without changing transport/compaction limits',()=>{
+ calls.resources.mockReturnValue({release:async()=>{}});
+ createDesktopPersistentWorker(identity,{...options,estimateTimeoutMs:90000,cancellationTimeoutMs:5000,sessionTimeoutMs:120000},'trusted');
+ expect(calls.worker).toHaveBeenCalledWith(expect.objectContaining({estimateTimeoutMs:90000,cancellationTimeoutMs:5000,sessionTimeoutMs:120000}));
 });
 it('rejects an unqualified runtime instead of silently selecting full-history import',()=>{
  expect(()=>createDesktopPersistentWorker({...identity,executableSha256:'a'.repeat(64)},options,'trusted')).toThrow('NATIVE_TRIAL_RUNTIME_UNVERIFIED');

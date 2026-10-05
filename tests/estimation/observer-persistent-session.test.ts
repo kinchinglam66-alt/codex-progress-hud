@@ -1,4 +1,4 @@
-import {expect,it} from 'vitest';
+import {expect,it,vi} from 'vitest';
 import {readFileSync} from 'node:fs';
 import {nativePreservationInstructions} from '../../src/estimation/native-preservation.js';
 import {milestoneSelectionInstructions} from '../../src/estimation/milestone-selection.js';
@@ -700,6 +700,116 @@ it('cancels a model operation without accepting its stale result and retains the
  const r=await s.estimate(input,controller.signal);
  expect(r.interpretation).toBeNull();expect(r.cancelled).toBe(true);expect(r.terminalConfirmed).toBe(true);
  expect(f.calls.filter(c=>c.method==='turn/interrupt')).toHaveLength(1);expect(f.listeners.size).toBe(0);
+});
+it('allows a model terminal after 120 seconds when the estimate deadline is disabled',async()=>{
+ vi.useFakeTimers();
+ const f=fixture();f.setRespond(()=>{});
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0});
+ try{
+  await s.start();const pending=s.estimate(input,new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(130000);
+  expect(s.status()).toMatchObject({busy:true,uncertain:false});
+  f.emit('item/completed',{threadId:'thread',turnId:'turn-1',item:{type:'agentMessage',phase:'final_answer',text:JSON.stringify(answer)}});
+  f.emit('thread/tokenUsage/updated',{threadId:'thread',turnId:'turn-1',tokenUsage:{total:usage,last:usage}});
+  f.emit('turn/completed',{threadId:'thread',turn:{id:'turn-1',status:'completed'}});
+  expect(await pending).toMatchObject({terminalConfirmed:true,interpretation:answer,usageCompleteness:'single_update'});
+  expect(f.calls.filter(c=>c.method==='turn/start')).toHaveLength(1);
+  expect(f.listeners.size).toBe(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it.each([undefined,25])('preserves a finite legacy or explicit estimate deadline (%s)',async estimateTimeoutMs=>{
+ vi.useFakeTimers();const f=fixture();f.setRespond(()=>{});
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},timeoutMs:50,...(estimateTimeoutMs===undefined?{}:{estimateTimeoutMs})});
+ try{
+  await s.start();const pending=s.estimate(input,new AbortController().signal);
+  const assertion=expect(pending).rejects.toMatchObject({code:'SESSION_TIMEOUT',reason:'timeout',terminalConfirmed:false,turnId:'turn-1'});
+  await vi.advanceTimersByTimeAsync(estimateTimeoutMs??50);await assertion;
+  expect(s.status()).toMatchObject({busy:false,uncertain:true});expect(f.listeners.size).toBe(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it('keeps compaction bounded when model waiting is unlimited',async()=>{
+ vi.useFakeTimers();const f=fixture({compact:'ack-only'});
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},timeoutMs:50,estimateTimeoutMs:0});
+ try{
+  await s.start();const pending=s.compact(new AbortController().signal);
+  const assertion=expect(pending).rejects.toMatchObject({code:'SESSION_TIMEOUT',terminalConfirmed:false});
+  await vi.advanceTimersByTimeAsync(50);await assertion;expect(f.listeners.size).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it.each([true,false])('bounds cancellation without converting an interrupt RPC ACK into terminal proof (terminal=%s)',async terminal=>{
+ vi.useFakeTimers();const f=fixture(),controller=new AbortController();f.setRespond(()=>{});
+ if(!terminal){const call=f.rpc.call;f.rpc.call=async(method,params)=>{
+  if(method==='turn/interrupt'){f.calls.push({method,params});return {};}
+  return call(method,params);
+ };}
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0,cancellationTimeoutMs:50});
+ try{
+  await s.start();const pending=s.estimate(input,controller.signal);await vi.advanceTimersByTimeAsync(0);
+  controller.abort();
+  if(terminal)expect(await pending).toMatchObject({terminalConfirmed:true,cancelled:true,interpretation:null,usage:null});
+  else{
+   const assertion=expect(pending).rejects.toMatchObject({code:'SESSION_TIMEOUT',reason:'interrupt_timeout',terminalConfirmed:false,turnId:'turn-1'});
+   await vi.advanceTimersByTimeAsync(50);await assertion;
+  }
+  expect(f.calls.filter(c=>c.method==='turn/interrupt')).toHaveLength(1);
+  expect(f.listeners.size).toBe(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it('releases a cancelled estimate with a missing start ACK and ignores a late ACK',async()=>{
+ vi.useFakeTimers();const f=fixture(),controller=new AbortController(),call=f.rpc.call;
+ let ack!:(value:unknown)=>void;
+ f.rpc.call=async(method,params)=>{
+  if(method==='turn/start'){f.calls.push({method,params});controller.abort();return new Promise(resolve=>{ack=resolve;});}
+  return call(method,params);
+ };
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0,cancellationTimeoutMs:50});
+ try{
+  await s.start();const pending=s.estimate(input,controller.signal);
+  const assertion=expect(pending).rejects.toMatchObject({reason:'interrupt_timeout',terminalConfirmed:false});
+  await vi.advanceTimersByTimeAsync(50);await assertion;
+  ack({turn:{id:'late-turn'}});await vi.advanceTimersByTimeAsync(0);
+  expect(f.calls.filter(c=>c.method==='turn/interrupt')).toHaveLength(0);
+  expect(s.status()).toMatchObject({busy:false,uncertain:true});expect(f.listeners.size).toBe(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it('retains interrupt RPC failure as unconfirmed and clears the cancellation guard',async()=>{
+ vi.useFakeTimers();const f=fixture(),controller=new AbortController(),call=f.rpc.call;f.setRespond(()=>{});
+ f.rpc.call=async(method,params)=>{if(method==='turn/interrupt')throw Error('synthetic transport failure');return call(method,params);};
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0});
+ try{
+  await s.start();const pending=s.estimate(input,controller.signal);await vi.advanceTimersByTimeAsync(0);controller.abort();
+  await expect(pending).rejects.toMatchObject({code:'SESSION_PROTOCOL_FAILED',reason:'interrupt_failed',terminalConfirmed:false});
+  expect(f.listeners.size).toBe(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it.each([false,true])('exits unlimited model waiting on transport closure without inventing terminal or usage (ACK missing=%s)',async missingAck=>{
+ vi.useFakeTimers();const f=fixture(),closedListeners=new Set<()=>void>(),call=f.rpc.call;f.setRespond(()=>{});
+ f.rpc.subscribeClosed=listener=>{closedListeners.add(listener);return()=>{closedListeners.delete(listener);};};
+ if(missingAck)f.rpc.call=async(method,params)=>method==='turn/start'?new Promise(()=>{}):call(method,params);
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0});
+ try{
+  await s.start();const pending=s.estimate(input,new AbortController().signal);await vi.advanceTimersByTimeAsync(0);
+  for(const listener of closedListeners)listener();
+  await expect(pending).rejects.toMatchObject({code:'SESSION_PROTOCOL_FAILED',reason:'transport_closed',terminalConfirmed:false});
+  expect(s.status()).toMatchObject({busy:false,uncertain:true});expect(closedListeners.size).toBe(0);expect(f.listeners.size).toBe(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it('does not start an already-cancelled estimate or interrupt an already-terminal response',async()=>{
+ vi.useFakeTimers();const f=fixture(),controller=new AbortController();
+ const s=createPersistentObserverSession(f.rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0});
+ try{
+  await s.start();controller.abort();await expect(s.estimate(input,controller.signal)).rejects.toThrow();
+  expect(f.calls.filter(c=>c.method==='turn/start')).toHaveLength(0);
+  const next=new AbortController();f.setRespond(id=>{f.emit('turn/completed',{threadId:'thread',turn:{id,status:'completed'}});next.abort();});
+  expect(await s.estimate(input,next.signal)).toMatchObject({terminalConfirmed:true,cancelled:true,usage:null});
+  expect(f.calls.filter(c=>c.method==='turn/interrupt')).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{vi.useRealTimers();}
+});
+it.each([-1,NaN,Infinity,2147483648])('rejects an invalid model deadline %s',estimateTimeoutMs=>{
+ expect(()=>createPersistentObserverSession(fixture().rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs})).toThrow('INVALID_ESTIMATE_TIMEOUT');
+});
+it.each([0,-1,NaN,2147483648])('never permits an unbounded cancellation deadline %s',cancellationTimeoutMs=>{
+ expect(()=>createPersistentObserverSession(fixture().rpc,{cwd:'empty',outputSchema:{},estimateTimeoutMs:0,cancellationTimeoutMs})).toThrow('INVALID_CANCELLATION_TIMEOUT');
 });
 it.each([false,true])('retains anomalous automatic compaction usage without treating it as complete (runtimeManaged=%s)',async runtimeManagedContext=>{
  const f=fixture();

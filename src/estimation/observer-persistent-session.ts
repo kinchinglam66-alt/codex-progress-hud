@@ -16,7 +16,7 @@ import {taskObjectiveInstructions} from '../core/task-objective.js';
 import {bindProgressReviewOutputSchema} from './progress-review-output-schema.js';
 import {resolveSubscriptionModel,defaultSubscriptionModel,subscriptionEffort,assertSubscriptionModelAvailable,type SubscriptionModel} from './subscription-model.js';
 
-export interface SessionRpc {call(method:string,params:unknown):Promise<unknown>;subscribe(listener:(n:{method:string;params:Record<string,unknown>})=>void):()=>void;modelCatalogTimeoutCount?:()=>number}
+export interface SessionRpc {call(method:string,params:unknown):Promise<unknown>;subscribe(listener:(n:{method:string;params:Record<string,unknown>})=>void):()=>void;subscribeClosed?:(listener:()=>void)=>()=>void;modelCatalogTimeoutCount?:()=>number}
 type ObjectValue=Record<string,unknown>;
 const object=(v:unknown):ObjectValue=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as ObjectValue:{};
 const fields=['totalTokens','inputTokens','outputTokens','cachedInputTokens','cacheWriteInputTokens','reasoningOutputTokens'] as const;
@@ -26,7 +26,7 @@ export type UsageEvidence =
   | {kind:'snapshot';total:RawTokens;last:RawTokens;observedAt:number;source:'thread/tokenUsage/updated'}
   | {kind:'gap';observedAt:number;source:'thread/tokenUsage/updated';reason:'malformed_token_snapshot'};
 export type PersistentSessionErrorCode='SESSION_TIMEOUT'|'SESSION_PROTOCOL_FAILED'|'SESSION_USAGE_EVIDENCE_FAILED';
-export type PersistentSessionErrorReason='timeout'|'protocol_failed'|'interrupt_failed'|'usage_evidence_write_failed';
+export type PersistentSessionErrorReason='timeout'|'interrupt_timeout'|'transport_closed'|'protocol_failed'|'interrupt_failed'|'usage_evidence_write_failed';
 export class PersistentSessionError extends Error {
  readonly code:PersistentSessionErrorCode;readonly reason:PersistentSessionErrorReason;readonly terminalConfirmed:boolean;readonly turnId?:string;readonly terminalStatus?:string;
  constructor(code:PersistentSessionErrorCode,reason:PersistentSessionErrorReason,terminalConfirmed:boolean,turnId?:string,terminalStatus?:string){
@@ -68,6 +68,10 @@ export interface PersistentSessionOptions {
  nativeInstructions?:string;
  nativeRequestByteLimit?:number;
  cwd:string;outputSchema:unknown;timeoutMs?:number;now?:()=>number;
+ /** Model wait only: zero disables the local deadline; transport and cleanup stay bounded. */
+ estimateTimeoutMs?:number;
+ /** Finite acknowledgment window after cancellation, including a missing start ACK. */
+ cancellationTimeoutMs?:number;
  /** Encoded bytes of newly injected context allowed before runtime compaction. */
  bootstrapBatchByteCapacity?:number;
  /** Conservative policy reserve for the retained runtime summary; not a measured bound. */
@@ -121,6 +125,7 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
  const observationCoverage=createObservationCoverage();
  let wireMetrics:WireMetrics|undefined;
   const hashes=new Map<number,string>(),timeoutMs=options.timeoutMs??120000;
+ const estimateTimeoutMs=options.estimateTimeoutMs??timeoutMs,cancellationTimeoutMs=options.cancellationTimeoutMs??5000;
  const now=options.now??Date.now;
  const bootstrapBatchByteCapacity=options.bootstrapBatchByteCapacity??65536;
  const nativeRequestByteLimit=options.nativeRequestByteLimit??16*1024*1024;
@@ -148,6 +153,8 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
    confirmedCompactionThroughOrdinal,residentBound:!options.runtimeManagedContext&&contextCapacityPolicy?'policy_assumed':'unverified',
    retainedSummaryReserveBytes:options.runtimeManagedContext?0:policyReserve,contextCapacityBytes:options.runtimeManagedContext?null:contextCapacityPolicy?.contextCapacityBytes??null});
  if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1)throw Error('INVALID_SESSION_TIMEOUT');
+ if(!Number.isSafeInteger(estimateTimeoutMs)||estimateTimeoutMs<0||estimateTimeoutMs>2147483647)throw Error('INVALID_ESTIMATE_TIMEOUT');
+ if(!Number.isSafeInteger(cancellationTimeoutMs)||cancellationTimeoutMs<1||cancellationTimeoutMs>2147483647)throw Error('INVALID_CANCELLATION_TIMEOUT');
  function ready(){if(!threadId||busy||uncertain)throw Error('SESSION_UNAVAILABLE');}
  function compactionReady(){if(!threadId||uncertain||compacting||(!appending&&busy))throw Error('SESSION_UNAVAILABLE');}
  const observedRecord=(ordinal:number,part:number,final:boolean,text:string)=>JSON.stringify({observedRecord:{ordinal,part,final,text}});
@@ -523,15 +530,29 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
        if(typeof turn.status!=='string'){fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',false,id));return;}state.status=turn.status;complete();
        }
      });
+     let cancellationTimer:ReturnType<typeof setTimeout>|undefined;
      const interrupt=()=>{
+       if(settled)return;
+       // Cancellation must not wait indefinitely just because normal inference
+       // has no duration limit. RPC success alone is not terminal evidence.
+       cancellationTimer??=setTimeout(()=>{if(!settled)fail(new PersistentSessionError('SESSION_TIMEOUT','interrupt_timeout',
+         turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status));},cancellationTimeoutMs);
        if(!turnId||interrupted||states.get(turnId)?.status)return;
-       interrupted=true;const id=turnId;void rpc.call('turn/interrupt',{threadId,turnId:id}).catch(()=>fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','interrupt_failed',states.get(id)?.status!==undefined,id,states.get(id)?.status)));
+       interrupted=true;const id=turnId;void rpc.call('turn/interrupt',{threadId,turnId:id}).catch(()=>{
+         if(!settled)fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','interrupt_failed',states.get(id)?.status!==undefined,id,states.get(id)?.status));
+       });
      };
      signal.addEventListener('abort',interrupt,{once:true});
-     const timer=setTimeout(()=>{if(!settled)fail(new PersistentSessionError('SESSION_TIMEOUT','timeout',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status));},timeoutMs);
+     const timer=estimateTimeoutMs===0?undefined:setTimeout(()=>{if(!settled)fail(new PersistentSessionError('SESSION_TIMEOUT','timeout',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status));},estimateTimeoutMs);
+     const unsubscribeClosed=rpc.subscribeClosed?.(()=>{
+       if(!settled)fail(new PersistentSessionError('SESSION_PROTOCOL_FAILED','transport_closed',false,turnId));
+     });
      try{
+       if(failure)throw failure;
        modelDispatched=true;
-       const r=object(await rpc.call('turn/start',params));
+       // Until the start ACK binds turnId, done can only reject. Race it so
+       // cancellation/protocol failure also releases a stalled start ACK.
+       const r=object(await Promise.race([rpc.call('turn/start',params),done]));
        const id=object(r.turn).id;if(typeof id!=='string'||!id)throw Error('SESSION_TURN_MISSING');turnId=id;
        if(staged.length){submittedRecords+=staged.length;submittedThroughOrdinal=staged.at(-1)!.ordinal;}staged=[];stagedBytes=0;
        if(signal.aborted)interrupt();complete();await done;
@@ -563,7 +584,7 @@ export function createPersistentObserverSession(rpc:SessionRpc,options:Persisten
        return {interpretation,usage,terminalConfirmed:true,cancelled:signal.aborted,compactions:state.compactions,turnId,...(state.status===undefined?{}:{terminalStatus:state.status}),
          usageCompleteness,usageSnapshots:state.snapshots,usageGaps};
      }catch(e){uncertain=true;if(e instanceof PersistentSessionError)throw e;throw new PersistentSessionError('SESSION_PROTOCOL_FAILED','protocol_failed',turnId!==undefined&&states.get(turnId)?.status!==undefined,turnId,turnId===undefined?undefined:states.get(turnId)?.status);}
-     finally{clearTimeout(timer);unsubscribe();signal.removeEventListener('abort',interrupt);await Promise.allSettled(writeTasks);busy=false;}
+     finally{clearTimeout(timer);clearTimeout(cancellationTimer);unsubscribe();unsubscribeClosed?.();signal.removeEventListener('abort',interrupt);await Promise.allSettled(writeTasks);busy=false;}
    },
  };
 }

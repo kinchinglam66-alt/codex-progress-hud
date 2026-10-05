@@ -62,6 +62,7 @@ export interface ObserverObservation {
   objectiveTargetId?:string;
   timeBasis?:typeof ETA_TIME_BASIS;
   blockingUnknown?:boolean;
+  blockingEvidenceIncomplete?:boolean;
   humanBlocked?:boolean;
   measurementIdentity?:MeasurementIdentity;
   pendingMilestoneDecision?:NonNullable<ReturnType<PassiveGoals['pendingMilestoneDecision']>>;
@@ -275,6 +276,7 @@ export class ObserverScheduler {
         activeSeconds:view?.activeSeconds??flight!.observedActiveSeconds,activeTimeKnown:view!==null&&this.options.goals.activeTimeKnown(key),
         ...((view?.timeBasis??flight?.timeBasis)?{timeBasis:(view?.timeBasis??flight?.timeBasis)!,
           ...(view?.blockingUnknown===undefined?{}:{blockingUnknown:view.blockingUnknown}),
+          ...(view?.blockingEvidenceIncomplete===undefined?{}:{blockingEvidenceIncomplete:view.blockingEvidenceIncomplete}),
           ...(view?.humanBlocked===undefined?{}:{humanBlocked:view.humanBlocked})}:{}),
         ...(view?{timingUncertain:view.timingUncertain,recoveryState:view.recoveryState,recoveryGapSeconds:view.recoveryGapSeconds}:{}),
         runtime:view?.runtime??flight!.runtime,version:view?entry.version:flight!.version,

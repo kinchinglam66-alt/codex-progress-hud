@@ -65,6 +65,7 @@ export interface PersistentWorkerOptions {
  authorize:()=>boolean;now:()=>number;outputSchema:unknown;
  receiptDirectory:string;
   sessionTimeoutMs?:number;bootstrapBatchByteCapacity?:number;retainedSummaryByteReserve?:number;receiptJournalFactory?:(directory:string)=>PersistentReceiptJournal;
+  estimateTimeoutMs?:number;cancellationTimeoutMs?:number;
   /** Finite, explicitly trusted policy for one history preparation. */
   historyBudget?:PersistentHistoryBudget;
  processFactory?:(options?:Parameters<typeof createObserverSessionProcess>[0])=>ReturnType<typeof createObserverSessionProcess>;
@@ -345,6 +346,8 @@ export function createPersistentObserverWorker(options:PersistentWorkerOptions):
       ...(options.nativeInstructions===undefined?{}:{nativeInstructions:options.nativeInstructions}),
       ...(options.nativeRequestByteLimit===undefined?{}:{nativeRequestByteLimit:options.nativeRequestByteLimit}),
       ...(options.sessionTimeoutMs===undefined?{}:{timeoutMs:options.sessionTimeoutMs}),
+      ...(options.estimateTimeoutMs===undefined?{}:{estimateTimeoutMs:options.estimateTimeoutMs}),
+      ...(options.cancellationTimeoutMs===undefined?{}:{cancellationTimeoutMs:options.cancellationTimeoutMs}),
       ...(options.bootstrapBatchByteCapacity===undefined?{}:{bootstrapBatchByteCapacity:options.bootstrapBatchByteCapacity}),
        ...(options.retainedSummaryByteReserve===undefined?{}:{retainedSummaryByteReserve:options.retainedSummaryByteReserve}),
        ...(budget===undefined?{}:{contextCapacityPolicy:{trusted:true,contextCapacityBytes:budget.contextCapacityBytes,retainedSummaryReserveBytes:budget.retainedSummaryReserveBytes} satisfies PersistentContextCapacityPolicy})});

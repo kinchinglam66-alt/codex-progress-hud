@@ -36,6 +36,7 @@ export interface PassiveGoalView {
   attentionWorkContinuing?:boolean;
   timeBasis?:typeof ETA_TIME_BASIS;
   blockingUnknown?:boolean;
+  blockingEvidenceIncomplete?:boolean;
   humanBlocked?:boolean;
   predictionSource?:PredictionSource;
   estimateUncertain?:boolean;
@@ -583,7 +584,10 @@ export class PassiveGoals {
         const proof=evidence.humanBlock;
         const confirmed=proof?.humanActionRequired===true&&proof.wholeTurnBlocked===true&&
           proof.relevantWorkRunning===false&&evidence.attention?.relevantWorkRunning!==true&&typeof proof.evidenceRef==='string'&&proof.evidenceRef.length>0;
-        goal.wallClock.blocking(confirmed?'confirmed_human':evidence.state==='running'&&evidence.blockingEvidenceComplete!==false?'none':'unknown',Math.max(goal.lastObservedAt,at));
+        const blocking=confirmed?'confirmed_human':evidence.state!=='running'||
+          (evidence.attention?.required===true&&evidence.attention.relevantWorkRunning!==true)?'unknown':
+          evidence.blockingEvidenceComplete===false?'uncovered':'none';
+        goal.wallClock.blocking(blocking,Math.max(goal.lastObservedAt,at));
       }
     }
     if(uncertain){goal.timingUncertain=true;goal.runtimeUncertain=true;}
@@ -610,13 +614,18 @@ export class PassiveGoals {
 
   currentTurnKey(sessionKey:string):string|undefined {return this.goals.get(sessionKey)?.turnKey;}
 
-  private ticketIdentityIsCurrent(ticket:object):Ticket|null {
+  private ticketIdentityIsCurrent(ticket:object,checkMeasurement=true):Ticket|null {
+    if(this.nativeValidationFailures.has(ticket))return null;
     const captured=this.tickets.get(ticket),goal=captured?this.goals.get(captured.sessionKey):undefined;
     if(!captured||!goal||goal!==captured.goal||goal.pending!==ticket||goal.epoch!==captured.epoch||
       goal.runtime==='paused'||goal.runtime==='interrupted'||goal.runtime==='failed'||
       goal.runtime==='stopped'||goal.status==='completed')return null;
     if(captured.sourceEpoch!==undefined){try{if(this.source?.epoch(captured.sessionKey)!==captured.sourceEpoch)return null;}catch{return null;}}
-    if(captured.sourceMeasurementEpoch!==undefined){try{if(this.source?.measurementEpoch?.(captured.sessionKey)!==captured.sourceMeasurementEpoch)return null;}catch{return null;}}
+    if(checkMeasurement&&captured.sourceMeasurementEpoch!==undefined){try{
+      const current=this.source?.measurementEpoch?.(captured.sessionKey);
+      const proof=this.nativeValidationEpochs.get(ticket);
+      if(current!==captured.sourceMeasurementEpoch&&(proof===undefined||current!==proof))return null;
+    }catch{return null;}}
     return captured;
   }
 
@@ -684,9 +693,23 @@ export class PassiveGoals {
     if(!result)return null;
     this.nativeTickets.set(ticket,false);
     return {...result,validate:async checkSignal=>{
-      if(!this.ticketIdentityIsCurrent(ticket))throw stale();checkSignal.throwIfAborted();
-      await result.validate(checkSignal);
-      if(!this.ticketIdentityIsCurrent(ticket))throw stale();checkSignal.throwIfAborted();
+      // Display/pace projection loss is not loss of the frozen raw source.
+      // Re-attest raw bytes, preserving all goal/turn/source-epoch fences.
+      this.nativeValidationEpochs.delete(ticket);
+      try{
+        const combined=AbortSignal.any([signal,checkSignal]);
+        if(!this.ticketIdentityIsCurrent(ticket,false))throw stale();combined.throwIfAborted();
+        await result.validate(combined);
+        if(!this.ticketIdentityIsCurrent(ticket,false))throw stale();combined.throwIfAborted();
+        const epoch=this.source?.measurementEpoch?.(captured.sessionKey);
+        if(epoch!==undefined&&epoch!==null)this.nativeValidationEpochs.set(ticket,epoch);
+      }catch(error){
+        // Equality with the original projection epoch is not raw-byte proof.
+        // Latch failure per ticket so an older concurrent success cannot grant
+        // a new proof after this validation failed. A fresh request is separate.
+        this.nativeValidationFailures.add(ticket);
+        throw error;
+      }
     }};
   }
 
@@ -697,6 +720,9 @@ export class PassiveGoals {
   }
 
   private nativeTickets=new WeakMap<object,boolean>();
+  /** Only a completed raw-byte validation grants a current projection epoch. */
+  private nativeValidationEpochs=new WeakMap<object,number>();
+  private nativeValidationFailures=new WeakSet<object>();
   /** One bounded local supplement. Never called from settlement/arrival. */
   refreshNativeObservation(ticket:object,nowMs:number):import('../observer/native-source-request.js').NativeObservationSample|null {
     const captured=this.ticketIsCurrent(ticket,nowMs);
@@ -818,12 +844,17 @@ export class PassiveGoals {
     this.tickets.delete(ticket);
     const goal = this.goals.get(captured.sessionKey);
     if (goal?.pending === ticket) delete goal.pending;
+    if(this.nativeValidationFailures.has(ticket))return this.reject(ticket,'source_not_ready');
     if(captured.sourceEpoch!==undefined){
       try{if(this.source?.epoch(captured.sessionKey)!==captured.sourceEpoch)return this.reject(ticket,'source_epoch_changed');}
       catch{return this.reject(ticket,'source_epoch_unavailable');}
     }
     if(captured.sourceMeasurementEpoch!==undefined){
-      try{if(this.source?.measurementEpoch?.(captured.sessionKey)!==captured.sourceMeasurementEpoch)return this.reject(ticket,'measurement_epoch_changed');}
+      try{
+        const current=this.source?.measurementEpoch?.(captured.sessionKey);
+        const proof=this.nativeValidationEpochs.get(ticket);
+        if(current!==captured.sourceMeasurementEpoch&&(proof===undefined||current!==proof))return this.reject(ticket,'measurement_epoch_changed');
+      }
       catch{return this.reject(ticket,'measurement_epoch_unavailable');}
     }
     const clockValid=this.clock(nowMs,goal);
@@ -1049,7 +1080,8 @@ export class PassiveGoals {
         ...(outcome?{attentionRequired:false}:goal.wallClock?.humanBlocked===true?{attentionRequired:true,attentionWorkContinuing:false}:
           attention?.evidenceRef?.trim()?{attentionRequired,
             ...(typeof attention.relevantWorkRunning==='boolean'?{attentionWorkContinuing:attentionRequired&&attention.relevantWorkRunning}:{})}:{} )}:{}),
-      ...(this.timeBasis?{timeBasis:this.timeBasis,blockingUnknown:goal.wallClock?.unknownBlocking??true,humanBlocked:goal.wallClock?.humanBlocked??false}:{}),
+      ...(this.timeBasis?{timeBasis:this.timeBasis,blockingUnknown:goal.wallClock?.unknownBlocking??true,
+        blockingEvidenceIncomplete:goal.wallClock?.blockingEvidenceIncomplete??false,humanBlocked:goal.wallClock?.humanBlocked??false}:{}),
       ...(goal.prediction&&goal.predictionIdentity&&this.predictionSources.has(goal.predictionIdentity)?
         {predictionSource:{...this.predictionSources.get(goal.predictionIdentity)!}}:{}),
       ...(goal.progressState?{progressState:{scope:goal.progressState.scope,observedEventSequence:goal.progressState.observedEventSequence,

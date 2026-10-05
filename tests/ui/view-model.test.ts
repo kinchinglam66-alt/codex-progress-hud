@@ -3,6 +3,66 @@ import { buildConversationViews, buildHudView, createConversationViewProjector, 
 import type { HudSnapshot } from "../../src/server/task-store.js";
 import type { EtaEstimate, TaskSnapshot } from "../../src/core/types.js";
 import type { ConversationRow } from "../../src/server/conversation-projection.js";
+it('reports uncovered approval records as a diagnostic, not an observed current block',()=>{
+ const row=overdueConversation('running','ready');
+ Object.assign(row.goal!,{blockingUnknown:false,blockingEvidenceIncomplete:true,timingUncertain:true});
+ const view=buildConversationViews([row])[0]!;
+ expect(view.statusLabel).toBe('本轮执行中');expect(view.tone).toBe('active');
+ expect(view.diagnosticLabel).toContain('审批阻塞记录未覆盖');
+ row.goal!.blockingUnknown=true;expect(buildConversationViews([row])[0]!.statusLabel).toContain('阻塞性质未知');
+});
+it.each(['scheduler_aborted','scheduler_stale','worker_stale','provider_source_cancelled','critical_event_after_snapshot'] as const)(
+ 'does not present normal cancellation or supersession as an estimation fault: %s',reason=>{
+ const row=overdueConversation('running','rejected_result');row.observer!.rejectionReason=reason;
+ const view=buildConversationViews([row])[0]!;
+ expect(view.diagnosticLabel).toContain('等待下一次估时');expect(view.diagnosticLabel).not.toContain('结果未采纳');
+ expect(view.etaLabel).toContain('等待重新估时');expect(view.etaLabel).not.toContain('暂不可用');
+ expect(view.statusLabel).toBe('本轮执行中');
+ row.goal!.prediction=null;expect(buildConversationViews([row])[0]!.etaLabel).toContain('等待下一次估时');
+});
+it('explains expired delivery without fabricating an ETA or changing task state',()=>{
+ const row=overdueConversation('running','rejected_result');row.observer!.rejectionReason='estimate_expired_on_arrival';
+ const original=structuredClone(row),view=buildConversationViews([row])[0]!;
+ expect(view.statusLabel).toBe('本轮执行中');expect(view.diagnosticLabel).toContain('预测返回时已过期');
+ expect(view.etaLabel).toContain('等待重新估时');expect(view.etaLabel).not.toContain('暂不可用');
+ expect(row).toEqual(original);
+ row.goal!.prediction=null;
+ expect(buildConversationViews([row])[0]!.etaLabel).toBe('预测返回时已过期，等待下一次估时');
+ row.observer!.state='estimating';
+ expect(buildConversationViews([row])[0]!.etaLabel).toBe('正在估时');
+ row.goal!.humanBlocked=true;
+ expect(buildConversationViews([row])[0]!.etaLabel).toBe('等待你操作 · 估时已暂停');
+});
+it('does not conceal genuine process faults or invalid responses',()=>{
+ const row=overdueConversation('running','process_error');row.observer!.rejectionReason='preparation_failed';
+ expect(buildConversationViews([row])[0]!.diagnosticLabel).toContain('估时进程出错');
+ row.observer!.state='rejected_result';row.observer!.rejectionReason='schema_invalid';
+ expect(buildConversationViews([row])[0]!.diagnosticLabel).toContain('估时结果未采纳');
+});
+it('keeps independently waiting and interrupted rows out of the pending-user count',()=>{
+ const waiting=overdueConversation('waiting'),running=overdueConversation('running'),interrupted=overdueConversation('interrupted');
+ waiting.conversationKey='waiting';running.conversationKey='running';interrupted.conversationKey='interrupted';
+ expect(conversationActivityLabel(buildConversationViews([waiting,running,interrupted]))).toBe('1 个执行中 · 1 个状态待确认 · 1 个已中断');
+ waiting.goal!.humanBlocked=true;
+ expect(conversationActivityLabel(buildConversationViews([waiting,running]))).toBe('1 个执行中 · 1 个待处理');
+});
+it('collapses repeated rows only within the same conversation identity',()=>{
+ const row=overdueConversation('running');expect(buildConversationViews([row,structuredClone(row)])).toHaveLength(1);
+ const other=structuredClone(row);other.conversationKey='other';
+ expect(buildConversationViews([row,other])).toHaveLength(2);
+});
+it('counts a completely user-blocked task as pending, but keeps concurrent approval and work running',()=>{
+ const row=overdueConversation('running');row.goal!.humanBlocked=true;
+ expect(conversationActivityLabel(buildConversationViews([row]))).toBe('暂无执行中任务 · 1 个待处理');
+ row.goal!.humanBlocked=false;row.goal!.attentionRequired=true;row.goal!.attentionWorkContinuing=true;
+ expect(conversationActivityLabel(buildConversationViews([row]))).toBe('1 个执行中');
+ expect(buildConversationViews([row])[0]?.statusLabel).toContain('相关工作仍在继续');
+});
+it('uses no fixed timeout duration when the actual request limit is configurable',()=>{
+ const row=overdueConversation('running','process_error');row.observer!.contextState='estimate_timeout';
+ expect(buildConversationViews([row])[0]!.diagnosticLabel).toContain('估时超时');
+ expect(buildConversationViews([row])[0]!.diagnosticLabel).not.toContain('30秒');
+});
 it.each(['report_blocker','continue_work','unknown'] as const)('labels %s conditions, including overdue forecasts, without completing the turn',path=>{
  const row=overdueConversation('running','ready');row.goal!.prediction={remainingSeconds:10,errorPercent:100,observedActiveSeconds:row.goal!.activeSeconds};
  row.goal!.estimateCondition={selectedPath:path,displayPath:path,issue:path==='unknown'?'unknown_path':'conditional'};
@@ -107,7 +167,7 @@ function snapshot(taskValue: TaskSnapshot | null, eta: EtaEstimate | null, tasks
   };
 }
 
-function overdueConversation(runtime: "running" | "waiting" | "paused" = "running", observerState?: "pending" | "estimating" | "call_failed" | "setup_failed" | "rate_limited" | "disabled" | "ready"): ConversationRow {
+function overdueConversation(runtime: "running" | "waiting" | "paused" | "interrupted" = "running", observerState?: NonNullable<ConversationRow['observer']>['state']): ConversationRow {
   return {
     conversationKey: "conversation-1",
     task: task(),
@@ -132,8 +192,9 @@ describe("HUD view model", () => {
   it('counts actual running rows separately from waiting or uncertain goals',()=>{
     const waiting=overdueConversation('waiting'),running=overdueConversation('running');
     const uncertain=overdueConversation('waiting');uncertain.goal!.runtimeUncertain=true;
-    expect(conversationActivityLabel(buildConversationViews([waiting,uncertain]))).toBe('暂无执行中任务 · 2 个待处理');
-    expect(conversationActivityLabel(buildConversationViews([waiting,running]))).toBe('1 个执行中 · 1 个待处理');
+    uncertain.conversationKey='uncertain';running.conversationKey='running';
+    expect(conversationActivityLabel(buildConversationViews([waiting,uncertain]))).toBe('暂无执行中任务 · 2 个状态待确认');
+    expect(conversationActivityLabel(buildConversationViews([waiting,running]))).toBe('1 个执行中 · 1 个状态待确认');
     expect(conversationActivityLabel([])).toBe('暂无进行中任务');
     expect(buildConversationViews([uncertain])[0]?.statusLabel).toBe('本轮状态待确认');
   });
