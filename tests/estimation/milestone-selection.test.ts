@@ -38,7 +38,7 @@ it('keeps readable and native policy identical on selection boundaries and numer
  expect(milestoneSelectionInstructions).toContain('earliest supported observable result');
  expect(milestoneSelectionInstructions).toContain('The final reply itself is not an intermediate checkpoint');
  expect(milestoneSelectionInstructions).toContain('not itself a reason to withhold');
- expect(milestoneSelectionInstructions).toContain('Do not force a number');
+ expect(milestoneSelectionInstructions).toContain('best-effort numeric total');
  expect(milestoneSelectionInstructions).toContain('Equal milestone and whole-turn seconds are allowed');
  expect(Buffer.byteLength(milestoneSelectionInstructions)).toBeLessThan(1100);
 });

@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {lstat, open} from 'node:fs/promises';
 import {isAbsolute, resolve} from 'node:path';
-import {observerAssetPins} from './asset-pins.js';
+import {observerAssetPins,observerInstructionsMaxBytes} from './asset-pins.js';
 
 const LIMIT = 16_384;
 
@@ -11,21 +11,22 @@ export async function loadObserverApiAssets(resourcesDirectory: string): Promise
     if (!isAbsolute(resourcesDirectory) || /[\p{Cc}\p{Cf}]/u.test(resourcesDirectory) ||
         /(?:^|[\\/])[^\\/]*\.asar(?:[\\/]|$)/i.test(resourcesDirectory)) throw Error();
     async function readPinned(name: keyof typeof observerAssetPins): Promise<string> {
+      const limit=name==='observer-instructions.md'?observerInstructionsMaxBytes:LIMIT;
       const path = resolve(resourcesDirectory, 'observer-assets', name);
       const metadata = await lstat(path);
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > LIMIT) throw Error();
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > limit) throw Error();
       const handle = await open(path, 'r');
       try {
         const opened = await handle.stat();
-        if (!opened.isFile() || opened.size > LIMIT) throw Error();
-        const buffer = Buffer.alloc(LIMIT + 1);
+        if (!opened.isFile() || opened.size > limit) throw Error();
+        const buffer = Buffer.alloc(limit + 1);
         let size = 0;
         while (size < buffer.length) {
           const read = await handle.read(buffer, size, buffer.length - size, null);
           if (read.bytesRead === 0) break;
           size += read.bytesRead;
         }
-        if (size > LIMIT) throw Error();
+        if (size > limit) throw Error();
         const bytes = buffer.subarray(0, size);
         if (createHash('sha256').update(bytes).digest('hex') !== observerAssetPins[name]) throw Error();
         return new TextDecoder('utf-8', {fatal: true}).decode(bytes);
