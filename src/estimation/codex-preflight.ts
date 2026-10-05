@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import { buildCodexInvocation, type CodexProfile } from "./codex-invocation.js";
 import {parseCodexVersion} from './codex-runtime-profiles.js';
+import {observerAssetPins, observerInstructionsMaxBytes} from './asset-pins.js';
 
 export interface CodexFiles {
   executable:string; cwd:string; schemaPath:string; instructionsPath:string;
@@ -54,7 +55,11 @@ async function verify(files:CodexFiles):Promise<void> {
     (await readdir(files.cwd)).length!==0) throw Error();
   await regularFile(files.executable,files.executableSha256,512*1024*1024);
   await regularFile(files.schemaPath,files.schemaSha256,16384);
-  await regularFile(files.instructionsPath,files.instructionsSha256,16384);
+  // The restored observer prompt exceeds 16 KiB. Only this exact release pin
+  // gets the shared larger bound; arbitrary/legacy instructions stay at 16 KiB.
+  const instructionsLimit=files.instructionsSha256===observerAssetPins['observer-instructions.md']
+    ?observerInstructionsMaxBytes:16384;
+  await regularFile(files.instructionsPath,files.instructionsSha256,instructionsLimit);
   const compressionPaths=[files.compressionSchemaPath,files.compressionInstructionsPath,
     files.compressionSchemaSha256,files.compressionInstructionsSha256];
   if(compressionPaths.some(value=>value!==undefined)) {
