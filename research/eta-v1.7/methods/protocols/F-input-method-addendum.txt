@@ -1,0 +1,52 @@
+Implementation details frozen before any ETA response is requested.
+
+1. Primary anchor uses the first controller-observed complete native rollout
+prefix that contains the first executed tool result. Tool send time and native
+reader availability time are separate clocks in the same domain. The difference
+is recorded as readerAvailabilityLagMs, never backdated. This implements
+"after the first result" using the existing actually-observed-prefix reader.
+The fixed60s diagnostic always uses the latest complete prefix already received
+by60s; it never waits for a future result or substitutes the primary anchor.
+
+2. All information arms share one exact initial request from public-input.json
+and the same fixed environment/goal description. Native reader re-echoes of
+initial user request are replaced by that single shared request; all visible
+non-user execution messages and Full-derived timing/progress fields are retained.
+Activity contains only original tool lifecycle arrival times, generic tool name
+and pairing. Full native schema assembly and all byte-prefix evidence retained.
+Truncated/clipped inputs are missing, not silently compressed to fit.
+
+3. The exercised legacy19 runtime supplies frozen prompt/developer/schema and
+release logic. Each task/anchor has an immutable derived directory, exact elapsed
+time, task IDs and input-condition allowlist. The explicit private omission
+transport supports P0=0 and fractional primary anchors; production files are
+untouched. Future/true duration, condition labels, injected delay dose, other
+predictions and calibration coefficients never enter any model input.
+
+4. Both repeats are independent released sessions. q and truth calibration k
+use the mean positive numeric prediction within each eligible pilot-normal task,
+then task medians. Main MAE averages absolute errors over repeats within task,
+then tasks equally. Missing/failed calls remain in disposition and coverage.
+
+5. Display simulation compares start-only, start-then-Full and start-then-qActivity,
+with each curve sharing the corresponding initial prediction. Calibrated versions
+apply kInitial only to P0 and kFull/kActivity to the update. P60 calls are a separate
+same-clock diagnostic and do not add a second update to these primary curves.
+Actual request preparation/response/parse delivery time is added to its anchor.
+Old late responses cannot replace a newer anchor; results after final reply do
+not display. Unknown intervals over3seconds are not filled as covered time.
+
+6. Trial conclusions concern controlled tool-response latency. Actual task paths
+may change under delayed feedback, and paired runs are stochastic. The8pilot
+tasks calibrate normal environment only; the20validation tasks remain held until
+pilot dose/q/k are sealed. No task is chosen based on duration or ETA error.
+
+7. This batch has an explicit new timing-isolation contract. Complete normal
+final reply, independent timing, clean public-image source, per-executed-command
+network/mount/process isolation and exact native result proofs establish timing
+eligibility. Code correctness is independently graded. This does not claim every
+shell/output line was manually reviewed or every attempted network request was
+absent. Blocked policy requests and incomplete compliance classification remain
+reported; this contract cannot upgrade older manually-reviewed datasets. Any
+confirmed contamination or missing execution proof remains ineligible. A task
+is not removed merely because its implementation fails the independent tests.

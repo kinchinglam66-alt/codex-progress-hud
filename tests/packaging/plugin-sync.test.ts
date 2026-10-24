@@ -25,7 +25,15 @@ describe("plugin package synchronization", () => {
 
     await writeFixture(resolve(fixtureRoot, "package.json"), '{"version":"0.2.0"}\n');
     await writeFixture(resolve(fixtureRoot, ".codex-plugin/plugin.json"), '{"name":"fixture"}\n');
-    await writeFixture(resolve(fixtureRoot, "README.md"), "[Install on Windows](docs/INSTALL-WINDOWS.md)\n");
+    await writeFixture(resolve(fixtureRoot, "README.md"), [
+      "[Install on Windows](docs/INSTALL-WINDOWS.md)",
+      "[中文说明](README.zh-CN.md)",
+      "[Research](docs/RESEARCH-ARTIFACT.md)",
+      "[Research data](research/eta-v1.7/README.md)",
+      "[Example](examples/offline-countdown.mjs)",
+      "[Citation](CITATION.cff)",
+      "[Privacy](PRIVACY.md)",
+    ].join("\n") + "\n");
 
     const copiedFiles = [
       "hooks/hooks.json",
@@ -37,6 +45,8 @@ describe("plugin package synchronization", () => {
     for (const relativePath of copiedFiles) {
       await writeFixture(resolve(fixtureRoot, relativePath), `fixture ${relativePath}\n`);
     }
+    await writeFixture(resolve(fixtureRoot, "PRIVACY.md"), "[Data flow](docs/FULL-CONTEXT-ESTIMATION.md)\n");
+    await writeFixture(resolve(fixtureRoot, "SECURITY.md"), "[Threat model](docs/THREAT_MODEL.md)\n");
 
     const powershellFiles = ["scripts/launch-hook.ps1", "scripts/launch-mcp.ps1", "scripts/invoke-node-mode.ps1"];
     for (const relativePath of powershellFiles) {
@@ -44,6 +54,16 @@ describe("plugin package synchronization", () => {
     }
 
     execFileSync(process.execPath, ["scripts/sync-plugin-package.mjs"], { cwd: fixtureRoot, stdio: "pipe" });
+
+    const packagedReadme = await readFile(resolve(fixtureRoot, "plugins/codex-progress-hud/README.md"), "utf8");
+    for (const link of ["docs/INSTALL-WINDOWS.md", "README.zh-CN.md", "docs/RESEARCH-ARTIFACT.md", "research/eta-v1.7/README.md", "examples/offline-countdown.mjs", "CITATION.cff"]) {
+      expect(packagedReadme).toContain(`](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/${link})`);
+    }
+    expect(packagedReadme).toContain("[Privacy](PRIVACY.md)");
+    expect(await readFile(resolve(fixtureRoot, "plugins/codex-progress-hud/PRIVACY.md"), "utf8"))
+      .toContain("](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/FULL-CONTEXT-ESTIMATION.md)");
+    expect(await readFile(resolve(fixtureRoot, "plugins/codex-progress-hud/SECURITY.md"), "utf8"))
+      .toContain("](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/THREAT_MODEL.md)");
 
     for (const relativePath of powershellFiles) {
       const packagedPath = resolve(fixtureRoot, "plugins/codex-progress-hud", relativePath);

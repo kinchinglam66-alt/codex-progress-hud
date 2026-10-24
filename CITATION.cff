@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "Cite this research source snapshot and record the exact commit or archive identifier. Cite the empirical manuscript separately for its results."
+type: software
+title: "Codex Progress HUD"
+version: "research-release-2026-10-24"
+date-released: "2026-10-24"
+url: "https://github.com/kinchinglam66-alt/codex-progress-hud/releases/tag/research-release-2026-10-24"
+authors:
+  - family-names: Lam
+    given-names: Kin Ching
+    orcid: "https://orcid.org/0009-0009-4254-0631"
+license: Apache-2.0
+repository-code: "https://github.com/kinchinglam66-alt/codex-progress-hud"
+abstract: "A Windows research prototype connecting readable coding-agent execution histories, remaining-time estimates, and countdown delivery. This research release preserves runtime behavior from commit 40b81e6bb8f23cd25bcfac3f7c5106b0d3ad58f7 and adds documentation and companion research artifacts. Empirical accuracy remains specific to each study's input and execution contract."

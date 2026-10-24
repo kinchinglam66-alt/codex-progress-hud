@@ -6,6 +6,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(root, "plugins/codex-progress-hud");
 const checkOnly = process.argv.includes("--check");
 const normalizeText = (content) => content.replace(/\r\n/gu, "\n").replace(/\n*$/u, "\n");
+// These files are not copied into the plugin ZIP. Keep its documentation usable
+// without assuming that the repository's docs directory exists beside it.
+const pluginDocumentLinks = (content) => content.replace(
+  /\]\(((?:docs\/|examples\/|research\/)[^)]+|README\.zh-CN\.md|CITATION\.cff|CONTRIBUTING\.md)\)/gu,
+  "](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/$1)"
+);
 const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 const rootPlugin = JSON.parse(await readFile(resolve(root, ".codex-plugin/plugin.json"), "utf8"));
 const releasePlugin = { ...rootPlugin, version: packageManifest.version };
@@ -22,10 +28,7 @@ const releaseMcp = {
 const generated = new Map([
   [".codex-plugin/plugin.json", `${JSON.stringify(releasePlugin, null, 2)}\n`],
   [".mcp.json", `${JSON.stringify(releaseMcp, null, 2)}\n`],
-  ["README.md", (await readFile(resolve(root, "README.md"), "utf8")).replace(
-    "[Install on Windows](docs/INSTALL-WINDOWS.md)",
-    "[Install on Windows](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/INSTALL-WINDOWS.md)"
-  )]
+  ["README.md", pluginDocumentLinks(await readFile(resolve(root, "README.md"), "utf8"))]
 ]);
 const copies = new Map([
   ["hooks/hooks.json", "hooks/hooks.json"],
@@ -39,7 +42,8 @@ const copies = new Map([
 ]);
 
 for (const [target, source] of copies) {
-  generated.set(target, normalizeText(await readFile(resolve(root, source), "utf8")));
+  const content = normalizeText(await readFile(resolve(root, source), "utf8"));
+  generated.set(target, source.endsWith(".md") ? pluginDocumentLinks(content) : content);
 }
 
 const drift = [];

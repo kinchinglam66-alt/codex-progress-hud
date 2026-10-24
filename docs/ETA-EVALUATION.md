@@ -60,7 +60,7 @@ npm run typecheck
 
 The synthetic tests cover active/wait/pause timing, prefix isolation, malformed inputs/outputs, duplicate/split guards, unscored outcomes, exceptions, the existing estimator adapter and paired comparison. Their hand-calculated numbers are correctness fixtures, not benchmark claims.
 
-Next: add a consented, task-disjoint evaluation dataset and fit candidates only on training data. Calibration candidates must be evaluated on matched held-out prefixes before replacing online behavior. Independent model integration remains gated by the [observation feasibility report](superpowers/reports/2026-09-05-independent-observation-feasibility.md).
+Historical next steps for this first slice were to add a consented, task-disjoint dataset and fit only on training data. This component note is retained as design history; consult the [research artifact map](RESEARCH-ARTIFACT.md) for the current snapshot and the separate empirical studies. Calibration candidates still require matched held-out evaluation before online adoption.
 
 ## Calibration sample quality follow-up
 

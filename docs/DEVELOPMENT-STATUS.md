@@ -1,5 +1,10 @@
 # Development status — 2026-09-07
 
+This is a historical verification record for the September development candidate.
+For the source snapshot prepared on 24 October 2026, use the
+[research artifact map](RESEARCH-ARTIFACT.md), the snapshot file manifest, and its
+recorded verification. The counts below are not a new execution of those checks.
+
 The main development line includes passive multi-conversation observation,
 isolated model-based goal interpretation and ETA, durable usage accounting,
 countdown presentation and explicit failure diagnostics. Public main-model

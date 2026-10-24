@@ -4,3 +4,5 @@
 # This release asset has a reviewed byte-level SHA256 pin.
 scripts/windows/observer-home.ps1 text eol=lf
 scripts/windows/native-guard.ps1 text eol=lf
+# Research manifests hash exact reviewed bytes, including original line endings.
+research/eta-v1.7/** -text

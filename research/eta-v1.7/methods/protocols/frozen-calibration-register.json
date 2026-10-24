@@ -1,0 +1,38 @@
+{
+  "F": {
+    "sourceSha256": "8e9ebc42385ee09f5b663a8a0d19ad0d9425adab82ac9570e75f885bc916d5f5",
+    "calibration": {
+      "taskCount": 6,
+      "kInitial": 0.3327469696969697,
+      "kActivity": 0.42748532763532765,
+      "kFull": 0.3894920404040404,
+      "q": 1.1483516483516483,
+      "method": "within-task mean of two complete numeric repeats; across-task median ratios at primary anchor"
+    },
+    "delay": {
+      "ratio": 3.579571527770226,
+      "seconds": 10,
+      "pairs": 7,
+      "formula": "clamp(round5(30/(median(T30/T0)-1)),5,90); ratio<=1 =>90"
+    },
+    "validationOutcomesUsed": false,
+    "validationPredictionsUsed": false
+  },
+  "G": {
+    "coefficients": {
+      "first-result/activity": 0.3451794444444444,
+      "first-result/full": 0.3537383333333334,
+      "p60/activity": 0.6314744444444444,
+      "p60/full": 0.5450377777777777,
+      "p180/activity": 0.7728816666666667,
+      "p180/full": 0.6226763888888889
+    },
+    "calibrationCalls": 48,
+    "calibrationRepositories": 4,
+    "evaluationRepositories": 8,
+    "evaluationDispatchedAtFreeze": 0,
+    "validationPredictionsUsed": false,
+    "method": "prediction weighted median truth/prediction, weights prediction/2"
+  },
+  "rawPresentation": "Retrospective raw synthesis applies none of these factors; original calibrated analyses remain in Appendix C."
+}

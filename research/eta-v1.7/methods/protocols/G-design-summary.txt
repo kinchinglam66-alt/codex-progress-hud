@@ -1,0 +1,46 @@
+Study G: public summary of the original frozen replay design
+Derived disclosure; not a replacement for the original private protocol.
+Original protocol SHA256:
+e1c4eba8a32b8d9cca248b01b59958fe355d24055fda16385ddc8cbe720af87b
+Input freeze SHA256:
+2ac0c0f756fb5b9e71d8053204a71c146ee3c5c4e1f4194b2d696cec47958847
+
+Historical normal trajectories only. Select the first four completed pilot
+trajectories in original cohort order (8101,8102,8103,8105) for calibration and
+the first eight validation trajectories (8109..8116) for evaluation. Interrupted
+8104 remains in the historical inventory. No selection by prediction accuracy.
+These source numbers already appear in the manuscript; public data use matched
+pseudonyms. Outcomes had previously been viewed. This is diagnostic reuse.
+
+First actually readable executed result, P60 and P180; each anchor requires
+the source final reply to occur later. Do not replace ended/missing slots.
+Two independent repeats of Activity and canonical +Content at each anchor.
+144 maximum new ETA requests; zero new solver starts. Failed started requests
+are not rerun. GPT-6 Sol/medium, standard/default tier, subscription, one ETA
+at a time, fresh released worker/session for each request.
+
+Block order: deterministic SHA256 sort of seed 20261024, source identity and
+anchor, separately within calibration and evaluation. Opposite condition order
+across repeats; alternating first condition across blocks. Finish calibration,
+freeze its coefficients, then dispatch evaluation. G-call-inventory records the
+actual ordinal, stage, condition, anchor and repeat for all requests.
+
+Fit a separate positive scalar per arm and anchor using the four calibration
+repositories: minimize equal-task mean per-call absolute error, implemented as
+a prediction-weighted median of truth/prediction with repeat weights. No test
+prediction or outcome is used for this fit. Frozen values are published in the
+calibration register. This describes the historical design, not a new fit.
+
+Original main comparison: calibrated +Content minus calibrated Activity
+task-equal MAE at P180 and its change from first result. Also report raw/raw,
+all anchors, MARE for remaining>=60, task-mean Pearson, repeats, leave-one-repo-out
+and 10,000 repository bootstrap draws with seed 20261024. Separately propagate
+training and evaluation uncertainty where feasible. Repeats/stages are dependent.
+Intervals are descriptive, outcome-aware and unadjusted for multiple comparisons.
+
+Result: all 144 requests complete and settle with known usage. No solver starts.
+Original calibrated P180 difference is -2.1 seconds with conditional interval
+[-149.4,163.9]; it is inconclusive. Its joint training/evaluation interval also
+crosses zero. Raw later-anchor gains are reported descriptively in the paper.
+The raw presentation was selected after results were inspected; it is not the
+original primary analysis. No equivalence or universal +Content benefit follows.

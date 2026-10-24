@@ -1,0 +1,17 @@
+Copyright 2026 Lam Kin Ching.
+
+Program code (*.py) is licensed under the Apache License, Version 2.0.
+See LICENSES/Apache-2.0.txt.
+
+Derived numerical data, expected results, verification records, manifests and
+explanatory documentation in this package are licensed under Creative Commons
+Attribution 4.0 International, to the extent of the author's rights.
+See LICENSES/CC-BY-4.0.txt and https://creativecommons.org/licenses/by/4.0/.
+
+Attribution: Lam Kin Ching, ETA Numeric Supplement v1.1 (2026), companion to
+Execution Information and Estimation Timing for Coding Agent ETA.
+Source: https://github.com/kinchinglam66-alt/codex-progress-hud/releases/tag/research-release-2026-10-24
+Indicate modifications and retain applicable notices. License texts retain their
+own status. Omitted third-party source/task/transcript material and the manuscript
+are not included in this license grant. The data are provided as-is, without a
+warranty that consistency checks establish scientific validity.

@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "originalBuilderPairs": 36,
+  "frozenInputsVerified": 72,
+  "GActualRequestsVerified": 144,
+  "GNumericSupplementJoins": 96,
+  "GUniqueSessions": 144,
+  "knownTokens": 4091756,
+  "EFMetadataInputs": 299,
+  "EFMetadataCalls": 532,
+  "EFPreviousAuditAssertions": 19634,
+  "EFPreviousAuditFailedAssertions": [],
+  "newModelCalls": 0,
+  "serverAccess": false,
+  "rawTaskTextsPublished": 0,
+  "rawOutputsPublished": 0,
+  "scope": "G archive and input checks rerun locally; E/F inventories derive from prior audit, not new independent content review. Counts are checks, not independent statistical observations."
+}

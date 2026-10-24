@@ -1,43 +1,92 @@
-# Install on Windows
+# Run on Windows
 
-Codex Progress HUD 0.2.1 supports Windows 10/11 x64. The companion installer is currently unsigned, so Windows SmartScreen may ask you to review the publisher warning.
+The research snapshot is a source distribution for Windows 10/11 x64. Its package
+version is `0.2.1`, and the exact source baseline is recorded in
+[RESEARCH-ARTIFACT.md](RESEARCH-ARTIFACT.md). There is currently no published
+installer attached to this research release.
 
-## Verify and install
+## Build and try the offline example
 
-Download these three files from the same GitHub release:
-
-- `Codex-Progress-HUD-Setup-0.2.1.exe`
-- `codex-progress-hud-plugin-0.2.1.zip`
-- `SHA256SUMS.txt`
-
-Verify the downloads before running them:
-
-```powershell
-Get-FileHash .\Codex-Progress-HUD-Setup-0.2.1.exe -Algorithm SHA256
-Get-FileHash .\codex-progress-hud-plugin-0.2.1.zip -Algorithm SHA256
-```
-
-Compare both lowercase hashes with `SHA256SUMS.txt`, then run the companion installer. It installs per user without elevation and does not enable login startup.
-
-Add and enable the plugin through Codex's plugin page. For a Git checkout, the equivalent CLI flow is:
+Use Node.js 22.13.0 or later and extract the source snapshot to a working directory.
+Dependency installation downloads npm packages and Electron; it does not configure
+an estimator account.
 
 ```powershell
-codex plugin marketplace add kinchinglam66-alt/codex-progress-hud --ref main
-codex plugin add codex-progress-hud@kinchinglam66-alt
+npm ci
+npm run typecheck
+npm run build
+node examples/offline-countdown.mjs
 ```
 
-Hooks are optional best-effort compatibility support; review and trust them only if you want those signals. Fully quit and reopen Codex once. Task tracking is model-reported: use the supplied opaque task handle when present, otherwise the MCP-process lease fallback associates the call. A resumed older conversation can report after restart, without backfilling earlier elapsed time. If that conversation retained a pre-install plugin snapshot, start or fork a continuation task.
+The example uses synthetic input. To open the desktop companion, use
+`npm run start:hud`. Review [privacy](../PRIVACY.md) before granting estimator
+authorization. A first launch is not an accuracy test.
 
-The release plugin includes a small open-source Windows bridge compiled from `build/native-launcher.cs`. It validates the installer manifest and streams MCP JSON directly to the packaged companion, avoiding a global Node.js dependency and PowerShell's non-streaming redirected-input behavior.
+## Plugin and companion entry points
 
-## Controls and lifecycle
+The root `.mcp.json` is a development entry point using Node and the built
+`dist/mcp/main.js`. The marketplace entry in `.agents/plugins/marketplace.json`
+points to `plugins/codex-progress-hud`, whose native launcher expects a matching
+packaged companion installation. Adding that marketplace alone does not install
+the companion or turn a source checkout into a complete installed product.
 
-The Codex plugin page is the only global enable/disable/uninstall switch. Show/hide changes only the floating window. Select, pause, resume, and stop affect only one task's HUD timing and never pause or stop Codex itself.
+For a developer building a matched local Windows companion and plugin:
 
-Disabling or uninstalling stops new plugin activity. The companion exits after the final MCP lease disappears and a 30–60 second grace period. A companion started by a Hook also starts the same grace timer while waiting for its first MCP lease, so a missing or disabled MCP configuration cannot leave it running indefinitely. The deprecated `hud_close` alias requests immediate shutdown but does not persist an off preference; a later task write may restart the companion.
+```powershell
+npm run verify:release
+npm run release:artifacts
+```
 
-## Update and recovery
+These commands create local artifacts, including the installer, plugin ZIP, and
+`SHA256SUMS.txt`, under `release/`. Compare `Get-FileHash -Algorithm SHA256` for the
+installer and ZIP with that file before running the per-user installer. Then
+install the matching plugin in the host and restart the host. Windows may warn
+about an unsigned installer. The native launcher build requires the Windows .NET
+Framework C# compiler used by `scripts/build-native-launcher.mjs`.
 
-Install matching plugin and companion versions, then fully restart Codex. A version mismatch is reported separately from an offline companion. If tools or Hooks remain stale, disable and re-enable the plugin or reinstall both artifacts from the same release, then restart again.
+`npm run pack:win` creates an unpacked companion for packaging checks. It does not
+create the installer required by `npm run checksums`; use the complete maintainer
+workflow above when producing distributable artifacts. Packaging commands do not
+publish files or modify repository visibility.
 
-Run `hud_diagnose` when available. Diagnostic reports contain bounded state categories and timestamps, not tokens, prompts, task titles, source files, raw session IDs, Hook payloads, or command output. Review a report before sharing it.
+With a matching companion installed, register the extracted marketplace from its root:
+
+```powershell
+codex plugin marketplace add .
+```
+
+Then use the desktop Plugins Directory to select the source, install or enable the
+plugin, and restart the host. A local snapshot needs a local path; a published
+repository version should use its actual published ref. The
+[official packaging documentation](https://developers.openai.com/plugins/build/plugins)
+describes current marketplace support. This project uses optional lifecycle Hooks;
+the [official submission guidance](https://developers.openai.com/plugins/deploy/submission)
+directs plugins depending on Hooks to manual desktop distribution. GitHub source
+publication does not itself create a public-directory listing.
+
+## Configure an estimator
+
+In **设置** (Settings), inspect the source and recipient notice. Subscription mode
+follows the main file-backed Codex account by default; independent-account and API
+modes are separate options. See [account following](main-account-follow.md) and
+[provider settings](observer-provider-settings.md). Full-context estimation sends
+readable task text to the provider and may consume allowance or credit. Local
+configuration checks do not prove successful inference or estimation accuracy.
+
+## Controls and recovery
+
+The host's plugin page controls global plugin enablement. Hiding the window and
+pausing a row affect presentation or tracking, not the coding task. Use
+**撤销估时授权** to revoke saved estimator authorization. After an update, restart
+the host and use matching plugin and companion versions.
+
+If forecasts are missing, inspect source availability, supported runtime hashes,
+provider/account state, and local usage diagnostics. Keep unknown usage records.
+A protocol mismatch, unavailable account check, and network failure require
+different remedies. Deleting account data is not a general recovery step.
+
+## Future compiled downloads
+
+When a compiled release is published, verify its installer, plugin ZIP, and
+checksum file from the same release. This preparation supplies no signed installer
+or download URL for nonexistent artifacts. See [limitations](KNOWN-LIMITATIONS.md).

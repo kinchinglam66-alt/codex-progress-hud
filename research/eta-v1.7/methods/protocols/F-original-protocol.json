@@ -1,0 +1,57 @@
+{
+  "schema": "eta-controlled-slowdown-protocol-v1",
+  "cohortSha256": "7c44739e75415a9be61403cbac90b342ad5c557009613a53aeea803ae8beb18b",
+  "solver": {
+    "model": "gpt-6-sol",
+    "reasoning": "max",
+    "mode": "standard",
+    "billing": "subscription"
+  },
+  "eta": {
+    "model": "gpt-6-sol",
+    "reasoning": "medium",
+    "mode": "standard",
+    "billing": "subscription",
+    "releaseEachCall": true,
+    "historyPredictions": [],
+    "correctionInInput": false
+  },
+  "maximumNewSolverStarts": 56,
+  "maximumPilotEtaCalls": 80,
+  "maximumValidationEtaCalls": 400,
+  "parallelSolvers": 1,
+  "parallelEta": 1,
+  "anchors": {
+    "primary": "first-proven-executed-tool-result-sent-to-solver",
+    "diagnostic": "wall-clock-60s",
+    "initial": "independent-controller-turn-request-complete"
+  },
+  "inputs": [
+    "initial",
+    "activity",
+    "full"
+  ],
+  "repeats": 2,
+  "calibration": "pilot-normal-only; complete two numeric repeats; task mean then median ratios; kInitial from initial final-duration; kActivity/kFull/q from primary anchor",
+  "dose": "30s pilot; round5(clamp(30/(median(T30/T0)-1),5,90)); ratio<=1 =>90; at least3 complete qualified pairs",
+  "minimumPilotCalibrationTasks": 4,
+  "minimumPilotCompletePairs": 3,
+  "truth": "independent-controller-final-answer-receipt; native terminal separate; systems+injected wait included; only evidenced wholly-human blocks excluded",
+  "primary": "per-task repeat-mean absolute-error Full-minus-qActivity delayed; paired interaction relative to normal; both intervals support negative to claim benefit",
+  "bootstrap": {
+    "unit": "repository",
+    "iterations": 10000,
+    "seed": 20261022,
+    "confidence": 0.95
+  },
+  "failure": "no started solver/call retries; uncertainty holds affected queue; no automatic sample replacement",
+  "resources": {
+    "memoryReserveFraction": 0.25,
+    "dataReserveBytes": 12884901888,
+    "rootReserveBytes": 2147483648
+  },
+  "selection": "public seeded identity; new repositories first; language round robin; one task per repository before repeats; first28 frozen; preflight failure is recorded, never accuracy-based replacement",
+  "historicalResultsViewed": true,
+  "pilotUsedForDevelopment": true,
+  "validationMustRemainUnseenUntilCalibrationFrozen": true
+}

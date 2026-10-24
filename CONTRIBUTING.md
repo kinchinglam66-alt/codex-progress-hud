@@ -1,11 +1,11 @@
 # Contributing
 
-Codex Progress HUD is a local plugin and companion. Keep the Codex plugin page as the sole global enable/disable boundary: trusted Hooks plus an enabled plugin imply automatic tracking.
+Codex Progress HUD is a local plugin and companion. The host's plugin page controls global plugin enablement. Observation also depends on supported sources, identity evidence, and runtime readiness; independent estimation requires explicit authorization.
 
 ## Workflow
 
 1. Describe the user-visible behavior and privacy impact.
-2. Write a failing behavior test and record the RED result.
+2. For a behavior change, reproduce the problem with a focused failing test. For documentation, check commands, links, and the stated version against the implementation.
 3. Implement the smallest change, then run the focused test GREEN.
 4. Run typecheck, build, plugin validation, and the full suite.
 5. Update README, privacy, and threat-model documentation when control, data flow, retention, or permissions change.

@@ -1,0 +1,39 @@
+{
+  "extractedFrom": "Study G actual archived thread/start and turn/start requests",
+  "observedCalls": 144,
+  "model": "gpt-6-sol",
+  "effort": "medium",
+  "serviceTier": "default",
+  "billingRoute": "subscription",
+  "ephemeral": true,
+  "dynamicTools": [],
+  "wireEnvelope": {
+    "currentObservation": "prepared observation",
+    "importedThroughOrdinal": -1
+  },
+  "preparedFields": [
+    "activeSeconds",
+    "goalSummary",
+    "imageContextPending",
+    "messages",
+    "nativeTiming",
+    "observation",
+    "runtime",
+    "timeBasis",
+    "truncated"
+  ],
+  "nativeTimingFields": [
+    "requestActiveSeconds"
+  ],
+  "developerSha256": "f3607f500b7394573b56d34ddf234ec9d2fc9b94d065f865b011005c9d3eb3e7",
+  "outputSchemaSha256": "4dfe67ec189f7ccf31223225f57a084dfba5d734d2f8aff44ec52e81cb9fbe70",
+  "FValidationDeveloperPins": [
+    "f3607f500b7394573b56d34ddf234ec9d2fc9b94d065f865b011005c9d3eb3e7"
+  ],
+  "FValidationSchemaPins": [
+    "4dfe67ec189f7ccf31223225f57a084dfba5d734d2f8aff44ec52e81cb9fbe70"
+  ],
+  "FValidationSameDeveloperAsG": true,
+  "FValidationSameSchemaAsG": true,
+  "claimBoundary": "F pins are from the prior 400-call private audit; no new F archive-to-wire audit in this packaging run. No claim that other studies share this exact contract."
+}

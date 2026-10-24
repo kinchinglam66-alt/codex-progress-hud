@@ -1,0 +1,582 @@
+{
+  "cells": {
+    "B-bridge19|evaluation|original|p60|activity|gpt-6-sol": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 349.62984210526315,
+      "MARE": 1.0384022039286622,
+      "signedBias": 283.59152631578945,
+      "positiveContribution": 316.61068421052624,
+      "negativeMagnitude": 33.01915789473684,
+      "pearson": 0.5688081213307477
+    },
+    "B-bridge19|evaluation|original|p60|full|gpt-6-sol": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 240.83673684210527,
+      "MARE": 0.5219665899484638,
+      "signedBias": 82.01257894736843,
+      "positiveContribution": 161.4246578947368,
+      "negativeMagnitude": 79.41207894736843,
+      "pearson": 0.5048526594993069
+    },
+    "C-contemporary72|evaluation|original|p60|activity|gpt-6-sol": {
+      "tasks": 12,
+      "MAREtasks": 12,
+      "MAE": 451.36049999999994,
+      "MARE": 0.8319919766230135,
+      "signedBias": 413.38466666666665,
+      "positiveContribution": 432.3725833333333,
+      "negativeMagnitude": 18.987916666666667,
+      "pearson": 0.06487556958416041
+    },
+    "C-contemporary72|evaluation|original|p60|full|gpt-6-sol": {
+      "tasks": 12,
+      "MAREtasks": 12,
+      "MAE": 246.58683333333332,
+      "MARE": 0.42703969107448964,
+      "signedBias": 120.88466666666666,
+      "positiveContribution": 183.73575000000002,
+      "negativeMagnitude": 62.85108333333333,
+      "pearson": 0.012009781804467096
+    },
+    "E-information11|evaluation|original|p60|base|gpt-6-sol": {
+      "tasks": 11,
+      "MAREtasks": 11,
+      "MAE": 395.99236363636356,
+      "MARE": 0.8560084753617816,
+      "signedBias": 381.19599999999997,
+      "positiveContribution": 388.5941818181818,
+      "negativeMagnitude": 7.39818181818182,
+      "pearson": 0.655820605681681
+    },
+    "E-information11|evaluation|original|p60|full|gpt-6-sol": {
+      "tasks": 11,
+      "MAREtasks": 11,
+      "MAE": 189.66572727272725,
+      "MARE": 0.4221576074316854,
+      "signedBias": 141.65054545454544,
+      "positiveContribution": 165.65813636363637,
+      "negativeMagnitude": 24.007590909090915,
+      "pearson": 0.5529530376497916
+    },
+    "F-validation|evaluation|normal|first-result|activity|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 907.4997999999999,
+      "MARE": 1.4868727010295633,
+      "signedBias": 903.5712,
+      "positiveContribution": 905.5355,
+      "negativeMagnitude": 1.9643000000000028,
+      "pearson": 0.6259334216024073
+    },
+    "F-validation|evaluation|normal|first-result|full|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 871.0711999999997,
+      "MARE": 1.4856960593518855,
+      "signedBias": 871.0711999999997,
+      "positiveContribution": 871.0711999999997,
+      "negativeMagnitude": 0,
+      "pearson": 0.45551776028528124
+    },
+    "F-validation|evaluation|normal|p60|activity|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 815.76505,
+      "MARE": 1.4291885641441167,
+      "signedBias": 815.76505,
+      "positiveContribution": 815.76505,
+      "negativeMagnitude": 0,
+      "pearson": 0.7577817506693324
+    },
+    "F-validation|evaluation|normal|p60|full|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 316.67425000000003,
+      "MARE": 0.5676063511012985,
+      "signedBias": 282.0150500000001,
+      "positiveContribution": 299.34465,
+      "negativeMagnitude": 17.329599999999996,
+      "pearson": 0.6638499393480087
+    },
+    "F-validation|evaluation|delayed|first-result|activity|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 502.61349999999993,
+      "MARE": 0.5486496296849965,
+      "signedBias": 378.6065,
+      "positiveContribution": 440.60999999999996,
+      "negativeMagnitude": 62.00350000000001,
+      "pearson": 0.2202430874107084
+    },
+    "F-validation|evaluation|delayed|first-result|full|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 505.17705000000007,
+      "MARE": 0.5286124098816422,
+      "signedBias": 413.6065,
+      "positiveContribution": 459.39177500000005,
+      "negativeMagnitude": 45.785275,
+      "pearson": 0.5868353491803201
+    },
+    "F-validation|evaluation|delayed|p60|activity|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 469.27645,
+      "MARE": 0.5151737351086908,
+      "signedBias": 325.1535499999999,
+      "positiveContribution": 397.215,
+      "negativeMagnitude": 72.06145000000001,
+      "pearson": 0.3371159245270903
+    },
+    "F-validation|evaluation|delayed|p60|full|gpt-6-sol": {
+      "tasks": 20,
+      "MAREtasks": 20,
+      "MAE": 387.17584999999997,
+      "MARE": 0.4178301312720234,
+      "signedBias": 275.4035499999999,
+      "positiveContribution": 331.2897,
+      "negativeMagnitude": 55.88615,
+      "pearson": 0.6530833234794752
+    },
+    "G-evaluation|evaluation|normal|first-result|activity|gpt-6-sol": {
+      "tasks": 8,
+      "MAREtasks": 8,
+      "MAE": 1073.233125,
+      "MARE": 1.7827734134195465,
+      "signedBias": 1073.233125,
+      "positiveContribution": 1073.233125,
+      "negativeMagnitude": 0,
+      "pearson": 0.4603310025419387
+    },
+    "G-evaluation|evaluation|normal|first-result|full|gpt-6-sol": {
+      "tasks": 8,
+      "MAREtasks": 8,
+      "MAE": 1216.983125,
+      "MARE": 1.9783675358977968,
+      "signedBias": 1216.983125,
+      "positiveContribution": 1216.983125,
+      "negativeMagnitude": 0,
+      "pearson": 0.4671310114565556
+    },
+    "G-evaluation|evaluation|normal|p60|activity|gpt-6-sol": {
+      "tasks": 8,
+      "MAREtasks": 8,
+      "MAE": 902.723625,
+      "MARE": 1.6496816756641701,
+      "signedBias": 902.723625,
+      "positiveContribution": 902.723625,
+      "negativeMagnitude": 0,
+      "pearson": 0.5015148620296251
+    },
+    "G-evaluation|evaluation|normal|p60|full|gpt-6-sol": {
+      "tasks": 8,
+      "MAREtasks": 8,
+      "MAE": 688.973625,
+      "MARE": 1.2909218435708791,
+      "signedBias": 688.973625,
+      "positiveContribution": 688.973625,
+      "negativeMagnitude": 0,
+      "pearson": 0.48056067396350244
+    },
+    "G-evaluation|evaluation|normal|p180|activity|gpt-6-sol": {
+      "tasks": 8,
+      "MAREtasks": 8,
+      "MAE": 370.43287499999997,
+      "MARE": 0.996418681160927,
+      "signedBias": 343.97362499999997,
+      "positiveContribution": 357.20325,
+      "negativeMagnitude": 13.229624999999999,
+      "pearson": 0.38556606115504904
+    },
+    "G-evaluation|evaluation|normal|p180|full|gpt-6-sol": {
+      "tasks": 8,
+      "MAREtasks": 8,
+      "MAE": 183.124125,
+      "MARE": 0.41107166236658116,
+      "signedBias": 3.9736250000000126,
+      "positiveContribution": 93.54887500000001,
+      "negativeMagnitude": 89.57524999999998,
+      "pearson": 0.16467667432512711
+    },
+    "B-timing19|evaluation|original|first|gpt-6-astra|gpt-6-astra": {
+      "tasks": 19,
+      "MAREtasks": 19,
+      "MAE": 477.95752631578944,
+      "MARE": 1.332577719595765,
+      "signedBias": 472.747947368421,
+      "positiveContribution": 475.35273684210523,
+      "negativeMagnitude": 2.60478947368421,
+      "pearson": 0.6559355968398741
+    },
+    "B-timing19|evaluation|original|q25|gpt-6-astra|gpt-6-astra": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 152.35573684210527,
+      "MARE": 0.48553442852849,
+      "signedBias": 63.58331578947369,
+      "positiveContribution": 107.96952631578947,
+      "negativeMagnitude": 44.38621052631579,
+      "pearson": 0.5842633603860551
+    },
+    "B-timing19|evaluation|original|q50|gpt-6-astra|gpt-6-astra": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 96.72726315789475,
+      "MARE": 0.4501862733324683,
+      "signedBias": 25.37842105263158,
+      "positiveContribution": 61.05284210526317,
+      "negativeMagnitude": 35.67442105263158,
+      "pearson": 0.6480518761358895
+    },
+    "B-timing19|evaluation|original|q75|gpt-6-astra|gpt-6-astra": {
+      "tasks": 19,
+      "MAREtasks": 16,
+      "MAE": 59.59157894736842,
+      "MARE": 0.4046910155823618,
+      "signedBias": 8.5,
+      "positiveContribution": 34.04578947368421,
+      "negativeMagnitude": 25.54578947368421,
+      "pearson": 0.2349916686917779
+    },
+    "B-timing19|evaluation|original|first|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 19,
+      "MAREtasks": 19,
+      "MAE": 612.7479473684211,
+      "MARE": 1.6069278896222685,
+      "signedBias": 612.7479473684211,
+      "positiveContribution": 612.7479473684211,
+      "negativeMagnitude": 0,
+      "pearson": 0.7036414537936648
+    },
+    "B-timing19|evaluation|original|q25|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 144.71973684210525,
+      "MARE": 0.42930372174385184,
+      "signedBias": 11.741210526315788,
+      "positiveContribution": 78.23047368421052,
+      "negativeMagnitude": 66.48926315789474,
+      "pearson": 0.4739638120759441
+    },
+    "B-timing19|evaluation|original|q50|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 85.51994736842104,
+      "MARE": 0.3823468772984148,
+      "signedBias": -4.753157894736842,
+      "positiveContribution": 40.38339473684211,
+      "negativeMagnitude": 45.13655263157894,
+      "pearson": 0.6708360874579633
+    },
+    "B-timing19|evaluation|original|q75|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 19,
+      "MAREtasks": 16,
+      "MAE": 54.80878947368421,
+      "MARE": 0.3462098617734218,
+      "signedBias": -1.6315789473684241,
+      "positiveContribution": 26.588605263157895,
+      "negativeMagnitude": 28.220184210526316,
+      "pearson": 0.2242382835399319
+    },
+    "B-timing19|evaluation|original|first|gpt-6-sol|gpt-6-sol": {
+      "tasks": 19,
+      "MAREtasks": 19,
+      "MAE": 904.8532105263159,
+      "MARE": 2.30903824789653,
+      "signedBias": 904.8532105263159,
+      "positiveContribution": 904.8532105263159,
+      "negativeMagnitude": 0,
+      "pearson": 0.6593115713601073
+    },
+    "B-timing19|evaluation|original|q25|gpt-6-sol|gpt-6-sol": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 174.38878947368423,
+      "MARE": 0.4889601944310833,
+      "signedBias": -13.785105263157899,
+      "positiveContribution": 80.30184210526313,
+      "negativeMagnitude": 94.08694736842105,
+      "pearson": 0.17053703261580533
+    },
+    "B-timing19|evaluation|original|q50|gpt-6-sol|gpt-6-sol": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 126.08926315789473,
+      "MARE": 0.517802604891637,
+      "signedBias": -30.542631578947365,
+      "positiveContribution": 47.77331578947369,
+      "negativeMagnitude": 78.31594736842104,
+      "pearson": 0.3563574905845057
+    },
+    "B-timing19|evaluation|original|q75|gpt-6-sol|gpt-6-sol": {
+      "tasks": 19,
+      "MAREtasks": 16,
+      "MAE": 50.80631578947369,
+      "MARE": 0.32807917433412825,
+      "signedBias": -18.92105263157895,
+      "positiveContribution": 15.942631578947367,
+      "negativeMagnitude": 34.86368421052632,
+      "pearson": 0.19651463355067927
+    },
+    "B-timing19|evaluation|original|first|gpt-6-luna|gpt-6-luna": {
+      "tasks": 19,
+      "MAREtasks": 19,
+      "MAE": 1115.3078421052633,
+      "MARE": 2.412448772948668,
+      "signedBias": 1012.3532105263159,
+      "positiveContribution": 1063.8305263157895,
+      "negativeMagnitude": 51.477315789473685,
+      "pearson": 0.4250514097769339
+    },
+    "B-timing19|evaluation|original|q25|gpt-6-luna|gpt-6-luna": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 206.77147368421055,
+      "MARE": 0.516045574681304,
+      "signedBias": -142.73247368421053,
+      "positiveContribution": 32.01950000000001,
+      "negativeMagnitude": 174.75197368421055,
+      "pearson": 0.07119015195636359
+    },
+    "B-timing19|evaluation|original|q50|gpt-6-luna|gpt-6-luna": {
+      "tasks": 19,
+      "MAREtasks": 18,
+      "MAE": 139.96294736842106,
+      "MARE": 0.5240655973787037,
+      "signedBias": -128.7005263157895,
+      "positiveContribution": 5.63121052631579,
+      "negativeMagnitude": 134.33173684210527,
+      "pearson": 0.39755959288042314
+    },
+    "B-timing19|evaluation|original|q75|gpt-6-luna|gpt-6-luna": {
+      "tasks": 19,
+      "MAREtasks": 16,
+      "MAE": 75.08668421052631,
+      "MARE": 0.622290192623089,
+      "signedBias": -69.23684210526315,
+      "positiveContribution": 2.9249210526315785,
+      "negativeMagnitude": 72.16176315789474,
+      "pearson": 0.24090700959380318
+    }
+  },
+  "contrasts": {
+    "contrast-01": {
+      "tasks": 19,
+      "repositories": 19,
+      "baselineMean": 349.62984210526315,
+      "candidateMean": 240.83673684210527,
+      "mean": -108.79310526315787,
+      "lower": -241.33094736842102,
+      "upper": 19.903473684210535
+    },
+    "contrast-02": {
+      "tasks": 12,
+      "repositories": 12,
+      "baselineMean": 451.36049999999994,
+      "candidateMean": 246.58683333333332,
+      "mean": -204.77366666666668,
+      "lower": -345.2991666666667,
+      "upper": -66.60950000000001
+    },
+    "contrast-03": {
+      "tasks": 11,
+      "repositories": 11,
+      "baselineMean": 395.99236363636356,
+      "candidateMean": 189.66572727272725,
+      "mean": -206.32663636363634,
+      "lower": -306.39536363636364,
+      "upper": -103.53063636363636
+    },
+    "contrast-04": {
+      "tasks": 20,
+      "repositories": 20,
+      "baselineMean": 907.4997999999999,
+      "candidateMean": 871.0711999999997,
+      "mean": -36.4286,
+      "lower": -171.78580000000002,
+      "upper": 102.32140000000001
+    },
+    "contrast-05": {
+      "tasks": 20,
+      "repositories": 20,
+      "baselineMean": 815.76505,
+      "candidateMean": 316.67425000000003,
+      "mean": -499.09079999999994,
+      "lower": -646.5814,
+      "upper": -365.1587
+    },
+    "contrast-06": {
+      "tasks": 20,
+      "repositories": 20,
+      "baselineMean": 502.61349999999993,
+      "candidateMean": 505.17705000000007,
+      "mean": 2.563550000000015,
+      "lower": -181.5766,
+      "upper": 176.641
+    },
+    "contrast-07": {
+      "tasks": 20,
+      "repositories": 20,
+      "baselineMean": 469.27645,
+      "candidateMean": 387.17584999999997,
+      "mean": -82.1006,
+      "lower": -184.09685,
+      "upper": 20.096500000000002
+    },
+    "contrast-08": {
+      "tasks": 8,
+      "repositories": 8,
+      "baselineMean": 1073.233125,
+      "candidateMean": 1216.983125,
+      "mean": 143.75000000000003,
+      "lower": -162.5,
+      "upper": 468.7500000000001
+    },
+    "contrast-09": {
+      "tasks": 8,
+      "repositories": 8,
+      "baselineMean": 902.723625,
+      "candidateMean": 688.973625,
+      "mean": -213.75,
+      "lower": -376.25,
+      "upper": -24.99999999999997
+    },
+    "contrast-10": {
+      "tasks": 8,
+      "repositories": 8,
+      "baselineMean": 370.43287499999997,
+      "candidateMean": 183.124125,
+      "mean": -187.30875000000003,
+      "lower": -349.1875,
+      "upper": -22.79400000000001
+    }
+  },
+  "interactions": {
+    "interaction-01": {
+      "mean": -462.6621999999999,
+      "lower": -659.8669,
+      "upper": -274.09869999999995,
+      "tasks": 20,
+      "repositories": 20
+    },
+    "interaction-02": {
+      "mean": -84.66414999999999,
+      "lower": -303.84565,
+      "upper": 140.8164,
+      "tasks": 20,
+      "repositories": 20
+    },
+    "interaction-03": {
+      "mean": -357.5,
+      "lower": -770,
+      "upper": 17.50000000000003,
+      "tasks": 8,
+      "repositories": 8
+    },
+    "interaction-04": {
+      "mean": -331.0587500000001,
+      "lower": -587.9487500000001,
+      "upper": -60.38425000000004,
+      "tasks": 8,
+      "repositories": 8
+    },
+    "interaction-05": {
+      "mean": 38.99215,
+      "lower": -248.01860000000002,
+      "upper": 309.56010000000003,
+      "tasks": 20,
+      "repositories": 20
+    },
+    "interaction-06": {
+      "mean": 416.9902,
+      "lower": 242.02954999999997,
+      "upper": 607.7092,
+      "tasks": 20,
+      "repositories": 20
+    }
+  },
+  "fixedSupport": {
+    "B-timing19|evaluation|original|first|gpt-6-astra|gpt-6-astra": {
+      "tasks": 16,
+      "MAE": 523.3869374999999,
+      "MARE": 1.2651867179443752
+    },
+    "B-timing19|evaluation|original|q25|gpt-6-astra|gpt-6-astra": {
+      "tasks": 16,
+      "MAE": 166.8039375,
+      "MARE": 0.4686733560115313
+    },
+    "B-timing19|evaluation|original|q50|gpt-6-astra|gpt-6-astra": {
+      "tasks": 16,
+      "MAE": 102.7155625,
+      "MARE": 0.4354231323372871
+    },
+    "B-timing19|evaluation|original|q75|gpt-6-astra|gpt-6-astra": {
+      "tasks": 16,
+      "MAE": 58.804625,
+      "MARE": 0.4046910155823618
+    },
+    "B-timing19|evaluation|original|first|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 16,
+      "MAE": 681.5755625,
+      "MARE": 1.5702797890123465
+    },
+    "B-timing19|evaluation|original|q25|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 16,
+      "MAE": 158.36118749999997,
+      "MARE": 0.40541381087881334
+    },
+    "B-timing19|evaluation|original|q50|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 16,
+      "MAE": 92.84437499999999,
+      "MARE": 0.3797315389643905
+    },
+    "B-timing19|evaluation|original|q75|gpt-6.1-sol|gpt-6.1-sol": {
+      "tasks": 16,
+      "MAE": 55.0000625,
+      "MARE": 0.3462098617734218
+    },
+    "B-timing19|evaluation|original|first|gpt-6-sol|gpt-6-sol": {
+      "tasks": 16,
+      "MAE": 1017.2005625,
+      "MARE": 2.335574561545115
+    },
+    "B-timing19|evaluation|original|q25|gpt-6-sol|gpt-6-sol": {
+      "tasks": 16,
+      "MAE": 193.59318749999997,
+      "MARE": 0.48017260259078676
+    },
+    "B-timing19|evaluation|original|q50|gpt-6-sol|gpt-6-sol": {
+      "tasks": 16,
+      "MAE": 137.89543749999999,
+      "MARE": 0.5206220390691623
+    },
+    "B-timing19|evaluation|original|q75|gpt-6-sol|gpt-6-sol": {
+      "tasks": 16,
+      "MAE": 51.09087500000001,
+      "MARE": 0.32807917433412825
+    },
+    "B-timing19|evaluation|original|first|gpt-6-luna|gpt-6-luna": {
+      "tasks": 16,
+      "MAE": 1290.2920000000001,
+      "MARE": 2.6176214351422313
+    },
+    "B-timing19|evaluation|original|q25|gpt-6-luna|gpt-6-luna": {
+      "tasks": 16,
+      "MAE": 240.02087500000002,
+      "MARE": 0.5466340296395262
+    },
+    "B-timing19|evaluation|original|q50|gpt-6-luna|gpt-6-luna": {
+      "tasks": 16,
+      "MAE": 160.526,
+      "MARE": 0.567774094999576
+    },
+    "B-timing19|evaluation|original|q75|gpt-6-luna|gpt-6-luna": {
+      "tasks": 16,
+      "MAE": 85.46974999999999,
+      "MARE": 0.622290192623089
+    }
+  }
+}

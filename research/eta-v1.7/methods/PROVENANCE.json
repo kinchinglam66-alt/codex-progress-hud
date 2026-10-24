@@ -1,0 +1,80 @@
+{
+  "schema": "eta-public-methods-provenance-v1",
+  "sourcePins": {
+    "G-input-freeze": {
+      "sha256": "2ac0c0f756fb5b9e71d8053204a71c146ee3c5c4e1f4194b2d696cec47958847",
+      "bytes": 15722
+    },
+    "G-original-protocol": {
+      "sha256": "e1c4eba8a32b8d9cca248b01b59958fe355d24055fda16385ddc8cbe720af87b",
+      "bytes": 5282
+    },
+    "G-original-preparation": {
+      "sha256": "45a754afb6222728270c4fb13c6e31728258e15b76c0a464fe12ef888dd9cac1",
+      "bytes": 5866
+    },
+    "G-original-canonical-builder": {
+      "sha256": "20b5477a95fc762d761f1deaef53864e83086106e4b30aa48ecfa7966ad48e51",
+      "bytes": 5789
+    },
+    "G-execution-freeze": {
+      "sha256": "713bce25d3e839a8a1c711dcc6e74c54d1d8d6537c69614ebdf2429b510bb1e3",
+      "bytes": 55507
+    },
+    "G-recovery-r2": {
+      "sha256": "49be482b20965d151284ca61221400031c879ae72a6a820ca0e8ecddb25b724f",
+      "bytes": 1416
+    },
+    "G-recovery-r3": {
+      "sha256": "90c2c1ace66fd933fdc6249442ccfcb0f5cbe2569e9b899f6588b11494abcf60",
+      "bytes": 1205
+    },
+    "F-original-protocol": {
+      "sha256": "d622948d02229e92dee42ddc95108d18ee4306a6420e2ccf9890c4c0af3c02f1",
+      "bytes": 2274
+    },
+    "F-original-causal-builder": {
+      "sha256": "251c54e387b68358c4d37b989330d3a76946c51bb6af07d2cb2cd179fee0b114",
+      "bytes": 5477
+    },
+    "F-input-method-addendum": {
+      "sha256": "dcc0bce0e7e5851a3cc25b2debd44a7634d0f642312774568fdaefa8edf25d2c",
+      "bytes": 3530
+    },
+    "F-concurrency-amendment": {
+      "sha256": "33ca23e14c3fa431653c2542a91f80c4579836067c682401c775c697b1d03e67",
+      "bytes": 2692
+    },
+    "F-storage-amendment": {
+      "sha256": "c199da7e56ec003a417ae3e5dcd6a0e1e7a9e332db7a27ba461e2cf406d36457",
+      "bytes": 2261
+    },
+    "F-output-amendment": {
+      "sha256": "c8b104b075a9c54cec317902be8139cb369cd492493518a7337ea123d9366e0e",
+      "bytes": 2483
+    },
+    "EF-prior-input-audit": {
+      "sha256": "5261ce7e48a3c826c560aad8ccda2b59ef6e8ceb32cfdc7489c5b5f7f56724dd",
+      "bytes": 5220980
+    },
+    "F-first-result-review": {
+      "sha256": "ab2ee1f14b54eeef3aa43db151a3d19624ebdbac908e480ae3ba2293de903103",
+      "bytes": 29619
+    },
+    "numeric-data": {
+      "sha256": "f564fc67a7ac55e61298f0ede0a561e7cd0f24382395d2c27031fa060e91f9d8",
+      "bytes": 458845
+    },
+    "preprint-r2-text": {
+      "sha256": "77db6e5623a67d0463966ee9da526cf933bb31a5485e3717adb41a687c50c744",
+      "bytes": 72425
+    }
+  },
+  "GSourceArchiveSha256": "3af4648f2b3e2ce95f69c43d0faeddd93e4474f8beda60b1dcabf09c6dd8850e",
+  "GSourceArchivePublic": false,
+  "derivedFiles": "Public inventories select metadata and pseudonymize identities. They are not unchanged original evidence files.",
+  "legacyBuilderChange": "Only import source core.mjs -> canonical.mjs for identical check/sha helpers; no native reader or model transport included.",
+  "canonicalBuilder": "Byte-identical to original G input freeze. Original test source copied unchanged.",
+  "identityMapping": "Same task/repository/trajectory pseudonyms as numeric supplement where available. gcal identifiers are reserved for its four non-exported training trajectories; private mapping not shipped.",
+  "license": "Publication v1.1: program code and output-schema definition Apache-2.0; author-held derived data, prompt text and explanatory materials CC BY 4.0. See LICENSE-SCOPE.txt. Original scientific records unchanged."
+}

@@ -1,0 +1,51 @@
+Public metadata dictionary
+
+task/repository/trajectory: consistent opaque identities shared with the numeric
+supplement for its evaluation population. gcal-* denotes the four separate G
+training sources. F and G share trajectory identity where G reuses F normal data.
+source numbers in the protocol narrative identify original cohort positions;
+the full name/pseudonym mapping is private.
+
+condition: activity or full in G. full is the manuscript's canonical +Content,
+not legacy F Full. E base is its archived Timing comparator. Conditions here
+are analysis metadata, not newly added model inputs.
+stage: calibration or evaluation. ordinal: actual G request schedule position.
+repeat: independent forecast repetition, not an additional task.
+anchor: first-result, p60 or p180. activeSeconds: actual elapsed cutoff in seconds.
+prediction: original unscaled remainingSeconds. No recalibration was performed.
+knownTokens: finalized known usage including recorded cached subtotals, not cost.
+
+frozenFileBytes: original pretty-printed input file size. serializedInputBytes:
+the original compact JSON input size. preparedBytes/wireTextBytes in E/F refer
+to its audited prepared observation/wire text. These measures are UTF-8 bytes,
+not context tokens, and use different serialization stages. Do not mix them.
+frozenFileSha256: hash of original archived file bytes, not of a public input.
+preparedSha256: original runtime hash of compact prepared JSON, not the hash of
+its pretty-printed file. receiptSha256 hashes original receipt file bytes.
+responseSchemaSha256 hashes compact schema JSON; developerSha256 hashes the
+exact developer string. PROVENANCE source hashes refer to private originals.
+
+activity: actual canonical id/phase/elapsedSeconds/tool for a G anchor.
+contentArmEventStructure: matching identities with field names and UTF-8 lengths
+of textual fields, plus selected execution flags. Command, argument values,
+stdout, stderr and rejection message text are omitted. argumentFields names
+describe the schema and do not disclose argument values.
+exitCode: observed outer process code, not proof every inner command succeeded.
+executionStarted=false: explicit non-execution rejection, distinct from failure
+after execution. Absence of this field in a result is not a false value.
+outputComplete: original flag; missing/unknown stays unknown.
+explicitRgNotFound: narrow pattern flag computed from stderr for G. It is not a
+comprehensive tool-failure classifier. Other failures remain possible.
+
+duplicateResultPairs: E/F prior audit count of exact stdout/stderr/exitCode
+matches in an inner DynamicToolCall and array-wrapped outer result within one
+second. This conservative rule is not an exhaustive repetition detector.
+informationArmLabelVisible: prior F audit's information-condition marker flag,
+distinct from a normal/delayed treatment label.
+
+frozenFieldsPreserved/wireMatchesPrepared/freshSession/settledAndReleased:
+results of the author's local private-archive checks. Public verify.py checks
+their reported consistency, not the unavailable original receipt or payload.
+original-builder-check.json: local regeneration of all 36 pairs using unchanged
+frozen code and private ledgers. The public synthetic tests cover representative
+cutoff, wrapper and rejected-call behavior; they do not replay real transcripts.

@@ -1,90 +1,79 @@
-# Privacy policy
+# Privacy and data flow
 
-Codex Progress HUD is local-first. It has no project-operated cloud service or telemetry.
+Codex Progress HUD runs a local desktop companion and has no project-operated
+cloud backend or telemetry. Independent estimation uses the provider selected by
+the user. This policy describes the research source snapshot based on commit
+`40b81e6bb8f23cd25bcfac3f7c5106b0d3ad58f7`; older engineering notes may describe
+earlier, more limited observation paths.
 
-## Full-context development branch (2026-09-12)
+## Readable task content
 
-This section supersedes the historical candidate and disconnected-adapter
-descriptions below for the full-context implementation. It is not an installation
-or release announcement.
+The full-context observer reads supported existing local conversation records for
+the authenticated conversation and current turn, including earlier readable user,
+assistant, and tool records. A fixed readable cutoff binds each request. It does
+not promise access to hidden reasoning, arbitrary attachments, or every host
+format. Missing history and unavailable images are tracked as gaps.
 
-When independent estimation is enabled, the HUD reads the authenticated current
-conversation's existing local source, including readable user, assistant and tool
-records from before attachment. It sends that context to the user's selected
-subscription or API provider. Task text is **not redacted**: confidential material
-already present in the conversation can be sent again. A different API endpoint
-can be a different recipient from the service executing the main task.
+When the user explicitly enables estimation, readable task text can be sent to the
+selected subscription or API provider without task-text redaction. Confidential
+material already in a conversation can therefore be sent again. An API endpoint
+can represent a different recipient from the service executing the coding task.
+Review the recipient notice in Settings before authorizing it.
 
-Only model/request capacity overflow triggers old-history compression, using the
-same selected estimator service. Compression adds model calls and can lose detail.
-The plugin does not promise zero provider retention; service/account policies
-still apply. Pausing or hiding the HUD is not a substitute for disabling estimation.
+Capacity overflow can trigger history compression using the selected estimator
+service, adding requests and possible information loss. The history feature uses
+bounded in-memory caches; it does not create a persistent raw transcript cache.
+The original conversation source remains managed by the host.
 
-The history path does not fetch arbitrary attachment paths or import plugin auth
-files, environment secrets, other conversations, or hidden model reasoning. It
-does not create persistent raw conversation copies. The existing Codex source
-remains managed by Codex. Discardable process-memory caches contain summaries;
-local accounting and research journals contain allowlisted counters/status codes,
-not raw task text. Diagnostic exports should still be reviewed before sharing.
+## Accounts and authorization
 
-Earlier turns are background; the ETA horizon remains the current turn's remaining
-active work. Missing/unreadable history and compressed history are identified
-separately. See [full-context operation](docs/FULL-CONTEXT-ESTIMATION.md).
+Subscription estimation follows the verified file-backed main Codex account by
+default. The isolated supported runtime receives an access token and account
+metadata through an ephemeral credential path. It does not copy refresh tokens
+or rewrite the main login. Independent subscription login is a separate mode.
+API mode uses the user's configured endpoint, model, and key.
 
-## Historical release and earlier candidate notes
+Saved consent binds the configured source and the stated account-following policy.
+Switching identity retires the previous provider and fences late results. Revoke
+estimator consent in Settings to remove its durable authorization. A hidden
+window or paused tracking is not a substitute for revoking estimator consent or
+disabling the plugin. See [account following](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/main-account-follow.md).
 
-The remaining sections document earlier behavior, not the current full-context
-data flow. In particular, their text-filtering, fixed retention and no-external-call
-claims must not be applied to the full-context estimator.
+API secrets are write-only in Settings and use the protected local secret store.
+Do not enter credentials into task messages or commit local account files.
+The application does not read browser cookies.
 
-## Control and processing
+## Local metadata and records
 
-Codex’s plugin page is the sole global enable/disable/uninstall control. Enablement loads capabilities; it does not force model calls. Tracking is cooperative model reporting. Hooks are optional best-effort compatibility signals, not a prerequisite or unconditional automatic-tracking mechanism. Window visibility and per-task controls are presentation/timing controls only; they do not change plugin state or Codex execution.
+Loopback communication uses local authentication. Lifecycle projections and
+diagnostics use bounded state, counters, identities, versions, and timestamps.
+Chat names can appear on the local desktop; their metadata path is distinct from
+task content supplied for estimation. Optional Hooks accept an allowlisted event
+schema and transform session/turn identifiers into opaque keys.
 
-The Hook adapter accepts `session_id`, `turn_id`, `tool_use_id`, `hook_event_name`, and `source` after schema validation. Session and turn values become HMAC-hashed identifiers. In the multi-conversation candidate, a turn-identified UserPromptSubmit or PostToolUse additionally carries the raw host session ID over authenticated loopback to the companion solely to look up the actual chat name. The companion verifies its HMAC binding. This raw mapping is memory-only and is absent from model responses, logs, diagnostics and research data. Prompt text, transcript path, tool input/output, cwd, arbitrary fields and secrets are discarded.
+Known usage, reservations, and unresolved or unknown usage remain in durable local
+accounting. Observer research journals record structured metadata and numeric
+outcomes, not the raw task transcript. Existing host logs, host source files, and
+explicit developer exports have their own storage lifecycle. Review any diagnostic
+or research export before sharing it.
 
-Chat names are read by a local metadata-only Codex app-server client and held in a bounded memory cache. Desktop rows show these names; MCP snapshots expose only rows bound to that client's lease. The aggregate event stream is desktop-only. Names are not sent to an estimator, diagnostic export or research dataset. Failed refreshes retain a visibly stale name; no available name displays an explicit placeholder. Disabling the service clears the cache.
+## Network and costs
 
-The candidate name reader supports a pinned Windows Codex CLI build, uses an empty temporary working directory, disables plugin/hook/tool features and issues only initialization and metadata read requests, never task start/resume or inference. CLI startup can read its existing local configuration and authentication; the HUD does not parse authentication files. Exact-build compatibility and local executable replacement remain limitations. This does not establish that CLI startup itself is completely network-free.
+The companion listens on authenticated loopback. Explicitly enabled estimation,
+necessary compression, and explicitly requested synthetic trials can contact the
+selected provider and consume allowance or API credit. Provider retention and
+billing policies apply; the project does not promise zero provider retention or
+an exact invoice from local token counters. Dependency downloads and host account
+operations are separate network activity.
 
-## Development candidate: passive task content
+## Limits and reporting
 
-The passive-development candidate changes the content boundary described above:
-identified prompt, final assistant message and selected tool-response text fields
-are filtered locally and sent over authenticated loopback to private companion
-memory. Transcript files are not read; arbitrary nested tool input, environment
-objects and unrelated fields are not serialized. Obvious credentials are filtered
-before truncation, but this is not a guarantee that all sensitive information is removed.
+Processes running as the same compromised OS user may access application data or
+credentials. Local authentication does not eliminate that risk. Runtime admission,
+consent checks, account fences, and structured diagnostics address particular
+boundaries rather than every possible compromise.
 
-Each content item is limited to 4,096 UTF-16 characters. Default conversation
-retention is 32 entries and 16,384 characters, with at most 32 active context
-records. Content and observer goal summaries are excluded from public HUD/MCP
-snapshots, SSE and default diagnostics. Session end deletes retained content;
-companion close clears private memory. No raw task history is written to disk by
-this collection path.
-
-The new independent-observer contract and local goal owner are under development,
-not an installed passive release. They do not currently launch model requests.
-Future activation requires disclosure of the additional requests, quota use and
-selected task content sent through the user's configured route. A shared provider
-name alone does not establish identical retention or account handling.
-
-## Storage and retention
-
-Live task snapshots, the MCP-process fallback identifier, and lease state are in memory. The fallback identifier is random, content-free, authenticated by the local lease, and never persisted or sent as telemetry. Operational logs and diagnostic reports are local, bounded, and contain only allowlisted versions/states, bounded codes/categories, and canonical timestamps. They never contain token, raw session ID/handle, title, prompt, path, Hook payload, or secret. Review reports before sharing. Removing the application-data directory after stopping removes the local token and files; the next start creates a new token.
-
-## Lifecycle and migration
-
-After plugin or companion updates, fully restart Codex Desktop to reload the plugin. An existing conversation can report afterward without backfilling prior activity. Restarting the MCP process creates a new task association; multiple conversations sharing one MCP process cannot be distinguished by the fallback. A protocol mismatch is distinct from an offline companion; update the mismatched side and restart host and companion. `hud_hide` is an ordinary window-visibility alias. `hud_open` and `hud_close` remain deprecated compatibility aliases; `tracking_start` is supported explicit start/restart, not deprecated. None is global consent or a second enable switch; `hud_close` requests immediate shutdown without persisting a global off preference.
-
-## Network
-
-The companion binds only to loopback and sends no HUD data to remote services. Package-manager activity is outside the running HUD.
-
-Future telemetry, cloud synchronization, persisted task history, or external model calls require an updated policy and explicit control.
-
-## Development-only shadow estimator
-
-The source tree contains a disconnected optional estimation adapter and offline evaluation tools. The installed application does not instantiate this adapter or automatically send task metrics to it. An explicit future pilot requires a model, credentials, positive spend budget, and consent for the exact data fields. The current adapter accepts only active seconds, numeric progress, tool count and validation-failure count; it rejects text, paths, task identifiers and extra fields. Its request disables response storage, but that is not a promise of zero provider retention.
-
-A separately opened local pilot budget journal stores only a limit and numeric reservations, not task history or credentials. It conservatively retains reservations after uncertain cancellation, and does not reset on restart. Tests use synthetic responses and temporary journals. No production telemetry or display replacement is enabled by these development modules.
+Use [SECURITY.md](SECURITY.md) to report a vulnerability without including real
+tokens or private conversations. The current data flow is also described in
+[full-context estimation](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/FULL-CONTEXT-ESTIMATION.md) and the
+[threat model](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/THREAT_MODEL.md).

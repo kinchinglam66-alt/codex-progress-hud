@@ -1,0 +1,18 @@
+Copyright 2026 Lam Kin Ching.
+
+Program code (*.mjs, *.py) and prompts/G-observed-output-schema.json are licensed
+under the Apache License, Version 2.0. See LICENSES/Apache-2.0.txt.
+
+All other author-held derived data, prompt text, protocol disclosures, manifests,
+synthetic examples and explanatory documentation in this package are licensed
+under Creative Commons Attribution 4.0 International, to the extent of the
+author's rights. See LICENSES/CC-BY-4.0.txt and
+https://creativecommons.org/licenses/by/4.0/.
+
+Attribution: Lam Kin Ching, ETA Methods and Validity Supplement v1.1 (2026),
+companion to Execution Information and Estimation Timing for Coding Agent ETA.
+Source: https://github.com/kinchinglam66-alt/codex-progress-hud/releases/tag/research-release-2026-10-24
+Indicate modifications and retain applicable notices. License texts retain their
+own status. Omitted third-party task/code/transcript material and the manuscript
+are not included in this license grant. Private evidence hashes do not grant
+access to, or redistribution rights over, the unavailable original material.

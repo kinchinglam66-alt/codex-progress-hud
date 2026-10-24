@@ -1,71 +1,121 @@
 # Codex Progress HUD
 
-A local overlay for Codex task progress and honest remaining-time ranges, with user-configured model processing. Community project; not affiliated with OpenAI.
+[中文说明](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/README.zh-CN.md)
 
-> Development status: this checkout contains an unreleased passive-tracking
-> migration. Public model-reporting tools and the reporting skill have been
-> removed from the candidate. The full-context branch sends readable conversation
-> text to the selected estimator without task-text redaction; see the
-> [full-context boundary](docs/FULL-CONTEXT-ESTIMATION.md) and [privacy policy](PRIVACY.md).
-> Local independent-model activation, numeric ETA delivery and pause freezing have
-> been exercised. Full installed acceptance and long-task accuracy validation are
-> still incomplete. This is a source update, not a new signed or tagged release.
+Codex Progress HUD is a Windows desktop companion that observes coding-task
+activity and displays task state and estimated remaining time. It connects
+readable execution history, an optional independent estimator, and a countdown
+that accounts for elapsed time and delivery latency.
 
-## Current development candidate
+This is a community research prototype, developed independently of OpenAI.
+The desktop interface is primarily Simplified Chinese; the project documentation
+and installation entry point are English. See [language support](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/LANGUAGE.md)
+for the main control labels and the role of estimator instructions.
 
-- Passive conversation observation and multiple task rows identified by
-  their Codex chat names; completed and idle goals are excluded from active rows.
-- An isolated, explicitly authorized estimator produces task-state interpretations
-  and remaining-time estimates without asking the main task model to report progress.
-- Countdown and uncertainty display, paused/waiting work-time handling, and static
-  startup/call diagnostics. Model-stated uncertainty is not calibrated confidence.
-- Explicit runtime version/hash validation, isolated authentication and durable
-  usage accounting. Model requests consume the user's selected service allowance.
+## Research source snapshot
 
-An earlier development regression passed 1,456 tests. This establishes historical tested behavior,
-not ETA accuracy: representative long-task scoring and complete multi-conversation
-live acceptance remain outstanding. See [development status](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/DEVELOPMENT-STATUS.md).
+The `research-release-2026-10-24` version is based on upstream commit
+`40b81e6bb8f23cd25bcfac3f7c5106b0d3ad58f7`, with reviewed documentation and an
+offline example. Runtime and estimator behavior are preserved from that commit.
+The embedded package version remains `0.2.1`; that number alone does not identify
+an experimental runtime. [Research provenance](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/RESEARCH-ARTIFACT.md) records
+the relationship to the ETA preprint and its separate experimental artifacts.
 
-## Earlier release reference
+The distribution prepared here is source code. Installation from a compiled
+Windows installer requires matching, published artifacts and checksums; this
+snapshot does not supply an installer download. Start with the source workflow.
 
-The following installation and model-reporting sections describe the earlier
-release. Do not use them as the current passive candidate's API contract.
+## What it does
 
-## One plugin switch
+- Observes supported local Codex conversation records and shows separate task rows.
+- Builds a readable execution prefix for the current turn and binds each estimate
+  to its source, account, and request.
+- Supports a user-selected subscription or Responses-compatible API estimator.
+- Ages accepted forecasts into a countdown and records stale, missing, or failed
+  estimates explicitly.
+- Tracks known and unknown usage separately and checks a finite set of supported
+  observer runtime versions and hashes.
 
-Install, enable, disable, or uninstall Codex Progress HUD in Codex’s plugin page. That page is the only global switch. Enablement loads the plugin capabilities; it does not force model progress calls. Task tracking occurs when the model reports, using a supplied opaque handle when available or the MCP-process lease fallback otherwise. After a fallback task reaches a terminal state, an explicitly requested handle-free `tracking_start` creates one fresh fallback task and preserves the old record; ordinary progress and delayed reports never roll over automatically.
+The settings window asks for explicit estimator authorization. Full-context
+estimation can send readable user, assistant, and tool text to the selected
+provider without redacting task text, and may consume subscription allowance or
+API credit. Review [PRIVACY.md](PRIVACY.md) before enabling it.
 
-After installing or updating, fully quit Codex Desktop and reopen it so the host reloads the plugin, optional Hooks, skill, and MCP definitions. An existing conversation can report after the restart without backfilling prior activity. A frozen conversation from before installation cannot be reconstructed.
+## Quick start
 
-Window and task controls are separate presentation controls. Show/hide changes only window visibility. Per-task select, pause, resume, and stop changes only that task’s HUD presentation/timing. None of these controls enables or disables the plugin, and none pauses, cancels, or controls Codex execution. `hud_hide` is an ordinary window-visibility alias, not a deprecated lifecycle alias. `hud_close` is a deprecated compatibility alias for an immediate shutdown request; it does not persist a global off preference. These aliases are not another global switch.
+Use Windows 10/11 x64, Git, and Node.js 22.13.0 or later. From an extracted source
+snapshot or a checkout of the pinned version:
 
-## Windows installation and troubleshooting
+```powershell
+npm ci
+npm run build
+node examples/offline-countdown.mjs
+```
 
-Install the Windows companion first, then add and enable the matching release plugin in Codex. Hooks are optional best-effort compatibility support; review or trust them only if you want those signals. Fully restart Codex once. The installer is per-user, requires no global Node.js, and is unsigned until a trusted signing certificate is configured. See [Install on Windows](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/INSTALL-WINDOWS.md) for checksum, install, update, disable, and uninstall instructions.
+The example uses synthetic numbers and imports the actual countdown component.
+It reads no conversation, needs no account, and makes no network or model request.
 
-If tools are missing, run `npm run diagnose:mcp`. If tools are present but the companion is offline, check the installed bundle and local executable. If versions mismatch, update both sides and fully restart Codex; do not mix an old MCP client with a new companion. `hud_diagnose` reports plugin enablement, Hook trust/activity, MCP lease, companion process, protocol compatibility, and per-task tracking separately. Multiple conversations sharing one MCP process cannot be distinguished by the fallback lease.
+To explore the desktop companion after reviewing its data flow:
 
-## Privacy-bounded Hooks
+```powershell
+npm run start:hud
+```
 
-The adapter accepts only `session_id`, optional `turn_id`, optional `tool_use_id`, optional `hook_event_name`, and optional `source` (`startup`, `resume`, `clear`, or `compact`). It validates and then discards raw Hook input. `session_id` and `turn_id` are HMAC-hashed into opaque keys; the event identity also hashes the Hook name, source, and tool-use identifier. Prompts, transcript paths, tool input/output, cwd, arbitrary fields, titles, and secrets are discarded and never sent or stored.
+Opening the companion is distinct from granting estimator consent. Follow
+[Install on Windows](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/INSTALL-WINDOWS.md) for plugin wiring, matching companion
+requirements, and the difference between source and packaged entry points.
 
-Operational history is bounded codes and canonical timestamps only. It contains no token, raw session ID/handle, title, prompt, path, Hook payload, or secret. Diagnostics are local and safe to review before sharing.
+## A typical session
+
+1. Build and open the companion, then configure a supported plugin integration.
+2. Open **设置** (Settings), inspect the provider and usage notice, and explicitly
+   authorize estimation if you want independent forecasts.
+3. Continue a task in Codex. The HUD shows supported task activity and any accepted
+   forecast. A hidden window or paused tracking does not pause the coding task.
+4. Use **撤销估时授权** (Revoke estimator consent) to revoke the saved estimator
+   authorization. The Codex plugin page controls plugin enablement.
+
+See [known limitations](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/KNOWN-LIMITATIONS.md) for compatibility, accuracy,
+language, and the distinction between a final response and a correct repair.
+
+## Research and evaluation
+
+The accompanying study is *Execution Information and Estimation Timing for Coding
+Agent ETA: An Empirical Study and a Delivery-Aware Framework*, preprint revision
+1.7 with editorial revision r2. It compares information packages and estimation
+anchors and evaluates selected countdown policies. Its results do not provide a
+single accuracy guarantee for this installed companion or every configuration.
+
+The [research materials](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/research/eta-v1.7/README.md) include derived numeric data,
+offline reproduction code, the archived estimator prompt and response schema,
+the canonical input builder, structural audit inventories, and protocol disclosures.
+Download versioned packages from the
+[research release](https://github.com/kinchinglam66-alt/codex-progress-hud/releases/tag/research-release-2026-10-24).
+Consult the [artifact map](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/RESEARCH-ARTIFACT.md) before reproducing a paper table.
+Historical task text and execution payloads remain outside the public supplements;
+their structural inventories do not enable complete semantic input verification.
 
 ## Development
 
-The transactional-accounting candidate requires Node.js 22.13.0 or newer.
-End users of the packaged Windows companion do not need a global Node installation.
-
 ```powershell
-npm test -- --run
+npm test -- --run --maxWorkers=1 --no-file-parallelism
 npm run typecheck
 npm run build
 npm run validate:plugin
-npm run diagnose:mcp
+npm run check:plugin-sync
 ```
 
-See [known side effects and limitations](docs/KNOWN-SIDE-EFFECTS.md), [PRIVACY.md](PRIVACY.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+The release manifest records archive hashes and the verification actually performed
+for this version. Historical test counts in older technical notes describe their
+original revisions. Read [CONTRIBUTING.md](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/CONTRIBUTING.md), [SECURITY.md](SECURITY.md),
+and the [threat model](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/THREAT_MODEL.md) before changing account, content, or
+request ownership behavior.
 
-## License
+## License and citation
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+The framework and companion program code use Apache License 2.0; see [LICENSE](LICENSE)
+and [NOTICE](NOTICE). The research directory separately licenses its derived data
+and explanatory materials under CC BY 4.0; see its explicit license scopes.
+Use [CITATION.cff](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/CITATION.cff) and record the exact source snapshot or commit
+when citing the software. The companion manuscript remains a preprint preparation
+and has no assigned public manuscript URL or DOI in this release.

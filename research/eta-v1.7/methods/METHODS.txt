@@ -1,0 +1,118 @@
+Execution information, observation time and ETA: methods disclosure
+
+1. Prediction target and clock
+The target is remaining wall-clock seconds from the input anchor until the
+independent source controller receives the complete final reply of that turn.
+A final reply may contain a correct repair, an incorrect repair or a blocker.
+Only confirmed intervals wholly blocked on required human action are excluded
+where the collection's original contract permits this. Missing final-reply
+evidence is not assigned a synthetic completion duration.
+
+The first-result anchor requires an actually readable native prefix containing
+an executed result. A physical shell finish or server send does not by itself
+make output visible to the observer. P60 and P180 use observations received by
+60 and 180 seconds from dispatch. They do not wait for a future completed tool.
+Study B's fractional anchors select the earliest complete observed prefixes at
+or after 25%, 50% and 75% of final duration. The selection is retrospective,
+although duration and fractional labels are withheld from the estimator.
+
+2. Legacy F input construction
+builders/legacy-causal-input.mjs preserves the original initialInput,
+commonInitial, activityInput, firstResultAvailability and etaOrder functions.
+Only its check/sha import is redirected to the standalone canonical module.
+The file is not a complete reconstruction of the historical native reader.
+The public packet does not claim to rerun that reader from private traces.
+
+All arms share the exact initial task and goal/environment description. Full
+retains native non-user messages and derived execution/progress state. Activity
+projects tool lifecycle timing into a user-role message, omitting arguments,
+outputs and assistant narration. F's actual prepared Full fields include
+turnEvidence, executionObservations, progressState and representation. Flags
+and formatting also differ. The actual non-initial F inputs contain information
+condition identifiers. These are distinct from normal/delayed environment
+labels; they may nevertheless affect prompting. The two public builder excerpts
+alone do not account for every field added by the native runtime.
+
+audit/EF-input-inventory.json lists all inputs in the earlier E/F request audit,
+including field sets, historyComplete, bytes and duplicate-result counts. E's
+Timing/base comparator has its own contract; it must not be equated field for
+field with F Activity. E/F metadata are derived from the prior private audit.
+This publication preparation did not newly inspect every E/F request archive.
+
+3. Canonical G input construction
+builders/canonical.mjs is byte-identical to the original frozen builder. It
+binds each actual command to a native DynamicToolCall identity, RPC result and
+broker proof. One command has one start and at most one visible result. Equal
+text from distinct command identities remains distinct. Duplicate outer result
+wrappers are not counted as new commands. Rejected arguments remain explicit
+non-executed calls, not successful executions.
+
+Result visibility additionally requires a reader snapshot whose hashed byte
+prefix contains the native completion and whose arrival is no earlier than
+the server result. Pending starts can be visible without their future result.
+The builder checks native/RPC bindings; the full source records remain private.
+
+Both arms share initial text, neutral explanation, two user-role messages,
+goal, clock, observation flags and identical canonical activity. Activity has
+executionContent=[]; +Content supplies the corresponding command arguments and
+observed stdout/stderr/exitCode/outputComplete, or explicit rejection error.
+Assistant reasoning, derived progress, prior forecasts, fitted factors, outcome
+duration and added information-condition labels are absent from this builder.
+Length changes with content; this is not a length-controlled semantic ablation.
+Historical task text is retained verbatim in both arms. No new clipping is
+introduced; earlier output truncation is retained, not filled from later bytes.
+
+audit/G-paired-structures.json covers every frozen block, rather than selecting
+successful predictions. It preserves actual event IDs/phases/relative arrival
+times and content field names, byte lengths, exit/truncation flags and a narrow
+rg-not-found indicator. It contains neither task text nor command/output text.
+These structural records are not substitutes for the original model inputs.
+
+4. Actual request contract
+prompts/G-observed-developer.txt is extracted verbatim from archived requests;
+the schema is its original compact JSON serialization. All 144 G requests share
+these bytes. The developer prompt includes explicit best-effort numeric ETA,
+final-reply endpoint and uncertainty rules, plus general milestone instructions
+that do not imply milestone evidence exists in the canonical input.
+
+Each G call uses a fresh ephemeral GPT-6 Sol session, medium reasoning effort,
+default/standard requested tier, subscription transport and no dynamic tools.
+The user payload has currentObservation and importedThroughOrdinal=-1. Runtime
+preparation adds imageContextPending and nativeTiming; their field names are in
+REQUEST-CONTRACT.json. Every original frozen field was compared structurally
+with the archived prepared observation, and every prepared observation with its
+wire payload. Receipt/result file hashes were checked against the collected
+manifest; source checks are reported separately from public reproducibility.
+Requested service identifiers are not immutable provider model snapshots.
+
+The request-contract register reports whether the prior F validation prompt
+and schema hashes match G. It makes no shared-prompt claim for B, C, E or every
+production build. B's four ETA identifiers are gpt-6-astra, gpt-6.1-sol,
+gpt-6-sol and gpt-6-luna, all medium effort, standard service and independent
+released sessions. Exact B wire contracts are not supplied in this supplement.
+
+5. Unit of analysis and numerical linkage
+G has four calibration and eight evaluation trajectories/repositories, three
+anchors, two arms and two independent repeats: 144 requests, not 144 tasks.
+Its eight evaluation trajectories reuse F normal executions. Public pseudonyms
+match the numeric supplement; all 96 G evaluation predictions join exactly.
+The four gcal identifiers are reserved training identities absent from that
+numeric extract. Do not pool G and F as independent task replications.
+
+Compute each call's absolute error first, average repeats within task, then
+average tasks equally. Bias uses signed errors. Pearson uses task-mean forecasts
+and actual remaining times; it is not another measure of MAE. MARE's primary
+support requires at least 60 seconds remaining. A lower raw MAE may result from
+less overestimation without an established improvement in discrimination.
+
+The paper's raw synthesis is retrospective and uses 10,000 repository-cluster
+bootstrap draws, seed 20261024, with unadjusted descriptive 95% intervals.
+Original F/G calibrated primaries and seeds remain in Appendix C. No coefficients
+were re-fitted or applied to the raw numerical supplement in this preparation.
+
+6. Point accuracy and delivery
+Forecast error is evaluated at the observation anchor. A delivered countdown
+subtracts time elapsed during request/response processing and later display,
+and clamps at zero. Reaching zero does not declare task completion. A late
+response may provide no useful display at all. Point-accuracy results do not
+establish improved coverage, user experience or deployed-plugin effectiveness.

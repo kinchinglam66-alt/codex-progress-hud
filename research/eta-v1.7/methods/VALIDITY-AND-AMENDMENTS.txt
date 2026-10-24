@@ -1,0 +1,118 @@
+Validity threats and protocol history
+This disclosure accompanies ETA Preprint v1.7 editorial r2. It retains favorable
+and inconclusive evidence. Source hashes appear in PROVENANCE.json.
+
+INPUT CONTENT AND CONSTRUCT VALIDITY
+F's 40 validation first-result commands are initial read-only orientation/search.
+38 results contain an explicit rg-not-found error, despite an outer exit code
+of zero; a pipeline's final exit status does not certify every command succeeded.
+Normal anchors occur at 4.999-9.003 seconds; delayed anchors at 14.999-19.002.
+They are limited examples of rich task progress. These observations do not mean
+the tools never executed or that 38 solver tasks failed. All remain in analysis.
+
+The previous private input audit detected identical inner/outer result wrappers
+in all 33 E Full anchor inputs and all 80 F Full anchor inputs. Corresponding
+Activity lifecycle observations also contain repetition. This is representation
+duplication, not duplicated model dispatch or double scoring. Its bias direction
+is unknown. Old predictions cannot be called deduplicated predictions after an
+input edit. G instead makes fresh requests with canonicalized inputs.
+
+Legacy packages change semantic content, length, roles, flags, assistant text
+and derived fields together. F information-arm labels are visible. G matches
+more fields, but content length still varies and the prompt remains the archived
+general ETA prompt. No study here isolates individual contributions of successful
+tests, failed tests, edits, source reads or execution semantics independent of length.
+
+G's input contract and byte-prefix checks restrict future visibility. The release
+does not publish all original text or independently prove semantic non-leakage.
+Targeted checks cannot observe provider internals or eliminate all implicit cues.
+The actual prompt/schema and all structural blocks make the implementation more
+inspectable while this content-level reproducibility gap remains explicit.
+
+ORIGINAL DESIGN AND AMENDMENTS
+F originally freezes 28 tasks (8 pilot +20 validation), paired normal/delayed
+runs, at most 56 solver starts, 80 pilot-normal ETA and 400 validation ETA.
+Pilot delay is 30 seconds after an actually executed result. Seven complete
+pilot pairs determine a 10-second validation dose; six eligible normal pilot
+tasks determine q and three truth factors. Validation does not enter those fits.
+
+The original primary tests Full versus frozen q*Activity in the delayed
+environment and its paired interaction relative to normal, with repository
+bootstrap seed 20261022. The original delayed difference is -171.4 seconds,
+95% interval [-378.1,20.2]; the interaction is +98.7 [-209.2,391.1]. The joint
+benefit criterion is not met. Later raw or P60 analyses do not replace this test.
+
+Output handling: pilot pair 4 interrupts at the old 2 MiB buffer. Both starts
+are retained, without completion times or known final usage and without retries.
+Subsequent runs in both environments use stream capture; combined output <=2 MiB
+is returned unchanged, while above that threshold pipes longer than 128 KiB
+show their first/last 64 KiB with an explicit truncation notice. Private archived
+hidden output is not substituted into ETA inputs. Earlier successful pilot
+traces retain the old profile. This changes collection behavior and may add I/O.
+
+Scheduling: the first 14 validation pairs run serially. The last six use an
+authorized two-solver paired-wave amendment; five actually overlap and one
+recovers serially. ETA requests remain serial and do not overlap active solver
+runs. Storage capacity changes from 751619276800 to 1073741824000 bytes before
+the first amended pair (700 to 1000 GiB; the paper uses the shorthand GB).
+These nonrandom small strata cannot identify a concurrency effect independently
+of storage, time, workload or other operational changes. Preserve both planned
+schedule and actual overlap. No claim of serial/parallel equivalence is made.
+
+F also retains the dependency-amended validation task, output truncation and
+the serial-recovery observation gap in its limitations/sensitivities. Removing
+an affected case is a sensitivity analysis and does not replace the full cohort
+because it yields a more favorable interval. Delayed feedback may change the
+solver's path: all 20 pairs change executed-tool counts. They are stochastic
+paired executions, not one trajectory with a mechanically stretched clock.
+
+G preparation: rejected tool arguments were retained explicitly before the input
+freeze. Initial coordinator ownership failed before any worker/model started.
+It was repaired under the existing identity requirement. The first real request
+then completed; a JSON key-order identity alarm was resolved by structural
+equality. That completed request was counted once and never repeated. All
+original recovery records are retained privately and their hashes are listed.
+
+DEPENDENCE, SELECTION AND INFERENCE
+B's four-model fixed-point study retains 608 starts and 602 numeric responses;
+584 common-valid rows enter matched model comparisons. Its 19 tasks include 11
+originally admitted and eight reassessed sources. A partial source stays outside
+the fixed-point set. The same 16-task support is used for its cross-stage profile.
+Fractional anchors require final duration and are not validated online triggers.
+
+G reuses F normal trajectories. B bridge requests reuse B's solver trajectories;
+C diagnostics reuse C development sources. E's separate timing-qualified sources
+provide a different kind of evidence, but legacy packaging limits interpretation.
+Do not add calls, repeats, environments, anchors or studies into an independent N.
+
+The raw presentation was chosen after viewing results. Many unadjusted intervals
+are reported. Small repository counts, especially eight G evaluation and four
+calibration repositories, limit stability. A zero-crossing interval is neither
+proof of no effect nor equivalence. Retain raw and original calibrated findings.
+Reduced overestimation can improve MAE without improving ranking: all G P60
+forecasts overestimate, so its raw MAE gain entirely reduces overestimation.
+Every G paired Pearson-difference interval crosses zero.
+
+ACCOUNTING AND AUDIT COVERAGE
+F: 56 closed starts, 54 completed timing sources, two interrupted pilot sources
+with unknown final usage; 69 pilot and 400 validation numeric ETA responses,
+plus a separately retained zero-model failure. Validation correctness is 14/20
+normal and 13/20 delayed. Incorrect repairs are not excluded just for correctness.
+G: 144 completed, known-usage, released ETA requests, including 48 calibration
+and 96 evaluation, and zero new solvers. Recorded known tokens total 4,091,756;
+this is not monetary cost. The local curation verifies all 144 archived calls.
+
+The earlier E/F audit checked 532 actual requests and 19,634 assertions; B/C
+analyses mainly recomputed frozen row-level evidence. This package includes
+derived E/F audit metadata, not their private requests. Public hash/count tests
+cannot replace transcript inspection or independent experimental replication.
+The numeric supplement covers selected raw tables/figure components; delivery
+integration, every correlation interval and calibrated appendices remain outside
+its executable scope. Those limitations should remain in Data Availability.
+
+FRAMEWORK AND PRACTICAL VALIDITY
+G +Content is not the plugin's complete real input/transport/scheduling pipeline.
+Point error, useful delivery coverage, code correctness and user benefit are
+separate outcomes. No participant study establishes a user-experience benefit.
+The results support conditional information/time hypotheses and an inspectable
+framework, not universal Full superiority or an optimal online trigger policy.

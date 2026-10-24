@@ -1,0 +1,246 @@
+{
+  "synthetic": true,
+  "historicalPredictions": false,
+  "pairs": [
+    {
+      "synthetic": true,
+      "seconds": 5,
+      "activity": {
+        "goalSummary": "Complete the supplied public software task, validate locally when possible, and deliver this turn’s final reply.\n\nFixed environment: Dedicated offline Linux benchmark container, public source preloaded, designated command tool, no ETA visible to solver; use the captured initial request for exact paths and constraints.",
+        "timeBasis": "turn-delivery-wall-minus-confirmed-human-block-v1",
+        "activeSeconds": 5,
+        "runtime": "running",
+        "messages": [
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Synthetic example: repair an invented boundary-condition error and report the result."
+          },
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Observed tool-call records through the current clock cutoff. Starts identify received container-command requests; a request can be rejected before execution. Result arrival alone does not establish successful task completion. executionContent contains any supplied command arguments and returned output for those same event identities.\n{\"activity\":[{\"id\":1,\"phase\":\"started\",\"elapsedSeconds\":1,\"tool\":\"container_command\"},{\"id\":1,\"phase\":\"result_arrived\",\"elapsedSeconds\":5,\"tool\":\"container_command\"}],\"executionContent\":[]}"
+          }
+        ],
+        "truncated": false,
+        "observation": {
+          "sequence": 2,
+          "summaryThroughSequence": 2,
+          "activeTimeKnown": false,
+          "historyComplete": false,
+          "currentAction": null,
+          "previousEstimate": null,
+          "omittedCategories": [
+            "assistant",
+            "tool",
+            "summary"
+          ]
+        }
+      },
+      "full": {
+        "goalSummary": "Complete the supplied public software task, validate locally when possible, and deliver this turn’s final reply.\n\nFixed environment: Dedicated offline Linux benchmark container, public source preloaded, designated command tool, no ETA visible to solver; use the captured initial request for exact paths and constraints.",
+        "timeBasis": "turn-delivery-wall-minus-confirmed-human-block-v1",
+        "activeSeconds": 5,
+        "runtime": "running",
+        "messages": [
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Synthetic example: repair an invented boundary-condition error and report the result."
+          },
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Observed tool-call records through the current clock cutoff. Starts identify received container-command requests; a request can be rejected before execution. Result arrival alone does not establish successful task completion. executionContent contains any supplied command arguments and returned output for those same event identities.\n{\"activity\":[{\"id\":1,\"phase\":\"started\",\"elapsedSeconds\":1,\"tool\":\"container_command\"},{\"id\":1,\"phase\":\"result_arrived\",\"elapsedSeconds\":5,\"tool\":\"container_command\"}],\"executionContent\":[{\"id\":1,\"phase\":\"started\",\"command\":\"inspect source\",\"arguments\":{\"command\":\"inspect source\"}},{\"id\":1,\"phase\":\"result_arrived\",\"result\":{\"stdout\":\"Synthetic source listing\",\"stderr\":\"\",\"exitCode\":0,\"outputComplete\":true}}]}"
+          }
+        ],
+        "truncated": false,
+        "observation": {
+          "sequence": 2,
+          "summaryThroughSequence": 2,
+          "activeTimeKnown": false,
+          "historyComplete": false,
+          "currentAction": null,
+          "previousEstimate": null,
+          "omittedCategories": [
+            "assistant",
+            "tool",
+            "summary"
+          ]
+        }
+      },
+      "audit": {
+        "events": 2,
+        "commands": 1,
+        "results": 1,
+        "latestAtMs": 5000,
+        "cutoffMs": 5000,
+        "duplicateIdentities": 0
+      }
+    },
+    {
+      "synthetic": true,
+      "seconds": 60,
+      "activity": {
+        "goalSummary": "Complete the supplied public software task, validate locally when possible, and deliver this turn’s final reply.\n\nFixed environment: Dedicated offline Linux benchmark container, public source preloaded, designated command tool, no ETA visible to solver; use the captured initial request for exact paths and constraints.",
+        "timeBasis": "turn-delivery-wall-minus-confirmed-human-block-v1",
+        "activeSeconds": 60,
+        "runtime": "running",
+        "messages": [
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Synthetic example: repair an invented boundary-condition error and report the result."
+          },
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Observed tool-call records through the current clock cutoff. Starts identify received container-command requests; a request can be rejected before execution. Result arrival alone does not establish successful task completion. executionContent contains any supplied command arguments and returned output for those same event identities.\n{\"activity\":[{\"id\":1,\"phase\":\"started\",\"elapsedSeconds\":1,\"tool\":\"container_command\"},{\"id\":1,\"phase\":\"result_arrived\",\"elapsedSeconds\":5,\"tool\":\"container_command\"},{\"id\":2,\"phase\":\"started\",\"elapsedSeconds\":20,\"tool\":\"container_command\"}],\"executionContent\":[]}"
+          }
+        ],
+        "truncated": false,
+        "observation": {
+          "sequence": 2,
+          "summaryThroughSequence": 2,
+          "activeTimeKnown": false,
+          "historyComplete": false,
+          "currentAction": null,
+          "previousEstimate": null,
+          "omittedCategories": [
+            "assistant",
+            "tool",
+            "summary"
+          ]
+        }
+      },
+      "full": {
+        "goalSummary": "Complete the supplied public software task, validate locally when possible, and deliver this turn’s final reply.\n\nFixed environment: Dedicated offline Linux benchmark container, public source preloaded, designated command tool, no ETA visible to solver; use the captured initial request for exact paths and constraints.",
+        "timeBasis": "turn-delivery-wall-minus-confirmed-human-block-v1",
+        "activeSeconds": 60,
+        "runtime": "running",
+        "messages": [
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Synthetic example: repair an invented boundary-condition error and report the result."
+          },
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Observed tool-call records through the current clock cutoff. Starts identify received container-command requests; a request can be rejected before execution. Result arrival alone does not establish successful task completion. executionContent contains any supplied command arguments and returned output for those same event identities.\n{\"activity\":[{\"id\":1,\"phase\":\"started\",\"elapsedSeconds\":1,\"tool\":\"container_command\"},{\"id\":1,\"phase\":\"result_arrived\",\"elapsedSeconds\":5,\"tool\":\"container_command\"},{\"id\":2,\"phase\":\"started\",\"elapsedSeconds\":20,\"tool\":\"container_command\"}],\"executionContent\":[{\"id\":1,\"phase\":\"started\",\"command\":\"inspect source\",\"arguments\":{\"command\":\"inspect source\"}},{\"id\":1,\"phase\":\"result_arrived\",\"result\":{\"stdout\":\"Synthetic source listing\",\"stderr\":\"\",\"exitCode\":0,\"outputComplete\":true}},{\"id\":2,\"phase\":\"started\",\"command\":\"run synthetic test\",\"arguments\":{\"command\":\"run synthetic test\"}}]}"
+          }
+        ],
+        "truncated": false,
+        "observation": {
+          "sequence": 2,
+          "summaryThroughSequence": 2,
+          "activeTimeKnown": false,
+          "historyComplete": false,
+          "currentAction": null,
+          "previousEstimate": null,
+          "omittedCategories": [
+            "assistant",
+            "tool",
+            "summary"
+          ]
+        }
+      },
+      "audit": {
+        "events": 3,
+        "commands": 2,
+        "results": 1,
+        "latestAtMs": 20000,
+        "cutoffMs": 60000,
+        "duplicateIdentities": 0
+      }
+    },
+    {
+      "synthetic": true,
+      "seconds": 180,
+      "activity": {
+        "goalSummary": "Complete the supplied public software task, validate locally when possible, and deliver this turn’s final reply.\n\nFixed environment: Dedicated offline Linux benchmark container, public source preloaded, designated command tool, no ETA visible to solver; use the captured initial request for exact paths and constraints.",
+        "timeBasis": "turn-delivery-wall-minus-confirmed-human-block-v1",
+        "activeSeconds": 180,
+        "runtime": "running",
+        "messages": [
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Synthetic example: repair an invented boundary-condition error and report the result."
+          },
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Observed tool-call records through the current clock cutoff. Starts identify received container-command requests; a request can be rejected before execution. Result arrival alone does not establish successful task completion. executionContent contains any supplied command arguments and returned output for those same event identities.\n{\"activity\":[{\"id\":1,\"phase\":\"started\",\"elapsedSeconds\":1,\"tool\":\"container_command\"},{\"id\":1,\"phase\":\"result_arrived\",\"elapsedSeconds\":5,\"tool\":\"container_command\"},{\"id\":2,\"phase\":\"started\",\"elapsedSeconds\":20,\"tool\":\"container_command\"},{\"id\":2,\"phase\":\"result_arrived\",\"elapsedSeconds\":61,\"tool\":\"container_command\"},{\"id\":3,\"phase\":\"started\",\"elapsedSeconds\":70,\"tool\":\"container_command\"},{\"id\":3,\"phase\":\"result_arrived\",\"elapsedSeconds\":71,\"tool\":\"container_command\"},{\"id\":4,\"phase\":\"started\",\"elapsedSeconds\":175,\"tool\":\"container_command\"}],\"executionContent\":[]}"
+          }
+        ],
+        "truncated": false,
+        "observation": {
+          "sequence": 2,
+          "summaryThroughSequence": 2,
+          "activeTimeKnown": false,
+          "historyComplete": false,
+          "currentAction": null,
+          "previousEstimate": null,
+          "omittedCategories": [
+            "assistant",
+            "tool",
+            "summary"
+          ]
+        }
+      },
+      "full": {
+        "goalSummary": "Complete the supplied public software task, validate locally when possible, and deliver this turn’s final reply.\n\nFixed environment: Dedicated offline Linux benchmark container, public source preloaded, designated command tool, no ETA visible to solver; use the captured initial request for exact paths and constraints.",
+        "timeBasis": "turn-delivery-wall-minus-confirmed-human-block-v1",
+        "activeSeconds": 180,
+        "runtime": "running",
+        "messages": [
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Synthetic example: repair an invented boundary-condition error and report the result."
+          },
+          {
+            "kind": "user",
+            "scope": "current",
+            "truncated": false,
+            "text": "Observed tool-call records through the current clock cutoff. Starts identify received container-command requests; a request can be rejected before execution. Result arrival alone does not establish successful task completion. executionContent contains any supplied command arguments and returned output for those same event identities.\n{\"activity\":[{\"id\":1,\"phase\":\"started\",\"elapsedSeconds\":1,\"tool\":\"container_command\"},{\"id\":1,\"phase\":\"result_arrived\",\"elapsedSeconds\":5,\"tool\":\"container_command\"},{\"id\":2,\"phase\":\"started\",\"elapsedSeconds\":20,\"tool\":\"container_command\"},{\"id\":2,\"phase\":\"result_arrived\",\"elapsedSeconds\":61,\"tool\":\"container_command\"},{\"id\":3,\"phase\":\"started\",\"elapsedSeconds\":70,\"tool\":\"container_command\"},{\"id\":3,\"phase\":\"result_arrived\",\"elapsedSeconds\":71,\"tool\":\"container_command\"},{\"id\":4,\"phase\":\"started\",\"elapsedSeconds\":175,\"tool\":\"container_command\"}],\"executionContent\":[{\"id\":1,\"phase\":\"started\",\"command\":\"inspect source\",\"arguments\":{\"command\":\"inspect source\"}},{\"id\":1,\"phase\":\"result_arrived\",\"result\":{\"stdout\":\"Synthetic source listing\",\"stderr\":\"\",\"exitCode\":0,\"outputComplete\":true}},{\"id\":2,\"phase\":\"started\",\"command\":\"run synthetic test\",\"arguments\":{\"command\":\"run synthetic test\"}},{\"id\":2,\"phase\":\"result_arrived\",\"result\":{\"stdout\":\"Synthetic assertion failed\",\"stderr\":\"\",\"exitCode\":1,\"outputComplete\":true}},{\"id\":3,\"phase\":\"started\",\"command\":\"inspect fixture\",\"arguments\":{\"command\":\"inspect fixture\",\"unsupportedOption\":true}},{\"id\":3,\"phase\":\"result_arrived\",\"result\":{\"executionStarted\":false,\"errorCode\":\"SYNTHETIC_ARGUMENT_ERROR\",\"message\":\"Synthetic command was not executed.\",\"outputComplete\":true}},{\"id\":4,\"phase\":\"started\",\"command\":\"validate synthetic repair\",\"arguments\":{\"command\":\"validate synthetic repair\"}}]}"
+          }
+        ],
+        "truncated": false,
+        "observation": {
+          "sequence": 2,
+          "summaryThroughSequence": 2,
+          "activeTimeKnown": false,
+          "historyComplete": false,
+          "currentAction": null,
+          "previousEstimate": null,
+          "omittedCategories": [
+            "assistant",
+            "tool",
+            "summary"
+          ]
+        }
+      },
+      "audit": {
+        "events": 7,
+        "commands": 4,
+        "results": 3,
+        "latestAtMs": 175000,
+        "cutoffMs": 180000,
+        "duplicateIdentities": 0
+      }
+    }
+  ]
+}

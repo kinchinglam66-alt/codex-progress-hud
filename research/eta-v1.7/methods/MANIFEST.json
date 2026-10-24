@@ -1,0 +1,156 @@
+{
+  "schema": "eta-publication-file-manifest-v1",
+  "version": "1.1",
+  "release": "https://github.com/kinchinglam66-alt/codex-progress-hud/releases/tag/research-release-2026-10-24",
+  "publicationAuthorized": true,
+  "codeLicense": "Apache-2.0",
+  "dataAndDocumentationLicense": "CC-BY-4.0",
+  "scienceUnchangedFromReviewedCandidate": true,
+  "files": [
+    {
+      "path": "audit/CURATION-CHECKS.json",
+      "bytes": 633,
+      "sha256": "8884bc62fee3b7efe8428be916d9137bc2303f9bcb80498e1e4d644aa8db965f"
+    },
+    {
+      "path": "audit/EF-call-inventory.json",
+      "bytes": 289400,
+      "sha256": "ddf93585da75b910541eda52ed3917269750ac1164f9d49845158ac30bad0daf"
+    },
+    {
+      "path": "audit/EF-input-inventory.json",
+      "bytes": 196068,
+      "sha256": "c0beea027d6e338eee5ad560f1c9bfec9f668e3012df7d6c185fdf8e13705988"
+    },
+    {
+      "path": "audit/G-call-inventory.json",
+      "bytes": 120280,
+      "sha256": "f47aa78cf1d184ff5c97b5f76df3c0850354b8fd412e3dcadce4803156933416"
+    },
+    {
+      "path": "audit/G-input-inventory.json",
+      "bytes": 56155,
+      "sha256": "4fbe81de8d669a8320a38e743af26c3cc9597a1ff1e131bccb83db9d50df5350"
+    },
+    {
+      "path": "audit/G-operational-audit.json",
+      "bytes": 850,
+      "sha256": "210e8a8ffda3d5673bfe15f071bcc657747859d27a0cb18e95685ed6d6bb08f4"
+    },
+    {
+      "path": "audit/G-paired-structures.json",
+      "bytes": 344233,
+      "sha256": "2f13993d60a1ddc9e2871aa1c1fa544969ee15cd4d8a5639ed43afda0f8e724c"
+    },
+    {
+      "path": "audit/original-builder-check.json",
+      "bytes": 122,
+      "sha256": "47a2a869076e877afe9976e58482363e7b2408ea852c18602eeef1029dd60beb"
+    },
+    {
+      "path": "builders/canonical.mjs",
+      "bytes": 5789,
+      "sha256": "20b5477a95fc762d761f1deaef53864e83086106e4b30aa48ecfa7966ad48e51"
+    },
+    {
+      "path": "builders/canonical.test.mjs",
+      "bytes": 3777,
+      "sha256": "42f92142888699339ea458a855b2a0996c692f5fd2a87228bf66d17037acce7b"
+    },
+    {
+      "path": "builders/demo.mjs",
+      "bytes": 1735,
+      "sha256": "f22130f7c24ad2e50c2c7a1faa174951511b4931b7f2e05bbbb06d8f353f5444"
+    },
+    {
+      "path": "builders/legacy-causal-input.mjs",
+      "bytes": 5482,
+      "sha256": "8b87dd21c48437af14b618a3a750215f6e3ad80e7578c0b6eaa283919bca7b5e"
+    },
+    {
+      "path": "DATA-DICTIONARY.txt",
+      "bytes": 3329,
+      "sha256": "bea9ad88e9f0f8dbceeac580daf4cb48c9f591b57863081a8892287d350c5f30"
+    },
+    {
+      "path": "examples/synthetic-pairs.json",
+      "bytes": 14534,
+      "sha256": "0ebf4e114d6b16f87ba1de0e1074fbcc3bd329bc62fb9e16f68aa962c0f3c02f"
+    },
+    {
+      "path": "LICENSE-SCOPE.txt",
+      "bytes": 1089,
+      "sha256": "95a601566c68b231bf725ded3522246a1c13a3456895bb053f059e123fd8be54"
+    },
+    {
+      "path": "LICENSES/Apache-2.0.txt",
+      "bytes": 11362,
+      "sha256": "4ec2e979251d3cfbdefe5a77346ea9a268c78517e6d5c55abf33cdf40efb7449"
+    },
+    {
+      "path": "LICENSES/CC-BY-4.0.txt",
+      "bytes": 18657,
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
+    },
+    {
+      "path": "METHODS.txt",
+      "bytes": 7570,
+      "sha256": "5720fd0c2bb7ef3351957caaaf5436b0060aa157327151c23cc635088da7a0c4"
+    },
+    {
+      "path": "prompts/G-observed-developer.txt",
+      "bytes": 13554,
+      "sha256": "f3607f500b7394573b56d34ddf234ec9d2fc9b94d065f865b011005c9d3eb3e7"
+    },
+    {
+      "path": "prompts/G-observed-output-schema.json",
+      "bytes": 3782,
+      "sha256": "4dfe67ec189f7ccf31223225f57a084dfba5d734d2f8aff44ec52e81cb9fbe70"
+    },
+    {
+      "path": "prompts/REQUEST-CONTRACT.json",
+      "bytes": 1274,
+      "sha256": "1381894cd5064c4d970f15af9559c30e31fb5647eb34f19786d0e0fdccf55b1e"
+    },
+    {
+      "path": "protocols/F-input-method-addendum.txt",
+      "bytes": 3530,
+      "sha256": "dcc0bce0e7e5851a3cc25b2debd44a7634d0f642312774568fdaefa8edf25d2c"
+    },
+    {
+      "path": "protocols/F-original-protocol.json",
+      "bytes": 2274,
+      "sha256": "d622948d02229e92dee42ddc95108d18ee4306a6420e2ccf9890c4c0af3c02f1"
+    },
+    {
+      "path": "protocols/frozen-calibration-register.json",
+      "bytes": 1350,
+      "sha256": "5c2b7cadafa7634855d09980e817f5f8ee37f8e8c0aa3f96447c9655d7001117"
+    },
+    {
+      "path": "protocols/G-design-summary.txt",
+      "bytes": 2953,
+      "sha256": "84d35c0372f8a53cecf091710c65ea5dc4a0a87d64b6cff614dc74c57fa6abec"
+    },
+    {
+      "path": "PROVENANCE.json",
+      "bytes": 3420,
+      "sha256": "6dd0173d472be38f542c5a1ddfae7ebde4c4ec0d761db9993553ac100841c90a"
+    },
+    {
+      "path": "README.txt",
+      "bytes": 4318,
+      "sha256": "a21dc93e52bb603f3877cc096484a73f8ce421cf6635a6054c7e6324c0227f35"
+    },
+    {
+      "path": "VALIDITY-AND-AMENDMENTS.txt",
+      "bytes": 7760,
+      "sha256": "b0477017c9fd8ae46c27d68d8b3dbeb50f536733adec9ba239833d0a5d5d5fb5"
+    },
+    {
+      "path": "verify.py",
+      "bytes": 6222,
+      "sha256": "81673910b0291e55a5ca0be2ee224479a642cfb03caa75e52fbcf873f5b1309a"
+    }
+  ]
+}

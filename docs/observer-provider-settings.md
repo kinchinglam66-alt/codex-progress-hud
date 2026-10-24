@@ -6,9 +6,10 @@ that a particular account, endpoint, or model is available.
 
 ## Choose one source
 
-- **ChatGPT subscription:** HUD uses its own login slot. Changing the account in
-  the main Codex app does not automatically change the HUD account. Replace the
-  HUD account through its account controls and complete the official login flow.
+- **ChatGPT subscription:** the default `main` account source follows the verified
+  file-backed login in the main Codex account. Switching that account retires the
+  old provider before replacement. The optional `independent` source uses its own
+  login slot. See [account following](main-account-follow.md) for consent and runtime limits.
 - **Responses-compatible API:** configure an HTTPS base URL, model, and API key.
   This is separately billed by that provider, not paid for by a ChatGPT
   subscription. The configured path prefix is retained when adding `responses`.
@@ -23,9 +24,9 @@ improve ETA accuracy.
 Enable the plugin and open HUD settings. Choose one source and accept the inline
 recipient/usage notice before starting:
 
-- **ChatGPT subscription:** choose **登录并开始** and finish the official browser
-  authorization. HUD verifies its independent account before starting estimation.
-  An already authenticated HUD account can use **开始估时** without another login.
+- **ChatGPT subscription:** default account-following mode uses **检查账户并开始**
+  to inspect the main login. Independent mode can use **登录并开始** and its browser
+  login flow. An already verified source can use **开始估时** without another login.
 - **Responses-compatible API:** enter the HTTPS base URL, model, and key, then
   choose **保存并开始**. Review the recipient and billing notice beside the action.
   A retained key need not be entered again for the same saved profile and endpoint.
@@ -41,9 +42,11 @@ settings window cancels an unfinished connection/start operation; it does not
 log out an account or erase a saved draft. Configuration edits clear the inline
 acceptance so a changed recipient cannot inherit consent to the previous form.
 
-Signing in to the ChatGPT website alone does not authorize HUD. Start the login
-from HUD so the official browser flow can return credentials to its independent
-login slot. HUD does not read browser cookies or copy the main Codex account.
+Signing in to the ChatGPT website alone does not authorize HUD. In independent
+mode, initiate login from HUD. In main-following mode, the reader accesses the
+verified main file-backed login and supplies an access token and account metadata
+to an isolated ephemeral runtime; it does not copy refresh tokens or rewrite the
+main login. HUD does not read browser cookies.
 
 ## Advanced: save, check, trial, activate
 

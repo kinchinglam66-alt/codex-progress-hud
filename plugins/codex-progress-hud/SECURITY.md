@@ -20,4 +20,4 @@ If private vulnerability reporting is unavailable, open a public issue containin
 - Release installers are unsigned until a trusted code-signing certificate is configured; verify the published SHA-256 checksums before execution.
 - Packaged launchers accept only the installer-written exact executable path and never invoke a shell-selected Node runtime.
 
-See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for detailed assumptions and residual risks.
+See [docs/THREAT_MODEL.md](https://github.com/kinchinglam66-alt/codex-progress-hud/blob/main/docs/THREAT_MODEL.md) for detailed assumptions and residual risks.

@@ -1,0 +1,51 @@
+{
+  "schema": "eta-publication-file-manifest-v1",
+  "version": "1.1",
+  "release": "https://github.com/kinchinglam66-alt/codex-progress-hud/releases/tag/research-release-2026-10-24",
+  "publicationAuthorized": true,
+  "codeLicense": "Apache-2.0",
+  "dataAndDocumentationLicense": "CC-BY-4.0",
+  "scienceUnchangedFromReviewedCandidate": true,
+  "files": [
+    {
+      "path": "expected-results.json",
+      "bytes": 18920,
+      "sha256": "d50b6e5cc50c46c54e7e086288257a84549a93410b99d91dafc05028223ded97"
+    },
+    {
+      "path": "LICENSE-SCOPE.txt",
+      "bytes": 990,
+      "sha256": "7aa1ec392c13d6ff4fba11284888b61a4ec86a9a4418c3654ec8b35050ea0511"
+    },
+    {
+      "path": "LICENSES/Apache-2.0.txt",
+      "bytes": 11362,
+      "sha256": "4ec2e979251d3cfbdefe5a77346ea9a268c78517e6d5c55abf33cdf40efb7449"
+    },
+    {
+      "path": "LICENSES/CC-BY-4.0.txt",
+      "bytes": 18657,
+      "sha256": "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
+    },
+    {
+      "path": "numeric-data.json",
+      "bytes": 458845,
+      "sha256": "f564fc67a7ac55e61298f0ede0a561e7cd0f24382395d2c27031fa060e91f9d8"
+    },
+    {
+      "path": "README.txt",
+      "bytes": 4926,
+      "sha256": "0f26248ab5a71de467dbb2cbf2857e3095fb85ec8beb56368eeded307149e5d1"
+    },
+    {
+      "path": "reproduce.py",
+      "bytes": 6975,
+      "sha256": "cf4184c4ed0c2070a2f61dced262072e09e353814e3688a32a6ca49707bca1d8"
+    },
+    {
+      "path": "verification.json",
+      "bytes": 20424,
+      "sha256": "3a93760e09e79a343534b27fc167f83dac90c53b1fc925bc4e5a86115b9f3c5f"
+    }
+  ]
+}
