@@ -50,7 +50,7 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.6.2",
     "electron": "^44.1.0",
     "electron-builder": "26.15.3",
     "typescript": "^7.0.2",
